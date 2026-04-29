@@ -1,0 +1,30 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS images
+*.iso
+*.img
+*.hdd
+
+# Limine binary artifacts (downloaded at build time)
+/limine/
+
+# Orchestrator history (personal)
+.orchestrator_history
+
+# Saved web pages (reference material, not code)
+*.html
+*_files/
+
+# OS-specific
+Thumbs.db
+Desktop.ini
+.DS_Store

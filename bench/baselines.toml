@@ -1,0 +1,79 @@
+# Performance baselines for critical kernel subsystems.
+#
+# Each section records a measured or published reference latency from
+# Linux, Fuchsia, seL4, or similar, plus our target.  After implementing
+# a subsystem, benchmark it and compare to these numbers.
+#
+# Sources should be specific: paper name, kernel version, or "measured
+# on dev machine, Linux X.Y, <hardware description>".
+
+[syscall_trivial]
+description = "Trivial syscall round-trip (e.g., getpid)"
+linux_ns    = 100
+target_ns   = 200
+source      = "Typical Linux 6.x on modern x86_64 desktop"
+
+[ipc_channel_roundtrip]
+description = "Channel IPC send+recv round-trip"
+fuchsia_us  = 1.5
+l4_us       = 0.8
+target_us   = 2.0
+source      = "Fuchsia perf docs; seL4 published benchmarks"
+
+[context_switch]
+description = "Full context switch between two threads"
+linux_us    = 2.0
+target_us   = 5.0
+source      = "Linux 6.x, typical desktop hardware (1-3us range)"
+
+[page_fault_anon]
+description = "Anonymous page fault (demand paging)"
+linux_us    = 3.0
+target_us   = 10.0
+source      = "Linux 6.x anonymous fault, 2-5us typical"
+
+[page_alloc_free]
+description = "Physical page allocate + free cycle"
+linux_ns    = 300
+target_ns   = 1000
+source      = "Linux buddy allocator, 100-500ns typical"
+
+[heap_alloc_small]
+description = "Kernel heap allocation, common small size (64-256 bytes)"
+jemalloc_ns = 35
+target_ns   = 200
+source      = "jemalloc small alloc 20-50ns typical"
+
+[futex_uncontended]
+description = "Futex fast path (uncontended, pure userspace CAS)"
+linux_ns    = 10
+target_ns   = 10
+source      = "By design: uncontended path is pure userspace, no syscall"
+
+[futex_contended_wake]
+description = "Futex contended wake (kernel involvement)"
+linux_us    = 2.0
+target_us   = 3.0
+source      = "Linux 6.x, 1-3us typical"
+
+[iouring_sqe_submit]
+description = "io_uring single SQE submission"
+linux_ns    = 150
+target_ns   = 200
+source      = "Linux io_uring, 100-200ns per SQE typical"
+
+[interrupt_dispatch]
+description = "Total ISR dispatch latency"
+target_us   = 10.0
+source      = "Design target: < 10us including deferred work setup"
+
+[vfs_path_component]
+description = "Single path component lookup (cached)"
+linux_ns    = 350
+target_ns   = 500
+source      = "Linux dcache lookup, 200-500ns per component"
+
+[compositor_frame_4k]
+description = "Full desktop composite at 4K resolution"
+target_ms   = 2.0
+source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"

@@ -1,0 +1,2 @@
+make a docker for the project to make it easy for people to test
+have the agents read "Bugs Rust Won't Catch _ corrode Rust Consulting.html", at least when they're working on the relevant task(s).

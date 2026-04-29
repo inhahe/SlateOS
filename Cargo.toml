@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+]
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"

@@ -1,0 +1,20 @@
+# Build configuration for the OS kernel.
+# Target: bare-metal x86_64 (no OS, no std).
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+# Use the LLD linker (ships with Rust) for bare-metal linking.
+linker = "rust-lld"
+
+# Custom linker script for kernel memory layout.
+rustflags = ["-C", "link-arg=-Tkernel/linker.ld", "-C", "code-model=kernel"]
+
+runner = "scripts/boot-test.sh"
+
+[unstable]
+# build-std is needed if the pre-built core library doesn't work for our target.
+# Uncomment if needed:
+# build-std = ["core", "alloc"]
+# build-std-features = ["compiler-builtins-mem"]

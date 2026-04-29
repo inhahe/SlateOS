@@ -1,0 +1,142 @@
+//! Kernel error types.
+//!
+//! All kernel subsystems return errors from this unified enum.  Each
+//! variant carries enough context for the caller to decide what to do.
+//! Error codes are stable across kernel versions (part of the Tier 1
+//! stable ABI).
+//!
+//! Design: no heap allocation in error types.  Errors are small (single
+//! discriminant + optional payload) and can be returned by value through
+//! registers.
+
+use core::fmt;
+
+/// Top-level kernel error.
+///
+/// Every fallible kernel function returns `Result<T, KernelError>`.
+/// Variants are organized by subsystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum KernelError {
+    // --- General (0 - 99) ---
+    /// An operation that should have been valid produced an unexpected state.
+    InternalError = -1,
+    /// A required feature or resource is not available.
+    NotSupported = -2,
+    /// An argument to a syscall or internal function was invalid.
+    InvalidArgument = -3,
+    /// The requested operation would block, but non-blocking was requested.
+    WouldBlock = -4,
+    /// The operation was cancelled (e.g., handle closed while waiting).
+    Cancelled = -5,
+    /// A timeout expired before the operation completed.
+    TimedOut = -6,
+
+    // --- Memory (100 - 199) ---
+    /// No physical memory available to satisfy the allocation.
+    OutOfMemory = -100,
+    /// The virtual address range is invalid or already in use.
+    InvalidAddress = -101,
+    /// A page fault could not be resolved (e.g., access to unmapped memory).
+    PageFault = -102,
+    /// Memory alignment requirement not met.
+    BadAlignment = -103,
+
+    // --- Process (200 - 299) ---
+    /// The referenced process or thread does not exist.
+    NoSuchProcess = -200,
+    /// The ELF binary is malformed or unsupported.
+    InvalidExecutable = -201,
+    /// The process has exited.
+    ProcessExited = -202,
+
+    // --- IPC (300 - 399) ---
+    /// The channel or pipe has been closed by the other end.
+    ChannelClosed = -300,
+    /// The send buffer is full and the operation is non-blocking.
+    ChannelFull = -301,
+    /// The message exceeds the maximum allowed size.
+    MessageTooLarge = -302,
+
+    // --- Capability (400 - 499) ---
+    /// The caller lacks the required capability for this operation.
+    PermissionDenied = -400,
+    /// The capability handle is invalid or has been revoked.
+    InvalidCapability = -401,
+
+    // --- Filesystem (500 - 599) ---
+    /// The file, directory, or path does not exist.
+    NotFound = -500,
+    /// The target already exists (e.g., creating a file that exists).
+    AlreadyExists = -501,
+    /// The target is not a directory when a directory was expected.
+    NotADirectory = -502,
+    /// The target is a directory when a file was expected.
+    IsADirectory = -503,
+    /// The filesystem or disk is full.
+    DiskFull = -504,
+    /// The handle refers to a resource that is not of the expected type.
+    InvalidHandle = -505,
+
+    // --- Device / I/O (600 - 699) ---
+    /// An I/O operation failed at the hardware level.
+    IoError = -600,
+    /// The referenced device does not exist or is not attached.
+    NoSuchDevice = -601,
+    /// The device is busy and cannot accept the operation right now.
+    DeviceBusy = -602,
+}
+
+impl KernelError {
+    /// Human-readable short description of this error.
+    ///
+    /// These messages are part of the stable ABI — do not change wording
+    /// once a version ships.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::InternalError => "internal kernel error",
+            Self::NotSupported => "operation not supported",
+            Self::InvalidArgument => "invalid argument",
+            Self::WouldBlock => "operation would block",
+            Self::Cancelled => "operation cancelled",
+            Self::TimedOut => "operation timed out",
+            Self::OutOfMemory => "out of memory",
+            Self::InvalidAddress => "invalid address",
+            Self::PageFault => "unresolvable page fault",
+            Self::BadAlignment => "bad alignment",
+            Self::NoSuchProcess => "no such process",
+            Self::InvalidExecutable => "invalid executable",
+            Self::ProcessExited => "process has exited",
+            Self::ChannelClosed => "channel closed",
+            Self::ChannelFull => "channel buffer full",
+            Self::MessageTooLarge => "message too large",
+            Self::PermissionDenied => "permission denied",
+            Self::InvalidCapability => "invalid capability",
+            Self::NotFound => "not found",
+            Self::AlreadyExists => "already exists",
+            Self::NotADirectory => "not a directory",
+            Self::IsADirectory => "is a directory",
+            Self::DiskFull => "disk full",
+            Self::InvalidHandle => "invalid handle",
+            Self::IoError => "I/O error",
+            Self::NoSuchDevice => "no such device",
+            Self::DeviceBusy => "device busy",
+        }
+    }
+
+    /// The stable integer error code.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+impl fmt::Display for KernelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.message(), self.code())
+    }
+}
+
+/// Convenience type alias used throughout the kernel.
+pub type KernelResult<T> = Result<T, KernelError>;

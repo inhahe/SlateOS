@@ -1,0 +1,1220 @@
+DESIGN REVIEW
+=============
+
+Pushback, answers, and analysis — organized by section in design.txt.
+
+
+================================================================================
+AI DEVELOPMENT PROCESS (lines 1-6)
+================================================================================
+
+> "should use an actual sophisticated ai planning and execution program"
+
+You're probably thinking of AI agent frameworks like AutoGPT, CrewAI, or
+similar. For a project this size, these aren't mature enough to manage years of
+development. A better approach: use Claude Code (or similar) for implementation,
+but manage the project with a traditional project management tool (GitHub
+Projects, Linear, or even a structured markdown roadmap). AI is a tool for the
+programmer, not a replacement for project management.
+
+> "AI isn't particularly good at making performant code"
+
+Partly true. AI tends to write correct-but-naive code. Mitigations you listed
+are good (review existing code, allow optimization PRs). Additional: write
+benchmarks first, then let AI optimize against them. AI is actually quite good
+at optimization when it has a concrete target to beat.
+
+> "Make sure none of our design is tainted by standard/popular but outdated
+> practices or tuning values."
+
+Good principle. We've already applied this (16 KiB pages instead of 4 KiB,
+geometric size classes instead of glibc's three-bin model, etc.). Keep
+questioning defaults throughout.
+
+
+================================================================================
+BeOS AND PLAN 9 (line 8) — ANSWERING YOUR QUESTION
+================================================================================
+
+BeOS good ideas:
+- Pervasive multithreading — every window got its own thread, so one app's
+  heavy computation never froze its UI. Most OSes still don't enforce this.
+- BFS (Be File System) had rich queryable metadata built in — you could search
+  files by any attribute (artist, bitrate, email sender) as fast as a database
+  query. This is the database-as-filesystem idea you mentioned.
+- Real-time media prioritization — audio and video streams got guaranteed
+  scheduling priority, so media playback never stuttered even under load.
+- Very fast boot (under 10 seconds on 1990s hardware).
+- Clean, consistent API — since everything was designed together rather than
+  accumulated over decades, the API was coherent.
+
+Plan 9 good ideas:
+- "Everything is a file" taken seriously — not just devices, but network
+  connections, process state, window contents, even remote machines are accessed
+  through the filesystem namespace. Makes tooling composable.
+- Per-process namespaces — each process can have its own view of the filesystem.
+  One process sees /net as the local network stack, another sees /net as a remote
+  machine's network. This is the ancestor of Linux namespaces/containers.
+- 9P protocol — a simple protocol for accessing all these "files" that works
+  identically over local access and network. This eliminated the distinction
+  between local and remote resources.
+- Factotum — authentication handled by a single separate process. Programs
+  never touch passwords or keys directly, they delegate to factotum. Much
+  cleaner than every program implementing its own auth.
+- UTF-8 — Plan 9 is where UTF-8 was invented (by Ken Thompson and Rob Pike).
+
+Recommendations for your OS:
+- Adopt BeOS's queryable file metadata idea (complements your database-as-
+  filesystem option)
+- Adopt the factotum concept for credential handling (you mentioned API
+  functions for username/password fields — a dedicated credential manager
+  service is the right architecture for this)
+- Adopt per-process filesystem namespaces if you want container-like isolation
+  later
+- BeOS's per-window threading model is worth studying for your GUI API
+
+
+================================================================================
+API FREEZE TIMING (line 10)
+================================================================================
+
+> "At what point in development should we make the API functions stable/freeze
+> them?"
+
+Don't freeze the API until you have at least a handful of real third-party
+applications using it. You need the feedback loop of real developers hitting
+real problems with your API before you commit to it. A premature freeze locks
+in mistakes.
+
+Phased approach:
+1. Internal development: API changes freely
+2. Alpha (developers only): API versioned, breaking changes allowed with notice
+3. Beta (early adopters): API v1 declared, breaking changes only in new version
+4. Release: versioned syscall tables, old versions maintained
+
+
+================================================================================
+KERNEL ARCHITECTURE (lines 12-36)
+================================================================================
+
+> "Microkernal, maybe with some drivers working in the kernel. Networking?"
+
+PUSHBACK: Don't put networking in the kernel. Networking is complex, changes
+frequently (new protocols, new hardware offloads), and is a major attack
+surface. Keep it in userspace. The performance cost of userspace networking is
+small with modern IPC, and you get: fault isolation (network stack crash doesn't
+take down the system), easy updates (restart the network service without
+rebooting), and the ability to run multiple network stacks (useful for
+containers/VMs).
+
+If specific network-critical workloads need it, offer it as an optional in-
+kernel module. But the default should be userspace.
+
+> "Should we support the text-based linux driver specification tree?"
+
+You're thinking of DeviceTree (DT/FDT). It's a data structure that describes
+hardware to the OS — what devices are present, what addresses they use, what
+interrupts they're on. It's critical on ARM (where hardware isn't self-
+describing like on x86 with ACPI).
+
+For a desktop OS targeting x86: you don't need DeviceTree. x86 uses ACPI for
+hardware discovery, and PCIe devices self-identify. Supporting ACPI is
+mandatory.
+
+For ARM support in the future: you'd need DeviceTree support then. But for
+initial development, skip it.
+
+What would give you easy support for more hardware: reusing existing Linux
+driver code. The Linux kernel has the largest collection of hardware drivers
+ever assembled. Porting individual Linux drivers to your kernel (adapting them
+to your driver API) is the pragmatic path. Some OSes (like Google's Fuchsia)
+have done this selectively.
+
+SPARK/IOMMU/FFI stack: looks good, no pushback. The layer diagram is correct.
+
+
+================================================================================
+SYSCALLS AND io_uring (lines 38-43)
+================================================================================
+
+No pushback. Your decisions here are sound:
+- Many specialized syscalls: correct
+- io_uring as optional for batch I/O: correct
+- Some operations (fork, mmap, exec) stay synchronous: correct
+
+One addition: consider io_uring from day one in your kernel design rather than
+bolting it on later. Linux's io_uring was added after 30 years of syscall
+design and had to work around existing interfaces. You can design your internal
+kernel dispatch to natively support both synchronous and queued invocation from
+the start.
+
+
+================================================================================
+SCHEDULING (lines 47-68)
+================================================================================
+
+PUSHBACK on BFS/MuQSS:
+
+> "BFS / MuQSS (Con Kolivas's schedulers)"
+
+MuQSS was abandoned by Con Kolivas in 2021. BFS hasn't been maintained for
+modern kernels. Neither has an active developer. Building on abandoned
+schedulers is risky — you'd inherit all maintenance.
+
+Better option: study BFS/MuQSS's design principles (simplicity, optimized for
+interactivity on <16 cores) and implement your own scheduler with those
+principles. The actual algorithms are simple enough that writing your own is
+less work than porting and maintaining an abandoned codebase.
+
+Also, your document lists these two options as either/or, but they're not
+mutually exclusive:
+- Priority levels: yes, you need these regardless
+- Preemption: yes, you need this regardless
+- The real choice is the fairness algorithm and queue structure
+
+Recommended: a simple priority-based scheduler with round-robin within each
+priority level, priority inheritance for locks, per-CPU queues with work
+stealing. This gives you everything BFS offered for desktop use. You can get
+fancier later if profiling shows a need.
+
+> "If possible, for the first scheduling option, make it so that the user can
+> change the priority level of a process while it's running, pause it, or
+> resume it."
+
+This is standard — every modern OS supports this. Not an "if possible," it's
+straightforward to implement.
+
+> "Would it be possible to abstract out the memory management system so that
+> users can select a workload type..."
+
+ANSWER: Yes, but not by recompiling the kernel. The right approach is runtime-
+tunable parameters exposed via sysctl-like interface (files in a /sys-like
+filesystem, or dedicated syscalls). Linux already does this extensively — you
+can tune dozens of memory management parameters without recompiling.
+
+What genuinely requires recompilation: page size, some allocator structural
+choices. Everything else (thresholds, ratios, timing parameters) can be runtime
+tunable.
+
+Workload profiles would just be named presets of these runtime parameters:
+- "Desktop": balanced, favor interactivity
+- "Database": large pages preferred, aggressive readahead, pin hot pages
+- "Development": fast compilation, many short-lived processes
+- "Gaming": minimize latency, favor foreground process heavily
+
+The user selects a profile, the OS applies the preset values, no recompile
+needed. Power users can tune individual parameters.
+
+
+================================================================================
+PAGING (lines 70-88)
+================================================================================
+
+16 KiB pages: good decision, as discussed.
+
+> "Need to define swap tuning parameters"
+
+Key swap parameters to expose:
+- Swappiness (how aggressively to swap vs. drop page cache) — Linux default 60
+  is too aggressive for desktop, 10-20 is better for desktop with enough RAM
+- Swap priority (if multiple swap devices)
+- Minimum free memory threshold (when to start swapping)
+- Whether to compress pages in memory before swapping (zswap/zram — highly
+  recommended for desktop, trading CPU for I/O reduction)
+
+> "Have an alloc function where the program can allocate X amount of memory and
+> it won't fail as long as the user has that much memory plus space on the
+> filesystem"
+
+PUSHBACK: This is what Linux already does by default (overcommit). The problem
+is well-documented: programs allocate more virtual memory than physical RAM +
+swap can back, everything works fine until programs actually use all that
+memory, and then the OOM killer starts killing processes to free memory. The
+promise of "won't fail" is a lie — it fails later, catastrophically, instead of
+failing early, gracefully.
+
+Better approach: let programs request "committed" memory (guaranteed to be
+backed by physical RAM + swap) or "lazy" memory (may fail on access if
+overcommitted). Default to committed for reliability. Programs that know what
+they're doing (like databases that manage their own memory) can opt into lazy.
+
+> "Also programs can have a stack that won't run out and doesn't have to be
+> given a size limit on startup"
+
+PARTIAL PUSHBACK: Automatically growing stacks via page fault handlers is a
+real technique (Go does this, for example). But "won't run out" is dangerous —
+a program with infinite recursion would consume all available memory before
+crashing. You need a configurable maximum (default 8 MiB like Linux, or 64 MiB
+if generous), but allow programs to request more or set no limit if they know
+what they're doing.
+
+The page-fault-based growth mechanism is good — allocate a large virtual address
+range for the stack but only commit physical pages as they're touched. This is
+how Linux already handles stacks. The key detail: you need a guard page at the
+end of the stack that triggers a segfault on access, so stack overflow is a
+clean crash rather than silently corrupting the heap.
+
+
+================================================================================
+FILESYSTEM (lines 94-167)
+================================================================================
+
+> "Support Inode-based, support copy-on-write, support log-structured, consider
+> developing a database filesystem option"
+
+PUSHBACK on scope: Supporting three filesystem types plus considering a fourth
+is enormous. For initial development, pick ONE primary filesystem. Recommendation:
+use an existing well-tested filesystem (ext4 or XFS via ported code) as the
+default, and add others later.
+
+Don't write your own filesystem from scratch initially — filesystem bugs cause
+data loss, and existing filesystems have decades of battle-testing.
+
+> "Would be nice to support ext4, NTFS, FAT32, etc."
+
+Correct priorities. FAT32 is essential (USB drives, EFI System Partition).
+NTFS read support is important for dual-boot. ext4 support comes free if you
+use it as your primary filesystem. ISO 9660 for optical media, yes.
+
+> "Reuse ext4 or xfs code for inode-based, btrfs/zfs code for copy-on-write?"
+
+Yes, reuse existing code. Porting Linux filesystem code to your kernel's VFS
+layer is the standard approach. Don't fork and modify the on-disk format —
+keep compatibility so users can mount drives between your OS and Linux.
+
+> "/ used as path splitter"
+
+Good. Use forward slash. Do NOT also support backslash — pick one and be
+consistent. Backslash support can exist only in the POSIX/Windows compatibility
+layers.
+
+> "what characters should be allowed for filenames?"
+
+Allow everything except: / (path separator) and the null byte. That's what
+Linux does. Let the POSIX/Windows compatibility layers enforce additional
+restrictions (Windows disallows \, :, *, ?, ", <, >, |) when interacting with
+those ecosystems.
+
+Filename maximum length: 255 bytes (UTF-8). This is the Linux standard and
+it's sufficient.
+
+Path maximum length: either no limit (modern approach) or a generous limit like
+4096 bytes.
+
+> "Case-sensitive or case-insensitive?"
+
+RECOMMENDATION: Case-sensitive filesystem, case-insensitive user-facing tools.
+
+Case-sensitive is technically cleaner and simpler to implement (byte-for-byte
+comparison). Case-insensitive is a nightmare with Unicode (Turkish 'i' problem:
+uppercase of 'i' depends on locale).
+
+Make the filesystem case-sensitive (like Linux), but have the shell, file
+picker, and tab-completion do case-insensitive matching by default. Best of
+both worlds — correct semantics underneath, friendly behavior on top. This is
+what macOS effectively does (APFS is case-insensitive by default but supports
+case-sensitive mode).
+
+Actually, scratch that — macOS's case-insensitive APFS causes real problems for
+developers (two files with names differing only in case can't coexist). Go with
+case-sensitive. Users who want to type "downloads" instead of "Downloads" get
+that from the shell's tab completion, not from the filesystem.
+
+> "Make the file type come before the name rather than after??"
+
+STRONG PUSHBACK: Your disadvantages list already captures why this is bad.
+The compatibility issue alone is a dealbreaker — every file transferred to or
+from your OS needs renaming. The "looks ugly" issue isn't trivial either; it
+will make users reject the OS.
+
+The advantages you list (alphabetical grouping by type, aligned names) are
+real but minor, and are better solved in the file explorer UI:
+- Sort by type, then by name — gives you type grouping without changing naming
+- Column view already aligns names regardless of extension length
+- The "most general info first" principle doesn't apply to filenames — files
+  are looked up by name far more often than by type
+
+Keep traditional name.ext format.
+
+> "What will our extensions be for static libraries, dynamic link libraries,
+> and executables?"
+
+Recommendations:
+- Static libraries: .a (matches Unix convention, linkers already expect this)
+- Dynamic libraries: .so (same reason) with versioning like .so.1.2.3
+- Executables: no extension required (Unix convention — executables are marked
+  by the execute permission bit, not by extension). Or use .elf if you want an
+  extension.
+- Packages: .pkg or define your own
+
+These should match what gcc/llvm toolchains produce by default, since you're
+including those. Fighting the toolchain's defaults creates constant friction.
+
+> "Hooks on various changes to files and directories"
+
+The hook system you've described is very comprehensive, which is good for
+capability, but PUSHBACK on having the kernel implement all of these directly.
+
+Many of these hooks (especially the per-program activity hooks) would be better
+implemented as a debugging/tracing subsystem (like Linux's ftrace/perf/eBPF)
+rather than a general-purpose hook API. Reason: if 10 programs each install
+hooks on file creation, every file creation now triggers 10 callbacks. This
+can severely impact performance for operations that happen thousands of times
+per second.
+
+Recommendation:
+- Filesystem change notifications (inotify equivalent): yes, kernel-level,
+  essential
+- Process/program activity hooks: implement as an optional tracing subsystem
+  that's off by default, enabled per-capability
+- Make hooks asynchronous (notification queue, not synchronous callback) so a
+  slow hook handler can't stall the operation being hooked
+
+
+> "journaling? ability of programs to group any writes into an atomic write?"
+
+Yes to both. Journaling is essential for crash recovery — without it, a power
+failure can leave the filesystem in an inconsistent state. Every production
+filesystem supports this (ext4 uses a write-ahead journal, Btrfs uses CoW
+which is inherently atomic).
+
+Application-level atomic writes (transactions): Very useful. Databases need
+this. The API would be something like:
+  transaction_begin()
+  write(file1, data)
+  write(file2, data)
+  transaction_commit()  // either both writes happen or neither does
+
+This is hard to implement well in the general case. SQLite implements its own
+transaction system because no filesystem provides a good one. If you can offer
+this at the filesystem level, it would be genuinely novel and valuable.
+
+> "deduplication? as an option?"
+
+Yes, as an option. Block-level deduplication (like ZFS/Btrfs offer) saves space
+when multiple files contain identical blocks. The cost is RAM for the dedup
+table and CPU for hashing. Make it opt-in per filesystem.
+
+> "file/dir metadata"
+
+Your list is good. Additions:
+- Owner (user/group) — needed for permissions
+- Capability requirements — you already have this
+- Hash: compute on write, store in metadata, verify on read. Per-block hashing
+  is better (detects which part is corrupt, enables dedup). Per-file hash can
+  be computed from block hashes as you suggested.
+- "last time read" (atime): CAUTION — updating atime on every read is a major
+  performance hit (every read becomes a read + write). Linux defaults to
+  "relatime" (only update atime if it's older than mtime, or once per day).
+  Do the same.
+- Arbitrary string/comment: useful, max size maybe 64 KiB? Stored in extended
+  attributes. But this feature is rarely used in practice — user-facing tagging
+  is better done at the GUI/search-index level, not in filesystem metadata.
+- Consider: immutable flag (file can't be modified or deleted until flag is
+  cleared by a privileged user), append-only flag (for log files).
+
+
+================================================================================
+IPC MODEL (lines 169-199)
+================================================================================
+
+> "Use channels like Fuchsia?"
+
+Good choice. Channels (structured message-passing with capability transfer) as
+the primary IPC, with byte-stream sockets and shared memory as options, is the
+modern best practice.
+
+> "Pipe support (one-way and two-way?)"
+
+One-way pipes are simpler and sufficient — two-way communication uses two pipes
+or a socket pair. Don't add two-way pipes; they introduce complexity (what
+happens when both ends write simultaneously?) for little benefit over just using
+two one-way pipes or a channel.
+
+> "Support an epoll equivalent"
+
+Your IOCP-like design (lines 181-193) is correct. You independently reinvented
+IOCP/io_uring's completion-based model, which is the right approach. The
+register/unregister model with an arbitrary user-data integer is exactly what
+epoll (with EPOLL_CTL_ADD/DEL) and IOCP do.
+
+One refinement: don't limit it to file descriptors. Allow waiting on:
+- I/O completion
+- Timers
+- Process/thread exit
+- Signals/events
+- Semaphores/mutexes
+- Channel messages
+
+This is what Windows WaitForMultipleObjects + IOCP together provide. Unifying
+all waitable objects into one mechanism is much cleaner than having separate
+wait mechanisms for different object types.
+
+> "Some way for programs to easily communicate with each other using names"
+
+ANSWERING YOUR QUESTION ABOUT COM AND DDE:
+
+DDE (Dynamic Data Exchange): An old Windows IPC mechanism from the 1980s.
+Programs send messages to each other by application name + topic + item.
+Example: Excel could tell Word "the value in cell A1 changed." It's message-
+based and simple but very limited — text only, no structured data, no method
+calls. Essentially deprecated.
+
+COM (Component Object Model): A much more sophisticated system. Programs
+expose "objects" with defined interfaces. Other programs can create those
+objects and call methods on them, even across process boundaries or across
+the network (DCOM). It's language-agnostic — a Python program can call methods
+on a C++ COM object.
+
+COM is powerful but notoriously complex (reference counting, apartment threading
+models, registry-based class factories, IDL interface definitions).
+
+For your OS: implement a simpler service discovery + RPC mechanism. Programs
+register named services with defined interfaces (think D-Bus on Linux, but
+better designed). Other programs discover services by name, get a channel
+handle, and make typed RPC calls. Use your channel IPC for transport.
+
+D-Bus is the closest Linux equivalent and is used everywhere (desktop
+environments, system services, applications). Its problems: slow (message
+serialization overhead), XML-based introspection, complex wire protocol. You
+can do better with a simpler binary protocol and tighter integration with your
+channel IPC.
+
+> "Define a standard for library event loops"
+
+Good idea. The event loop fragmentation problem (Qt has its own, GTK has its
+own, libuv has its own, etc.) is real and annoying. If your OS provides a
+standard event loop primitive (built on your epoll/IOCP equivalent), libraries
+can integrate with it instead of each bringing their own.
+
+The key API: "give me the underlying waitable handle so I can add it to my
+event loop." If every library exposes this, any event loop can drive any
+library.
+
+
+================================================================================
+SECURITY (lines 200-271)
+================================================================================
+
+Your capability model is well thought out. Some specific responses:
+
+> "implement this? file:///D:/soundshop/ccs05-cfi.pdf"
+
+I can't access local PDF files on your machine. If you paste the title or key
+content, I can discuss it. If it's about Control-Flow Integrity (CFI) — that's
+an exploit mitigation technique where the compiler inserts checks to ensure
+function calls and returns go to valid targets. It's worth implementing (LLVM
+has CFI support, Clang can emit it). It's compatible with your OS plan and the
+performance cost is 1-5%. Rust already provides some of this protection through
+its type system, but CFI adds defense in depth for unsafe code and FFI
+boundaries.
+
+> "Problem: How to give a user or process access to the whole filesystem except
+> for specific files/directories?"
+
+We discussed this (deny lists, tagged restricted directories, file-picker
+escalation). Your solution in the document (capability intersection/AND
+composition) works for requiring multiple capabilities to access something.
+For the "everything except X" case, the restricted-directory tag approach is
+cleanest.
+
+> "If a file or directory has a capability group in its list, do the individual
+> capabilities in the group compose via AND or OR?"
+
+Your instinct of OR is correct. A capability group represents "any of these
+roles can access this." If a file is tagged with the "developers" group, any
+member of that group should have access — that's OR. If you want to require
+membership in two groups, tag the file with both groups (AND between groups,
+OR within groups).
+
+> Capabilities list (lines 229-271)
+
+This is extremely comprehensive — almost too comprehensive. PUSHBACK on a few:
+
+- "RAM limits, HD limits, time limits, CPU limits" — Yes, but implement these
+  as cgroup-like resource controls, not as capability checks on every allocation.
+  A capability check on every malloc would be devastating for performance.
+  Instead: set resource limits at process launch, let the kernel enforce them.
+
+- "read memory / write memory" of other programs — This is essentially a
+  debugger API. Implement it as a debugging interface (like Linux's ptrace)
+  with capability requirements, not as a general-purpose IPC mechanism.
+
+- "automate (emulate mouse clicks, keyboard input)" — Accessibility depends on
+  this. Make sure your capability model doesn't make accessibility tools
+  impossible to use. Have a dedicated accessibility capability class.
+
+- "hooks on things they do" — As mentioned above, implement as a tracing
+  subsystem, not synchronous hooks. The list is very thorough (lines 247-271)
+  but if every event triggered synchronous capability-checked hooks, the system
+  would crawl.
+
+- "allocate/deallocate memory" as a hookable event — This happens millions of
+  times per second in a typical program. Even as an async notification, the
+  volume would be unmanageable. This should only be available in a specialized
+  profiling/tracing mode, not as a general hook.
+
+
+================================================================================
+GRAPHICS (lines 282-297)
+================================================================================
+
+> "Probably do it like Linux and Windows."
+
+Correct. Direct GPU access for rendering, compositor for final display,
+fullscreen bypass option. No pushback.
+
+Addition: define a standard 2D drawing API in the OS (like Skia/Cairo) so
+application developers don't all have to use raw GPU commands for basic UI.
+Vulkan/OpenGL/GPU compute for programs that need it, but a high-level 2D API
+for normal applications.
+
+
+================================================================================
+INIT / SERVICE MANAGEMENT (lines 299-311)
+================================================================================
+
+> "text logs instead of binary"
+
+Correct. JSON-lines format is a good choice — structured (machine-parseable)
+but also human-readable and greppable.
+
+> "Make only one or two ways to load programs on startup"
+
+STRONG AGREEMENT. Windows has: registry Run keys (several), Startup folder
+(per-user and all-users), Task Scheduler, services, drivers, group policy, and
+more. It's a mess. Two mechanisms:
+1. Service manager (for system services and daemons)
+2. User startup list (for user applications, simple ordered list)
+
+> "have an os api function to tell the os 'this app is now fully loaded'"
+
+Good idea. This is what systemd's "notify" service type does — the service
+sends sd_notify(READY=1) when it's actually ready to serve requests, not just
+when its process has started. Essential for correct dependency ordering.
+
+> "fallback of loading next app when no drive activity for X seconds"
+
+PUSHBACK: This is fragile. Use explicit readiness notification as the primary
+mechanism, with a timeout fallback (30 seconds, configurable). "No drive
+activity" is not a reliable signal — an app might be doing CPU-intensive
+initialization with no I/O, or waiting for a network connection.
+
+^^ i argued with ai about this and it agreed with me.
+
+================================================================================
+ABI STABILITY (lines 315-317)
+================================================================================
+
+Good. Versioned syscall tables with additive changes within a version. No
+pushback.
+
+
+================================================================================
+PACKAGE MANAGER (lines 319-343)
+================================================================================
+
+> "Whenever Nix updates a library by making a whole new instance, it has to go
+> through every program that uses it and change the source and recompile it.
+> There must be a better way..."
+
+ANSWER: You're describing the tension between reproducibility and practicality.
+The "middleman" you're describing is just dynamic linking with a symlink layer —
+instead of hardcoding /nix/store/abc123-libpng/lib, programs link against
+/lib/libpng.so which is a symlink to the current version.
+
+How is this different from replacing the library in place? It's not,
+functionally. The Nix model's advantage is that the old version still exists on
+disk, so you can atomically switch the symlink back if the update breaks
+something. In-place replacement destroys the old version.
+
+Your proposed middle ground (content-addressed packages with shared dynamic
+libraries within a generation) is the right answer. Concretely:
+
+- Each "generation" is a set of symlinks in /lib, /bin, etc. pointing to
+  store paths
+- Updating a library creates a new generation with updated symlinks
+- Rolling back switches to the previous generation's symlink set
+- Programs use standard dynamic linking and don't know about the store
+
+This gives you: fast security patches (update one library + update symlinks),
+atomic rollback (switch generation pointer), and compatibility with third-party
+binaries (they find libraries in standard paths).
+
+> "How about a central repository for curated and tested apps"
+
+Recommendation:
+1. Official repository — curated, tested, signed by the OS project
+2. Third-party repositories — anyone can host one, user adds the URL
+3. Direct installation — download a .pkg from anywhere and install it
+
+The capability system provides security for option 3 — even untrusted
+software can only do what its capabilities allow. Show the user what
+capabilities a package requests before installation (like Android app
+permissions).
+
+
+================================================================================
+WINDOW MANAGER / GUI (lines 344-421)
+================================================================================
+
+Mostly good. Specific comments:
+
+> "can pin apps to taskbar on the left, all launched applications go to the
+> right"
+
+Good, this is the Windows 7 model which was widely considered the best taskbar
+design.
+
+> "should we allow programs to add context menu items?"
+
+ANSWER: Allow it, but with controls:
+- Programs must request a capability to add context menu items
+- Items load lazily (don't load the program's DLL just to show the menu)
+- Provide a settings page where users can see and disable individual context
+  menu extensions
+- Rate limit: if a context menu handler takes >200ms, skip it and show a
+  "loading..." entry
+
+> "need a better way to drag a file into a file explorer window"
+
+ANSWER: Use drop zones. When dragging a file over a file explorer window:
+- Dropping on empty space in the file list → copy/move to this directory
+- Dropping on a folder → copy/move into that folder
+- Dropping on a file → offer to open the file with that program (if it's an
+  executable) or do nothing
+- Show a clear visual indicator (highlighted drop zone) so the user knows what
+  will happen
+
+> "must have a model for dragging and dropping various objects"
+
+You're thinking of OLE (Object Linking and Embedding) drag and drop. It works
+by having a standard data transfer interface — the source provides data in
+multiple formats (text, HTML, file path, image, custom), the target picks the
+format it understands. Your OS needs a clipboard/drag-and-drop system that
+supports multiple data formats per operation.
+
+> "support for web apps - like electron apps but provide the framework"
+
+Good idea but MAJOR undertaking. You'd need to ship a browser engine (WebKit
+or Chromium) as a system component. This is a whole project by itself. Consider
+making this a "phase 2" feature — get the native GUI API right first, web app
+support later.
+
+> "signals and slots"
+
+Good. Qt's signal/slot mechanism (or something like it) is the right pattern
+for GUI event handling. In Rust, this maps naturally to channels or callback
+registration.
+
+> "css styles applied to various things like with Qt"
+
+Recommendation: use a styling system, but don't use CSS. CSS was designed for
+documents, not applications — it has bizarre specificity rules, cascade
+complications, and poor support for application layout patterns. Design a
+simpler, purpose-built styling language for application widgets.
+
+Or: use a subset of CSS (just the properties that make sense for widgets:
+colors, borders, padding, margins, fonts, border-radius) without the cascade
+complexity. Qt's stylesheet system is a reasonable starting point for what
+works and what doesn't.
+
+> "strongly encourage app designers to set a hover tooltip for any menu option
+> or button that's currently disabled, explaining why it's disabled"
+
+PUSHBACK on enforcing this. Strongly encouraging it in documentation and API
+design is fine (make the "disable" function have an optional reason parameter
+that's prominent in the docs). But enforcing it would block developers from
+shipping until they've written tooltip text for every disabled state, which
+creates busywork and leads to useless tooltips like "This button is disabled."
+
+> "probably shouldn't support other window managers that aren't API compatible
+> with our own"
+
+Correct. One window management API, one compositor. This is one of the
+advantages of building a new OS — you don't have to support the
+X11/Wayland/Mir fragmentation.
+
+> "layout capabilities"
+
+RECOMMENDATION: Study Flexbox and CSS Grid (from the web) for layout
+algorithms, but implement them as native layout engines, not through CSS
+parsing. Flexbox's model (main axis, cross axis, flex-grow, flex-shrink,
+alignment) covers 90% of application layout needs elegantly.
+
+> "text windows - support all web formatting, spans"
+
+CAUTION: "All web formatting" means implementing an HTML/CSS rendering engine,
+which is one of the most complex pieces of software ever written. Instead:
+- Simple text view: plain text, single font, ANSI colors. For terminals and
+  logs.
+- Rich text view: formatted text with fonts, sizes, colors, inline images.
+  NOT HTML — a simpler markup model.
+- Web view: embedded browser engine for actual HTML content. Phase 2 feature.
+
+> "LaTeX/MathML support"
+
+Probably a library rather than built into the OS, but worth including. Typst
+is the modern alternative to LaTeX you may be thinking of — simpler syntax,
+faster compilation, similar output quality.
+
+
+================================================================================
+INCLUDED SOFTWARE (lines 423-561)
+================================================================================
+
+> "fast find file function"
+
+Yes. But complement with a background indexer (which you mention on line 500).
+Real-time search of the full filesystem is slow; an index makes it instant.
+
+> "grep - use my python grep?"
+
+For the system utility, use a Rust implementation (ripgrep is excellent and
+open source). Python grep would be too slow for large-scale searching. Your
+Python grep could be included additionally as a tool.
+
+> "something exactly like Windows' robocopy?"
+
+rsync is the Unix equivalent and more capable. Include rsync.
+
+> "good process explorer"
+
+Your feature list (lines 439-444) is thorough. One addition: a system-wide
+resource monitor view (CPU/RAM/disk/network graphs over time, like Windows Task
+Manager's Performance tab or htop).
+
+> "something like tmux?"
+
+ANSWER: tmux is a terminal multiplexer. It lets you:
+- Split one terminal into multiple panes (side by side, top/bottom)
+- Create multiple terminal "tabs" (called windows) within one session
+- Detach from a session (it keeps running in the background) and reattach
+  later — even from a different SSH connection or after logging out and back in
+
+The detach/reattach feature is why tmux is essential for server work — start a
+long compilation, detach, go home, SSH back in, reattach, check progress.
+
+For your OS: include tmux or build the multiplexing features into your terminal
+emulator. The detach/reattach feature belongs in the terminal emulator itself
+or as a session management service.
+
+> "shell - powershell has a good scheme for piping data between programs"
+
+IMPORTANT DECISION. Options:
+- Bash-compatible: huge existing script ecosystem, but genuinely bad language
+  design (quoting rules, whitespace handling, arrays, error handling are all
+  terrible)
+- PowerShell-style (object piping): powerful, but complex, and limited existing
+  script ecosystem
+- New shell: clean design, but no existing scripts
+
+Recommendation: Include bash for compatibility (people will expect it via POSIX
+layer). Also develop or adopt a modern shell as the default:
+- Nushell (Rust, structured data piping like PowerShell, much cleaner syntax)
+- Oil shell / Oils (designed as a bash replacement, compatible but cleaner)
+- Fish (user-friendly, good defaults, but not POSIX-compatible)
+
+Nushell is probably the best fit — it's written in Rust (matches your kernel
+language), has structured data piping, and is actively developed.
+
+> "cmake, gcc and such? (seems obvious to include them, but for some reason
+> linux distros don't)"
+
+Linux distros don't include them by default to keep the base installation
+small. Desktop users (majority) don't need a compiler. Your OS could include
+them since you need gcc/Rust anyway for kernel recompilation, or make them a
+one-click install from the package manager.
+
+> "WINE-like support for Windows programs"
+
+Porting WINE is a massive but valuable undertaking. WINE is ~10 million lines
+of code. It would need to be adapted to your OS's APIs. This is a long-term
+goal, not a launch feature.
+
+> "WSL-like support for Linux?"
+
+Since your OS is Unix-like, this is less needed than WSL is on Windows.
+Linux binaries won't run directly (different kernel, different syscall
+numbers), but your POSIX compatibility layer means porting Linux applications
+is straightforward (recompile, not rewrite). A Linux syscall translation layer
+(like FreeBSD's Linux compatibility layer) is feasible and simpler than WINE.
+
+> "docker? kubernetes?"
+
+Docker: yes, eventually — it needs container primitives (namespaces, cgroups
+equivalent). Plan for these in your kernel design.
+Kubernetes: only relevant for server use, not for desktop. Skip for now.
+
+> "an IDE?"
+
+Don't build one. Include a good text editor. IDEs are enormous projects
+(VS Code alone is millions of lines of code). Users will bring their own IDE or
+use VS Code / Neovim / etc.
+
+> "is there really any reason to have a swap partition instead of a swap file?"
+
+Swap partitions are marginally faster (no filesystem overhead, contiguous on
+disk). Swap files are much more convenient (resize without repartitioning).
+On SSDs, the performance difference is negligible. Use a swap file as default.
+
+> "browser - prefer chrome"
+
+Chromium (the open-source base of Chrome) or Firefox. Don't include proprietary
+Chrome — you can't distribute it, and the "wallet popup" issue you mention is
+part of Google's proprietary layer. Chromium doesn't have that.
+
+
+================================================================================
+DAEMON / PUSH NOTIFICATION SYSTEM (lines 563-651)
+================================================================================
+
+PUSHBACK: This section reads like it was written many years ago (references to
+AIM, MSN, ICQ, Yahoo, Flock). The use cases are still valid but the design
+needs modernizing:
+
+- The push notification problem is solved today by WebSocket connections and
+  push notification services. Your OS should provide:
+  1. A notification daemon that programs can send notifications to (like D-Bus
+     notifications on Linux)
+  2. A standard API for long-lived server connections (WebSocket or similar)
+  3. Programs register to receive notifications, the daemon routes them
+
+- The security concerns you raised are real but the solutions are much simpler
+  with your capability model: a program needs the "receive push notifications"
+  capability, the notification daemon only accepts connections from registered
+  services, done.
+
+- Skip the binary XML. Use a simple binary protocol (MessagePack, FlatBuffers,
+  or your own simple TLV format). Or just use your channel IPC — it already
+  handles structured messages.
+
+- "only allow connections from ips that resolve to blahblah.com" — This is
+  not reliable security (DNS can be spoofed). Use TLS with certificate
+  verification instead.
+
+
+================================================================================
+ERROR HANDLING (lines 653-662)
+================================================================================
+
+> "always give traceback requires debug build, which is slower"
+
+ANSWER: Not necessarily. Modern compilers can emit frame pointers or DWARF
+unwind info with minimal performance impact (<2%). Rust already emits unwind
+tables in release builds by default for panic backtraces.
+
+The approach: include unwind information in release builds (small binary size
+increase), strip detailed debug symbols (no line numbers or variable names
+in the binary), but include them in a separate debug symbol file that can be
+loaded on demand. When a crash happens, capture the backtrace with addresses,
+then symbolize it from the debug file. This is what most production systems do.
+
+> "CPU exceptions, such as pagefault and divide by zero, should be easily
+> catchable by the application as any other exception."
+
+Good idea but with caveats. Some CPU exceptions (like page faults) are handled
+by the kernel and should NOT be exposed to the application (they're part of
+normal virtual memory operation). Others (divide by zero, illegal instruction,
+segfault from genuine invalid access) should be catchable.
+
+Unix does this via signals (SIGFPE, SIGILL, SIGSEGV), which are notoriously
+difficult to handle correctly. A better model: convert hardware exceptions into
+language-level exceptions that unwind normally. Windows does this with
+Structured Exception Handling (SEH). It's much more ergonomic.
+
+
+================================================================================
+DISK I/O PRIORITIES (lines 664-667)
+================================================================================
+
+> "let small HD operations pass through without having to wait for larger
+> operations"
+
+The "10 items or less" metaphor is too simplistic, but the principle is right.
+Modern approach: I/O scheduler with multiple priority levels:
+- Realtime (for audio/video playback)
+- Best-effort with priority levels (for normal applications)
+- Idle (for background tasks: indexing, backup, dedup)
+
+Linux's BFQ (Budget Fair Queueing) I/O scheduler does this well. Small reads
+from interactive applications get low latency even during heavy background I/O.
+Study BFQ's design.
+
+On SSDs, the I/O scheduling problem is less severe (no seek penalty), but
+bandwidth prioritization still matters.
+
+> "applications can set their own priorities"
+
+Yes, but have the OS verify against the capability model. Don't let any
+application claim realtime I/O priority without the right capability.
+
+
+================================================================================
+MICROTHREADS (line 668)
+================================================================================
+
+> "inherent support for microthreads (like in stackless python)?"
+
+This is better implemented in userspace runtimes (like Go's goroutines, Rust's
+async tasks, Python's asyncio) than in the kernel. The kernel should provide
+efficient primitives that make userspace green threads work well:
+- Fast context switching (for user-level thread libraries)
+- io_uring (so green threads can do async I/O without kernel threads)
+- Futexes (so green thread synchronization can avoid syscalls in the
+  uncontended case)
+
+Don't put a green thread scheduler in the kernel — it would impose one
+concurrency model on all programs. Instead, make the kernel primitives
+efficient enough that any userspace runtime can build its own.
+
+
+================================================================================
+HOT RELOAD OF OS UPDATES (line 561)
+================================================================================
+
+> "try to allow hot reloads of OS updates like security fixes so that the user
+> doesn't have to reboot all the time"
+
+PUSHBACK on feasibility: Hot-reloading kernel code is extremely difficult and
+risky. Linux has kpatch/livepatch for this, and it's limited to small,
+carefully constructed patches. You can't hot-reload a new scheduler or a new
+memory manager.
+
+What you CAN hot-reload:
+- Userspace services (restart the network service, the compositor, etc.)
+- Kernel modules/drivers (unload old, load new)
+- Shared libraries (with a generation-based package manager, update the library
+  and restart affected services)
+
+What you CANNOT safely hot-reload:
+- Core kernel code (scheduler, memory manager, syscall dispatch)
+- Anything that changes kernel data structures
+
+Microkernel advantage: since most OS functionality is in userspace services, most
+updates can be hot-reloaded by restarting the relevant service. This is one of
+the strongest arguments for your microkernel choice. Only core kernel changes
+require a reboot, and those should be rare.
+
+
+================================================================================
+RECYCLE BIN (line 557)
+================================================================================
+
+Your design is solid. The lazy pruning optimization (delete large old files
+first when running out of space) is good. One addition: the recycle bin should
+be per-filesystem (don't try to move files between filesystems into a single
+recycle bin — that turns a metadata operation into a full copy + delete).
+
+> "can move files to recycle bin even when they're deleted from the command line
+> or by other programs"
+
+CAUTION: This means intercepting all delete operations system-wide. This would
+be a significant performance overhead for programs that create and delete many
+temporary files (compilers, builds). Solution: have a "trash-capable delete"
+syscall that moves to recycle bin, and a "permanent delete" syscall that
+bypasses it. Make the file explorer and shell use trash-capable by default.
+Programs that know they want permanent delete (temp file cleanup) use the
+direct syscall. Maybe require the "bypass recycle bin" capability for non-temp
+directories.
+
+
+================================================================================
+CONFIGURATION FILES (line 556)
+================================================================================
+
+> "configuration files will be yaml, processed with ruamel.yaml to preserve
+> user formatting and comments"
+
+PUSHBACK: YAML has well-documented problems:
+- "Norway problem": the country code NO is parsed as boolean false
+- Implicit type coercion: 1.0 is a float, 1 is an int, but 01 might be octal
+- Indentation-sensitive (like Python, which is fine, but combined with the
+  above issues it creates subtle bugs)
+- Multiple ways to write strings, multiple document formats
+
+TOML is a better choice for configuration: simpler, no implicit coercion, well-
+defined types, also supports comments. Rust ecosystem uses TOML extensively
+(Cargo.toml). Alternatively, a strict YAML subset with explicit type tags.
+
+The "preserve formatting and comments" requirement is important and TOML
+handles it too.
+
+
+================================================================================
+SETTINGS / CONFIGURATION UI (lines 671-772)
+================================================================================
+
+Mostly good, very thorough. Specific comments:
+
+> "grub settings (should we use grub?)"
+
+For x86 UEFI: consider systemd-boot (simpler than GRUB) or write your own
+minimal UEFI bootloader. GRUB is complex and over-featured for a single-OS
+system. For dual-boot, GRUB is the standard and you should play nicely with it
+(install your OS as a GRUB menu entry rather than replacing GRUB).
+
+> "is it possible to allow our os to modify grub settings when grub was
+> installed by a linux installation?"
+
+Yes, by writing to /etc/grub.d/ or /boot/grub/grub.cfg on the Linux partition.
+Most Linux distros use os-prober to auto-detect other OSes and add GRUB
+entries. You can also add your own entry file.
+
+> "can we detect what ip the router is at and have a button to load that ip in
+> the browser?"
+
+Yes, the default gateway IP (from DHCP or route table) is almost always the
+router. Easy to detect and show.
+
+> "turn off screen after N minutes - Can wake up as soon as it detects enough
+> change via the webcam or enough sound from the mic?"
+
+PUSHBACK: This requires the webcam and microphone to be always on, which is a
+privacy concern and power drain. Make this opt-in with a clear privacy warning.
+The standard approach (wake on keyboard/mouse/touchpad input) is sufficient for
+most users.
+
+> "hotkeys - purposely comes with very few (or possibly no) hotkeys enabled by
+> default"
+
+PUSHBACK: Some hotkeys are expected by all users:
+- Alt+F4 to close window
+- Alt+Tab to switch windows
+- Ctrl+C/V/X for copy/paste/cut (in the GUI, not terminal)
+- Ctrl+Z for undo
+- Print Screen for screenshot
+These should be enabled by default. The complaint about "hotkeys everywhere"
+is about application-specific hotkeys conflicting, not about these fundamental
+OS hotkeys.
+
+> "Installation wizard - is there really any reason to have a swap partition
+> instead of just a swap file?"
+
+Answered above: no, swap file is fine for desktop use. Default to swap file.
+
+> "option of unattended installation - some way of specifying all configuration
+> options beforehand"
+
+Good. The YAML file approach works: provide a kickstart/preseed-style file
+with all answers. This is essential for automated deployment and testing.
+
+
+================================================================================
+MISC ITEMS I HAVEN'T ADDRESSED YET
+================================================================================
+
+> "no AI shit in the OS, and of course no ads" (line 558)
+
+Noted, with the exception of speech input/output which you explicitly allow.
+
+> "make the OS be friendly to being run under a VM" (line 669)
+
+This means: include virtio drivers (for disk, network, GPU under KVM/QEMU),
+VMware tools equivalent, support for paravirtualized hardware. Important for
+development and testing of the OS itself.
+
+> "something pretty much exactly like Chrome Remote Desktop" (line 552)
+
+Implement VNC or RDP (or both) server built into the OS. VNC is simpler (sends
+screen pixels, cross-platform). RDP is more efficient (sends draw commands, but
+more complex). For LAN use, VNC is sufficient and much simpler to implement.
+For internet use, add TLS encryption on top.
+
+> "signals - tell a program to cleanly shut down, etc." (line 554)
+
+Your instinct is right — don't implement Unix signals. They're a mess (async
+signal safety issues, limited number, poor composability). Instead, use your
+channel/message IPC. The service manager sends a "please shut down" message
+on the program's control channel. The program handles it in its normal event
+loop. If it doesn't respond within a timeout, force-kill it.
+
+> "can always view a history of which programs recently either played a system
+> sound or emitted any sound" (line 559)
+
+Nice usability feature. Requires the audio subsystem to log which processes
+have active audio streams and recently had them. Low overhead since the audio
+mixer already tracks this.
+
+> "ActiveScript" (line 747)
+
+The concept: register scripting languages with the OS so any application can
+embed scripting via a common API. Windows has this (VBScript, JScript, later
+PowerShell). The modern equivalent: embed Lua or a WASM runtime as a standard
+extension mechanism. Lua is tiny, fast, designed for embedding. WASM is
+sandboxed and language-agnostic. Probably offer both.
+
+> "snapshot or restore from snapshot feature" (line 506)
+
+This ties into your package manager (Nix-style generations) and your filesystem
+choice. If you support Btrfs/ZFS, filesystem snapshots are built in. System
+snapshots would combine: filesystem snapshot + list of installed packages +
+configuration. The restore operation: roll back filesystem, reinstall package
+generation, done.
+
+
+================================================================================
+OVERALL ASSESSMENT
+================================================================================
+
+Strengths of the design:
+- Microkernel with optional in-kernel drivers is the right architecture
+- SPARK + IOMMU for driver safety is novel and well-reasoned
+- Capability-based security model is modern and appropriate
+- Nix-style package management with dynamic linking compromise is practical
+- The GUI feature list is very comprehensive
+- Good instincts on what to keep from existing OSes and what to redesign
+
+Main risks:
+1. SCOPE — this is an enormous project. Prioritize ruthlessly. Many features
+   listed here are "nice to have" that could absorb years each (web app
+   framework, WINE compatibility, database filesystem, IDE).
+2. FILESYSTEM — don't write your own from scratch. Port existing code. Data loss
+   bugs are unforgivable.
+3. GPU DRIVERS — the hardest driver category. GPU driver development is where
+   most OS projects stall. Plan to support a limited set of GPUs initially
+   (probably just one vendor's open-source driver, like AMD's).
+"NVIDIA's Linux driver situation is complicated:
+
+        **NVIDIA has two Linux drivers:**
+
+        - **Proprietary driver** — the good one that everyone uses. High performance, full feature support. But it's a
+        closed-source binary blob that's tightly coupled to the Linux kernel. You can't port it — you don't have the
+        source code, and it depends on Linux kernel internals that change every release. NVIDIA would have to port it to
+        your OS themselves, which they won't do for a new OS.
+
+        - **Nouveau** (open source, reverse-engineered) — historically terrible performance because NVIDIA didn't
+        release documentation or firmware. However, this is changing: NVIDIA has been releasing open-source kernel
+        modules since 2022 (for Turing and newer GPUs, GTX 1600+/RTX 2000+). The open-source driver is improving but
+        still significantly behind the proprietary one, especially for gaming and compute.
+
+        **AMD is much easier:**
+
+        AMD's Linux GPU driver (AMDGPU) is fully open source, included in the Linux kernel, and well-documented. It
+        supports all modern AMD GPUs with good performance. This is why most new OS projects, Linux distros, and even
+        the Steam Deck chose AMD.
+
+        **What to do:**
+
+        1. **Start with AMD** — port the AMDGPU driver. Open source, well-documented, good performance, covers a large
+        chunk of desktop users.
+        2. **Intel integrated graphics** — also fully open source (i915/xe driver). Covers most laptops and desktops
+        that don't have a discrete GPU.
+        3. **NVIDIA later** — wait for their open-source driver to mature, then port that. Or hope that your Linux
+        syscall compatibility layer eventually becomes good enough to run their proprietary driver's userspace
+        components against your kernel's DRM/KMS implementation. That's how FreeBSD handles NVIDIA — their Linux
+        compatibility layer runs the Linux NVIDIA driver.
+
+        The FreeBSD approach is actually the most promising path for NVIDIA support on your OS."
+4. BROWSER — don't build one. Port Chromium or Firefox. This alone is a massive
+   porting effort.
+
+Suggested development phases:
+Phase 1: Boot, kernel, basic drivers (keyboard, display, storage, network),
+  shell, basic filesystem (ported ext4), package manager
+Phase 2: GUI, compositor, file explorer, terminal, process manager, basic
+  applications
+Phase 3: Advanced features (capability security, SPARK drivers, Btrfs/ZFS,
+  audio, advanced networking)
+Phase 4: Polish (WINE, web app framework, database filesystem, advanced
+  settings UI)

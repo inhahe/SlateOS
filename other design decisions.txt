@@ -1,0 +1,118 @@
+ Kernel architecture
+
+  - Monolithic (Linux, BSD) — drivers, filesystem, networking all run in kernel space. Fast (no context switches between
+   components), but a bug in any driver can crash the whole system.
+  - Microkernel (Mach, seL4, MINIX 3) — kernel only handles IPC, scheduling, and memory. Everything else (drivers,
+  filesystems) runs as userspace processes. More robust and modular, but IPC overhead between components can hurt
+  performance.
+  - Hybrid (Windows NT, macOS/XNU) — microkernel in theory, but performance-critical stuff gets pulled back into kernel
+  space in practice.
+
+  The debate has been going for 35+ years (the famous Torvalds vs. Tanenbaum argument). Microkernels have gotten faster,
+   but monolithic still dominates in practice.
+
+  Syscall interface style
+
+  - Many specialized syscalls (Linux has ~450) — each operation gets its own syscall number. Simple to use, but the
+  interface grows over time and accumulates legacy.
+  - Few generic syscalls with message passing (microkernels, Plan 9's read/write on everything) — cleaner abstraction,
+  but you end up encoding a lot of structure into messages/buffers.
+  - Capability-based (seL4, Fuchsia) — syscalls operate on capability handles rather than global names. More secure by
+  design, but very different programming model.
+  - io_uring style submission queues — userspace writes requests into a shared ring buffer, kernel drains it. Avoids
+  syscall overhead entirely for batched I/O. Could you design an OS where all kernel interaction works this way?
+
+  Scheduling
+
+  - Completely Fair Scheduler (Linux CFS, now EEVDF) — models fairness as a resource allocation problem, uses a tree of
+  virtual runtimes. Good general-purpose behavior.
+  - Priority-based with preemption levels (real-time OSes, Windows) — fixed priority levels, highest priority runnable
+  thread always runs. Predictable latency, but priority inversion is a problem.
+  - BFS / MuQSS (Con Kolivas's schedulers) — optimized for desktop interactivity over throughput. Simpler, arguably
+  better for < 16 cores.
+  - Per-CPU run queues vs. single global queue — per-CPU scales better but makes load balancing harder.
+
+  Trade-off: throughput vs. latency vs. fairness vs. simplicity. No scheduler wins on all four.
+
+  Memory: paging model
+
+  - 4 KiB pages (standard on x86) — fine granularity, less waste, but huge page tables for large address spaces and TLB
+  pressure.
+  - Transparent huge pages (2 MiB / 1 GiB) — fewer TLB misses, but internal fragmentation and memory compaction
+  overhead.
+  - Variable page sizes — some architectures support this, but it massively complicates the page allocator.
+  - Single address space OS (no per-process page tables, everything shares one address space, use capabilities/segments
+  for protection) — radical simplification, but very different security model.
+
+  Filesystem
+
+  - Inode-based (ext4, XFS) — separate metadata structure pointing to data blocks. Battle-tested, well understood.
+  - Copy-on-write / B-tree (Btrfs, ZFS) — never overwrites data in place, writes new copies. Gets you snapshots and
+  checksums for free, but fragmentation and complexity.
+  - Log-structured (F2FS, LFS) — all writes are sequential appends. Great for flash storage, but garbage collection is
+  tricky.
+  - Database-as-filesystem (WinFS, never shipped; BeFS was partially this) — rich metadata and queries built into the
+  filesystem.
+
+  Also: do you enforce a filesystem hierarchy (/usr/bin/...) or let it be flat with tags/attributes?
+
+  IPC model
+
+  - Everything is a file descriptor (Unix) — pipes, sockets, devices, even signals (signalfd) share one abstraction.
+  Elegant, but you end up shoehorning things that aren't really byte streams.
+  - Everything is a message/RPC (Mach, QNX, Fuchsia) — structured messages between processes. Cleaner for complex
+  interactions, but more overhead for simple byte streaming.
+  - Shared memory as the primary IPC — fastest possible, but now you need synchronization primitives and trust between
+  processes.
+
+  Driver model
+
+  - In-kernel drivers (Linux) — maximum performance, but a buggy driver takes down the system. Drivers must be written
+  in the kernel's language (C, now some Rust).
+  - Userspace drivers (microkernels, Fuchsia, some USB/GPU drivers on Linux) — fault isolation, can restart a crashed
+  driver, can write drivers in any language. But you need a way to handle interrupts and DMA from userspace efficiently.
+  - Driver sandboxing (somewhere in between) — run drivers in kernel space but in restricted memory domains. IOMMU
+  hardware helps with DMA isolation.
+
+  Security model
+
+  - DAC (discretionary access control) — traditional Unix permissions. User owns files, decides who can access them.
+  Simple, but one compromised process has access to everything that user owns.
+  - MAC (mandatory access control) — system-wide policy overrides user decisions (SELinux, AppArmor). Much stronger, but
+   complex to configure and debug.
+  - Capability-based — processes can only access objects they hold a capability (unforgeable token) for. No ambient
+  authority. Theoretically the cleanest model, but existing software assumes ambient access to things like the
+  filesystem.
+  - Pledge/unveil (OpenBSD) — process voluntarily gives up syscalls and filesystem paths it doesn't need. Simple,
+  practical, but relies on programs opting in.
+
+  Graphics
+
+  - Kernel-mode graphics driver with userspace compositor (Linux DRM/KMS + Wayland) — kernel handles mode setting and
+  memory management, userspace handles window layout and compositing.
+  - Kernel-mode compositor (Windows DWM historically had kernel ties via win32k) — lower latency for window management,
+  but larger attack surface.
+  - GPU as a first-class compute device — do you expose a low-level GPU command queue (like Vulkan), a high-level
+  drawing API (like Skia/Cairo), or both? Do applications talk to the GPU directly or always through the compositor?
+
+  Init / service management
+
+  - Simple init + shell scripts (traditional Unix, OpenRC) — easy to understand, but slow sequential boot and no
+  dependency tracking.
+  - Parallel dependency-based (systemd, launchd) — fast boot, socket activation, supervision, but complex.
+  - Supervision trees (Erlang-style, s6) — each process has a supervisor that restarts it on failure. Clean fault
+  recovery model.
+
+  ABI stability
+
+  This is a policy decision more than a technical one, but it has massive consequences:
+
+  - Stable syscall ABI forever (Linux — Torvalds's #1 rule) — programs compiled 20 years ago still run. But you can
+  never fix a bad syscall design.
+  - Stable API, unstable ABI (macOS, Fuchsia) — you recompile against new headers, but the kernel can change its
+  internal interface. Allows fixing mistakes, but breaks binary distribution.
+  - No stability guarantee (research OSes) — maximum freedom, but no ecosystem.
+
+  ---
+  These are roughly in order of how early you need to decide them — kernel architecture and syscall style shape
+  everything downstream. What areas are you most interested in exploring further?

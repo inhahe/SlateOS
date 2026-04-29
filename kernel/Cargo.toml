@@ -1,0 +1,20 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+authors = ["AI-Generated OS Project"]
+description = "Microkernel for x86_64 desktop OS"
+
+[dependencies]
+limine = "0.3"
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "lazy", "once"] }
+bitflags = "2"
+log = "0.4"
+
+[lints]
+workspace = true
+
+# Kernel is a bare-metal binary, not a library.
+[[bin]]
+name = "kernel"
+path = "src/main.rs"

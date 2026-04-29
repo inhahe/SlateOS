@@ -1,0 +1,1424 @@
+# Detailed Roadmap — Every Feature from design.txt
+
+This is the fine-grained companion to `roadmap.md`. Every actionable feature from `design.txt` (and related design files) is listed here as a checkbox item. Where `design.txt` leaves an ambiguity or open question, it is marked with `AMBIGUITY:` for the human operator to resolve.
+
+Status key: `[ ]` not started, `[-]` in progress, `[x]` done, `[~]` deferred
+
+### Testing Responsibility
+
+This OS is built entirely by AI. The human operator does not review code line-by-line and does not run test suites. **AI is the developer, reviewer, and tester.** Every module, function, and subsystem must be tested by AI before it is considered done. "It compiles" is not "it works."
+
+**What AI must test:**
+- Unit tests for every public function (happy path + every error/edge case)
+- Integration tests for every subsystem (exercise public API as a real caller would)
+- Stress tests for all shared data structures (thousands of ops across multiple threads/cores)
+- Memory pressure tests (allocate until OOM, verify graceful degradation)
+- Boot tests after any change to boot, memory init, or interrupt handling (QEMU with serial output, automated pass/fail)
+- Benchmarks for all performance-critical subsystems (see performance targets in CLAUDE.md)
+- Boundary conditions for all `unsafe` code (off-by-one, null, max values, alignment)
+
+**What requires the human to manually test:**
+- Subjective visual/UX quality (does the desktop _feel_ right, do animations look smooth, are colors pleasing)
+- Physical hardware interaction (real Bluetooth pairing, real USB devices, real GPU output on a monitor)
+- Multi-monitor setups (AI has no way to simulate actual multi-display behavior)
+- Installation on real hardware (partitioning a real disk, UEFI boot on real firmware)
+- Accessibility evaluation (screen reader experience, color-blind usability beyond automated contrast checks)
+- Anything that requires human judgment about whether something is annoying, confusing, or ugly
+
+When AI finishes a feature that has aspects requiring human manual testing, it must document what needs testing and what specifically to look for in `manual-testing.txt`. Not in commit messages (too easy to miss), and not in `todo.txt` (that is the human operator's personal file — AI does not write to it).
+
+### Design Principles (non-negotiable)
+
+- **No AI features in the OS** (exceptions: speech I/O, opt-in ML image/video indexer). **No ads.**
+- **YAML for all configuration files**, processed with a library that preserves user comments and formatting (e.g., ruamel.yaml or Rust equivalent).
+- **No binary logs** — text-based (JSON-lines) structured logging.
+
+### API Design Principles
+
+- **Handle-based filesystem:** all file/dir operations take a capability handle, not a path string. Open returns a handle; subsequent ops are relative to it. Handles ARE capabilities — no TOCTOU races. Convenience wrappers for open+operate+close in one call. Validated by corrode.dev "Bugs Rust Won't Catch" (2026-04): 44 CVEs in Rust coreutils (uutils), largest cluster = TOCTOU path-resolution races. Our handle-based API eliminates the entire class. Additional API rules from that analysis:
+  - **Atomic creation with permissions:** file/directory creation APIs take permissions as a parameter, never create-then-chmod (race window between create and permission set lets other processes open with default permissions).
+  - **Byte-aware paths:** path types must handle all valid bytes (everything except `/` and `\0`), never force UTF-8 conversion. No `from_utf8_lossy` on paths or OS-boundary data — that's silent data corruption. Use byte-string or OS-string types at system boundaries.
+  - **Resolve before trust boundaries:** all path resolution, user lookups, library loading, and capability checks must complete before entering restricted contexts (chroot, sandbox, privilege drop). Once inside a restricted context, external resolution may load attacker-controlled data.
+- **Copy-default IPC:** small messages copy (safe, simple). Large messages opt in to move/page-transfer explicitly. `send()` copies, `send_transfer()` moves pages.
+- **Capability checks are cheap and local:** `has_capability("audio.volume")` must be a fast in-process check, not an IPC round-trip. Apps check capabilities to show/hide UI features.
+- **Sync-first base API, async via event loop:** simple programs use blocking calls. GUI apps and services use the IOCP event loop (inherently async). Toolkit handles async I/O internally so developers write event-driven code without touching io_uring directly.
+- **Cancellation via handle close:** closing a handle cancels all pending operations on it (they return a "cancelled" error). For io_uring: individual submissions are cancellable by token without closing the underlying handle.
+- **Many specialized functions at all levels** (kernel and userspace): type-safe, discoverable, composable. Broad/dynamic APIs only for inherently open-ended systems: CSS-like styling (key-value property sets), batch widget configuration, and serialization/RPC (Cap'n Proto structured data).
+- **Widget creation: create then configure** (Qt-style). Widget exists, set properties, add to layout. Batch `configure()` convenience method available for setting many properties at once.
+- **Unified error model:** kernel returns typed error codes (Rust enum / integer ABI). Each language translates: Rust → `Result<T, SysError>`, Python → `OSError` subtypes, C → errno. Error enum defined once, every code has a built-in human-readable message.
+- **API stability tiers:** Tier 0 (unstable) = kernel internals. Tier 1 (stable from beta) = syscall ABI, capability names, handle semantics. Tier 2 (stable from beta) = toolkit widget API, service discovery, RPC. Tier 3 (semi-stable) = convenience wrappers, high-level Python APIs. Tier documented on every public API item.
+
+---
+
+## Phase 0: Project Foundation
+
+- [ ] Choose a project name - out of ai's suggestions, so far it's Slate, Facet or Rime. My ideas: Neo
+- [x] Set up git repo, CI, build system (cargo workspace)
+- [x] Set up QEMU/VirtualBox dev loop (edit on Windows, cross-compile, boot in VM)
+- [x] Set up Rust cross-compilation (`x86_64-unknown-none` target)
+- [x] Set up Limine bootloader for development
+- [ ] Later (pre-release): write minimal EFI stub for standalone UEFI boot
+- [ ] Later (pre-release): GRUB menu entry support for dual-boot installs
+- [x] Write CLAUDE.md / coding standards
+- [x] Set up benchmark infrastructure (`criterion`, `bench/` directory, `bench/baselines.toml`)
+- [ ] Integrate fastpy compiler into build system
+- [ ] Porting automation tool: rule-based source code transformer for large-scale ports (Chromium, Firefox, Mesa, etc.)
+  - [ ] Build on clang LibTooling (understands C/C++ semantics, AST-level rewrites) for C/C++ code
+  - [ ] Transformation rule library: Win32 API → native API, POSIX → native syscalls, threading primitives, handle types, platform headers, ifdef resolution
+  - [ ] Dry-run mode: report what would change, how many call sites, what's unhandled
+  - [ ] Handles the mechanical 90% (API translation, type substitution, header remapping); leaves genuinely tricky parts (architectural differences, custom platform assumptions) flagged for human review
+  - [ ] Rules are additive — each port adds rules that benefit future ports
+
+_Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boot (installer adds menu entry) + minimal custom EFI stub for standalone UEFI boot with Secure Boot._
+
+---
+
+## Phase 1: Kernel Core
+
+### 1.1 Boot and Hardware Init
+
+- [x] UEFI boot entry point (via Limine boot protocol)
+- [ ] Parse ACPI tables for hardware discovery (x86 uses ACPI, not DeviceTree)
+- [x] Initialize GDT (with TSS for privilege transitions and IST for double-fault stack)
+- [x] Initialize IDT (all 20 exception handlers + default handler for remaining 236 vectors)
+- [x] Set up interrupt handlers (exception handlers log to serial and halt; IRQ handlers TBD with APIC)
+- [ ] Set up 16 KiB page tables (not 4 KiB — design decision)
+- [ ] Set up kernel heap allocator (geometric size class, per-CPU caches)
+- [x] Initialize serial console for debug output (COM1, 115200 baud, 8N1)
+- [ ] Initialize PCI bus enumeration
+- [ ] Boot task list display (optional, show what the OS is doing during boot)
+- [ ] Optimize boot time — minimize kernel to get to usable state fast
+- [ ] Low-priority HD access for background service/library loading during boot
+
+### 1.2 Memory Manager
+
+#### Physical Page Allocator
+- [ ] Buddy allocator for 16 KiB base pages
+- [ ] Per-CPU free lists to avoid cross-CPU atomic contention
+- [ ] Benchmark: target < 1us per alloc/free (Linux buddy: 100-500ns)
+
+#### Virtual Memory
+- [ ] Page table management (map, unmap, protect)
+- [ ] Kernel virtual address space layout
+- [ ] Userspace virtual address space layout
+
+#### Demand Paging and Stack
+- [ ] Page fault handler for demand paging
+- [ ] Lazy allocation (allocate virtual range, commit physical on touch)
+- [ ] Stack growth via page fault
+- [ ] Guard page at bottom of stack (clean crash on overflow)
+- [ ] Configurable maximum stack size (default 8-64 MiB, programs can request more or unlimited)
+
+#### Swap
+- [ ] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD)
+- [ ] zswap/zram compressed swap (recommended for desktop)
+- [ ] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
+- [ ] Swap priority (multiple swap devices)
+- [ ] Minimum free memory threshold (when to start swapping)
+- [ ] Swap I/O must not tie up system — throttle or lower I/O priority
+
+#### Memory Allocation Modes
+- [ ] Committed memory by default (guaranteed backed by RAM + swap)
+- [ ] Lazy/overcommit memory as opt-in (programs request explicitly)
+- [ ] OOM handling: graceful, no silent kills — fail the allocation
+
+#### Kernel Heap
+- [ ] Slab allocator for common kernel object sizes
+- [ ] Benchmark: target < 200ns for common sizes (jemalloc: 20-50ns)
+
+#### Tunables and Profiles
+- [ ] Runtime-tunable memory parameters via sysctl-like interface
+- [ ] Workload profiles as named presets: Desktop, Database, Development, Gaming
+- [ ] Settings UI can select workload type to populate tuning fields
+
+_Four workload profiles: Desktop (default, interactive/responsive), Database (high throughput, big caches — also covers server), Development (parallel compilation, many processes — also covers game dev), Gaming (low-latency, prioritize foreground app)._
+
+### 1.3 Scheduler
+
+- [ ] Scheduler trait interface (pick_next_task, enqueue, dequeue, task_tick, balance_load)
+- [ ] Priority round-robin scheduler (default implementation):
+  - [ ] 32 or 64 priority levels, real-time levels at top
+  - [ ] Round-robin within each priority level
+  - [ ] Configurable time slices per level (shorter = higher priority for lower latency)
+  - [ ] Per-CPU run queues
+  - [ ] Work stealing from longest queue when idle (prefer same NUMA node)
+  - [ ] Priority inheritance on mutex contention
+  - [ ] Interactive task detection (I/O-blocking tasks get small priority boost)
+  - [ ] Runtime-tunable time slice durations
+- [ ] Process/thread pause while running
+- [ ] Process/thread resume while running
+- [ ] Process/thread priority change while running
+- [ ] Workload profile presets for scheduler parameters
+- [ ] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
+- [ ] Benchmark: context switch target < 5us (Linux: 1-3us)
+
+### 1.4 IPC and Syscalls
+
+#### Syscall Dispatch
+- [ ] Syscall entry/exit path
+- [ ] Many specialized syscalls (Linux style, individual syscall numbers)
+- [ ] Versioned syscall tables for ABI stability
+- [ ] Syscall number ranges: kernel-core 0-199, kernel-ipc 200-399, kernel-security 400-499, kernel-process 500-599, fs 600-799, net 800-999
+- [ ] Benchmark: target < 200ns for trivial syscall (Linux getpid: ~100ns)
+
+#### Channel IPC (Primary IPC)
+- [ ] Kernel-managed channel objects with send/receive queues
+- [ ] Structured message passing
+- [ ] Capability handle transfer in messages
+- [ ] Asynchronous (buffered) send — sender writes and continues, receiver reads when ready
+- [ ] Synchronous (rendezvous) send as option — sender blocks until receiver reads, no buffering needed (L4-style, faster for request/response patterns)
+- [ ] Backpressure handling (buffer-full conditions)
+- [ ] Zero-copy for large messages (page ownership transfer / page flipping, not data copy)
+- [ ] Fast-path register passing for tiny messages (a few words) — pass in CPU registers during context switch, no memory access (L4 optimization)
+- [ ] Benchmark: target < 2us round-trip (Fuchsia: 1-2us, L4: 0.5-1us)
+
+#### Other IPC Mechanisms
+- [ ] One-way pipes (byte streams, no two-way pipes)
+  - [ ] Splice/vmsplice optimization: move pages between pipe and file handle (or between pipes) without copying to userspace. vmsplice maps userspace pages directly into pipe buffer. Makes pipes nearly zero-copy for large transfers.
+- [ ] Shared memory regions (fastest IPC — direct memory reads/writes after setup)
+  - [ ] Lock-free ring buffer support for shared memory
+  - [ ] Futex-based signaling for sleep/wake on shared memory
+  - [ ] Sequence locks (seqlocks) for one-writer-many-readers pattern — readers never block the writer, no locks at all
+- [ ] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)
+
+#### Timer Primitives
+- [ ] Monotonic timers: "wake me in N nanoseconds" — unaffected by clock changes, for timeouts/intervals
+- [ ] Wall-clock timers: "wake me at datetime X in timezone Y" — kernel handles DST transitions, NTP corrections, timezone changes automatically. For alarms, reminders, scheduled tasks.
+- [ ] Both timer types waitable via IOCP-like completion port
+- [ ] Recurring wall-clock timers (e.g., "every weekday at 09:00 local") handled correctly across DST boundaries
+
+#### Unified Wait / IOCP-like Completion Port
+- [ ] Register/unregister waitable objects (not limited to file descriptors)
+- [ ] Arbitrary user-data integer per registration (for app-side dispatch)
+- [ ] Wait on: I/O completion, timers, process/thread exit, semaphores/mutexes, channel messages, eventfd counters
+- [ ] Benchmark: sub-microsecond for ready events
+
+#### io_uring-style Submission Queue
+- [ ] Shared ring buffer between userspace and kernel
+- [ ] Batched I/O submission (submit many, complete many, one syscall)
+- [ ] **Dual-path design**: every syscall always has a normal synchronous entry point. I/O-heavy syscalls additionally get ring buffer submission paths. Programmer chooses which to use.
+- [ ] Ring buffer paths for: read, write, open, close, fsync, send, recv, accept, connect, and similar I/O operations
+- [ ] **No ring buffer for fork, exec, mmap** — these change process state and the caller needs the result before continuing. Also no ring buffer for ultra-fast queries (getpid, getuid) where the overhead would make them slower.
+- [ ] Benchmark: target ~100-200ns per SQE submission (match Linux io_uring)
+
+#### Futexes
+- [ ] Userspace fast path: pure atomic CAS, no syscall for uncontended case
+- [ ] Kernel slow path: sleep/wake on contention
+- [ ] Benchmark: uncontended = no syscall; contended wake target 1-3us
+
+#### Event Loop Integration
+- [ ] Standard API: "give me the underlying waitable handle so I can add it to my event loop"
+- [ ] Libraries expose waitable handles so any event loop can drive any library
+
+#### Per-Process Namespaces
+- [ ] Mount table remapping per process (for sandboxing)
+- [ ] Processes can have restricted view of filesystem (can't even see what exists outside namespace)
+
+### 1.5 Capability / Security Model
+
+#### Core Capability System
+- [ ] Per-process capability table (unforgeable handles to kernel objects)
+- [ ] Capability delegation (parent passes subset to child, cannot create new capabilities)
+- [ ] Capability-gated syscalls
+
+#### User/Group Model
+- [ ] Users with per-user capability sets
+- [ ] Named capability groups (can nest — groups can contain other groups)
+- [ ] User cannot create another user with capabilities they don't have
+- [ ] File/directory capability tags — AND-composition between multiple required capabilities
+- [ ] Within a capability group attached to a file, individual capabilities compose via OR
+- [ ] Predefined groups ship with OS (e.g., "Developer Tools", "Security Suite", "Backup App")
+- [ ] Users/admins can create custom groups from any combination of capabilities
+
+_One graphical session at a time. Fast user switching (suspend one session, start another). SSH creates a non-graphical session alongside the desktop._
+
+#### Capability Granting
+- [ ] Static at launch time (binary metadata specifies starting capabilities)
+- [ ] Dynamic via broker (process requests capability from privileged service)
+- [ ] Temporarily scoped (capability for one operation, then revoked)
+- [ ] "Request capability from user" dialog — app passes reason string shown to user
+
+#### Capability Types — Filesystem
+- [ ] `fs.read` — read files and directories (scopable per path)
+- [ ] `fs.write` — modify existing files (scopable per path)
+- [ ] `fs.create` — create new files and directories (scopable per path)
+- [ ] `fs.delete` — delete files and directories (scopable per path)
+- [ ] `fs.execute` — run a file as a program (scopable per path). Required in addition to `proc.launch` — prevents running programs from untrusted locations. File must also have the executable attribute set.
+- [ ] `fs.metadata` — change file/directory metadata (capabilities, attributes)
+- [ ] `fs.bypass_recycle` — permanently delete without recycle bin (for non-temp directories)
+- [ ] All `fs.*` capabilities are separate (not grouped) — each represents a distinct risk level. Files and directories have separate capability requirement lists for each of read, write, create, delete, execute.
+- [ ] `fs.execute` applies to files only. Directories have no execute concept — traversal/opening a directory is `fs.read`. (Unix overloads "x" on directories to mean "traverse" — this is a historical quirk we don't replicate.)
+
+#### Capability Types — Network
+- [ ] `net.connect` — outbound connections (scopable per domain/IP)
+- [ ] `net.listen` — listen on ports (scopable per port range)
+- [ ] `net.socket_rw` — read/write on established sockets
+
+#### Capability Types — Process Management
+- [ ] `proc.launch` — launch another program
+- [ ] `proc.create_thread` — create/delete threads
+- [ ] `proc.priority` — change own priority within allowed range
+- [ ] `proc.signal` — send shutdown/IPC messages to other processes
+
+#### Capability Types — IPC
+- [ ] `ipc.channel` — create/use IPC channels
+- [ ] `ipc.sharedmem` — create/use shared memory regions
+- [ ] `ipc.pipe` — create/use pipes
+- [ ] `ipc.driver` — communicate directly with a driver
+
+#### Capability Types — Audio
+- [ ] `audio.play` — emit sound
+- [ ] `audio.system_sound` — emit system notification sounds
+- [ ] `audio.volume` — change global volume (elevated)
+
+#### Capability Types — UI
+- [ ] `ui.notification` — show notification in notification pane
+- [ ] `ui.fullscreen` — show fullscreen window
+- [ ] `ui.always_on_top` — show always-on-top window
+- [ ] `ui.hide_taskbar` — remove own entry from taskbar
+- [ ] `ui.context_menu` — add items to system context menus
+
+#### Capability Types — Automation / Accessibility
+- [ ] `access.automate` — emulate mouse/keyboard input to other programs
+- [ ] `access.read_screen` — read screen content of other windows
+- [ ] `access.window_control` — move/resize/close other windows
+- [ ] Dedicated accessibility capability class — ensure capability model doesn't block accessibility tools
+
+#### Capability Types — Resource Limits
+- [ ] `resource.ram` — RAM limit per process
+- [ ] `resource.cpu` — CPU limit (% or time-based)
+- [ ] `resource.disk` — disk space limit
+- [ ] `resource.io_priority` — set I/O priority (realtime requires elevated grant)
+
+#### Capability Types — User / System Administration (elevated)
+- [ ] `admin.user` — create/delete/modify users
+- [ ] `admin.user_caps` — change other users' capabilities
+- [ ] `admin.cross_user` — install/modify across user accounts
+
+#### Capability Types — Libraries
+- [ ] `lib.load` — load dynamic libraries
+- [ ] `lib.plugin` — load plugins via the scripting API
+
+#### Capability Types — Push Notifications
+- [ ] `push.receive` — register for push notifications, maintain long-lived server connections
+
+#### Hook Capabilities — Monitoring (async, notification-style)
+
+_Principle: monitoring something is a separate capability from doing it. Hooks are grouped by what they observe. Programs can only hook filesystem events on paths they already have `fs.*` access to._
+
+- [ ] `hook.filesystem` — async notifications for file/dir events within accessible paths:
+  - [ ] Create, delete, rename, change, read file or dir
+  - [ ] Metadata changed, capabilities changed on file or dir
+  - [ ] Read/write errors (corrupt, locked, not found, out of space)
+  - [ ] Change journal integration: "what changed since timestamp X" (works across reboots)
+- [ ] `hook.storage` — mount/unmount drive, create/resize/delete partition
+- [ ] `hook.process` — program launched, program exited, program crashed, program suspended/resumed
+- [ ] `hook.system` — system going to sleep, system shutdown, DPI/scaling change, OS errors (OOM, I/O error)
+- [ ] `hook.security` — user created/deleted, user capabilities changed, capability grants/revocations
+- [ ] `hook.network` — network activity (scopable per source/destination program by capability)
+- [ ] `hook.updates` — library loading, library update, snapshot created/rolled back
+
+#### Hook Capabilities — Interceptor (synchronous, can block operations)
+
+- [ ] `hook.intercept` — synchronous hooks that can REJECT operations before they complete (elevated)
+  - [ ] Applies to subset of filesystem and network events (e.g., block file creation, block network connection)
+  - [ ] Strict 100ms timeout — if interceptor doesn't respond, operation proceeds
+  - [ ] More restricted than async hooks — requires separate elevated grant
+  - [ ] Use cases: antivirus, data loss prevention, security monitors
+
+#### Debugging Suite (separate capability namespace — developer tools only)
+
+_The debugging suite is NEVER granted to normal applications. These are for debuggers, profilers, and developer tools. Each is a separate capability — granting `debug.attach` does not grant `debug.memory.write`._
+
+- [ ] `debug.attach` — attach to another process (ptrace-like debugging interface)
+- [ ] `debug.memory.read` — read another process's memory
+- [ ] `debug.memory.write` — write another process's memory (higher risk than read)
+- [ ] `debug.breakpoint` — set breakpoints, single-step execution
+- [ ] `debug.trace.syscalls` — trace another process's syscall invocations
+- [ ] `debug.trace.ipc` — trace another process's IPC messages
+- [ ] `debug.trace.locks` — trace lock acquisition/release, contention
+- [ ] `debug.profile` — high-frequency profiling mode (specialized, NOT general hooks):
+  - [ ] Allocate/deallocate memory events (millions/sec — cannot be a general hook)
+  - [ ] Syscall timing
+  - [ ] Lock contention timing
+  - [ ] Per-function CPU sampling (via hardware perf counters)
+
+#### Predefined Capability Groups (ship with OS)
+
+- [ ] "Developer Tools" — `debug.attach`, `debug.memory.read`, `debug.trace.syscalls`, `debug.trace.locks`, `hook.process`
+- [ ] "Full Debugger" — all `debug.*` capabilities
+- [ ] "Security Suite" — `hook.intercept`, `hook.filesystem`, `hook.network`, `hook.security`, `hook.process`
+- [ ] "Backup App" — `hook.filesystem` (with change journal), `fs.read`
+- [ ] "Network Monitor" — `hook.network`, `net.connect`, `net.listen`
+- [ ] "Accessibility Tool" — `access.automate`, `access.read_screen`, `access.window_control`
+- [ ] "System Admin" — `admin.user`, `admin.user_caps`, `admin.cross_user`, `hook.security`, `hook.system`
+
+#### Hardware Security
+- [ ] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware (< 1% overhead)
+- [ ] Enable LLVM CFI as default compiler flag for C/C++ code (1-5% overhead)
+
+#### IOMMU
+- [ ] IOMMU setup and DMA sandboxing
+- [ ] Detect disabled IOMMU, prompt user to enable in BIOS
+- [ ] Option for IOMMU-sandboxed drivers (5-15% speedup over pure userspace drivers)
+
+### 1.6 Process Management
+
+- [ ] ELF binary loader
+- [ ] Process creation/destruction
+- [ ] Thread creation/destruction
+- [ ] posix_spawn-style process creation (avoid fork's problems)
+- [ ] exec equivalent
+- [ ] Hardware exceptions → language-level exceptions (SEH-style)
+  - [ ] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
+  - [ ] Normal page faults handled by kernel, NOT exposed to application
+- [ ] Structured shutdown via IPC message (not Unix signals)
+- [ ] Process credential / capability management
+- [ ] Unwind info in release builds for backtraces (< 2% perf impact)
+- [ ] Separate debug symbol files loaded on demand for symbolization
+
+### 1.7 I/O Scheduler
+
+- [ ] BFQ-style I/O scheduler:
+  - [ ] Realtime priority (audio/video playback)
+  - [ ] Best-effort with priority levels (normal applications)
+  - [ ] Idle priority (background indexing, backup, dedup)
+- [ ] Capability-gated realtime I/O priority
+- [ ] User can set per-app I/O priority (in settings and while running)
+- [ ] Apps can request I/O priority (with capability)
+- [ ] User can override app-set priorities
+- [ ] Prevent heavy I/O from making system unusable (small ops pass through)
+
+### 1.8 Interrupt Handling
+
+- [ ] Interrupt dispatch
+- [ ] Deferred work mechanism (softirq/tasklet equivalent)
+- [ ] Interrupt delivery from kernel to userspace drivers via IPC
+- [ ] Benchmark: total ISR latency < 10us
+
+---
+
+## Phase 2: Basic Userspace
+
+### 2.1 Driver Framework
+
+- [ ] Userspace driver framework:
+  - [ ] MMIO mapping into driver process address space
+  - [ ] Interrupt delivery via IPC
+  - [ ] DMA mapping setup syscalls
+  - [ ] Driver crash detection and automatic restart
+- [ ] Ada/SPARK FFI bridge for kernel-space safety-critical drivers
+- [ ] virtio drivers (disk, network, GPU) for VM development/testing
+- [ ] VMware tools equivalent for VM-friendliness
+
+### 2.2 Essential Drivers
+
+- [ ] Keyboard (PS/2 and USB HID)
+- [ ] Framebuffer / basic display (UEFI GOP initially)
+- [ ] Storage: NVMe driver
+- [ ] Storage: AHCI/SATA driver
+- [ ] USB host controller (xHCI)
+- [ ] Network: Intel e1000/e1000e (for VMs)
+- [ ] Network: basic Realtek (for real hardware)
+- [ ] Timer: HPET
+- [ ] Timer: APIC timer
+- [ ] RTC (real-time clock)
+- [ ] Bluetooth: HCI driver (USB Bluetooth adapters via xHCI)
+  - [ ] Bluetooth pairing, discovery, connection management
+  - [ ] Bluetooth audio (A2DP sink/source, HFP for headsets)
+  - [ ] Bluetooth HID (keyboards, mice, game controllers)
+  - [ ] Bluetooth file transfer (OBEX)
+  - [ ] Bluetooth Low Energy (BLE) for modern peripherals
+  - [ ] Settings UI: scan, pair, manage devices, auto-reconnect
+  - [ ] Port BlueZ or implement from spec (BlueZ is Linux's Bluetooth stack, well-tested, open source)
+
+### 2.3 Filesystem
+
+#### VFS Layer
+- [ ] Virtual filesystem abstraction
+- [ ] Path lookup with dcache equivalent
+- [ ] Benchmark: cached lookup target ~200-500ns per component
+
+#### ext4 (Primary)
+- [ ] Port ext4 code (do NOT write from scratch)
+- [ ] Read-write support
+- [ ] Journaling (via ext4's own journal)
+
+#### Other Filesystems
+- [ ] FAT32 (USB drives, EFI System Partition — essential)
+- [ ] ISO 9660 (optical media)
+- [ ] Later: NTFS read/write support
+- [ ] Later: Btrfs port (CoW, snapshots, checksums)
+- [ ] Later: F2FS port (SSD optimization)
+
+_No database-as-filesystem. Queryable indexed metadata (Phase 6.2) covers the practical use cases. Atomic write transactions are a separate feature. No full relational model._
+
+#### Filesystem Rules
+- [ ] Case-sensitive paths
+- [ ] Forward slash `/` path separator
+- [ ] Filenames: allow everything except `/` and null byte
+- [ ] 255 byte max filename length
+
+#### File Metadata
+- [ ] Owner (user/group)
+- [ ] Capability requirements (AND-composition)
+- [ ] Hash: per-block hashing (detects corruption, enables dedup), per-file hash from block hashes
+- [ ] Time created
+- [ ] Time last read (relatime — only update if older than mtime, or once per day)
+- [ ] Time last written
+- [ ] Size
+- [ ] Extended attributes (for arbitrary data)
+- [ ] Immutable flag (can't modify/delete until cleared by privileged user)
+- [ ] Append-only flag (for log files)
+
+_File comments: extended attribute `user.comment`, max ~64 KiB. No dedicated inode field. Works via ext4 xattrs. Not a launch goal._
+
+#### Filesystem Features
+- [ ] Atomic write transactions (programs can group writes)
+- [ ] Filesystem change notification system (inotify equivalent, async not synchronous)
+- [ ] Change journal: "what changed since timestamp X" queries (for backup programs, works across reboots)
+- [ ] Interceptor hooks: synchronous capability-gated hooks for security tools (e.g., block file creation), 100ms timeout
+- [ ] Deduplication (optional, user-configurable)
+
+_Dedup: (1) Package manager hardlinks in content-addressed store. (2) Filesystem-level via Btrfs/ZFS ports (Phase 6.2). (3) Userspace batch tool — off by default, uses filesystem hashes when available, falls back to reading+hashing._
+
+#### Recycle Bin
+- [ ] Per-filesystem recycle bins (not one central bin)
+- [ ] Two syscalls: trash-capable delete (default for shell/explorer) and permanent delete
+- [ ] Auto-prune: keep items until system needs space, delete oldest first
+- [ ] Smart pruning: prefer deleting larger files that aren't much newer than oldest
+- [ ] Lazy/gradual pruning option (avoid thrashing when space gets low)
+- [ ] Free space reporting optionally excludes recycle bin
+- [ ] Bypass-recycle-bin capability for non-temp directories
+
+#### File Type Associations
+- [ ] Extension → default app mapping
+- [ ] Per-app icons per extension (e.g., audio vs video files can have different icons even if same app)
+- [ ] User can change association: pick from registered apps, any installed app, or any executable + arguments
+- [ ] Fallback to previous app when handler is uninstalled
+
+_Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso` (dynamic shared object), `.slib` (static library)._
+
+### 2.4 Networking Stack (Userspace)
+
+- [ ] TCP/IP stack (userspace service)
+- [ ] UDP
+- [ ] DNS resolver
+- [ ] DHCP client
+- [ ] Sockets API (dedicated socket handles, NOT file descriptors)
+- [ ] Basic packet filtering firewall
+- [ ] UPnP / NAT-PMP port forwarding (detect and configure router)
+- [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
+
+### 2.5 POSIX Compatibility Layer
+
+- [ ] Enough POSIX libc for: gcc, coreutils, bash, CPython
+- [ ] Translate POSIX calls to native syscalls
+- [ ] /proc, /sys equivalents (for programs that need them)
+- [ ] POSIX signals → translate to native IPC messages
+- [ ] POSIX file descriptors → translate to native handles
+- [ ] Bug-for-bug behavioral compatibility on ported tools: when reimplementing or porting Unix tools, match original exit codes, error messages, edge-case semantics, and option parsing exactly. Behavioral divergence = security bug when shell scripts depend on original behavior. (Lesson from uutils CVEs: `kill -1` interpreted differently → system-wide kill.)
+
+### 2.6 Init / Service Manager
+
+- [ ] PID 1 init process
+- [ ] Dependency-based parallel service startup
+- [ ] Socket activation
+- [ ] Automatic crash restart with exponential backoff
+- [ ] Resource limits per service (cgroup-equivalent)
+- [ ] JSON-lines structured logging (text-based, NOT binary)
+- [ ] "Service ready" notification API (app tells OS "I'm fully loaded")
+- [ ] Startup app list (separate from service manager, simple sequential list)
+  - [ ] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout)
+  - [ ] Option to wait until previous app signals ready, or load immediately
+- [ ] Low-priority I/O for background service/library loading (don't obstruct user)
+- [ ] On-demand service loading with priority insertion into schedule
+- [ ] Only two ways to load programs on startup: service manager + startup app list
+
+_Startup app list is a service manager config section (not a separate system). Entries: app path, arguments, whether to wait for readiness. Settings UI shows reorderable list with toggles. Entries can be shell commands for dynamic logic._
+
+### 2.7 Shell and Basic Userspace Tools
+
+#### Shells
+- [ ] Port Oils (bash-compatible, replaces bash for POSIX compatibility)
+- [ ] Port Nushell as default interactive shell (Rust, structured data piping)
+
+_Nushell as default interactive shell (structured data, Rust-native). Oils for POSIX/bash compatibility (replaces bash)._
+
+#### Core Utilities
+- [ ] Port coreutils (ls, cp, mv, rm, mkdir, cat, etc.)
+- [ ] Port rsync
+- [ ] Port curl
+- [ ] Port ssh / sshd
+- [ ] Port find (compatible with Linux find)
+- [ ] Build custom grep in Rust (with Python grep's unique features + standard grep features)
+- [ ] Filename sanitizer utility
+- [ ] Monitor-off utility (like nircmd monitor off)
+
+_nircmd: full feature set (see `nircmd.html`). CLI wrapper over system functions. Telnet: client only (for BBSs), no server._
+
+#### Terminal Emulator
+- [ ] Persistent input history (searchable)
+- [ ] Arrow keys and insert work in input
+- [ ] Tab autocomplete for file/directory names
+- [ ] Find text in backscroll (Ctrl+F)
+- [ ] Configurable colors and font
+- [ ] Ability to log all output
+- [ ] Unicode and ANSI support
+- [ ] Resizable, remembers last size and location
+- [ ] Word wrap option (if off, horizontal scroll to longest line)
+- [ ] tmux-like session detach/reattach
+
+#### CLI Copy/Move
+- [ ] Command-line copy/move using same mechanism as file explorer drag-drop
+- [ ] Options: auto-merge subdirectories, auto-rename (foo (2)) or overwrite on conflict
+
+### 2.8 Error Handling Philosophy
+
+- [ ] Always give meaningful error messages, never generic
+- [ ] Tracebacks with string error messages at each level
+- [ ] Non-bug failures: meaningful message with tips on why it might happen
+- [ ] Include unwind info in release builds (< 2% perf impact)
+- [ ] Separate debug symbol files for on-demand symbolization
+
+---
+
+## Phase 3: Graphics and GUI
+
+### 3.1 GPU Drivers
+
+- [ ] Port AMDGPU driver (open source, well-documented — first priority)
+- [ ] Port Intel i915/xe driver (integrated graphics — covers most laptops)
+- [ ] NVIDIA: defer, use Linux compat layer later (FreeBSD approach)
+
+### 3.2 Graphics Stack
+
+- [ ] DRM/KMS equivalent (kernel mode setting, GPU memory management)
+- [ ] Vulkan loader and basic GPU command submission
+- [ ] OpenGL via Mesa port
+- [ ] 2D drawing library for application UI
+- [ ] OS-level image codec support (all common formats apps can decode/encode via system API):
+  - [ ] JPEG, PNG, GIF (animated), BMP, TIFF, WebP, AVIF, HEIC/HEIF, ICO, SVG
+  - [ ] RAW formats (CR2, NEF, ARW, DNG — via libraw or similar)
+- [ ] OS-level video codec support (via FFmpeg/libav):
+  - [ ] H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, WMV, MOV container, MKV container, WebM
+  - [ ] Hardware-accelerated decode where GPU supports it (VAAPI/NVDEC)
+- [ ] Thumbnail generation service (used by file explorer, shared across apps)
+
+_2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex text shaping. Future Vello contributions if needed: blur/shadow, image filters, SVG coverage._
+
+### 3.3 Compositor
+
+- [ ] Wayland-inspired compositor (userspace)
+- [ ] GPU-accelerated window compositing
+- [ ] DMA-BUF buffer sharing between apps and compositor
+- [ ] Apps submit GPU command buffers directly (Vulkan/OpenGL bypass compositor for rendering)
+- [ ] Compositor only composites final output
+- [ ] Fullscreen bypass / direct scanout (for games)
+- [ ] Fullscreen optimization: detect single-app-fullscreen and optimize to no-op (Windows approach)
+- [ ] Native remote desktop streaming (compositor streams draw commands over network)
+- [ ] Video-encoded screen capture fallback (H.264/VP9 for games/video)
+- [ ] Benchmark: composite full desktop in < 2ms at 4K (for 144Hz vsync)
+
+### 3.4 Window Manager / Desktop Shell
+
+#### Taskbar
+- [ ] Pinned apps on left, running apps on right, divider between sections
+- [ ] Drag to reorder in both sections
+- [ ] Optional app name alongside icon
+- [ ] Aero-style blurry transparency (taskbar and/or window titlebars)
+
+#### System Tray
+- [ ] System tray icons: clock, wifi, volume, battery, emoji input, keyboard layout, network drives, GPU usage, date/time
+- [ ] Can drag and drop icons into and out of system tray
+- [ ] Apps can start in system tray or minimize to system tray
+- [ ] User can override any app: always start in system tray, always in taskbar, or neither
+- [ ] Sound mixer accessible from volume icon: per-app volume, shows currently-playing apps first
+- [ ] Sound history: view which programs recently played sounds, button to go to that app's sound capabilities
+
+#### Desktop
+- [ ] Desktop icons: snap-to-grid or free placement (user option)
+- [ ] Drag and drop icons between pinned apps, desktop, and start menu
+- [ ] Multi-monitor support
+
+#### Start Menu
+- [ ] Applications tree
+- [ ] Settings icon
+- [ ] Terminal shortcut
+- [ ] Power options: off, logout, reboot, hibernate, sleep, reboot in safe mode
+- [ ] Input field for finding and running apps
+
+_Kexec-style OS reboot without rebooting the PC, available as a power menu option._
+
+#### Other Desktop Features
+- [ ] Notification pane (per-app disable option)
+- [ ] Widget support
+- [ ] Ctrl+R run dialog (completion dropdown, recent commands)
+- [ ] Context menu extension API:
+  - [ ] Programs must request capability to add items
+  - [ ] Items load lazily (don't load program just to show menu)
+  - [ ] Settings page to see and disable individual extensions
+  - [ ] 200ms timeout per handler, show "loading..." if exceeded
+- [ ] OLE-style drag-and-drop system (multi-format data transfer: text, HTML, file path, image, custom)
+- [ ] File explorer drop zones (empty space = this dir, folder = into folder, file = open with if executable)
+- [ ] Atomic file operations with undo/resume:
+  - [ ] Copy/move/delete can be undone before finished
+  - [ ] If interrupted (shutdown, etc.), offer abort or resume on next boot
+  - [ ] Smart conflict resolution: rename to "foo (2)", skip, overwrite
+
+#### Themes and Appearance
+
+_A theme is a declarative YAML file plus optional bundled assets. Themes are pure data — never executable code. A theme defines visual treatment; it never changes layout, behavior, or hotkeys._
+
+##### Theme Format
+- [ ] YAML theme file following the OS config convention (comment-preserving parser)
+- [ ] `meta` block: name, author, version, license, tags, screenshots, `supports` list
+- [ ] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`)
+- [ ] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory.
+
+##### Tier 1 — Colors (baseline, include from the start)
+- [ ] Semantic color tokens (~30-40 defined by OS): `background`, `surface`, `primary`, `secondary`, `accent`, `error`, `warning`, `text`, `text-dim`, `text-on-primary`, `border`, etc.
+- [ ] Apps reference semantic tokens, not hardcoded colors — theme redefines tokens and everything updates
+- [ ] Light and dark mode variants in a single theme file (`colors` and `colors-light` sections)
+- [ ] Auto mode: switch light/dark based on time of day or system toggle
+- [ ] Theme color API for applications (apps query current token values)
+
+##### Tier 1 — Window Decorations
+- [ ] Title bar: height, button layout (close/min/max order and position), button shape (circle, square, icon), title font, title alignment
+- [ ] Window border: radius, width, color
+- [ ] Window shadow: offset, blur, color, spread
+- [ ] Aero-style blurry transparency (taskbar and/or window title bars)
+
+##### Tier 1 — Icon Theme
+- [ ] App icons, file type icons, system tray icons, folder icons
+- [ ] SVG-based with color token substitution (monochrome icon sets automatically match theme accent color)
+- [ ] Bundled in theme directory as SVGs, or referenced by name as a separate installable icon theme package
+
+##### Tier 1 — Cursor Theme
+- [ ] Cursor shape, size, color
+- [ ] Animated cursors (loading spinner)
+- [ ] SVG-based or XCursor format
+
+##### Tier 2 — Font Preferences (add in early update)
+- [ ] System font, monospace font, font sizes (base, small, large), font weight
+- [ ] Themes recommend fonts (not bundle — licensing issues). Settings app offers to install recommended fonts from package manager.
+
+##### Tier 2 — Widget Styling
+- [ ] Button shape: border radius, padding, shadow
+- [ ] Input field styling: border style, focus ring color/style
+- [ ] Scrollbar appearance: thin/wide, overlay/always-visible, color
+- [ ] Checkbox/radio/toggle appearance (e.g., pill toggle vs. checkbox)
+- [ ] These variables define the visual feel (flat modern vs. skeuomorphic vs. glassmorphism)
+
+##### Tier 2 — Taskbar/Panel Styling
+- [ ] Transparency/blur level
+- [ ] Icon spacing
+- [ ] Visual treatment (color, border, shadow) — not position or size (those are layout settings, not theme)
+
+##### Tier 3 — Sound Scheme (nice-to-have, add later)
+- [ ] System sounds: notification, error, login, logout, empty recycle bin, etc.
+- [ ] Small OGG files bundled in theme directory, or reference a separate sound scheme package
+- [ ] Optional — many users run silent, but themes that pair colors with sounds are more cohesive
+
+##### Tier 3 — Animation Tuning
+- [ ] `animation-duration-ms` (global default for window open/close, menu transitions)
+- [ ] `animation-easing` (ease-out, spring, linear)
+- [ ] `enable-animations` (bool — global kill switch)
+- [ ] Not full custom animations (that would be a compositor plugin). Just tuning built-in animation parameters.
+
+##### Tier 3 — Wallpaper Integration
+- [ ] Theme can bundle or recommend wallpapers
+- [ ] Dynamic wallpapers: list of images with time-of-day triggers (e.g., day image 06:00-18:00, night image 18:00-06:00)
+
+##### Tier 3 — Terminal Color Scheme
+- [ ] 16 ANSI colors + background + foreground, specifically for terminal emulators
+- [ ] Included as a `terminal` section in theme YAML so a single theme unifies the whole desktop including terminals
+
+##### What Themes Do NOT Control
+- **Layout** (taskbar position, widget placement, panel arrangement) — these are settings, not themes. Applying a theme must never break muscle memory.
+- **Behavior** (click behavior, scroll direction, keyboard shortcuts) — a theme never changes how things work, only how they look.
+- **Custom rendering code** (shaders, custom draw functions) — themes are declarative data, never executable. Fundamentally different widget appearances require a compositor/toolkit plugin, which goes through the full app vetting process.
+
+##### Desktop Background (independent of themes, but themes can recommend wallpapers)
+- [ ] Static image
+- [ ] Animated background (video)
+- [ ] Dynamic program-driven background (program receives desktop events as input — window changes, time, etc.)
+- [ ] Fit options: fit with letterbox, fill with crop (user can scroll to center)
+- [ ] Random background on boot or daily rotation (with exclusion filters)
+- [ ] Login screen background (easy way to match desktop background)
+
+#### Hotkeys
+- [ ] Set hotkey: capture from keyboard, show existing binding, select function or arbitrary command
+- [ ] Modify/delete hotkeys from list
+- [ ] Minimal defaults (Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen)
+- [ ] Available functions: monitor off, minimize all, change desktops, logoff, etc.
+
+_Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Everything else user-configured._
+
+### 3.5 GUI Toolkit / Widget API
+
+#### Layout Engine
+- [ ] Flexbox-based layout (main axis, cross axis, flex-grow, flex-shrink, alignment)
+- [ ] Grid-based layout
+- [ ] Implemented as native layout engines, NOT through CSS parsing
+- [ ] Align elements vertically, horizontally
+- [ ] Justify: left, right, center / top, bottom, center
+- [ ] Size item to content
+- [ ] Size to length of given text
+- [ ] Dynamic sizing based on content and available space
+- [ ] Margin (with color), padding, outline (curvature, thickness, color) on all or individual sides
+- [ ] Auto-scale images by OS DPI/scale factor
+- [ ] Image scaling: max fit in space, optional no-upscale with justify, fill to dimensions
+- [ ] Read size of any item/section
+- [ ] Nested sections
+- [ ] Horizontal/vertical rules
+- [ ] Rounded corners
+- [ ] Transparency support
+- [ ] Focus management (set/unset focus on app, input field, etc.)
+
+#### Styling — CSS Subset with Inheritance, No Cascade
+- [ ] **Keep:** color, background-color, font-family/size/weight, margin, padding, border, border-radius, width, height, min/max-width/height, opacity, box-shadow, text-shadow. Shorthands. Colors: hex, rgb(), rgba(), hsl(), hsla(), named. Units: px, %, em, rem, cm, mm, vw, vh, ch. var()/custom properties (OS theme variables). calc(). Transitions. Pseudo-classes: :hover, :active, :focus, :disabled, :checked. Selectors: type, .class, #id, > child. Position: absolute, relative, fixed. z-index.
+- [ ] **Drop:** cascade/specificity, !important, descendant/sibling combinators, ::before/::after, float, display, @media queries (use OS var() for theming), pt/ex units.
+- [ ] **Inheritance:** child widgets inherit parent font/color unless overridden. Style applied directly to widgets, no multi-source resolution. cm/mm use monitor EDID data for true physical sizes.
+
+#### Signals and Slots
+- [ ] Signal/slot mechanism (maps to Rust channels or callback registration)
+
+#### Core Widgets
+- [ ] Buttons (text, graphic)
+- [ ] Labels
+- [ ] Menus
+- [ ] Checkboxes
+- [ ] Tristate checkboxes (yes/no/default — useful for cascading option overrides)
+- [ ] Radio buttons (grouped, only one selected)
+- [ ] Treeview
+- [ ] Tristate checkbox treeview (with function to populate from directory)
+- [ ] Tabs view
+- [ ] Grid view
+- [ ] Color picker (like qtpyrc's)
+- [ ] Scroll bars (auto-hide when nothing to scroll)
+- [ ] Tooltips
+- [ ] Modal and non-modal dialogs
+- [ ] Simple alert popup with icon
+
+_Click selected radio button to deselect (returns group to no-selection state)._
+
+#### Text Views
+- [ ] Simple text view: plain text, single font, ANSI colors (for terminals/logs)
+- [ ] Rich text view: fonts, sizes, colors, inline images (NOT HTML, simpler markup)
+- [ ] Web view: embedded browser engine (after Chromium port)
+- [ ] Word wrap option (if off, horizontal scroll)
+- [ ] Scroll-to-bottom / stay-at-bottom when new text added
+- [ ] Emoji display without oversizing or resizing the line (unlike Qt)
+
+#### Input Fields
+- [ ] Single-line and multiline
+- [ ] Word wrap option
+- [ ] Placeholder text ("ghost text" showing field purpose)
+- [ ] Rich input with formatting and image paste (optional formatting toolbar)
+- [ ] Copy/paste: Ctrl+C/V and right-click context menu
+
+#### Dockable Panel / Splitter Layout Widget
+- [ ] Container widget that holds named panels separated by draggable splitters
+- [ ] User can drag panels to rearrange (reorder, move to different split)
+- [ ] User can drag splitters to resize
+- [ ] Add/remove panels from a menu or context menu
+- [ ] Horizontal and vertical splits, arbitrarily nested
+- [ ] Layout serialization (save/restore user's arrangement)
+- [ ] Panel tabs when multiple panels share a region
+- [ ] Minimum size constraints per panel
+- [ ] Apps define available panel types; user arranges them
+
+#### Code-Aware TextEdit Widget
+- [ ] Rope or gap buffer backing (efficient for large files)
+- [ ] Syntax highlighting via tree-sitter integration
+- [ ] Line numbers (toggleable)
+- [ ] Undo/redo stack
+- [ ] Multi-cursor support
+- [ ] Selection modes: line, word, block/column
+- [ ] Find/replace (regex-capable)
+- [ ] Soft wrap or horizontal scroll (user choice)
+- [ ] Indent/dedent selection
+- [ ] Auto-indent
+- [ ] Bracket matching
+- [ ] Configurable tab width, tabs vs spaces
+
+#### Advanced Features
+- [ ] Clipboard: multi-format (text, HTML, image, structured data)
+- [ ] Clipboard history with view and select
+- [ ] Paste as plain text option
+- [ ] Drag-and-drop (OLE-style multi-format)
+- [ ] File picker / save dialog (reuses file explorer component)
+- [ ] DPI/scaling awareness
+- [ ] Enable/disable controls API (grey out, set/clear tooltip explaining why disabled)
+- [ ] Encourage (but don't enforce) tooltip on disabled controls explaining why disabled
+- [ ] SVG rendering support
+- [ ] Web app framework: shared Chromium so each web app doesn't need 100MB Electron
+- [ ] No separate "app" type — all applications use the same toolkit/framework
+
+_Multi-format clipboard: source puts full rich + plain text, OS auto-generates sanitized rich text as third format. Apps request: full rich (at own risk), sanitized (safe default — strips backgrounds, embedded objects, invisible text; keeps bold, italic, links, font size, contrast-adjusted color), or plain text. Ctrl+Shift+V = plain text._
+
+### 3.6 Credential Manager (Factotum-like)
+
+- [ ] Central credential storage service (apps never touch raw passwords)
+- [ ] API: define username/password fields in UI, OS autofills if user opts in
+- [ ] API: verify user identity by OS password, with debounce (skip if entered recently)
+
+### 3.7 Audio
+
+- [ ] Audio driver framework
+- [ ] Audio mixing (per-app volume control)
+- [ ] System notification sounds (set of sounds for apps to use)
+- [ ] Sound history (which apps played/are playing sound, link to app settings)
+
+---
+
+## Phase 4: Applications
+
+### 4.1 File Explorer
+
+- [ ] Path bar with autocomplete (absolute or relative paths)
+- [ ] Thumbnails for images, video, PDFs
+- [ ] Detail column view:
+  - [ ] Columns are union of relevant columns per file type in folder
+  - [ ] User can choose default columns per file type
+  - [ ] Audio columns: stereo/mono/joint, VBR, kHz, bitrate, length, ID3v1/v2 tags
+  - [ ] Image columns: width, height, EXIF metadata
+  - [ ] General columns: size, dates (created/modified/accessed), permissions
+  - [ ] Apps can register custom detail columns and file decoders
+- [ ] View options: list, thumbnails (any size), column view, order by any column
+- [ ] Optional preview panel: shows currently selected image/video, movable and resizable (uses dockable panel widget)
+- [ ] Search feature with checkboxes for what to search:
+  - [ ] Filename/path (always available, no indexer needed)
+  - [ ] File contents (requires file indexer enabled)
+  - [ ] OCR text in images (requires file indexer + ML option enabled)
+  - [ ] ML image/video descriptions (requires file indexer + ML option enabled)
+  - [ ] Natural language understanding in search queries (hybrid BM25 full-text + semantic similarity via Reciprocal Rank Fusion — same algorithm as thumbsup2)
+  - [ ] Metadata fields for common file types (searchable without full indexer — read on demand or cached):
+    - [ ] Audio: artist, album, title, genre, year, track number, bitrate, duration, sample rate
+    - [ ] Images: dimensions, camera model, date taken, GPS location, aperture, ISO, focal length
+    - [ ] Video: dimensions, duration, codec, framerate, bitrate
+    - [ ] Documents: author, title, page count, creation date
+    - [ ] General: size (range), date created/modified/accessed (range), file type/extension
+- [ ] Used as system file-save and file-open dialog for applications
+- [ ] Drop zones for drag-and-drop
+- [ ] Atomic copy/move/delete with undo, resume on interruption
+
+### 4.2 Text Editor
+
+_Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3.5 TextEdit). App is a thin wrapper. All apps get the engine for free via the widget._
+
+- [ ] Text editor app: tab bar for multiple open files
+- [ ] Text editor app: file open/save with encoding detection
+- [ ] Text editor app: split panes (horizontal/vertical)
+- [ ] Text editor app: minimap
+- [ ] Text editor app: session restore (remember open tabs, cursor positions)
+- [ ] Text editor app: plugin system (Python scripts)
+- [ ] Text editor app: status bar (line/col, encoding, language, indentation mode)
+
+### 4.3 Process Explorer
+
+- [ ] Identify process by clicking window, kill it
+- [ ] Find process by name
+- [ ] Pause, resume, kill, change priority, restart
+- [ ] Show all libraries loaded by process
+- [ ] Show all subprocesses and threads
+- [ ] Show: capabilities, running user, priority levels, app name, what launched it, is it a service, what's blocking it, what's waiting on its locks, running/paused status, full path
+- [ ] Switch to any window or terminal a process owns
+- [ ] System resource graphs (CPU, RAM, disk, network over time)
+
+- [ ] Code signing display: process explorer shows "repo-verified," "signed by [entity]," or "unsigned"
+  - [ ] Repo packages verified by repo signature + content-addressed hash
+  - [ ] Direct .nx installs support optional CA code signing
+  - [ ] Unsigned apps NOT blocked — capability system is the real security, signing is informational only
+
+### 4.4 Other Core Applications
+
+- [ ] Photo/video viewer (not a separate app — file explorer's thumbnail view + preview panel)
+- [ ] Music player (custom Python/fastpy — see decision below)
+- [ ] Settings/configuration UI (comprehensive — see Settings section below)
+- [ ] System information explorer (hardware + OS info + tuning params + mounted drives)
+- [ ] Backup program (snapshot-based, all common backup types)
+- [ ] Background file indexer (configurable paths/extensions, OFF by default)
+  - [ ] Full-text content indexing for searchable file types
+  - [ ] Optional ML features (OFF by default, separate toggle from indexer itself):
+    - [ ] Image captioning via BLIP (same model/approach as thumbsup2)
+    - [ ] OCR via EasyOCR with GPU acceleration (same as thumbsup2), Tesseract as CPU fallback
+    - [ ] Semantic search embeddings via Sentence-Transformers (same as thumbsup2)
+    - [ ] Video: extract keyframes, caption and OCR those
+  - [ ] Search ranking: hybrid BM25 full-text + semantic cosine similarity, fused via Reciprocal Rank Fusion (same algorithm as thumbsup2)
+  - [ ] Results cached by file content hash (re-index only changed files)
+  - [ ] Exception to "no AI" rule — user must explicitly opt in, clearly labeled as ML feature
+- [ ] Reminder/calendar/alarm program (custom Python/fastpy — see decision below)
+
+_Custom music player in Python (fastpy). foobar2000 is closed source. Features:_
+- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_
+- _Library browser, album art, metadata editing_
+- _Equalizer_
+- _User-customizable layout using the toolkit's dockable panel widget (drag-and-drop panels, add/remove, slide splitters) — simpler than foobar2000's layout system_
+- _Playlist panels:_
+  - _Any number of playlist panels simultaneously (each is a dockable panel)_
+  - _Metadata columns: user picks which columns to show from all available metadata fields (title, artist, album, duration, bitrate, sample rate, codec, path, etc.)_
+  - _Column behavior: drag splitter to resize, click column header to sort, drag column header to reorder_
+  - _Directory-synced playlists: playlist watches one or more directories, auto-updates when files are added/removed_
+  - _"Opened files" playlist: auto-populated with songs opened via command line or file association / drag-drop / other external means. Auto-plays the newly opened song._
+  - _Manual playlists: user adds/removes/reorders songs freely_
+- _Visualizations (all with option for per-channel or average-to-mono):_
+  - _Oscilloscope (waveform)_
+  - _Frequency visualization_
+  - _Spectrum analyzer_
+  - _Milkdrop2 (port from open-source C++/DirectX → Vulkan, as a visualization panel/plugin)_
+- _Layout persists per user_
+
+_Custom Python (fastpy) calendar/reminder/alarm/timer app. Uses OS wall-clock timer primitives for correct DST/NTP handling. Features:_
+- _**Calendar view:** month/week/day views, write notes on any date. Reminders and alarms also appear on the calendar._
+- _**Notes:** can attach a note to any date (via calendar), and also to any individual reminder or alarm._
+- _**Reminders/scheduler:** configurable advance notice (start reminding N days before, and N hours/minutes before the time on the day). Recurrence patterns:_
+  - _Every X days, specific days of the week, specific days of the month_
+  - _Every X weeks, specific weeks of the month_
+  - _Every X months, specific months of the year_
+- _**Alarm clock:** any number of simultaneous alarms, each with its own duration until it goes off. Choose alarm sound per alarm, option to override current global volume when sounding. Same recurrence patterns as reminders._
+- _**Timer:** simple countdown timers, any number simultaneous_
+
+_No separate photo management app. Viewing via file explorer (thumbnails + preview panel). ML search via opt-in file indexer. Image/video decoding is OS-level._
+
+_Advanced undelete utility (Python/fastpy). PhotoRec/TestDisk-style: metadata scanning + raw file carving. Features:_
+- _Search within a specific directory (with option to recurse subdirectories)_
+- _Search by filename mask (e.g., `*.jpg`, `report*`)_
+- _Shows recoverable files with confidence level (metadata intact vs carved by signature)_
+- _Preview recovered files before saving_
+- _Save recovered files to a different drive/directory (never write to the drive being scanned)_
+
+### 4.5 Package Manager
+
+- [ ] Content-addressed immutable store (Nix model)
+- [ ] Shared dynamic linking within a generation (fast security patches)
+- [ ] Atomic updates and rollback (generation pointer swap)
+- [ ] File-level deduplication via hardlinks within store
+- [ ] Binary packages (preferred), with source build option
+- [ ] Binary with source included is most preferred
+- [ ] Show requested capabilities before install (Android-style)
+- [ ] Repository model:
+  - [ ] Official curated repository
+  - [ ] Third-party repository support (user adds URL)
+  - [ ] Direct .pkg installation from anywhere
+
+_Automated gates + community signals, human review only for escalation:_
+- _**Automated submission gates** (must pass all): builds from source (or static analysis for binary-only), declared capabilities match actual syscall/resource usage, no known malware signatures, basic quality checks (description, license, no duplicate name)_
+- _**Community signals** (informational, not gatekeeping): download count, ratings, reviews, time-in-repo without complaints. Automated flagging of suspicious updates (new capabilities requested, binary size jumps, etc.)_
+- _**Human review only when needed:** flagged packages, apps requesting sensitive capabilities (automation, network monitoring, cross-user access). Handled by OS team or trusted volunteers — rare, not every-package._
+- _**Tiered trust display** in package manager UI:_
+  - _"Official" — ships with OS or maintained by OS team_
+  - _"Verified" — passed automated gates, has community history, no flags_
+  - _"New" — passed automated gates but no track record yet_
+  - _"Third-party repo" — user-added repo, no guarantees_
+
+### 4.6 Theme Repository
+
+_Themes are simpler to vet than apps — they can't execute code. The process is lighter than package manager submission._
+
+#### Submission Flow (Git-Based)
+- [ ] Public Git repository (GitHub/Forgejo) for community themes
+- [ ] Authors fork the repo, add theme directory under `themes/<name>/` (YAML + screenshots + optional assets), open a PR
+- [ ] Zero custom infrastructure needed initially — a Git repo with CI is free, version-controlled, and community-reviewable
+
+#### Automated Validation (CI on PR)
+- [ ] Schema validation: does the YAML match the theme schema? Are all required color slots filled?
+- [ ] Asset validation: images are valid PNG/SVG under size limit, sound files are valid OGG/FLAC under duration/size limit, no executable content, no embedded scripts
+- [ ] Contrast checking: automated WCAG contrast ratio checks (text-on-background, text-on-surface, etc.). Does not reject — flags accessibility warnings for the author to see
+- [ ] Preview rendering: CI job renders standardized screenshots (taskbar, file manager, settings app, terminal, a dialog box) using the actual theme colors and widget styles, so reviewers don't need to install the theme
+
+#### Human Review (Light Touch)
+- [ ] Maintainer checks: does it look intentional (not random colors)? Do screenshots match the colors? Any obvious issues automation missed?
+- [ ] This is a 2-minute review, not a code audit — themes are data, not code
+- [ ] Community can also review each other's PRs
+
+#### Distribution to Users
+- [ ] Repository publishes a JSON index file: name, author, tags, color summary, screenshot URLs, download URL, download count, date added, date updated
+- [ ] Settings app fetches the index, shows searchable/filterable gallery
+- [ ] Individual themes downloaded on demand (themes are tiny — a few KB for colors-only, a few MB max with icons/cursors)
+- [ ] Simple HTTPS fetch + client-side schema validation — no need for full package manager pipeline
+- [ ] Theme updates: authors update via PR, users get updates through theme browser's update check
+
+#### Theme Browser in Settings App
+- [ ] **Large visual previews** as the primary selection mechanism — grid layout of standardized screenshots, click to see full-size preview
+- [ ] **Featured/Curated section** at top — hand-selected by community maintainers, rotated periodically (e.g., monthly). ~5-10 highlighted themes. Highlights new quality work, not just popularity.
+- [ ] **"New" section** — recently added themes get automatic visibility for 2-4 weeks
+- [ ] **Download count** displayed on each theme, but NOT used as the primary sort — popular doesn't mean good for any particular user
+- [ ] **No rating/star system** — aesthetic ratings are too noisy (taste varies too much for averages to be meaningful), attract gaming (sock puppets, friend brigading), create popularity feedback loops (high-rated stay on top, new themes can't compete), and most themes won't get enough ratings for the average to stabilize. Curation is more useful than aggregation.
+- [ ] **Filtering:**
+  - [ ] Light / dark / both variants
+  - [ ] What the theme covers: colors only, full theme with icons, includes sounds, etc. (based on `supports` field)
+  - [ ] Tags (author-assigned, maintainer-adjustable): warm, cool, high-contrast, pastel, retro, minimal, vibrant, earthy, monochrome, neon, professional, playful, etc.
+- [ ] **Sorting:** newest, most downloaded, recently updated
+- [ ] **Search** by theme name or author
+- [ ] **Local favorites** — users can mark themes they like, creating a private shortlist (not aggregated or published)
+- [ ] **Report button** — for themes with accessibility issues, broken assets, or screenshots that don't match the actual theme. More useful than ratings for quality control.
+- [ ] **One-click apply** with instant preview before committing
+- [ ] **Per-axis apply** — apply only colors from one theme, only icons from another, etc.
+
+#### Theme Editor in Settings App
+- [ ] **Live preview panel** showing a miniature desktop with the current theme applied, updating in real time as user makes changes
+- [ ] **Color picker** for each semantic token, with contrast ratio display for text/background combinations
+- [ ] **Built-in WCAG contrast checker** — flags when text/background combinations fail WCAG AA
+- [ ] **Import/Export** — import from the theme repository or a local YAML file, export current customizations as a shareable theme YAML
+- [ ] **Derive from existing** — start from any installed theme, tweak individual values, save as a new theme
+- [ ] **Preview multiple contexts** — see how changes look across taskbar, file manager, terminal, dialog, etc.
+
+_The theme editor makes it easy for non-technical users to create themes, which feeds the community repository. Authors can export their customizations and submit them directly._
+
+### 4.7 Port Chromium
+
+- [ ] Port Chromium (~35M lines C++)
+- [ ] System web app framework (shared Chromium, not per-app Electron)
+- [ ] Port VS Code (via Chromium + Node.js)
+- [ ] Port Thunderbird (email)
+
+_Chromium first (required for web app framework + VS Code). Firefox later via Linux compatibility layer._
+
+### 4.8 Development Tools
+
+- [ ] gcc, cmake, make, pkg-config (via POSIX layer)
+- [ ] Rust toolchain (for kernel recompilation)
+- [ ] CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
+- [ ] fastpy compiler (AOT Python compiler — first-class language for OS userspace)
+- [ ] Custom Rust target for the OS
+- [ ] Port Rust std library to native syscalls
+
+### 4.9 Remote Desktop
+
+- [ ] Port FreeRDP (working remote desktop early)
+- [ ] Native compositor-level streaming (draw-command forwarding — most efficient)
+- [ ] Video-encoded capture fallback (H.264/VP9 for games/video)
+- [ ] DynDNS setup helper in settings (prefer free services, especially dynu.net)
+
+### 4.10 System Snapshots
+
+- [ ] Package snapshots (manifest of active store paths)
+- [ ] Mutable data snapshots (CoW at filesystem level)
+- [ ] Snapshot tree with branching (like VMs)
+- [ ] Select what to include: files/dirs, programs, program data, program settings
+- [ ] Rollback any OS update, permanently disable it or retry later
+- [ ] Per-program snapshots/rollback (program data and settings)
+
+### 4.11 Service Discovery / RPC
+
+- [ ] Named service registry (D-Bus-like but better)
+- [ ] Programs register named services with typed interfaces
+- [ ] Service discovery by name, typed RPC calls over channel IPC
+- [ ] Serialization format: Cap'n Proto (zero-copy — wire format IS the in-memory format, no serialization step, ~1-5us locally) or FlatBuffers (similar zero-copy approach, from Google). Either avoids the XML/serialization overhead that makes D-Bus slow (~50-200us). Final choice between the two at implementation time.
+- [ ] Standard event loop integration API ("give me the waitable handle")
+
+### 4.12 Push Notifications
+
+- [ ] Notification daemon (programs send notifications to it)
+- [ ] Standard API for long-lived server connections (WebSocket or similar)
+- [ ] Programs register to receive notifications, daemon routes them
+- [ ] Capability-gated: "receive push notifications"
+- [ ] Store messages for apps not currently running, deliver on next launch
+
+_Push notifications use standard channel IPC + RPC serialization (Cap'n Proto/FlatBuffers). No separate wire format. Daemon maintains server connections, delivers via channels, stores for offline apps._
+
+---
+
+## Phase 5: Settings and Configuration
+
+_This is the comprehensive settings UI. Most items depend on the subsystem they configure._
+
+### 5.1 Display and Appearance
+
+- [ ] Screen resolution (auto-revert if user doesn't confirm in N seconds)
+- [ ] Desktop background (static, animated, video, dynamic, random, fitting options)
+- [ ] Login screen background
+- [ ] Theme browser (see Phase 4.6 for full spec): browse, filter, preview, install, apply themes
+- [ ] Theme editor (see Phase 4.6): create/modify themes with live preview, color pickers, contrast checker
+- [ ] Per-axis theme mixing: independently select color theme, icon theme, cursor theme, sound scheme, etc.
+- [ ] Active theme display: show which theme(s) are currently applied and which axes each covers
+
+### 5.2 Input
+
+- [ ] Mouse pointer style
+- [ ] Mouse pointer speed
+- [ ] Keyboard repeat speed
+- [ ] Keyboard layout customizer: arbitrary remap from any starting layout, save as named layout
+- [ ] Include optimized keyboard layouts (Dvorak, Colemak, others)
+
+_Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colemak, Workman. Plus QWERTY and locale-specific. Custom remap from any starting layout._
+
+### 5.3 Network
+
+- [ ] Ethernet configuration
+- [ ] WiFi: selection, password (show password option)
+- [ ] DNS servers (manual or auto)
+- [ ] DHCP or static
+- [ ] IPv4 configuration
+- [ ] IPv6 configuration
+- [ ] Firewall settings
+- [ ] UPnP/NAT-PMP port forwarding
+- [ ] Router detection (button to open router IP in browser)
+- [ ] Show LAN IP address
+- [ ] Show internet IP addresses (IPv4, IPv6)
+- [ ] VPN: OpenVPN settings, show active VPN (including third-party), button to launch VPN app
+
+### 5.4 Security
+
+- [ ] Capability group management
+- [ ] Per-user capability management
+- [ ] Per-program capability management
+- [ ] Per-file/directory capability requirements
+
+### 5.5 Users
+
+- [ ] User management (create, delete, modify)
+- [ ] Per-user capabilities
+
+### 5.6 Kernel and System Tuning
+
+- [ ] Memory management tuning parameters (may require reboot)
+- [ ] Scheduling tuning parameters (may require reboot)
+- [ ] Paging tuning parameters (page size requires recompile)
+- [ ] Filesystem tuning parameters
+- [ ] Workload type selector (populates all tuning fields)
+- [ ] Show advantages/disadvantages of each model/param profile
+- [ ] Recompile kernel with specified parameters (detect source changes)
+- [ ] Recompile OS component with specified parameters
+
+### 5.7 Storage
+
+- [ ] Swap file size
+- [ ] Filesystem deduplication toggle
+- [ ] Partition manager (with data loss warning)
+- [ ] Mounted drives, network drives: show capacity and free space
+
+### 5.8 Programs
+
+- [ ] Per-program: set priority, set capabilities
+- [ ] Uninstall (option to keep program files, keep program settings)
+- [ ] Recompile with specified parameters (if source available)
+- [ ] Notification settings per app: sound (dropdown, previewable), show in pane, per-notification-type control
+- [ ] Program data stored in standard subdirectory (encouraged)
+- [ ] Program settings stored in standard subdirectory (encouraged)
+- [ ] Wipe program data
+- [ ] Per-program snapshot/rollback
+
+### 5.9 Power
+
+- [ ] Action on power button press (shutdown/sleep/hibernate/run program)
+- [ ] Action on laptop lid close
+- [ ] Turn off screen after N minutes (disableable)
+- [ ] Put computer to sleep after N minutes (disableable)
+- [ ] Action on battery low (configurable threshold: minutes or percentage)
+- [ ] Webcam/mic wake (opt-in only, with privacy warning):
+  - [ ] Separate toggles for webcam wake and mic wake
+  - [ ] Configurable motion threshold for webcam
+  - [ ] Configurable sound level threshold for mic
+
+### 5.10 Snapshots
+
+- [ ] View, create, delete snapshots
+- [ ] Snapshot tree with branching
+- [ ] Select what to include
+
+### 5.11 Boot
+
+- [ ] GRUB integration for dual-boot
+- [ ] Optional boot task list display
+
+### 5.12 OS Maintenance
+
+- [ ] OS reset (like Windows)
+- [ ] OS repair: restore to initial state, re-import apps (warn/exclude dangerous-settings apps)
+- [ ] OS settings re-import by category
+- [ ] Rollback options
+- [ ] Let's Encrypt SSL certificate creation helper
+
+---
+
+## Phase 6: Advanced Features and Ecosystem
+
+### 6.1 Linux Compatibility Layer
+
+- [ ] Linux syscall translation (FreeBSD Linuxulator approach)
+- [ ] epoll, eventfd, signalfd emulation
+- [ ] /proc emulation (enough for WINE and common Linux apps)
+- [ ] Linux threading model (clone, futex)
+- [ ] Linux DRM/KMS compatibility (for NVIDIA proprietary driver userspace)
+- [ ] ALSA/PulseAudio compatibility shim
+- [ ] Result: WINE runs → Windows app support
+
+_WSL-style Linux distro support: built from compat layer + ext4 + container namespaces. Management layer for distro images. Syscall translation first, lightweight VM fallback if needed._
+
+### 6.2 Additional Filesystems
+
+- [ ] Port Btrfs (CoW, snapshots, checksums)
+- [ ] Port F2FS (SSD optimization)
+- [ ] NTFS read/write support
+- [ ] Queryable file metadata / indexed attributes (BeOS BFS-inspired)
+
+### 6.3 Additional Schedulers
+
+- [ ] EEVDF-style scheduler option
+- [ ] Deadline scheduler option (real-time/audio)
+- [ ] Selectable in settings, requires reboot
+
+### 6.4 Advanced Security
+
+- [ ] Per-process filesystem namespaces for sandboxing
+- [ ] Interceptor hooks implementation (`hook.intercept` — see Phase 1.5 for capability definition)
+- [ ] Async notification hooks / tracing subsystem implementation (`hook.*` — see Phase 1.5)
+- [ ] Debugging suite implementation (`debug.*` — see Phase 1.5 for capability definition)
+
+### 6.5 Hooks / Tracing Subsystem
+
+_All hooks are gated by their respective capability from Phase 1.5. Programs can only hook filesystem events on paths they have `fs.*` access to. Hook implementation details:_
+
+_Filesystem hooks — `hook.filesystem` (async notification):_
+- [ ] Rename file or dir
+- [ ] Create file or dir
+- [ ] Delete file or dir
+- [ ] Change file or dir
+- [ ] Read file or dir
+- [ ] Read/write errors (corrupt, locked, not found, out of space)
+- [ ] Capabilities changed on file or dir
+- [ ] Other metadata changed
+- [ ] Change journal: "what changed since timestamp X" queries (works across reboots, for backup programs)
+
+_Storage hooks — `hook.storage` (async notification):_
+- [ ] Mount or unmount drive
+- [ ] Create, resize, delete partition
+
+_Process hooks — `hook.process` (async notification):_
+- [ ] Program launched
+- [ ] Program exited (normal or crash, with exit code/crash info)
+- [ ] Program suspended / resumed
+- [ ] Program priority changed
+
+_System hooks — `hook.system` (async notification):_
+- [ ] System going to sleep
+- [ ] System shutdown
+- [ ] OS errors (OOM, I/O error)
+- [ ] DPI/scaling factor changed
+
+_Security hooks — `hook.security` (async notification):_
+- [ ] User created or deleted
+- [ ] User capabilities changed
+- [ ] Capability grant/revocation events
+
+_Network hooks — `hook.network` (async notification, scoped per source/destination):_
+- [ ] Network activity by program (inbound/outbound, destination, bytes)
+
+_Update hooks — `hook.updates` (async notification):_
+- [ ] Program/library loading
+- [ ] Library update
+- [ ] Snapshot created or rolled back
+
+_Interceptor hooks — `hook.intercept` (synchronous, can BLOCK operations):_
+- [ ] All `hook.filesystem` events (can reject before completion)
+- [ ] Network connection events (can reject before connection established)
+- [ ] 100ms timeout — operation proceeds if interceptor doesn't respond
+- [ ] Requires elevated grant, separate from async hooks
+
+_Debugging suite — `debug.*` (developer tools, never granted to normal apps):_
+- [ ] `debug.attach` — ptrace-like process attach
+- [ ] `debug.memory.read` / `debug.memory.write` — read/write other process memory
+- [ ] `debug.breakpoint` — breakpoints, single-step execution
+- [ ] `debug.trace.syscalls` — per-process syscall tracing
+- [ ] `debug.trace.ipc` — per-process IPC message tracing
+- [ ] `debug.trace.locks` — lock acquisition/release/contention tracing
+- [ ] `debug.profile` — high-frequency profiling mode (alloc/dealloc, syscall timing, lock contention timing, CPU sampling via hardware perf counters). NOT a general hook — millions of events/sec, specialized infrastructure.
+
+### 6.6 Container Support
+
+- [ ] Namespace primitives (PID, network, mount, user)
+- [ ] Resource control groups (CPU, memory, I/O limits per group)
+- [ ] Port Docker (or equivalent container runtime)
+
+### 6.7 Additional Software
+
+- [ ] Archive support: zip, 7z, tar.gz, rar
+- [ ] ISO file support (navigable, not just extractable)
+- [ ] Speech input / speech output (exception to "no AI")
+- [ ] Cellphone camera integration (like Windows)
+- [ ] Cellphone microphone integration
+- [ ] Cellphone-computer integration app
+- [ ] Scripting language registration API (ActiveScript-style — see decision below)
+- [ ] Network drive support
+- [ ] POP3/IMAP email program (or port Thunderbird)
+
+_ActiveScript-style language-agnostic scripting: apps define extension points, OS brokers to registered engines by file extension. Scripts sandboxed by capabilities. Ship with Python (fastpy, default), Lua, WASM. Anyone can add engines._
+
+_Typst as OS-level library (Rust crate, ~30MB). LaTeX as installable package for academics. MathML rendered via Chromium in web content._
+
+### 6.8 Hot-Reload for Updates
+
+- [ ] Userspace services: restart with new version (no reboot)
+- [ ] Kernel modules/drivers: unload old, load new
+- [ ] Shared libraries: update via generation-based package manager, restart affected services
+- [ ] NOT hot-reloadable: core kernel code (scheduler, memory manager, syscall dispatch)
+- [ ] Rollback any update, permanently disable or retry later
+
+### 6.9 ABI Stability
+
+- [ ] Phase 1 (internal dev): API changes freely
+- [ ] Phase 2 (alpha): API versioned, breaking changes with notice
+- [ ] Phase 3 (beta): API v1 declared, breaking changes only in new version
+- [ ] Phase 4 (release): versioned syscall tables, old versions maintained
+- [ ] Don't change existing functions — make new function if breaking change needed
+- [ ] Can remove whole version table when no longer used
+
+### 6.10 Kernel Primitives for Userspace Concurrency
+
+_Don't put green threads in the kernel. Provide efficient primitives instead:_
+- [ ] Fast context switching (for userspace thread libraries)
+- [ ] io_uring (async I/O without kernel threads)
+- [ ] Futexes (synchronization without syscall in uncontended case)
+- [ ] These enable Go-style goroutines, Rust async, Python asyncio at userspace level
+
+---
+
+## Phase 7: Installation Wizard
+
+### Pre-Install
+- [ ] Keyboard/layout selection
+- [ ] Auto-detect monitor DPI, show typical results, let user adjust scaling
+
+### Easy Install
+- [ ] Automatic partitioning with sane defaults
+- [ ] Swap file sizing (not partition)
+
+### Manual Install
+- [ ] Hard drive selection (show device name, size, filesystem, free space, browse files)
+- [ ] Partition manager (create, delete, resize — with warnings)
+- [ ] Boot partition sizing
+- [ ] Swap file sizing
+- [ ] Sanity checks on partition sizes
+- [ ] Warn about data erasure, confirm
+
+### Configuration
+- [ ] Workload type selection (populates tuning presets, show that they're changeable later)
+- [ ] Show individual tuning parameters, let user change them
+- [ ] Sanity check on user's tuning settings
+
+### Post-Reboot Setup
+- [ ] Audio device selection (if multiple)
+- [ ] Timezone (try to detect by GPS)
+- [ ] Username, password (show password option, allow blank?)
+- [ ] Autologin option
+- [ ] Browser choice (default for links and HTML files)
+- [ ] Theme selection
+- [ ] Style selection
+- [ ] WiFi selection and password (or ethernet)
+
+### Unattended Install
+- [ ] YAML configuration file specifying all options
+- [ ] Supports: OS defaults, answering all questions upfront, YAML file, any combination with per-setting fallbacks
+
+### Dual-Boot
+- [ ] GRUB integration: add menu entry, don't replace GRUB
+- [ ] Can modify GRUB config on Linux partition
+
+---
+
+## Design Decisions Reference
+
+_All 33 original ambiguities from design.txt have been resolved. Decisions are integrated inline throughout the roadmap above. For the full discussion and rationale behind each decision, see the conversation history._

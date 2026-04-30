@@ -119,8 +119,10 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [ ] virtio drivers (disk, network, GPU) for VM development/testing
 
 ### 2.2 Essential drivers
-- [ ] Keyboard (PS/2 and USB HID)
-- [ ] Framebuffer / basic display (UEFI GOP framebuffer initially)
+- [-] Keyboard (PS/2 and USB HID)
+  - [x] PS/2 keyboard driver (scan code set 1, IRQ 1, modifier tracking, ASCII echo)
+- [x] Framebuffer / basic display (UEFI GOP framebuffer initially)
+  - [x] 8x16 VGA bitmap font, framebuffer text console (160x50 @ 1280x800)
 - [ ] Storage (NVMe, AHCI/SATA)
 - [ ] USB host controller (xHCI)
 - [ ] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)

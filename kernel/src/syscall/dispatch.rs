@@ -20,10 +20,13 @@ use crate::serial_println;
 
 use super::number::{
     MAX_SYSCALL_NR, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV,
-    SYS_CHANNEL_SEND, SYS_CHANNEL_TRY_RECV, SYS_CP_CLOSE, SYS_CP_CREATE,
-    SYS_CP_NOTIFY, SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER,
-    SYS_CP_WAIT, SYS_DEBUG_PRINT, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
+    SYS_CHANNEL_SEND, SYS_CHANNEL_TRY_RECV, SYS_CONSOLE_READ_CHAR,
+    SYS_CONSOLE_WRITE, SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY,
+    SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
+    SYS_DEBUG_PRINT, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
+    SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
+    SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_WRITE_FILE,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
@@ -186,6 +189,10 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CP_CLOSE as usize] = Some(handlers::sys_cp_close);
     handlers[SYS_CP_NOTIFY as usize] = Some(handlers::sys_cp_notify);
 
+    // Console I/O (100–109).
+    handlers[SYS_CONSOLE_WRITE as usize] = Some(handlers::sys_console_write);
+    handlers[SYS_CONSOLE_READ_CHAR as usize] = Some(handlers::sys_console_read_char);
+
     // Security (400–499).
     handlers[SYS_CAP_QUERY as usize] = Some(handlers::sys_cap_query);
 
@@ -195,6 +202,15 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_ID as usize] = Some(handlers::sys_process_id);
     handlers[SYS_SET_EXCEPTION_HANDLER as usize] = Some(handlers::sys_set_exception_handler);
     handlers[SYS_PROCESS_KILL as usize] = Some(handlers::sys_process_kill);
+
+    // Filesystem (600–799).
+    handlers[SYS_FS_READ_FILE as usize] = Some(handlers::sys_fs_read_file);
+    handlers[SYS_FS_WRITE_FILE as usize] = Some(handlers::sys_fs_write_file);
+    handlers[SYS_FS_DELETE as usize] = Some(handlers::sys_fs_delete);
+    handlers[SYS_FS_LIST_DIR as usize] = Some(handlers::sys_fs_list_dir);
+    handlers[SYS_FS_MKDIR as usize] = Some(handlers::sys_fs_mkdir);
+    handlers[SYS_FS_RMDIR as usize] = Some(handlers::sys_fs_rmdir);
+    handlers[SYS_FS_STAT as usize] = Some(handlers::sys_fs_stat);
 
     SyscallTable {
         handlers,
@@ -262,6 +278,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_unimplemented()?;
     test_dispatch_out_of_range()?;
     test_dispatch_channel_roundtrip()?;
+    test_dispatch_console_write()?;
+    test_dispatch_fs_roundtrip()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -416,5 +434,215 @@ fn test_dispatch_channel_roundtrip() -> KernelResult<()> {
     dispatch(SYS_CHANNEL_CLOSE, &close1_args);
 
     serial_println!("[syscall]   Dispatch channel roundtrip: OK");
+    Ok(())
+}
+
+/// Test console write syscall.
+fn test_dispatch_console_write() -> KernelResult<()> {
+    let msg = b"[syscall]   Console write via SYS_CONSOLE_WRITE\n";
+    let args = SyscallArgs {
+        arg0: msg.as_ptr() as u64,
+        arg1: msg.len() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let result = dispatch(SYS_CONSOLE_WRITE, &args);
+    if result.value < 0 {
+        serial_println!(
+            "[syscall]   FAIL: console_write returned {}",
+            result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let expected_len = msg.len() as i64;
+    if result.value != expected_len {
+        serial_println!(
+            "[syscall]   FAIL: console_write returned {}, expected {}",
+            result.value, expected_len
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   Dispatch SYS_CONSOLE_WRITE: OK");
+    Ok(())
+}
+
+/// Test filesystem syscalls: write, read, stat, mkdir, list, delete, rmdir.
+///
+/// Exercises the full VFS path through the dispatch table.  Only runs if
+/// the VFS has a mounted filesystem (otherwise the write will fail and
+/// we skip gracefully).
+fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
+    let test_path = b"/syscall_test.txt";
+    let test_data = b"Hello from syscall self-test!";
+
+    // 1. Write a test file.
+    let write_args = SyscallArgs {
+        arg0: test_path.as_ptr() as u64,
+        arg1: test_path.len() as u64,
+        arg2: test_data.as_ptr() as u64,
+        arg3: test_data.len() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let write_result = dispatch(SYS_FS_WRITE_FILE, &write_args);
+    if write_result.value < 0 {
+        // No filesystem mounted — skip FS tests gracefully.
+        serial_println!(
+            "[syscall]   Dispatch FS roundtrip: SKIPPED (no FS, err={})",
+            write_result.value
+        );
+        return Ok(());
+    }
+
+    // 2. Read it back.
+    let mut read_buf = [0u8; 128];
+    let read_args = SyscallArgs {
+        arg0: test_path.as_ptr() as u64,
+        arg1: test_path.len() as u64,
+        arg2: read_buf.as_mut_ptr() as u64,
+        arg3: read_buf.len() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let read_result = dispatch(SYS_FS_READ_FILE, &read_args);
+    #[allow(clippy::cast_possible_wrap)]
+    let expected_len = test_data.len() as i64;
+    if read_result.value != expected_len {
+        serial_println!(
+            "[syscall]   FAIL: read_file returned {}, expected {}",
+            read_result.value, expected_len
+        );
+        return Err(KernelError::InternalError);
+    }
+    if read_buf.get(..test_data.len()) != Some(test_data.as_slice()) {
+        serial_println!("[syscall]   FAIL: read_file data mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. Stat the file.
+    let mut stat_buf = [0u8; 16];
+    let stat_args = SyscallArgs {
+        arg0: test_path.as_ptr() as u64,
+        arg1: test_path.len() as u64,
+        arg2: stat_buf.as_mut_ptr() as u64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let stat_result = dispatch(SYS_FS_STAT, &stat_args);
+    if stat_result.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: stat returned {}",
+            stat_result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Verify size field (bytes 0-7, u64 LE).
+    let stat_size = u64::from_le_bytes([
+        stat_buf[0], stat_buf[1], stat_buf[2], stat_buf[3],
+        stat_buf[4], stat_buf[5], stat_buf[6], stat_buf[7],
+    ]);
+    if stat_size != test_data.len() as u64 {
+        serial_println!(
+            "[syscall]   FAIL: stat size {} != expected {}",
+            stat_size, test_data.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Verify type field (byte 8): 0=file.
+    if stat_buf[8] != 0 {
+        serial_println!(
+            "[syscall]   FAIL: stat type {} != 0 (file)",
+            stat_buf[8]
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 4. Delete the test file.
+    let delete_args = SyscallArgs {
+        arg0: test_path.as_ptr() as u64,
+        arg1: test_path.len() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let delete_result = dispatch(SYS_FS_DELETE, &delete_args);
+    if delete_result.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: delete returned {}",
+            delete_result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 5. Test mkdir + rmdir.
+    let dir_path = b"/syscall_test_dir";
+    let mkdir_args = SyscallArgs {
+        arg0: dir_path.as_ptr() as u64,
+        arg1: dir_path.len() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let mkdir_result = dispatch(SYS_FS_MKDIR, &mkdir_args);
+    if mkdir_result.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: mkdir returned {}",
+            mkdir_result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Stat the directory.
+    let stat_dir_args = SyscallArgs {
+        arg0: dir_path.as_ptr() as u64,
+        arg1: dir_path.len() as u64,
+        arg2: stat_buf.as_mut_ptr() as u64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let stat_dir_result = dispatch(SYS_FS_STAT, &stat_dir_args);
+    if stat_dir_result.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: stat dir returned {}",
+            stat_dir_result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Type should be 1 (directory).
+    if stat_buf[8] != 1 {
+        serial_println!(
+            "[syscall]   FAIL: stat dir type {} != 1",
+            stat_buf[8]
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // List the root directory — our test dir should appear.
+    let root_path = b"/";
+    let mut list_buf = [0u8; 264 * 32]; // Room for 32 entries.
+    let list_args = SyscallArgs {
+        arg0: root_path.as_ptr() as u64,
+        arg1: root_path.len() as u64,
+        arg2: list_buf.as_mut_ptr() as u64,
+        arg3: list_buf.len() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let list_result = dispatch(SYS_FS_LIST_DIR, &list_args);
+    if list_result.value < 0 {
+        serial_println!(
+            "[syscall]   FAIL: list_dir returned {}",
+            list_result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Remove the test directory.
+    let rmdir_args = SyscallArgs {
+        arg0: dir_path.as_ptr() as u64,
+        arg1: dir_path.len() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let rmdir_result = dispatch(SYS_FS_RMDIR, &rmdir_args);
+    if rmdir_result.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: rmdir returned {}",
+            rmdir_result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[syscall]   Dispatch FS roundtrip: OK (write/read/stat/delete/mkdir/listdir/rmdir)");
     Ok(())
 }

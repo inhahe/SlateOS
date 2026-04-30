@@ -158,6 +158,34 @@ pub const SYS_PORT_WRITE: u64 = 41;
 /// removed or capability-gated once a proper logging service exists.
 pub const SYS_DEBUG_PRINT: u64 = 99;
 
+/// Write bytes to the framebuffer console.
+///
+/// `arg0`: pointer to byte buffer.
+/// `arg1`: length of buffer.
+///
+/// Writes to the framebuffer console and mirrors to serial.  Handles
+/// ASCII control characters (`\n`, `\r`, `\t`).  Non-ASCII bytes are
+/// rendered as their glyph.
+///
+/// This is a kernel-provided bootstrap console.  It will be replaced
+/// by a userspace console server in the future.
+///
+/// Returns: number of bytes written.
+pub const SYS_CONSOLE_WRITE: u64 = 100;
+
+/// Read one character from the keyboard (blocking).
+///
+/// `arg0`: pointer to a 1-byte buffer.
+///
+/// Blocks (via HLT) until a key is pressed.  Returns the ASCII code
+/// of the key.  Non-printable keys (function keys, arrows) return 0.
+///
+/// This is a kernel-provided bootstrap console.  It will be replaced
+/// by a userspace console server / terminal emulator.
+///
+/// Returns: 1 on success (one byte read), or negative error.
+pub const SYS_CONSOLE_READ_CHAR: u64 = 101;
+
 // ---------------------------------------------------------------------------
 // IPC syscalls (200–399)
 // ---------------------------------------------------------------------------
@@ -451,6 +479,91 @@ pub const SYS_EXCEPTION_RETURN: u64 = 505;
 ///
 /// Returns: number of threads killed on success.
 pub const SYS_PROCESS_KILL: u64 = 506;
+
+// ---------------------------------------------------------------------------
+// Filesystem syscalls (600–799)
+// ---------------------------------------------------------------------------
+
+/// Read an entire file into a userspace buffer.
+///
+/// `arg0`: pointer to null-terminated path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to destination buffer.
+/// `arg3`: buffer capacity.
+///
+/// Reads the file at `path` and copies up to `capacity` bytes into
+/// the buffer.  If the file is larger than the buffer, only `capacity`
+/// bytes are copied (no error — partial read).
+///
+/// Returns: number of bytes read, or negative error code.
+pub const SYS_FS_READ_FILE: u64 = 600;
+
+/// Write data to a file (create or overwrite).
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to source data.
+/// `arg3`: data length.
+///
+/// Creates the file if it doesn't exist, overwrites if it does.
+///
+/// Returns: 0 on success, or negative error code.
+pub const SYS_FS_WRITE_FILE: u64 = 601;
+
+/// Delete a file.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+///
+/// Returns: 0 on success, or negative error code.
+pub const SYS_FS_DELETE: u64 = 602;
+
+/// List directory entries.
+///
+/// `arg0`: pointer to directory path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to output buffer (for serialized entry data).
+/// `arg3`: buffer capacity.
+///
+/// Writes directory entries as a packed array of
+/// `FsDirEntry` structs (see below) into the buffer.
+///
+/// Returns: number of entries written, or negative error code.
+pub const SYS_FS_LIST_DIR: u64 = 603;
+
+/// Create a directory.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+///
+/// Returns: 0 on success, or negative error code.
+pub const SYS_FS_MKDIR: u64 = 604;
+
+/// Remove an empty directory.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+///
+/// Returns: 0 on success, or negative error code.
+pub const SYS_FS_RMDIR: u64 = 605;
+
+/// Stat a file or directory.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to output `FsStatResult` buffer (16 bytes).
+///
+/// Returns: 0 on success, or negative error code.
+pub const SYS_FS_STAT: u64 = 606;
+
+/// Size of `FsDirEntry` as returned by `SYS_FS_LIST_DIR`.
+///
+/// Layout (264 bytes):
+/// - `[0..256]`: filename (null-terminated UTF-8, padded with zeros)
+/// - `[256..260]`: file size (u32, little-endian)
+/// - `[260]`: entry type (0=file, 1=directory)
+/// - `[261..264]`: padding (zeros)
+pub const FS_DIR_ENTRY_SIZE: usize = 264;
 
 // ---------------------------------------------------------------------------
 // Version info

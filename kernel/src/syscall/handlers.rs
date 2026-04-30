@@ -1585,3 +1585,314 @@ pub fn sys_process_exec_with_frame(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Console I/O handlers (100–109)
+// ---------------------------------------------------------------------------
+
+/// `SYS_CONSOLE_WRITE` — write bytes to the framebuffer console.
+///
+/// Handles ASCII control characters (`\n`, `\r`, `\t`).
+/// Also mirrors to serial output via `console::write_str`.
+pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
+    let ptr = args.arg0 as *const u8;
+    let len = args.arg1 as usize;
+
+    if ptr.is_null() || len == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Cap length to prevent excessive output in a single syscall.
+    let safe_len = len.min(4096);
+
+    // TODO: Validate pointer is in caller's address space.
+    // For now, kernel tasks have full memory access.
+    // SAFETY: Caller guarantees ptr is valid for safe_len bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
+
+    // Use write_str when possible — it writes to both framebuffer
+    // and serial.  For non-UTF8 data, write bytes individually.
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        crate::console::write_str(s);
+    } else {
+        // Non-UTF8: write each byte to framebuffer (putchar) and
+        // serial (via serial_print).
+        for &b in bytes {
+            crate::console::putchar(b);
+        }
+        // Mirror to serial.
+        crate::serial_print!("<{} bytes>", safe_len);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(safe_len as i64)
+}
+
+/// `SYS_CONSOLE_READ_CHAR` — read one character from the keyboard.
+///
+/// Blocks (via HLT) until a key is pressed.  Returns the ASCII code
+/// in the single-byte buffer pointed to by `arg0`.
+pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
+    let ptr = args.arg0 as *mut u8;
+
+    if ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Block until a key is available.
+    let ch = crate::keyboard::read_char();
+
+    // TODO: Validate pointer is in caller's address space.
+    // SAFETY: Caller guarantees ptr points to a writable byte.
+    unsafe { core::ptr::write(ptr, ch); }
+
+    SyscallResult::ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem handlers (600–799)
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_READ_FILE` — read an entire file into a buffer.
+pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    let buf_ptr = args.arg2 as *mut u8;
+    let buf_cap = args.arg3 as usize;
+
+    if path_ptr.is_null() || path_len == 0 || buf_ptr.is_null() || buf_cap == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // TODO: Validate pointers are in caller's address space.
+    // SAFETY: Caller guarantees pointers are valid.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // Read the file via the VFS.
+    let data = match crate::fs::Vfs::read_file(path) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Copy to the user buffer (up to capacity).
+    let copy_len = data.len().min(buf_cap);
+    // SAFETY: buf_ptr is valid for buf_cap bytes (caller guarantee).
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, copy_len);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(copy_len as i64)
+}
+
+/// `SYS_FS_WRITE_FILE` — write data to a file (create or overwrite).
+pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    let data_ptr = args.arg2 as *const u8;
+    let data_len = args.arg3 as usize;
+
+    if path_ptr.is_null() || path_len == 0 || data_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // TODO: Validate pointers are in caller's address space.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let data = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
+
+    match crate::fs::Vfs::write_file(path, data) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_DELETE` — delete a file.
+pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+
+    if path_ptr.is_null() || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::remove(path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_LIST_DIR` — list directory entries.
+///
+/// Packs entries as `FS_DIR_ENTRY_SIZE`-byte records into the buffer.
+pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
+    use super::number::FS_DIR_ENTRY_SIZE;
+
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    let buf_ptr = args.arg2 as *mut u8;
+    let buf_cap = args.arg3 as usize;
+
+    if path_ptr.is_null() || path_len == 0 || buf_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let entries = match crate::fs::Vfs::readdir(path) {
+        Ok(e) => e,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Pack entries into the buffer.
+    let max_entries = buf_cap / FS_DIR_ENTRY_SIZE;
+    let mut count = 0usize;
+
+    for entry in &entries {
+        if count >= max_entries {
+            break;
+        }
+
+        let offset = count.wrapping_mul(FS_DIR_ENTRY_SIZE);
+        // SAFETY: buf_ptr + offset is within buf_cap (checked above).
+        unsafe {
+            let dest = buf_ptr.add(offset);
+            // Zero the entry first.
+            core::ptr::write_bytes(dest, 0, FS_DIR_ENTRY_SIZE);
+
+            // Copy filename (up to 255 bytes + null terminator).
+            let name_bytes = entry.name.as_bytes();
+            let name_len = name_bytes.len().min(255);
+            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dest, name_len);
+
+            // File size (u32 at offset 256).
+            let size_ptr = dest.add(256) as *mut u32;
+            #[allow(clippy::cast_possible_truncation)]
+            core::ptr::write(size_ptr, entry.size as u32);
+
+            // Entry type (offset 260): 0=file, 1=directory.
+            let type_ptr = dest.add(260);
+            let type_byte = match entry.entry_type {
+                crate::fs::EntryType::File => 0u8,
+                crate::fs::EntryType::Directory => 1u8,
+                // Skip volume labels — they're metadata, not real entries.
+                crate::fs::EntryType::VolumeLabel => continue,
+            };
+            core::ptr::write(type_ptr, type_byte);
+        }
+
+        count = count.wrapping_add(1);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(count as i64)
+}
+
+/// `SYS_FS_MKDIR` — create a directory.
+pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+
+    if path_ptr.is_null() || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::mkdir(path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_RMDIR` — remove an empty directory.
+pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+
+    if path_ptr.is_null() || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::rmdir(path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_STAT` — stat a file or directory.
+///
+/// Returns metadata in a 16-byte `FsStatResult` buffer:
+/// - bytes 0–7: file size (u64, little-endian)
+/// - byte 8: entry type (0=file, 1=directory)
+/// - bytes 9–15: reserved (zeros)
+pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    let out_ptr = args.arg2 as *mut u8;
+
+    if path_ptr.is_null() || path_len == 0 || out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // TODO: Validate pointers are in caller's address space.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let entry = match crate::fs::Vfs::stat(path) {
+        Ok(e) => e,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Write the 16-byte FsStatResult.
+    // SAFETY: Caller guarantees out_ptr points to at least 16 writable bytes.
+    unsafe {
+        // Zero the buffer first.
+        core::ptr::write_bytes(out_ptr, 0, 16);
+
+        // File size (u64 LE) at offset 0.
+        let size_ptr = out_ptr as *mut u64;
+        core::ptr::write(size_ptr, entry.size);
+
+        // Entry type at offset 8: 0=file, 1=directory, 2=volume label.
+        let type_byte = match entry.entry_type {
+            crate::fs::EntryType::File => 0u8,
+            crate::fs::EntryType::Directory => 1u8,
+            crate::fs::EntryType::VolumeLabel => 2u8,
+        };
+        core::ptr::write(out_ptr.add(8), type_byte);
+    }
+
+    SyscallResult::ok(0)
+}

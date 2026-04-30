@@ -413,6 +413,16 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 22b: Enable interrupt-driven I/O for virtio devices.
+    // Now that interrupts are globally enabled and the IOAPIC is
+    // initialized, switch virtio drivers from polling to interrupt-
+    // driven completion.  The PCI IRQ is configured as level-triggered
+    // and unmasked.  Both devices may share the same IRQ line (IRQ 11
+    // on QEMU q35); the handler reads each device's ISR status register
+    // to acknowledge, which is correct for shared level-triggered IRQs.
+    virtio::blk::enable_interrupts();
+    virtio::net::enable_interrupts();
+
     // Step 23: Verify the CMOS Real-Time Clock.
     // No initialization needed — the RTC is always running on battery.
     // We just verify we can read a plausible date/time.

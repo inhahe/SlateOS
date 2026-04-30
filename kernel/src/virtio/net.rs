@@ -22,6 +22,7 @@
 //! notify, and poll for completion.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicBool, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
@@ -29,7 +30,7 @@ use crate::mm::frame::{self, PhysFrame};
 use crate::pci::{self, PciDevice};
 use crate::virtio::queue::{Virtqueue, VRING_DESC_F_WRITE};
 use crate::virtio::{
-    VirtioLegacyPci, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    VirtioLegacyPci, REG_ISR_STATUS, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,69 @@ const NUM_RX_BUFS: usize = 16;
 // RX: buffers laid out sequentially from offset 0 within rx_frame.
 const DMA_TX_HEADER_OFFSET: usize = 0;          // 10 bytes
 const DMA_TX_DATA_OFFSET: usize = 16;           // Up to 1514 bytes
+
+// ---------------------------------------------------------------------------
+// IRQ support — lock-free state for ISR context
+// ---------------------------------------------------------------------------
+
+/// I/O port base for the virtio-net device, used by the ISR to
+/// acknowledge interrupts by reading the ISR status register.
+/// Set to 0 when no device is initialized.
+static NET_IO_BASE: AtomicU16 = AtomicU16::new(0);
+
+/// PCI IRQ line for the virtio-net device (from PCI config space).
+/// 0xFF means no device or IRQ not assigned.
+static NET_IRQ_LINE: AtomicU8 = AtomicU8::new(0xFF);
+
+/// Whether interrupt notification is active for the net device.
+static NET_IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Called from the IOAPIC device IRQ handler for every external
+/// device interrupt.  Checks whether this IRQ matches the virtio-net
+/// device's PCI IRQ line, then reads the ISR status register to
+/// acknowledge the interrupt at the device level.
+///
+/// This function runs in ISR context — no locks, no allocations.
+///
+/// Returns `true` if this device actually had a pending interrupt.
+pub fn handle_irq(irq: u32) -> bool {
+    let expected = NET_IRQ_LINE.load(Ordering::Relaxed);
+    if expected == 0xFF || irq != u32::from(expected) {
+        return false;
+    }
+    let io_base = NET_IO_BASE.load(Ordering::Acquire);
+    if io_base == 0 {
+        return false;
+    }
+    // Read ISR status: acknowledges the interrupt at the device.
+    // SAFETY: io_base is a valid virtio device I/O port, set during init.
+    let isr = unsafe { crate::port::inb(io_base.wrapping_add(REG_ISR_STATUS)) };
+    isr != 0
+}
+
+/// Enable interrupt notification for the virtio-net device.
+///
+/// Configures the PCI IRQ line as level-triggered and unmasks it.
+/// This allows the device to signal packet arrival via interrupts.
+///
+/// Must be called after IOAPIC init and `cpu::sti()`.
+/// Safe to call even if no device was found (returns silently).
+pub fn enable_interrupts() {
+    let irq = NET_IRQ_LINE.load(Ordering::Acquire);
+    if irq == 0xFF {
+        return; // No device initialized.
+    }
+    // PCI interrupts are level-triggered, active-low.
+    // SAFETY: IOAPIC is initialized (caller guarantees).
+    unsafe { crate::ioapic::set_level_triggered(irq); }
+    // SAFETY: The IDT handler is installed and calls handle_irq().
+    unsafe { crate::ioapic::unmask_irq(irq); }
+    NET_IRQ_ENABLED.store(true, Ordering::Release);
+    crate::serial_println!(
+        "[virtio-net] IRQ {} enabled — interrupt notification active",
+        irq,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Virtio-net header
@@ -127,6 +191,10 @@ impl VirtioNetDevice {
     pub fn init(pci_dev: &PciDevice, hhdm_offset: u64) -> KernelResult<Self> {
         let io_base = pci_dev.bar0_io_port().ok_or(KernelError::NoSuchDevice)?;
         crate::serial_println!("[virtio-net] BAR0 I/O port base: {:#x}", io_base);
+
+        // Store the I/O base globally so the ISR can acknowledge
+        // interrupts without holding a lock.
+        NET_IO_BASE.store(io_base, Ordering::Release);
 
         // Enable bus mastering for DMA.
         pci::enable_bus_master(pci_dev.address);
@@ -464,6 +532,8 @@ pub fn probe(hhdm_offset: u64) -> Option<VirtioNetDevice> {
 
     match VirtioNetDevice::init(&pci_dev, hhdm_offset) {
         Ok(dev) => {
+            // Store the PCI IRQ line for enable_interrupts() later.
+            NET_IRQ_LINE.store(pci_dev.irq_line, Ordering::Release);
             crate::serial_println!("[virtio-net] Device initialized successfully");
             Some(dev)
         }

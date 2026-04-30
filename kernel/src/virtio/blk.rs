@@ -2,7 +2,7 @@
 //!
 //! Provides synchronous sector-level read/write to a virtio-blk disk.
 //! Uses the legacy PCI transport (I/O port BAR0) and a single
-//! virtqueue with polling completion.
+//! virtqueue with interrupt-driven completion.
 //!
 //! ## Protocol
 //!
@@ -11,6 +11,15 @@
 //! 2. Data buffer (device-readable for write, device-writable for read)
 //! 3. Status byte (device-writable): 0=OK, 1=IOERR, 2=UNSUPP
 //!
+//! ## Completion
+//!
+//! After submitting a request, the driver yields the CPU via `HLT`
+//! and waits for the device to fire an IRQ.  The IOAPIC handler
+//! acknowledges the device interrupt by reading the ISR status
+//! register, then wakes the CPU from HLT.  The driver then checks
+//! the used ring for the completion.  Falls back to polling if
+//! interrupts are not yet configured (early boot).
+//!
 //! ## DMA buffers
 //!
 //! The header, data, and status are laid out in a single 16 KiB frame
@@ -18,13 +27,15 @@
 //! DMA; virtual addresses (via HHDM) are used by the driver to write
 //! headers and read status.
 
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicBool, Ordering};
+
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
 use crate::pci::{self, PciDevice};
 use spin::Mutex;
 use crate::virtio::queue::{Virtqueue, VRING_DESC_F_WRITE};
 use crate::virtio::{
-    VirtioLegacyPci, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    VirtioLegacyPci, REG_ISR_STATUS, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,6 +62,52 @@ const VIRTIO_BLK_S_OK: u8 = 0;
 const DMA_HEADER_OFFSET: usize = 0;           // 16 bytes
 const DMA_DATA_OFFSET: usize = 512;           // Up to 4096 bytes
 const DMA_STATUS_OFFSET: usize = 512 + 4096;  // 1 byte
+
+// ---------------------------------------------------------------------------
+// IRQ support — lock-free state for ISR context
+// ---------------------------------------------------------------------------
+
+/// I/O port base for the virtio-blk device, used by the ISR to
+/// acknowledge interrupts by reading the ISR status register.
+/// Set to 0 when no device is initialized.
+static BLK_IO_BASE: AtomicU16 = AtomicU16::new(0);
+
+/// PCI IRQ line for the virtio-blk device (from PCI config space).
+/// 0xFF means no device or IRQ not assigned.
+static BLK_IRQ_LINE: AtomicU8 = AtomicU8::new(0xFF);
+
+/// Whether interrupt-driven I/O is active.  When false, the driver
+/// falls back to polling (used during early boot before IOAPIC is up).
+static IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Called from the IOAPIC device IRQ handler for every external
+/// device interrupt.  Checks whether this IRQ matches the virtio-blk
+/// device's PCI IRQ line, then reads the ISR status register to
+/// acknowledge the interrupt at the device level (required for
+/// level-triggered PCI interrupts to de-assert the IRQ line).
+///
+/// For non-matching IRQs, this function performs two atomic loads
+/// (~1 ns) and returns immediately.  The actual I/O port read only
+/// happens when the IRQ matches.
+///
+/// This function runs in ISR context — no locks, no allocations.
+///
+/// Returns `true` if this device actually had a pending interrupt.
+pub fn handle_irq(irq: u32) -> bool {
+    let expected = BLK_IRQ_LINE.load(Ordering::Relaxed);
+    if expected == 0xFF || irq != u32::from(expected) {
+        return false;
+    }
+    let io_base = BLK_IO_BASE.load(Ordering::Acquire);
+    if io_base == 0 {
+        return false;
+    }
+    // Read ISR status: acknowledges the interrupt at the device.
+    // Bit 0 = used buffer notification, bit 1 = config change.
+    // SAFETY: io_base is a valid virtio device I/O port, set during init.
+    let isr = unsafe { crate::port::inb(io_base.wrapping_add(REG_ISR_STATUS)) };
+    isr != 0
+}
 
 // ---------------------------------------------------------------------------
 // Request header
@@ -82,6 +139,8 @@ pub struct VirtioBlkDevice {
     dma_frame: PhysFrame,
     /// Virtual address of the DMA request frame.
     dma_virt: *mut u8,
+    /// PCI IRQ line (0xFF if unknown/not assigned).
+    irq_line: u8,
 }
 
 // SAFETY: The device is accessed from a single thread (the shell).
@@ -149,6 +208,10 @@ impl VirtioBlkDevice {
         // SAFETY: We just allocated this frame; HHDM maps it writable.
         unsafe { core::ptr::write_bytes(dma_virt, 0, frame::FRAME_SIZE); }
 
+        // Store the I/O base globally so the ISR can acknowledge
+        // interrupts without holding a lock.
+        BLK_IO_BASE.store(io_base, Ordering::Release);
+
         Ok(Self {
             transport,
             queue,
@@ -156,6 +219,7 @@ impl VirtioBlkDevice {
             hhdm_offset,
             dma_frame,
             dma_virt,
+            irq_line: 0xFF, // Set later by enable_irq().
         })
     }
 
@@ -164,10 +228,102 @@ impl VirtioBlkDevice {
         self.capacity
     }
 
+    /// Enable interrupt-driven I/O on this specific device instance.
+    ///
+    /// Must be called after the IOAPIC is initialized and `cpu::sti()`.
+    /// Before this, the driver falls back to busy-wait polling.
+    ///
+    /// Prefer [`enable_interrupts()`] (module-level) when the device
+    /// has already been moved into the block device registry.
+    pub fn enable_irq(&mut self, irq_line: u8) {
+        self.irq_line = irq_line;
+        // SAFETY: The IRQ line is valid (from PCI config space) and the
+        // IOAPIC is initialized by this point.
+        // PCI interrupts are level-triggered, active-low.
+        unsafe { crate::ioapic::set_level_triggered(irq_line); }
+        unsafe { crate::ioapic::unmask_irq(irq_line); }
+        IRQ_ENABLED.store(true, Ordering::Release);
+        crate::serial_println!(
+            "[virtio-blk] IRQ {} unmasked — interrupt-driven I/O enabled",
+            irq_line,
+        );
+    }
+
+    /// Wait for the device to complete a request.
+    ///
+    /// If interrupts are enabled, yields the CPU via `HLT` and waits for
+    /// the device IRQ to fire.  Otherwise falls back to busy-wait polling
+    /// (used during early boot before the IOAPIC is configured).
+    ///
+    /// Returns the completed descriptor head index, or an error on timeout.
+    fn wait_completion(&mut self, head: u16, op: &str, sector: u64) -> KernelResult<u16> {
+        if IRQ_ENABLED.load(Ordering::Acquire) {
+            // Interrupt-driven: HLT until the device fires an IRQ.
+            // The APIC timer also fires at 100 Hz, so we won't sleep
+            // forever even if the device IRQ is lost.
+            let mut attempts = 0u32;
+            loop {
+                if let Some((completed_head, _len)) = self.queue.poll_used() {
+                    return Ok(completed_head);
+                }
+
+                attempts = attempts.wrapping_add(1);
+                // At 100 Hz timer, 500 HLTs ≈ 5 seconds — generous timeout.
+                if attempts > 500 {
+                    crate::serial_println!(
+                        "[virtio-blk] {} sector {} timed out (IRQ mode)",
+                        op, sector,
+                    );
+                    self.queue.free_chain(head);
+                    return Err(KernelError::TimedOut);
+                }
+
+                // Yield CPU until next interrupt (device IRQ or timer tick).
+                crate::cpu::hlt();
+            }
+        } else {
+            // Polling fallback for early boot (before IOAPIC init).
+            let mut spins = 0u32;
+            loop {
+                if let Some((completed_head, _len)) = self.queue.poll_used() {
+                    return Ok(completed_head);
+                }
+
+                spins = spins.wrapping_add(1);
+                if spins > 1_000_000 {
+                    crate::serial_println!(
+                        "[virtio-blk] {} sector {} timed out (polling)",
+                        op, sector,
+                    );
+                    self.queue.free_chain(head);
+                    return Err(KernelError::TimedOut);
+                }
+
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Check the DMA status byte after a completed request.
+    fn check_status(&self, op: &str, sector: u64) -> KernelResult<()> {
+        let status = unsafe {
+            core::ptr::read_volatile(self.dma_virt.add(DMA_STATUS_OFFSET))
+        };
+        if status != VIRTIO_BLK_S_OK {
+            crate::serial_println!(
+                "[virtio-blk] {} sector {} failed: status={}",
+                op, sector, status,
+            );
+            return Err(KernelError::IoError);
+        }
+        Ok(())
+    }
+
     /// Read a single 512-byte sector.
     ///
     /// `buf` must be exactly 512 bytes.  The read is synchronous — this
-    /// function blocks (polling) until the device completes the request.
+    /// function blocks until the device completes the request, yielding
+    /// the CPU via HLT when interrupt-driven I/O is active.
     // DMA offset arithmetic uses known small constants.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn read_sector(&mut self, sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
@@ -207,50 +363,22 @@ impl VirtioBlkDevice {
         // Notify the device.
         self.transport.notify_queue(0);
 
-        // Poll for completion.
-        let mut spins = 0u32;
-        loop {
-            if let Some((completed_head, _len)) = self.queue.poll_used() {
-                // Free the descriptor chain.
-                self.queue.free_chain(completed_head);
+        // Wait for completion (interrupt-driven or polling fallback).
+        let completed_head = self.wait_completion(head, "Read", sector)?;
+        self.queue.free_chain(completed_head);
 
-                // Check status.
-                let status = unsafe {
-                    core::ptr::read_volatile(self.dma_virt.add(DMA_STATUS_OFFSET))
-                };
+        self.check_status("Read", sector)?;
 
-                if status != VIRTIO_BLK_S_OK {
-                    crate::serial_println!(
-                        "[virtio-blk] Read sector {} failed: status={}",
-                        sector, status
-                    );
-                    return Err(KernelError::IoError);
-                }
-
-                // Copy data from DMA buffer to caller's buffer.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        self.dma_virt.add(DMA_DATA_OFFSET),
-                        buf.as_mut_ptr(),
-                        SECTOR_SIZE,
-                    );
-                }
-
-                return Ok(());
-            }
-
-            // Prevent infinite spinning.
-            spins = spins.wrapping_add(1);
-            if spins > 1_000_000 {
-                crate::serial_println!("[virtio-blk] Read sector {} timed out", sector);
-                // Try to free the descriptor anyway.
-                self.queue.free_chain(head);
-                return Err(KernelError::TimedOut);
-            }
-
-            // Brief pause to avoid bus flooding.
-            core::hint::spin_loop();
+        // Copy data from DMA buffer to caller's buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.dma_virt.add(DMA_DATA_OFFSET),
+                buf.as_mut_ptr(),
+                SECTOR_SIZE,
+            );
         }
+
+        Ok(())
     }
 
     /// Write a single 512-byte sector.
@@ -300,36 +428,11 @@ impl VirtioBlkDevice {
         let head = self.queue.submit(&chain)?;
         self.transport.notify_queue(0);
 
-        // Poll for completion.
-        let mut spins = 0u32;
-        loop {
-            if let Some((completed_head, _len)) = self.queue.poll_used() {
-                self.queue.free_chain(completed_head);
+        // Wait for completion (interrupt-driven or polling fallback).
+        let completed_head = self.wait_completion(head, "Write", sector)?;
+        self.queue.free_chain(completed_head);
 
-                let status = unsafe {
-                    core::ptr::read_volatile(self.dma_virt.add(DMA_STATUS_OFFSET))
-                };
-
-                if status != VIRTIO_BLK_S_OK {
-                    crate::serial_println!(
-                        "[virtio-blk] Write sector {} failed: status={}",
-                        sector, status
-                    );
-                    return Err(KernelError::IoError);
-                }
-
-                return Ok(());
-            }
-
-            spins = spins.wrapping_add(1);
-            if spins > 1_000_000 {
-                crate::serial_println!("[virtio-blk] Write sector {} timed out", sector);
-                self.queue.free_chain(head);
-                return Err(KernelError::TimedOut);
-            }
-
-            core::hint::spin_loop();
-        }
+        self.check_status("Write", sector)
     }
 }
 
@@ -368,6 +471,8 @@ pub fn probe(hhdm_offset: u64) -> Option<VirtioBlkDevice> {
 
     match VirtioBlkDevice::init(&pci_dev, hhdm_offset) {
         Ok(dev) => {
+            // Store the PCI IRQ line for enable_interrupts() later.
+            BLK_IRQ_LINE.store(pci_dev.irq_line, Ordering::Release);
             crate::serial_println!("[virtio-blk] Device initialized successfully");
             Some(dev)
         }
@@ -444,4 +549,34 @@ pub fn self_test(dev: &mut VirtioBlkDevice) -> KernelResult<()> {
 
     crate::serial_println!("[virtio-blk] Self-test PASSED");
     Ok(())
+}
+
+/// Enable interrupt-driven I/O for the virtio-blk device.
+///
+/// Configures the PCI IRQ line as level-triggered (required for PCI
+/// interrupts) and unmasks it in the IOAPIC.  After this call, the
+/// driver uses `HLT` to yield the CPU while waiting for completions
+/// instead of busy-wait polling.
+///
+/// Must be called after:
+/// - IOAPIC is initialized
+/// - Interrupts are enabled (`cpu::sti()`)
+/// - The virtio-blk device has been probed (`init()` already called)
+///
+/// Safe to call even if no device was found (returns silently).
+pub fn enable_interrupts() {
+    let irq = BLK_IRQ_LINE.load(Ordering::Acquire);
+    if irq == 0xFF {
+        return; // No device initialized.
+    }
+    // PCI interrupts are level-triggered, active-low.
+    // SAFETY: IOAPIC is initialized (caller guarantees).
+    unsafe { crate::ioapic::set_level_triggered(irq); }
+    // SAFETY: The IDT handler is installed and calls handle_irq().
+    unsafe { crate::ioapic::unmask_irq(irq); }
+    IRQ_ENABLED.store(true, Ordering::Release);
+    crate::serial_println!(
+        "[virtio-blk] IRQ {} enabled — interrupt-driven I/O active",
+        irq,
+    );
 }

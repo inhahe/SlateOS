@@ -598,6 +598,15 @@ pub extern "C" fn handle_device_irq(irq: u32) {
         crate::keyboard::handle_scancode();
     }
 
+    // PCI shared IRQ handling: acknowledge all virtio devices that
+    // may share this IRQ line.  Reading each device's ISR status
+    // register deasserts its interrupt signal — required for level-
+    // triggered PCI interrupts.  Each handler checks the IRQ line
+    // first (two atomic loads, ~1 ns) and only performs the I/O port
+    // read if this IRQ matches the device.
+    crate::virtio::blk::handle_irq(irq);
+    crate::virtio::net::handle_irq(irq);
+
     // 1. Record the interrupt.
     irq_notify(irq);
 

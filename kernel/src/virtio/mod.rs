@@ -39,7 +39,7 @@ const REG_QUEUE_NOTIFY: u16 = 0x10;
 /// Device status.
 const REG_DEVICE_STATUS: u16 = 0x12;
 /// ISR status (read to acknowledge interrupt).
-const REG_ISR_STATUS: u16 = 0x13;
+pub const REG_ISR_STATUS: u16 = 0x13;
 
 // Device status bits
 /// Guest has found the device and recognized it.

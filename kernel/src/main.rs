@@ -69,6 +69,7 @@ mod sched;
 mod security;
 mod serial;
 mod syscall;
+mod virtio;
 
 // ---------------------------------------------------------------------------
 // Kernel entry point
@@ -326,6 +327,11 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = pci::self_test() {
         serial_println!("WARNING: PCI scan failed: {}", e);
     }
+
+    // Step 20d: Probe for virtio-blk storage device.
+    // Uses legacy PCI transport (I/O port BAR0) with polling.
+    // The device is stored globally for kshell access.
+    virtio::blk::init(boot_info.hhdm_offset);
 
     // Step 21: Enable hardware interrupts.
     // From this point forward, the APIC timer fires periodically and

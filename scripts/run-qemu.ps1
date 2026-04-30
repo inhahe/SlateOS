@@ -19,6 +19,7 @@ $KernelBin   = "$ProjectRoot\target\x86_64-unknown-none\debug\kernel"
 $EspDir      = "$ProjectRoot\build\esp"
 $QemuExe     = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 $OvmfFw      = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
+$DiskImg     = "$ProjectRoot\disk.img"
 
 # Step 1: Build
 if (-not $NoBuild) {
@@ -59,6 +60,11 @@ if ($Test) {
                  "-drive `"format=raw,file=fat:rw:$EspDir`" " +
                  "-m ${Memory}M -machine q35 -no-reboot " +
                  "-serial `"file:$serialFile`" -display none"
+
+    # Add virtio-blk disk if the disk image exists.
+    if (Test-Path $DiskImg) {
+        $argString += " -drive `"file=$DiskImg,if=virtio,format=raw`""
+    }
 
     Write-Host "Running boot test (timeout: ${Timeout}s)..." -ForegroundColor Cyan
     $proc = Start-Process -FilePath $QemuExe -ArgumentList $argString -PassThru -NoNewWindow
@@ -109,6 +115,10 @@ if ($Test) {
         "-no-reboot",
         "-serial", "stdio"
     )
+    # Add virtio-blk disk if the disk image exists.
+    if (Test-Path $DiskImg) {
+        $qemuArgs += @("-drive", "file=$DiskImg,if=virtio,format=raw")
+    }
     Write-Host "Starting QEMU (Ctrl+C to exit)..." -ForegroundColor Cyan
     & $QemuExe @qemuArgs
 }

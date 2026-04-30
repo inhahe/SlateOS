@@ -144,6 +144,8 @@ fn execute(line: &str) {
         "reboot" => cmd_reboot(),
         "irq" => cmd_irq(),
         "pci" => cmd_pci(),
+        "disk" | "blkinfo" => cmd_disk(),
+        "blkread" => cmd_blkread(args),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -166,6 +168,8 @@ fn cmd_help() {
     crate::console_println!("  time      Show current date and time (RTC)");
     crate::console_println!("  irq       Show IRQ interrupt counts");
     crate::console_println!("  pci       List PCI devices");
+    crate::console_println!("  disk      Show virtio-blk disk info");
+    crate::console_println!("  blkread N Hex-dump sector N from disk");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -280,6 +284,74 @@ fn cmd_pci() {
         );
     }
     crate::console_println!("{} device(s)", devices.len());
+}
+
+// Sector formatting uses small arithmetic on known-bounded values.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_disk() {
+    let result = crate::virtio::blk::with_device(|dev| {
+        let cap = dev.capacity();
+        let kib = cap.saturating_mul(512) / 1024;
+        let mib = kib / 1024;
+        crate::console_println!("Virtio-blk disk:");
+        crate::console_println!(
+            "  Capacity: {} sectors ({} KiB / {} MiB)",
+            cap, kib, mib
+        );
+    });
+    if result.is_none() {
+        crate::console_println!("No virtio-blk disk present.");
+    }
+}
+
+// Hex-dump formatting uses offsets bounded by SECTOR_SIZE (512).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_blkread(args: &str) {
+    let sector: u64 = match args.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            crate::console_println!("Usage: blkread <sector_number>");
+            return;
+        }
+    };
+
+    let result = crate::virtio::blk::with_device(|dev| {
+        let mut buf = [0u8; crate::virtio::blk::SECTOR_SIZE];
+        match dev.read_sector(sector, &mut buf) {
+            Ok(()) => {
+                crate::console_println!("Sector {}:", sector);
+                // Print 32 rows of 16 bytes each (512 bytes total).
+                for row in 0..32 {
+                    let offset = row * 16;
+                    crate::console_print!("  {:04x}:", offset);
+                    for col in 0..16 {
+                        if let Some(&byte) = buf.get(offset + col) {
+                            crate::console_print!(" {:02x}", byte);
+                        }
+                    }
+                    // ASCII column.
+                    crate::console_print!("  |");
+                    for col in 0..16 {
+                        if let Some(&byte) = buf.get(offset + col) {
+                            let ch = if byte >= 0x20 && byte < 0x7F {
+                                byte as char
+                            } else {
+                                '.'
+                            };
+                            crate::console_print!("{}", ch);
+                        }
+                    }
+                    crate::console_println!("|");
+                }
+            }
+            Err(e) => {
+                crate::console_println!("Error reading sector {}: {:?}", sector, e);
+            }
+        }
+    });
+    if result.is_none() {
+        crate::console_println!("No virtio-blk disk present.");
+    }
 }
 
 fn cmd_irq() {

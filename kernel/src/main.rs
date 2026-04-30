@@ -63,6 +63,7 @@ mod keyboard;
 mod kshell;
 mod limine;
 mod mm;
+mod net;
 mod pci;
 mod port;
 mod proc;
@@ -339,6 +340,11 @@ extern "C" fn kmain() -> ! {
     // Uses legacy PCI transport (I/O port BAR0) with polling.
     // Non-fatal if no NIC is present.
     virtio::net::init(boot_info.hhdm_offset);
+
+    // Step 20d-3: Initialize networking stack.
+    // Sets up the network interface from the virtio-net device.
+    // DHCP discovery will run later from the shell.
+    net::init();
 
     // Step 20e: Initialize block device abstraction layer.
     // Moves driver instances from their module globals into the

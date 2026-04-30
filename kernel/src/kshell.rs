@@ -153,6 +153,8 @@ fn execute(line: &str) {
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
+        "dhcp" => cmd_dhcp(),
+        "ping" => cmd_ping(args),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -184,6 +186,8 @@ fn cmd_help() {
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create a test ELF binary on disk");
     crate::console_println!("  net       Show network interface info");
+    crate::console_println!("  dhcp      Obtain an IP address via DHCP");
+    crate::console_println!("  ping IP   Send an ARP probe to an IP");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -588,15 +592,83 @@ fn cmd_mkelf() {
 }
 
 fn cmd_net() {
-    let result = crate::virtio::net::with_device(|dev| {
-        crate::console_println!("Network interface: virtio-net");
-        crate::console_println!("  MAC address: {}", dev.mac());
-        crate::console_println!("  RX buffers:  {} pending", dev.rx_pending());
-        crate::console_println!("  Status:      up");
-    });
-    if result.is_none() {
-        crate::console_println!("No network device found.");
+    let info = crate::net::interface::info();
+    if !info.up {
+        crate::console_println!("No network interface.");
+        return;
     }
+
+    crate::console_println!("Network interface: virtio-net");
+    crate::console_println!("  MAC address:  {}", info.mac);
+    crate::console_println!("  IPv4 address: {}", info.ip);
+    crate::console_println!("  Subnet mask:  {}", info.subnet_mask);
+    crate::console_println!("  Gateway:      {}", info.gateway);
+    crate::console_println!("  DNS server:   {}", info.dns);
+    crate::console_println!("  DHCP state:   {}", crate::net::dhcp::state_str());
+
+    // Also show RX buffer status from the NIC.
+    let rx_info = crate::virtio::net::with_device(|dev| dev.rx_pending());
+    if let Some(pending) = rx_info {
+        crate::console_println!("  RX buffers:   {} pending", pending);
+    }
+}
+
+fn cmd_dhcp() {
+    crate::console_println!("Running DHCP discovery...");
+    match crate::net::dhcp::discover() {
+        Ok(ip) => {
+            crate::console_println!("DHCP successful: {}", ip);
+            // Show full config.
+            let info = crate::net::interface::info();
+            crate::console_println!("  Subnet mask: {}", info.subnet_mask);
+            crate::console_println!("  Gateway:     {}", info.gateway);
+            crate::console_println!("  DNS server:  {}", info.dns);
+        }
+        Err(e) => {
+            crate::console_println!("DHCP failed: {:?}", e);
+        }
+    }
+}
+
+fn cmd_ping(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: ping <ip-address>");
+        crate::console_println!("  e.g., ping 10.0.2.2");
+        return;
+    }
+
+    // Parse IP address (simple dotted-quad parser).
+    let ip = match parse_ipv4(args) {
+        Some(ip) => ip,
+        None => {
+            crate::console_println!("Invalid IP address: {}", args);
+            return;
+        }
+    };
+
+    crate::console_println!("ARP probe for {}...", ip);
+    match crate::net::arp::resolve(ip) {
+        Ok(mac) => {
+            crate::console_println!("{} is at {}", ip, mac);
+        }
+        Err(e) => {
+            crate::console_println!("ARP resolve failed: {:?}", e);
+        }
+    }
+}
+
+/// Parse an IPv4 address from a dotted-quad string.
+fn parse_ipv4(s: &str) -> Option<crate::net::interface::Ipv4Addr> {
+    let mut parts = s.split('.');
+    let a = parts.next()?.parse::<u8>().ok()?;
+    let b = parts.next()?.parse::<u8>().ok()?;
+    let c = parts.next()?.parse::<u8>().ok()?;
+    let d = parts.next()?.parse::<u8>().ok()?;
+    // Reject trailing parts.
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(crate::net::interface::Ipv4Addr::new(a, b, c, d))
 }
 
 fn cmd_irq() {

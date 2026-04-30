@@ -150,6 +150,8 @@ fn execute(line: &str) {
         "cat" | "type" => cmd_cat(args),
         "write" => cmd_write(args),
         "rm" | "del" => cmd_rm(args),
+        "run" | "exec" => cmd_run(args),
+        "mkelf" => cmd_mkelf(),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -178,6 +180,8 @@ fn cmd_help() {
     crate::console_println!("  cat FILE  Print file contents");
     crate::console_println!("  write F T Write text T to file F");
     crate::console_println!("  rm FILE   Delete a file");
+    crate::console_println!("  run FILE  Load and execute an ELF binary");
+    crate::console_println!("  mkelf     Create a test ELF binary on disk");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -515,6 +519,68 @@ fn cmd_rm(args: &str) {
         }
         Err(e) => {
             crate::console_println!("rm: {}: {:?}", path, e);
+        }
+    }
+}
+
+fn cmd_run(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: run <elf-file>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    // Read the ELF binary from the filesystem.
+    let elf_data = match crate::fs::Vfs::read_file(&path) {
+        Ok(data) => data,
+        Err(e) => {
+            crate::console_println!("run: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    crate::console_println!("Loading {} ({} bytes)...", path, elf_data.len());
+
+    // Spawn a new process from the ELF data.
+    let name = args.rsplit('/').next().unwrap_or(args);
+    let options = crate::proc::spawn::SpawnOptions::new(name);
+
+    match crate::proc::spawn::spawn_process(&elf_data, &options) {
+        Ok(result) => {
+            crate::console_println!(
+                "Process '{}' spawned: pid={}, tid={}, entry={:#x}",
+                name,
+                result.pid,
+                result.task_id,
+                result.entry_point
+            );
+        }
+        Err(e) => {
+            crate::console_println!("run: failed to spawn: {:?}", e);
+        }
+    }
+}
+
+fn cmd_mkelf() {
+    // Generate a minimal test ELF using the existing test builder.
+    let elf_data = crate::proc::elf::build_test_elf_public();
+
+    match crate::fs::Vfs::write_file("/EXIT.ELF", &elf_data) {
+        Ok(()) => {
+            crate::console_println!(
+                "Created /EXIT.ELF ({} bytes) — run it with: run EXIT.ELF",
+                elf_data.len()
+            );
+        }
+        Err(e) => {
+            crate::console_println!("mkelf: failed to write: {:?}", e);
         }
     }
 }

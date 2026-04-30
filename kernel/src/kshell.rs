@@ -156,6 +156,7 @@ fn execute(line: &str) {
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
         "dns" | "nslookup" => cmd_dns(args),
+        "wget" | "http" => cmd_wget(args),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -190,6 +191,7 @@ fn cmd_help() {
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
     crate::console_println!("  ping IP   Send an ARP probe to an IP");
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
+    crate::console_println!("  wget URL  Fetch a URL via HTTP GET");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -657,6 +659,119 @@ fn cmd_ping(args: &str) {
             crate::console_println!("ARP resolve failed: {:?}", e);
         }
     }
+}
+
+/// Parse a simple URL: "http://host/path" or just "host/path" or "host".
+/// Returns (host, port, path).
+fn parse_url(url: &str) -> Option<(&str, u16, &str)> {
+    let url = url.strip_prefix("http://").unwrap_or(url);
+
+    // Split host and path.
+    let (host_port, path) = match url.find('/') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, "/"),
+    };
+
+    // Split host and port.
+    let (host, port) = match host_port.rfind(':') {
+        Some(i) => {
+            let port_str = &host_port[i + 1..];
+            match port_str.parse::<u16>() {
+                Ok(p) => (&host_port[..i], p),
+                Err(_) => (host_port, 80),
+            }
+        }
+        None => (host_port, 80),
+    };
+
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, port, path))
+}
+
+// String formatting uses small bounded values.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_wget(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: wget <url>");
+        crate::console_println!("  e.g., wget http://example.com/");
+        return;
+    }
+
+    let Some((host, port, path)) = parse_url(args) else {
+        crate::console_println!("Invalid URL: {}", args);
+        return;
+    };
+
+    crate::console_println!("Resolving {}...", host);
+
+    // Resolve hostname to IP.
+    let ip = if let Some(ip) = parse_ipv4(host) {
+        ip
+    } else {
+        match crate::net::dns::resolve(host) {
+            Ok(ip) => ip,
+            Err(e) => {
+                crate::console_println!("DNS resolution failed: {:?}", e);
+                return;
+            }
+        }
+    };
+
+    crate::console_println!("Connecting to {}:{}...", ip, port);
+
+    // Open TCP connection.
+    let conn = match crate::net::tcp::connect(ip, port) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::console_println!("Connection failed: {:?}", e);
+            return;
+        }
+    };
+
+    // Build HTTP request.
+    let request = alloc::format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+
+    crate::console_println!("Sending HTTP request...");
+
+    if let Err(e) = crate::net::tcp::send(conn, request.as_bytes()) {
+        crate::console_println!("Send failed: {:?}", e);
+        let _ = crate::net::tcp::close(conn);
+        return;
+    }
+
+    // Read response.
+    crate::console_println!("--- Response ---");
+
+    let mut total = 0usize;
+    loop {
+        match crate::net::tcp::read_blocking(conn, 3000) {
+            Ok(data) => {
+                if data.is_empty() {
+                    // Check if connection closed.
+                    if crate::net::tcp::is_remote_closed(conn) {
+                        break;
+                    }
+                    // No data yet — try again briefly.
+                    continue;
+                }
+                total = total.saturating_add(data.len());
+                // Print as text.
+                match core::str::from_utf8(&data) {
+                    Ok(text) => crate::console_print!("{}", text),
+                    Err(_) => crate::console_print!("(binary: {} bytes)", data.len()),
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    crate::console_println!("\n--- End ({} bytes received) ---", total);
+    let _ = crate::net::tcp::close(conn);
 }
 
 fn cmd_dns(args: &str) {

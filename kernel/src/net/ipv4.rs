@@ -216,6 +216,7 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
     }
 
     match packet.protocol {
+        PROTO_TCP => super::tcp::process_tcp(&packet),
         PROTO_UDP => super::udp::process_udp(&packet),
         PROTO_ICMP => {
             // ICMP — could handle ping replies.  Silently ignore for now.

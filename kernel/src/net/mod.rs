@@ -21,6 +21,7 @@ pub mod dns;
 pub mod ethernet;
 pub mod interface;
 pub mod ipv4;
+pub mod tcp;
 pub mod udp;
 
 use crate::error::KernelResult;

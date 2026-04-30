@@ -156,7 +156,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] IPv4 packet parsing/building with checksum
   - [x] UDP datagram send/receive with socket layer
   - [x] DHCP client (auto-configure IP/mask/gateway/DNS at boot)
-  - [ ] TCP (connection-oriented reliable streams)
+  - [x] TCP client (3-way handshake, data transfer, FIN teardown)
   - [x] DNS resolver (A record queries via UDP)
   - [ ] Move to userspace service
 - [ ] Sockets API (not file descriptors — dedicated socket handles)

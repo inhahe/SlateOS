@@ -143,6 +143,7 @@ fn execute(line: &str) {
         "time" | "date" => cmd_time(),
         "reboot" => cmd_reboot(),
         "irq" => cmd_irq(),
+        "pci" => cmd_pci(),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -164,6 +165,7 @@ fn cmd_help() {
     crate::console_println!("  echo ...  Echo text to console");
     crate::console_println!("  time      Show current date and time (RTC)");
     crate::console_println!("  irq       Show IRQ interrupt counts");
+    crate::console_println!("  pci       List PCI devices");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -250,6 +252,34 @@ fn cmd_echo(args: &str) {
 fn cmd_time() {
     let dt = crate::rtc::read_datetime();
     crate::console_println!("{}", dt);
+}
+
+// PCI device class/subclass descriptions and bar formatting use simple
+// fixed-width arithmetic on small known values.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_pci() {
+    let devices = crate::pci::scan_bus0();
+    if devices.is_empty() {
+        crate::console_println!("No PCI devices found.");
+        return;
+    }
+
+    crate::console_println!("{:<10} {:<12} {:<8} {:<6}", "BDF", "VENDOR:DEV", "CLASS", "IRQ");
+    crate::console_println!("------------------------------------------");
+    for dev in &devices {
+        crate::console_println!(
+            "{:02x}:{:02x}.{}    {:04x}:{:04x}     {:02x}:{:02x}   {}",
+            dev.address.bus,
+            dev.address.device,
+            dev.address.function,
+            dev.vendor_id,
+            dev.device_id,
+            dev.class,
+            dev.subclass,
+            dev.irq_line
+        );
+    }
+    crate::console_println!("{} device(s)", devices.len());
 }
 
 fn cmd_irq() {

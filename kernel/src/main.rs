@@ -61,6 +61,7 @@ mod keyboard;
 mod kshell;
 mod limine;
 mod mm;
+mod pci;
 mod port;
 mod proc;
 mod rtc;
@@ -318,6 +319,12 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = ioapic::self_test() {
         serial_println!("FATAL: IOAPIC self-test failed: {}", e);
         cpu::halt_loop();
+    }
+
+    // Step 20c: Scan PCI bus for device discovery.
+    // This finds virtio, USB, NVMe, and other PCI devices.
+    if let Err(e) = pci::self_test() {
+        serial_println!("WARNING: PCI scan failed: {}", e);
     }
 
     // Step 21: Enable hardware interrupts.

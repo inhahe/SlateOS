@@ -1,6 +1,6 @@
 //! Kernel entry point.
 //!
-//! This is a microkernel for x86_64 desktops.  Only the scheduler,
+//! This is a microkernel for `x86_64` desktops.  Only the scheduler,
 //! memory manager, IPC, capability enforcement, and interrupt routing
 //! run in kernel space.  Everything else (drivers, filesystems,
 //! networking) runs in userspace.
@@ -15,32 +15,38 @@
 //! 6. Set up IDT (exception handlers).
 //! 7. Initialize physical frame allocator from memory map.
 //! 8. Initialize kernel heap.
-//! 9. ... (scheduler, IPC, first userspace process)
+//! 9. Initialize page table subsystem.
+//! 10. Initialize demand paging (page fault resolution).
+//! 11. Initialize scheduler (priority round-robin, cooperative).
+//! 12. Initialize IPC channels (self-test: send, recv, blocking, FIFO, backpressure).
+//! 13. Initialize syscall dispatch (self-test: `yield`, `task_id`, channel roundtrip).
+//! 14. Initialize futexes (self-test: value mismatch, no waiters, blocking wait/wake).
+//! 15. Initialize pipes (self-test: basic IO, partial read, EOF, broken pipe, non-blocking, blocking).
+//! 16. Initialize shared memory (self-test: create, write/read, zeroed, close frees frames).
+//! 17. Initialize eventfd counters (self-test: initial value, accumulate, reset, non-blocking, blocking).
+//! 18. Initialize completion port (self-test: create+poll, try-wait empty, notify+wake, unregister).
+//! 19. Initialize capability system (self-test: insert, rights, duplicate, revoke, delegation).
+//! 20. Set up SYSCALL/SYSRET MSRs (IA32_LSTAR entry point, IA32_FMASK,
+//!     IA32_KERNEL_GS_BASE for per-CPU data via SWAPGS, IA32_EFER.SCE).
+//! 21. Initialize process management (self-test: PCB create/lookup/destroy,
+//!     thread lifecycle, capability integration, ELF parse/segments/BSS/flags/
+//!     entry point, thread spawn/exit→zombie/reject zombie, process spawn from
+//!     ELF/reject invalid/spawn with capabilities, ring 3 spawn+exit).
+//! 22. Initialize Local APIC (calibrate timer via PIT, configure periodic mode
+//!     at 100 Hz, register timer ISR on vector 32).
+//! 23. Enable interrupts — preemptive scheduling is now active.
+//!     (self-test: verify timer ticks are observed).
+//! 24. ... (per-process address spaces, ring 3 transition, first userspace process)
 
 #![no_std]
 #![no_main]
-// Lint configuration per CLAUDE.md coding standards.
-#![deny(clippy::all, clippy::pedantic)]
-#![warn(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
-// Allow these lints in test code where panicking on bad data is expected.
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects
-    )
-)]
+// Lint configuration is in workspace Cargo.toml ([workspace.lints.clippy])
+// and inherited via [lints] workspace = true in kernel/Cargo.toml.
+
+extern crate alloc;
 
 // Module declarations.
+mod apic;
 mod boot;
 mod cap;
 mod cpu;
@@ -48,6 +54,7 @@ mod error;
 mod gdt;
 mod idt;
 mod ipc;
+mod limine;
 mod mm;
 mod port;
 mod proc;
@@ -68,7 +75,7 @@ mod syscall;
 /// - Interrupts disabled
 /// - BSS zeroed
 /// - A temporary stack provided by the bootloader
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
     // Step 1: Initialize serial console for debug output.
     // This must be first so we can log everything that follows.
@@ -82,12 +89,9 @@ extern "C" fn kmain() -> ! {
     serial_println!("=== Kernel booting ===");
 
     // Step 2: Parse boot information from Limine.
-    let boot_info = match boot::parse_boot_info() {
-        Some(info) => info,
-        None => {
-            serial_println!("FATAL: Failed to parse boot info from Limine");
-            cpu::halt_loop();
-        }
+    let Some(boot_info) = boot::parse_boot_info() else {
+        serial_println!("FATAL: Failed to parse boot info from Limine");
+        cpu::halt_loop();
     };
 
     serial_println!("[boot] Boot info parsed successfully");
@@ -112,31 +116,197 @@ extern "C" fn kmain() -> ! {
     serial_println!("[idt] IDT initialized");
 
     // Step 5: Initialize the physical frame allocator.
-    // TODO: Initialize buddy allocator from memory map.
-    serial_println!("[mm] Physical frame allocator: TODO");
+    //
+    // SAFETY: Boot info contains a valid memory map and HHDM offset from
+    // Limine.  This is the first and only call to frame::init.  We are
+    // single-threaded with interrupts disabled.
+    if let Err(e) = unsafe {
+        mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map)
+    } {
+        serial_println!("FATAL: Frame allocator init failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Verify basic allocator functionality before proceeding.
+    if let Err(e) = mm::frame::self_test() {
+        serial_println!("FATAL: Frame allocator self-test failed: {}", e);
+        cpu::halt_loop();
+    }
 
     // Step 6: Initialize the kernel heap.
-    // TODO: Set up bump allocator (early boot) or slab allocator.
-    serial_println!("[mm] Kernel heap allocator: TODO");
+    // The slab allocator uses the frame allocator for backing memory.
+    mm::heap::init(boot_info.hhdm_offset);
 
-    // Step 7: Initialize the scheduler.
-    // TODO: Set up run queues, timer interrupt.
-    serial_println!("[sched] Scheduler: TODO");
+    // Verify heap allocations work.
+    if let Err(e) = mm::heap::self_test() {
+        serial_println!("FATAL: Heap allocator self-test failed: {}", e);
+        cpu::halt_loop();
+    }
 
-    // Step 8: Initialize IPC subsystem.
-    // TODO: Channel system, pipe system, eventfd.
-    serial_println!("[ipc] IPC subsystem: TODO");
+    // Step 7: Initialize the page table subsystem.
+    // This provides map/unmap/translate operations for managing virtual
+    // address spaces.  Uses the HHDM to read/write page table entries.
+    mm::page_table::init(boot_info.hhdm_offset);
 
-    // Step 9: Initialize capability system.
-    // TODO: Root capability table.
-    serial_println!("[cap] Capability system: TODO");
+    // Verify page table operations work (translate HHDM, map/unmap).
+    if let Err(e) = mm::page_table::self_test() {
+        serial_println!("FATAL: Page table self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 8: Initialize the page fault / demand paging subsystem.
+    // This registers the kernel address space and enables the page
+    // fault handler to resolve faults for demand-paged regions.
+    mm::fault::init();
+
+    // Verify demand paging works (register VMA, trigger fault, verify).
+    if let Err(e) = mm::fault::self_test() {
+        serial_println!("FATAL: Demand paging self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 9: Initialize the scheduler.
+    // Creates the idle task (the current execution context) and sets up
+    // the priority round-robin scheduler.  Timer-based preemption will
+    // be added when the APIC timer is wired up (§2.2).
+    sched::init();
+
+    // Verify cooperative scheduling works (spawn tasks, yield, verify).
+    if let Err(e) = sched::self_test() {
+        serial_println!("FATAL: Scheduler self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 10: Initialize IPC subsystem.
+    // Channels are the primary IPC mechanism — structured message
+    // passing between tasks/processes.  No explicit init needed (the
+    // global channel table is lazily populated).  Run self-tests to
+    // verify send, recv, blocking, close detection, and backpressure.
+    if let Err(e) = ipc::channel::self_test() {
+        serial_println!("FATAL: IPC channel self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 11: Initialize syscall dispatch.
+    // The versioned dispatch table maps syscall numbers to handlers.
+    // No explicit init needed (table is a const static), but we run
+    // self-tests to verify dispatch, yield, task_id, and IPC roundtrip
+    // all work through the syscall interface.
+    if let Err(e) = syscall::self_test() {
+        serial_println!("FATAL: Syscall dispatch self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 12: Initialize futex subsystem.
+    // Futexes enable fast userspace synchronization: the uncontended
+    // path is pure atomic CAS (no syscall), the contended path uses
+    // the kernel to block/wake tasks.
+    if let Err(e) = ipc::futex::self_test() {
+        serial_println!("FATAL: Futex self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 13: Initialize pipe subsystem.
+    // Pipes provide one-way kernel-buffered byte streams — the classic
+    // Unix pipe model but strictly unidirectional.
+    if let Err(e) = ipc::pipe::self_test() {
+        serial_println!("FATAL: Pipe self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 14: Initialize shared memory subsystem.
+    // Shared memory regions let tasks (and future processes) map the
+    // same physical pages into their address spaces for zero-copy IPC.
+    if let Err(e) = ipc::shm::self_test() {
+        serial_println!("FATAL: Shared memory self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 15: Initialize eventfd subsystem.
+    // Eventfds are lightweight 64-bit counters for wake-up notifications.
+    // Lighter than channels — ideal for "did something happen?" signaling.
+    if let Err(e) = ipc::eventfd::self_test() {
+        serial_println!("FATAL: Eventfd self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 16: Initialize completion port subsystem.
+    // Completion ports provide unified wait on heterogeneous kernel
+    // objects (channels, pipes, eventfds, future timers/process exit).
+    // This is the IOCP-like multiplexer from the design spec.
+    if let Err(e) = ipc::completion::self_test() {
+        serial_println!("FATAL: Completion port self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 17: Initialize capability system.
+    // Capability tables store unforgeable handles to kernel objects.
+    // Every resource access goes through capability checks — no
+    // ambient authority.
+    if let Err(e) = cap::self_test() {
+        serial_println!("FATAL: Capability system self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 18: Set up SYSCALL/SYSRET MSRs.
+    // IA32_STAR (segment selectors) was already configured in gdt::init().
+    // This sets up IA32_LSTAR (entry point RIP), IA32_FMASK (RFLAGS mask),
+    // and IA32_KERNEL_GS_BASE (per-CPU data pointer for SWAPGS).
+    //
+    // Must be done before proc::self_test() because the spawn tests
+    // transition to ring 3, and userspace code uses SYSCALL to exit.
+    //
+    // SAFETY: GDT is loaded (IA32_STAR is set), IDT is initialized.
+    // Called exactly once.
+    unsafe {
+        syscall::entry::init();
+    }
+
+    // Step 19: Initialize process management subsystem.
+    // Process control blocks track per-process state: address space,
+    // capability table, thread list, parent relationship.
+    // Spawn tests exercise the full ring 3 path: IRETQ → userspace →
+    // SYSCALL(SYS_EXIT) → kernel, so SYSCALL MSRs must be ready.
+    if let Err(e) = proc::self_test() {
+        serial_println!("FATAL: Process management self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 20: Initialize Local APIC and start the timer.
+    // The APIC timer provides periodic interrupts for preemptive
+    // scheduling.  Before this point, scheduling is purely cooperative.
+    //
+    // SAFETY: GDT, IDT, and heap are initialized.  We are single-threaded
+    // with interrupts disabled.  Called exactly once.
+    unsafe {
+        apic::init();
+    }
+
+    // Step 21: Enable hardware interrupts.
+    // From this point forward, the APIC timer fires periodically and
+    // the scheduler enforces time slices preemptively.
+    //
+    // SAFETY: The IDT is fully set up with handlers for exceptions,
+    // the timer (vector 32), and spurious interrupts (vector 255).
+    // The APIC is configured and the scheduler is ready.
+    unsafe {
+        cpu::sti();
+    }
+    serial_println!("[boot] Interrupts enabled — preemptive scheduling active");
+
+    // Verify the APIC timer is actually firing.
+    if let Err(e) = apic::self_test() {
+        serial_println!("FATAL: APIC timer self-test failed: {}", e);
+        cpu::halt_loop();
+    }
 
     // Boot success marker — the boot test script looks for this.
     serial_println!("BOOT_OK");
     serial_println!("=== Kernel boot complete ===");
 
     // Idle loop: halt until interrupt, repeat.
-    // Once the scheduler is up, this becomes the idle task.
+    // The APIC timer wakes us periodically; the scheduler runs
+    // on each timer tick.
     loop {
         cpu::hlt();
     }

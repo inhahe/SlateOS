@@ -1,4 +1,4 @@
-//! x86_64 port I/O primitives.
+//! `x86_64` port I/O primitives.
 //!
 //! Provides safe wrappers around the `in` and `out` CPU instructions
 //! for communicating with hardware devices via I/O ports.  Every wrapper

@@ -1,30 +1,39 @@
 //! Interrupt Descriptor Table (IDT) setup and exception handling.
 //!
-//! The IDT maps interrupt vectors (0–255) to handler functions.  The
+//! The IDT maps interrupt vectors (0--255) to handler functions.  The
 //! first 32 vectors are CPU exceptions; the rest are available for
 //! hardware IRQs and software interrupts.
 //!
 //! ## Design
 //!
 //! - Each exception gets a dedicated assembly stub that saves all
-//!   registers, calls a Rust handler, restores registers, and `iretq`s.
-//! - Assembly stubs are generated via `global_asm!` (stable Rust — no
+//!   registers, calls a Rust handler, restores registers, and executes
+//!   `iretq`.
+//! - Assembly stubs are generated via `global_asm!` (stable Rust --- no
 //!   nightly features required).
-//! - The double-fault handler (#8) uses IST1 (a separate stack) so it
+//! - The double-fault handler (#8) uses `IST1` (a separate stack) so it
 //!   can fire even if the kernel stack itself overflowed.
 //! - IRQ handlers (vectors 32+) will be wired up when the APIC driver
 //!   is initialized.
 
 use core::arch::global_asm;
+use core::ptr::addr_of;
+use core::ptr::addr_of_mut;
 
 use crate::cpu;
 use crate::gdt;
+use crate::mm;
+use crate::mm::frame::{self, FRAME_SIZE};
+use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::proc::spawn::{USER_STACK_TOP, USER_STACK_GUARD};
+use crate::sched;
+use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // IDT entry
 // ---------------------------------------------------------------------------
 
-/// Number of entries in the IDT (full x86_64 range).
+/// Number of entries in the IDT (full `x86_64` range).
 const IDT_ENTRIES: usize = 256;
 
 /// A single 64-bit IDT gate descriptor (16 bytes).
@@ -66,14 +75,19 @@ impl IdtEntry {
     /// Create an interrupt gate entry pointing to `handler`.
     ///
     /// - `selector`: code segment selector (always kernel CS).
-    /// - `ist`: IST index (0 = no IST, 1–7 = use that IST stack).
+    /// - `ist`: IST index (0 = no IST, 1--7 = use that IST stack).
     /// - `dpl`: descriptor privilege level (0 for kernel-only, 3 for
     ///   user-callable via `int` instruction).
+    // The casts here intentionally extract 16-bit and 32-bit slices from a
+    // 64-bit virtual address to fill the IDT gate's split offset fields.
+    // Truncation is the desired behaviour.
+    #[allow(clippy::cast_possible_truncation)]
     fn new(handler: u64, selector: u16, ist: u8, dpl: u8) -> Self {
         Self {
             offset_low: handler as u16,
             selector,
-            ist: ist & 0x7,
+            // Mask to IST field width (bits [2:0]).
+            ist: ist & 0b111,
             // Present | DPL | Interrupt Gate (type 0xE)
             type_attr: 0x80 | ((dpl & 3) << 5) | 0x0E,
             offset_mid: (handler >> 16) as u16,
@@ -133,9 +147,9 @@ pub struct InterruptStackFrame {
 //   4. Calls the Rust handler
 //   5. Restores all registers
 //   6. Pops the error code
-//   7. Returns via iretq
+//   7. Returns via `iretq`
 //
-// The Rust handlers are #[no_mangle] extern "C" so the assembler can
+// The Rust handlers are #[unsafe(no_mangle)] extern "C" so the assembler can
 // reference them by name.
 // ---------------------------------------------------------------------------
 
@@ -143,7 +157,6 @@ pub struct InterruptStackFrame {
 macro_rules! isr_stub_no_error {
     ($stub:ident, $handler:ident) => {
         global_asm!(
-            ".intel_syntax noprefix",
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
             "push 0",              // dummy error code
@@ -183,7 +196,7 @@ macro_rules! isr_stub_no_error {
             "add rsp, 8",          // pop dummy error code
             "iretq",
         );
-        extern "C" { fn $stub(); }
+        unsafe extern "C" { fn $stub(); }
     };
 }
 
@@ -191,7 +204,6 @@ macro_rules! isr_stub_no_error {
 macro_rules! isr_stub_with_error {
     ($stub:ident, $handler:ident) => {
         global_asm!(
-            ".intel_syntax noprefix",
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
             // CPU already pushed error code.
@@ -231,7 +243,7 @@ macro_rules! isr_stub_with_error {
             "add rsp, 8",          // pop error code
             "iretq",
         );
-        extern "C" { fn $stub(); }
+        unsafe extern "C" { fn $stub(); }
     };
 }
 
@@ -258,60 +270,132 @@ isr_stub_no_error!(isr_simd_fp, handle_simd_fp);
 // Default handler for unregistered vectors.
 isr_stub_no_error!(isr_default, handle_default);
 
+// Hardware IRQ handlers (vectors 32+).
+// Timer (vector 32) — driven by the Local APIC timer.
+isr_stub_no_error!(isr_timer, handle_timer_irq);
+// Spurious (vector 255) — APIC spurious interrupts.
+isr_stub_no_error!(isr_spurious, handle_spurious_irq);
+
+// ---------------------------------------------------------------------------
+// Ring 3 exception handling — kill faulting userspace task
+// ---------------------------------------------------------------------------
+
+/// The CPL (current privilege level) is stored in bits [1:0] of CS.
+/// Ring 3 = user mode.
+const RING_3: u64 = 3;
+
+/// Returns `true` if the exception occurred in ring 3 (userspace).
+fn is_userspace_exception(frame: &InterruptStackFrame) -> bool {
+    (frame.cs & RING_3) == RING_3
+}
+
+/// Kill the current task because it caused an unrecoverable exception
+/// while running in ring 3.
+///
+/// Logs the exception, performs thread/process bookkeeping, then calls
+/// `task_exit()` which does a context switch to the next task and never
+/// returns.  The faulting task's kernel stack (with the exception frame
+/// on it) is abandoned and will be freed when the dead task is reaped.
+///
+/// This function never returns.
+fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
+    let task_id = sched::current_task_id();
+    serial_println!(
+        "[exception] Killing task {} — {} at {:#x} (ring 3)",
+        task_id, exception_name, frame.rip
+    );
+    serial_println!(
+        "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
+        frame.cs, frame.rflags, frame.rsp, frame.ss
+    );
+
+    // Thread bookkeeping: remove from process, transition to zombie
+    // if this was the last thread.
+    crate::proc::thread::on_thread_exit(task_id);
+
+    // Mark task as dead and switch to next task (never returns).
+    sched::task_exit();
+
+    // Unreachable — task_exit() does a context switch.
+    cpu::halt_loop();
+}
+
 // ---------------------------------------------------------------------------
 // Rust exception handlers
 //
 // These are called from the assembly stubs above.  They MUST be
-// #[no_mangle] extern "C" so the assembler can reference them.
+// #[unsafe(no_mangle)] extern "C" so the assembler can reference them.
+//
+// Each handler that can be triggered from user code checks the CS
+// privilege level.  Ring 3 faults kill the offending task; ring 0
+// faults are unrecoverable kernel bugs and halt the system.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Divide Error (#DE)", frame);
+    }
     serial_println!("EXCEPTION: Divide Error (#DE) at {:#x}", frame.rip);
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("EXCEPTION: Debug (#DB) at {:#x}", frame.rip);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("EXCEPTION: NMI at {:#x}", frame.rip);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("EXCEPTION: Breakpoint (#BP) at {:#x}", frame.rip);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_overflow(frame: &InterruptStackFrame, _error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Overflow (#OF)", frame);
+    }
     serial_println!("EXCEPTION: Overflow (#OF) at {:#x}", frame.rip);
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Bound Range Exceeded (#BR)", frame);
+    }
     serial_println!("EXCEPTION: Bound Range Exceeded (#BR) at {:#x}", frame.rip);
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Invalid Opcode (#UD)", frame);
+    }
     serial_println!("EXCEPTION: Invalid Opcode (#UD) at {:#x}", frame.rip);
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Device Not Available (#NM)", frame);
+    }
     serial_println!("EXCEPTION: Device Not Available (#NM) at {:#x}", frame.rip);
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
+    // Double faults are always unrecoverable — even from ring 3.
+    // By the time we get a #DF, the CPU has already failed to handle
+    // the original exception AND the secondary fault.
     serial_println!(
         "EXCEPTION: Double Fault (#DF) at {:#x}, error={:#x}",
         frame.rip,
@@ -325,7 +409,7 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
     serial_println!(
         "EXCEPTION: Invalid TSS (#TS) at {:#x}, error={:#x}",
@@ -334,8 +418,11 @@ extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Segment Not Present (#NP)", frame);
+    }
     serial_println!(
         "EXCEPTION: Segment Not Present (#NP) at {:#x}, selector={:#x}",
         frame.rip,
@@ -344,8 +431,11 @@ extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Stack-Segment Fault (#SS)", frame);
+    }
     serial_println!(
         "EXCEPTION: Stack-Segment Fault (#SS) at {:#x}, error={:#x}",
         frame.rip,
@@ -354,8 +444,11 @@ extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("General Protection Fault (#GP)", frame);
+    }
     serial_println!(
         "EXCEPTION: General Protection Fault (#GP) at {:#x}, error={:#x}",
         frame.rip,
@@ -368,7 +461,7 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     // CR2 contains the faulting virtual address.
     let cr2: u64;
@@ -378,6 +471,33 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
     }
 
+    // Attempt to resolve the fault via the memory manager (demand
+    // paging for kernel VMAs).  If resolution succeeds, the CPU will
+    // retry the faulting instruction after iretq.
+    if mm::fault::resolve(cr2, error).is_ok() {
+        return;
+    }
+
+    // For user-mode page faults, try stack growth before killing.
+    let is_user = error & 4 != 0;
+    if is_user {
+        if try_grow_user_stack(cr2, error) {
+            return; // Stack grew successfully — retry the instruction.
+        }
+
+        // Unresolvable user fault — kill the task.
+        serial_println!(
+            "[exception] Killing task {} — Page Fault (#PF) at {:#x}, address={:#x}",
+            sched::current_task_id(), frame.rip, cr2
+        );
+        let present = if error & 1 != 0 { "present" } else { "not-present" };
+        let write = if error & 2 != 0 { "write" } else { "read" };
+        serial_println!("  Cause: {present}, {write}, user");
+        // kill_userspace_task never returns.
+        kill_userspace_task("Page Fault (#PF)", frame);
+    }
+
+    // Unresolvable kernel page fault — halt.
     serial_println!(
         "EXCEPTION: Page Fault (#PF) at {:#x}, address={:#x}, error={:#x}",
         frame.rip,
@@ -385,25 +505,107 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         error
     );
 
-    // Decode error code bits.
     let present = if error & 1 != 0 { "present" } else { "not-present" };
     let write = if error & 2 != 0 { "write" } else { "read" };
     let user = if error & 4 != 0 { "user" } else { "kernel" };
     serial_println!("  Cause: {present}, {write}, {user}");
+    serial_println!(
+        "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
+        frame.cs, frame.rflags, frame.rsp, frame.ss
+    );
 
-    // TODO: Once the memory manager is up, attempt to resolve the fault
-    // (demand paging, stack growth, CoW).  For now, halt.
     cpu::halt_loop();
 }
 
-#[no_mangle]
+/// Attempt to grow the user stack to cover the faulting address.
+///
+/// The user stack occupies `[USER_STACK_GUARD, USER_STACK_TOP)` and
+/// grows downward on demand.  If `cr2` is within this region and the
+/// page is not yet mapped, we allocate a frame and map it with
+/// user read/write/no-execute permissions.
+///
+/// Returns `true` if the stack was successfully grown, `false` if the
+/// address is outside the stack region or allocation failed.
+fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
+    // Only handle not-present faults (bit 0 clear = page not mapped).
+    // A present-page violation (protection fault) is not stack growth.
+    if error & 1 != 0 {
+        return false;
+    }
+
+    // Check if the address is in the growable stack region.
+    if cr2 < USER_STACK_GUARD || cr2 >= USER_STACK_TOP {
+        return false;
+    }
+
+    // Align down to the page (frame) boundary.
+    #[allow(clippy::arithmetic_side_effects)]
+    let page_addr = cr2 & !(FRAME_SIZE as u64 - 1);
+
+    // Read the current PML4 from CR3 — this is the faulting process's
+    // page table (the scheduler loaded it on context switch).
+    let pml4_phys: u64;
+    // SAFETY: Reading CR3 is always safe in ring 0.
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) pml4_phys, options(nomem, nostack, preserves_flags));
+    }
+
+    // Allocate a physical frame.
+    let phys_frame = match frame::alloc_frame() {
+        Ok(f) => f,
+        Err(_) => return false, // OOM — can't grow stack.
+    };
+
+    // Zero the frame (stack pages must be zeroed).
+    let Some(hhdm) = page_table::hhdm() else {
+        // No HHDM — can't zero the frame.  Free it and fail.
+        // SAFETY: phys_frame was just allocated and is exclusively ours.
+        let _ = unsafe { frame::free_frame(phys_frame) };
+        return false;
+    };
+    let frame_virt = phys_frame.to_virt(hhdm);
+    // SAFETY: frame_virt is the HHDM mapping of a freshly
+    // allocated, exclusively owned frame.
+    unsafe {
+        core::ptr::write_bytes(frame_virt as *mut u8, 0, FRAME_SIZE);
+    }
+
+    // Map the frame with user read/write/no-execute permissions.
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+
+    let virt = VirtAddr::new(page_addr);
+    // SAFETY: pml4_phys is the current CR3 (valid), phys_frame is
+    // freshly allocated and exclusively ours, virt is in user space
+    // within the stack region.
+    match unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) } {
+        Ok(()) => true,
+        Err(_) => {
+            // Mapping failed (e.g., OOM for page table allocation).
+            // SAFETY: phys_frame was just allocated and is exclusively ours.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            false
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("x87 Floating-Point (#MF)", frame);
+    }
     serial_println!("EXCEPTION: x87 Floating-Point (#MF) at {:#x}", frame.rip);
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
+    // #AC can only occur in ring 3 (when CR0.AM and RFLAGS.AC are set).
+    if is_userspace_exception(frame) {
+        kill_userspace_task("Alignment Check (#AC)", frame);
+    }
     serial_println!(
         "EXCEPTION: Alignment Check (#AC) at {:#x}, error={:#x}",
         frame.rip,
@@ -412,20 +614,24 @@ extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
+    // Machine check is a hardware error — always fatal.
     serial_println!("EXCEPTION: Machine Check (#MC) at {:#x}", frame.rip);
     serial_println!("FATAL: Machine check is unrecoverable. Halting.");
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_simd_fp(frame: &InterruptStackFrame, _error: u64) {
+    if is_userspace_exception(frame) {
+        kill_userspace_task("SIMD Floating-Point (#XM)", frame);
+    }
     serial_println!("EXCEPTION: SIMD Floating-Point (#XM) at {:#x}", frame.rip);
     cpu::halt_loop();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn handle_default(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("INTERRUPT: Unhandled vector at {:#x}", frame.rip);
 }
@@ -434,7 +640,7 @@ extern "C" fn handle_default(frame: &InterruptStackFrame, _error: u64) {
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Install exception handlers and load the IDT.
+/// Install exception handlers and load the IDT via `lidt`.
 ///
 /// # Safety
 ///
@@ -442,49 +648,60 @@ extern "C" fn handle_default(frame: &InterruptStackFrame, _error: u64) {
 /// loaded (the IDT entries reference the kernel CS selector).
 pub unsafe fn init() {
     // SAFETY: Single-threaded boot, no other CPU accesses the IDT yet.
+    // We use addr_of_mut! to avoid creating references to a mutable
+    // static (Rust 2024 requirement).
     unsafe {
         let cs = gdt::KERNEL_CS;
+        let idt = &mut *addr_of_mut!(IDT);
 
         // CPU exceptions (vectors 0–19).  Double fault uses IST1.
-        IDT.entries[0] = IdtEntry::new(isr_divide_error as usize as u64, cs, 0, 0);
-        IDT.entries[1] = IdtEntry::new(isr_debug as usize as u64, cs, 0, 0);
-        IDT.entries[2] = IdtEntry::new(isr_nmi as usize as u64, cs, 0, 0);
-        IDT.entries[3] = IdtEntry::new(isr_breakpoint as usize as u64, cs, 0, 0);
-        IDT.entries[4] = IdtEntry::new(isr_overflow as usize as u64, cs, 0, 0);
-        IDT.entries[5] = IdtEntry::new(isr_bound_range as usize as u64, cs, 0, 0);
-        IDT.entries[6] = IdtEntry::new(isr_invalid_opcode as usize as u64, cs, 0, 0);
-        IDT.entries[7] = IdtEntry::new(isr_device_not_avail as usize as u64, cs, 0, 0);
+        idt.entries[0] = IdtEntry::new(isr_divide_error as *const () as u64, cs, 0, 0);
+        idt.entries[1] = IdtEntry::new(isr_debug as *const () as u64, cs, 0, 0);
+        idt.entries[2] = IdtEntry::new(isr_nmi as *const () as u64, cs, 0, 0);
+        idt.entries[3] = IdtEntry::new(isr_breakpoint as *const () as u64, cs, 0, 0);
+        idt.entries[4] = IdtEntry::new(isr_overflow as *const () as u64, cs, 0, 0);
+        idt.entries[5] = IdtEntry::new(isr_bound_range as *const () as u64, cs, 0, 0);
+        idt.entries[6] = IdtEntry::new(isr_invalid_opcode as *const () as u64, cs, 0, 0);
+        idt.entries[7] = IdtEntry::new(isr_device_not_avail as *const () as u64, cs, 0, 0);
         // Double fault uses IST1 for a separate stack.
-        IDT.entries[8] = IdtEntry::new(isr_double_fault as usize as u64, cs, 1, 0);
+        idt.entries[8] = IdtEntry::new(isr_double_fault as *const () as u64, cs, 1, 0);
         // Vector 9 (coprocessor segment overrun) is legacy, not used.
-        IDT.entries[10] = IdtEntry::new(isr_invalid_tss as usize as u64, cs, 0, 0);
-        IDT.entries[11] = IdtEntry::new(isr_seg_not_present as usize as u64, cs, 0, 0);
-        IDT.entries[12] = IdtEntry::new(isr_stack_segment as usize as u64, cs, 0, 0);
-        IDT.entries[13] = IdtEntry::new(isr_general_protection as usize as u64, cs, 0, 0);
-        IDT.entries[14] = IdtEntry::new(isr_page_fault as usize as u64, cs, 0, 0);
+        idt.entries[10] = IdtEntry::new(isr_invalid_tss as *const () as u64, cs, 0, 0);
+        idt.entries[11] = IdtEntry::new(isr_seg_not_present as *const () as u64, cs, 0, 0);
+        idt.entries[12] = IdtEntry::new(isr_stack_segment as *const () as u64, cs, 0, 0);
+        idt.entries[13] = IdtEntry::new(isr_general_protection as *const () as u64, cs, 0, 0);
+        idt.entries[14] = IdtEntry::new(isr_page_fault as *const () as u64, cs, 0, 0);
         // Vector 15 is reserved.
-        IDT.entries[16] = IdtEntry::new(isr_x87_fp as usize as u64, cs, 0, 0);
-        IDT.entries[17] = IdtEntry::new(isr_alignment_check as usize as u64, cs, 0, 0);
-        IDT.entries[18] = IdtEntry::new(isr_machine_check as usize as u64, cs, 0, 0);
-        IDT.entries[19] = IdtEntry::new(isr_simd_fp as usize as u64, cs, 0, 0);
+        idt.entries[16] = IdtEntry::new(isr_x87_fp as *const () as u64, cs, 0, 0);
+        idt.entries[17] = IdtEntry::new(isr_alignment_check as *const () as u64, cs, 0, 0);
+        idt.entries[18] = IdtEntry::new(isr_machine_check as *const () as u64, cs, 0, 0);
+        idt.entries[19] = IdtEntry::new(isr_simd_fp as *const () as u64, cs, 0, 0);
+
+        // Hardware IRQ vectors.
+        // Vector 32: APIC timer interrupt.
+        idt.entries[32] = IdtEntry::new(isr_timer as *const () as u64, cs, 0, 0);
+        // Vector 255: APIC spurious interrupt.
+        idt.entries[255] = IdtEntry::new(isr_spurious as *const () as u64, cs, 0, 0);
 
         // Fill remaining vectors with the default handler.
-        let default_addr = isr_default as usize as u64;
-        for entry in &mut IDT.entries[20..] {
+        let default_addr = isr_default as *const () as u64;
+        for entry in &mut idt.entries[20..] {
             if entry.type_attr == 0 {
                 *entry = IdtEntry::new(default_addr, cs, 0, 0);
             }
         }
 
         // Load the IDT.
+        // IDT size is 256 * 16 = 4096 bytes; limit (4095) always fits in u16.
+        #[allow(clippy::cast_possible_truncation)]
         let idt_ptr = IdtPointer {
             limit: (core::mem::size_of::<Idt>() - 1) as u16,
-            base: core::ptr::addr_of!(IDT) as u64,
+            base: addr_of!(IDT) as u64,
         };
 
         core::arch::asm!(
             "lidt [{}]",
-            in(reg) &idt_ptr,
+            in(reg) &raw const idt_ptr,
             options(readonly, nostack, preserves_flags),
         );
     }

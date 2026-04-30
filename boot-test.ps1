@@ -1,0 +1,25 @@
+$fw = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
+$qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
+$cwd = "D:\visual studio projects\os"
+
+Set-Location $cwd
+Remove-Item serial.log -ErrorAction SilentlyContinue
+
+$proc = Start-Process -FilePath $qemu -ArgumentList @(
+    "-drive", "`"if=pflash,format=raw,readonly=on,file=$fw`"",
+    "-drive", "format=raw,file=fat:rw:esp",
+    "-m", "128M",
+    "-serial", "file:serial.log",
+    "-display", "none",
+    "-no-reboot",
+    "-no-shutdown"
+) -NoNewWindow -PassThru
+
+Start-Sleep -Seconds 25
+Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
+
+if (Test-Path serial.log) {
+    Get-Content serial.log
+} else {
+    Write-Host "ERROR: serial.log not created"
+}

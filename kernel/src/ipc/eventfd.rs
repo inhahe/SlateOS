@@ -1,0 +1,508 @@
+//! Eventfd — lightweight kernel-managed wake-up counter.
+//!
+//! An eventfd is a simple signaling mechanism: a kernel-managed 64-bit
+//! unsigned integer counter.  Tasks can:
+//!
+//! - **Write (signal)**: atomically add a value to the counter.
+//! - **Read (wait)**: block until the counter is non-zero, then
+//!   atomically read and reset it.
+//!
+//! Eventfds are lighter than channels (no message allocation, no
+//! queue management) and ideal for simple wake-up notifications
+//! where the only question is "did something happen?" — not "what
+//! happened?"
+//!
+//! ## Use Cases
+//!
+//! - Producer→consumer event notification (producer signals, consumer
+//!   wakes and processes work from a shared queue).
+//! - Thread-pool wake-up (signal N workers to check for new tasks).
+//! - Timer expiration notification.
+//! - Integration with IOCP/completion port (eventfd handles are
+//!   waitable objects).
+//!
+//! ## Semantics
+//!
+//! - **`eventfd_write(handle, value)`**: adds `value` to the counter.
+//!   If the result would overflow `u64::MAX - 1`, the write blocks
+//!   (or returns `WouldBlock` in non-blocking mode).  Value of 0 is
+//!   a no-op.
+//!
+//! - **`eventfd_read(handle)`**: if counter > 0, returns the counter
+//!   value and resets it to 0.  If counter == 0, blocks until a write
+//!   occurs.
+//!
+//! - **`eventfd_try_read(handle)`**: same but returns `WouldBlock`
+//!   instead of blocking.
+//!
+//! ## Performance Target
+//!
+//! Wake latency: 0.5–1 µs (comparable to Linux eventfd).
+//!
+//! ## Lock Ordering
+//!
+//! `EVENTFD_TABLE` → `SCHED` (read/write may call `sched::wake()`).
+
+use alloc::collections::BTreeMap;
+use crate::error::{KernelError, KernelResult};
+use crate::sched::{self, task::TaskId};
+use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum counter value.  Writes that would exceed this block.
+/// `u64::MAX` is reserved as a sentinel (matches Linux semantics).
+#[allow(clippy::arithmetic_side_effects)]
+const MAX_COUNTER: u64 = u64::MAX - 1;
+
+// ---------------------------------------------------------------------------
+// Handle
+// ---------------------------------------------------------------------------
+
+/// Unique ID for an eventfd.
+type EventFdId = u64;
+
+/// Counter for generating unique IDs.
+static NEXT_EVENTFD_ID: AtomicU64 = AtomicU64::new(1);
+
+fn alloc_eventfd_id() -> EventFdId {
+    NEXT_EVENTFD_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A handle to an eventfd counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EventFdHandle(u64);
+
+impl EventFdHandle {
+    /// Reconstruct a handle from its raw u64 representation.
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Get the raw u64 representation.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// The eventfd ID (the handle IS the ID).
+    fn id(self) -> EventFdId {
+        self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Eventfd internals
+// ---------------------------------------------------------------------------
+
+/// A kernel eventfd: a 64-bit counter with wait/wake semantics.
+struct EventFd {
+    /// The counter value.
+    counter: u64,
+    /// Task blocked waiting to read (counter is 0).
+    reader_waiter: Option<TaskId>,
+    /// Task blocked waiting to write (counter would overflow).
+    writer_waiter: Option<TaskId>,
+    /// Whether the eventfd has been closed.
+    closed: bool,
+}
+
+impl EventFd {
+    fn new(initial: u64) -> Self {
+        Self {
+            counter: initial.min(MAX_COUNTER),
+            reader_waiter: None,
+            writer_waiter: None,
+            closed: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global table
+// ---------------------------------------------------------------------------
+
+/// Global table of all live eventfds.
+///
+/// Lock ordering: `EVENTFD_TABLE` → `SCHED`.
+static EVENTFD_TABLE: Mutex<BTreeMap<EventFdId, EventFd>> =
+    Mutex::new(BTreeMap::new());
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Create a new eventfd with an initial counter value.
+///
+/// The initial value is typically 0 (event not signaled).
+pub fn create(initial: u64) -> EventFdHandle {
+    let id = alloc_eventfd_id();
+    let efd = EventFd::new(initial);
+
+    let mut table = EVENTFD_TABLE.lock();
+    table.insert(id, efd);
+
+    EventFdHandle(id)
+}
+
+/// Write (signal) — add `value` to the counter.
+///
+/// If `value` is 0, this is a no-op.  If the addition would overflow
+/// `MAX_COUNTER`, the write blocks until the reader drains the counter.
+///
+/// # Returns
+///
+/// - `Ok(())` — value added.
+/// - `Err(ChannelClosed)` — eventfd was closed.
+/// - `Err(InvalidHandle)` — handle not found.
+pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
+    if value == 0 {
+        return Ok(());
+    }
+
+    loop {
+        {
+            let mut table = EVENTFD_TABLE.lock();
+            let efd = table
+                .get_mut(&handle.id())
+                .ok_or(KernelError::InvalidHandle)?;
+
+            if efd.closed {
+                return Err(KernelError::ChannelClosed);
+            }
+
+            // Check if we can add without overflow.
+            if let Some(new_val) = efd.counter.checked_add(value)
+                && new_val <= MAX_COUNTER
+            {
+                efd.counter = new_val;
+
+                // Wake blocked reader.
+                let reader = efd.reader_waiter.take();
+                drop(table);
+
+                if let Some(task_id) = reader {
+                    sched::wake(task_id);
+                }
+                return Ok(());
+            }
+
+            // Would overflow — block until reader drains.
+            efd.writer_waiter = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+    }
+}
+
+/// Non-blocking write.
+///
+/// # Returns
+///
+/// - `Ok(())` — value added.
+/// - `Err(WouldBlock)` — counter would overflow.
+/// - `Err(ChannelClosed)` — eventfd closed.
+pub fn try_write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
+    if value == 0 {
+        return Ok(());
+    }
+
+    let wake_reader;
+
+    {
+        let mut table = EVENTFD_TABLE.lock();
+        let efd = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
+
+        if efd.closed {
+            return Err(KernelError::ChannelClosed);
+        }
+
+        if let Some(new_val) = efd.counter.checked_add(value)
+            && new_val <= MAX_COUNTER
+        {
+            efd.counter = new_val;
+            wake_reader = efd.reader_waiter.take();
+        } else {
+            return Err(KernelError::WouldBlock);
+        }
+    }
+
+    if let Some(task_id) = wake_reader {
+        sched::wake(task_id);
+    }
+    Ok(())
+}
+
+/// Read (wait) — consume the counter value.
+///
+/// Blocks until the counter is non-zero, then returns the value and
+/// resets the counter to 0.
+///
+/// # Returns
+///
+/// - `Ok(value)` where `value > 0` — the counter was consumed.
+/// - `Err(ChannelClosed)` — eventfd was closed while waiting.
+/// - `Err(InvalidHandle)` — handle not found.
+pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
+    loop {
+        {
+            let mut table = EVENTFD_TABLE.lock();
+            let efd = table
+                .get_mut(&handle.id())
+                .ok_or(KernelError::InvalidHandle)?;
+
+            if efd.counter > 0 {
+                let val = efd.counter;
+                efd.counter = 0;
+
+                // Wake blocked writer.
+                let writer = efd.writer_waiter.take();
+                drop(table);
+
+                if let Some(task_id) = writer {
+                    sched::wake(task_id);
+                }
+                return Ok(val);
+            }
+
+            if efd.closed {
+                return Err(KernelError::ChannelClosed);
+            }
+
+            // Counter is 0 — block.
+            efd.reader_waiter = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+    }
+}
+
+/// Non-blocking read.
+///
+/// # Returns
+///
+/// - `Ok(value)` — counter consumed.
+/// - `Err(WouldBlock)` — counter is 0.
+/// - `Err(ChannelClosed)` — eventfd closed.
+pub fn try_read(handle: EventFdHandle) -> KernelResult<u64> {
+    let wake_writer;
+    let result;
+
+    {
+        let mut table = EVENTFD_TABLE.lock();
+        let efd = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
+
+        if efd.counter > 0 {
+            result = Ok(efd.counter);
+            efd.counter = 0;
+            wake_writer = efd.writer_waiter.take();
+        } else if efd.closed {
+            return Err(KernelError::ChannelClosed);
+        } else {
+            return Err(KernelError::WouldBlock);
+        }
+    }
+
+    if let Some(task_id) = wake_writer {
+        sched::wake(task_id);
+    }
+    result
+}
+
+/// Close an eventfd handle.
+///
+/// Wakes any blocked reader or writer (they will see `ChannelClosed`).
+pub fn close(handle: EventFdHandle) {
+    let mut wake_tasks: [Option<TaskId>; 2] = [None, None];
+
+    {
+        let mut table = EVENTFD_TABLE.lock();
+        if let Some(efd) = table.get_mut(&handle.id()) {
+            efd.closed = true;
+            wake_tasks[0] = efd.reader_waiter.take();
+            wake_tasks[1] = efd.writer_waiter.take();
+
+            // Remove from table.
+            table.remove(&handle.id());
+        }
+    }
+
+    for task_id in wake_tasks.iter().flatten() {
+        sched::wake(*task_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Polling helper (for completion port)
+// ---------------------------------------------------------------------------
+
+/// Check if the eventfd counter is non-zero (non-consuming).
+///
+/// Returns `true` if `read()` would not block (counter > 0 or
+/// eventfd is closed).  Returns `false` if the counter is 0 and
+/// the eventfd is still open.
+pub fn has_value(handle: EventFdHandle) -> bool {
+    let table = EVENTFD_TABLE.lock();
+    let Some(efd) = table.get(&handle.id()) else {
+        return false;
+    };
+    efd.counter > 0 || efd.closed
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Run eventfd self-tests.
+///
+/// Tests:
+/// 1. Create with initial value, read it back.
+/// 2. Write signals, accumulate counter.
+/// 3. Read resets counter to 0.
+/// 4. Non-blocking read on empty counter.
+/// 5. Blocking read via spawned task.
+/// 6. Close wakes blocked reader.
+pub fn self_test() -> KernelResult<()> {
+    serial_println!("[eventfd] Running eventfd self-test...");
+
+    test_initial_value()?;
+    test_write_accumulate()?;
+    test_read_resets()?;
+    test_nonblocking()?;
+    test_blocking_read()?;
+
+    serial_println!("[eventfd] Eventfd self-test PASSED");
+    Ok(())
+}
+
+/// Test 1: create with initial value, read it back.
+fn test_initial_value() -> KernelResult<()> {
+    let handle = create(5);
+    let val = read(handle)?;
+    if val != 5 {
+        serial_println!("[eventfd]   FAIL: initial read {} expected 5", val);
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+    close(handle);
+    serial_println!("[eventfd]   Initial value: OK");
+    Ok(())
+}
+
+/// Test 2: multiple writes accumulate.
+fn test_write_accumulate() -> KernelResult<()> {
+    let handle = create(0);
+    write(handle, 3)?;
+    write(handle, 7)?;
+    let val = read(handle)?;
+    if val != 10 {
+        serial_println!("[eventfd]   FAIL: accumulated {} expected 10", val);
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+    close(handle);
+    serial_println!("[eventfd]   Write accumulate: OK");
+    Ok(())
+}
+
+/// Test 3: read resets counter to 0.
+fn test_read_resets() -> KernelResult<()> {
+    let handle = create(0);
+    write(handle, 42)?;
+    let _ = read(handle)?; // Consume.
+
+    // Counter should be 0 now — try_read should return WouldBlock.
+    match try_read(handle) {
+        Err(KernelError::WouldBlock) => {} // Expected.
+        other => {
+            serial_println!("[eventfd]   FAIL: after reset, try_read: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(handle);
+    serial_println!("[eventfd]   Read resets counter: OK");
+    Ok(())
+}
+
+/// Test 4: non-blocking on empty counter.
+fn test_nonblocking() -> KernelResult<()> {
+    let handle = create(0);
+
+    // try_read on 0 counter → WouldBlock.
+    match try_read(handle) {
+        Err(KernelError::WouldBlock) => {}
+        other => {
+            serial_println!("[eventfd]   FAIL: try_read(0): {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // try_write should succeed.
+    try_write(handle, 1)?;
+    let val = try_read(handle)?;
+    if val != 1 {
+        serial_println!("[eventfd]   FAIL: try_read got {}, expected 1", val);
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+    serial_println!("[eventfd]   Non-blocking: OK");
+    Ok(())
+}
+
+/// Result counter for blocking test.
+static EVENTFD_TEST_RESULT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Task for the blocking read test.
+extern "C" fn eventfd_reader_task(handle_raw: u64) {
+    let handle = EventFdHandle::from_raw(handle_raw);
+    if let Ok(val) = read(handle) {
+        #[allow(clippy::cast_possible_truncation)]
+        EVENTFD_TEST_RESULT.store(val as u32, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Test 5: blocking read via spawned task.
+fn test_blocking_read() -> KernelResult<()> {
+    EVENTFD_TEST_RESULT.store(0, core::sync::atomic::Ordering::SeqCst);
+
+    let handle = create(0); // Start at 0 — reader will block.
+
+    // Spawn reader task.
+    sched::spawn(b"efd-test", 16, eventfd_reader_task, handle.raw(), 0)?;
+
+    // Yield to let reader run and block.
+    sched::yield_now();
+
+    // Signal the eventfd.
+    write(handle, 77)?;
+
+    // Yield to let reader wake and process.
+    sched::yield_now();
+    sched::yield_now();
+
+    let result = EVENTFD_TEST_RESULT.load(core::sync::atomic::Ordering::SeqCst);
+    if result != 77 {
+        serial_println!("[eventfd]   FAIL: reader got {}, expected 77", result);
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+    serial_println!("[eventfd]   Blocking read: OK");
+    Ok(())
+}

@@ -1,6 +1,6 @@
 //! Global Descriptor Table (GDT) and Task State Segment (TSS) setup.
 //!
-//! In 64-bit long mode the GDT is mostly vestigial — segment bases and
+//! In 64-bit long mode the GDT is mostly vestigial --- segment bases and
 //! limits are ignored for code and data segments.  But three things still
 //! require it:
 //!
@@ -24,6 +24,8 @@
 //! | 5–6   | 0x28   | TSS (16 bytes)    | 0   | Loaded via `ltr`            |
 
 use core::mem::size_of;
+use core::ptr::addr_of;
+use core::ptr::addr_of_mut;
 
 use crate::cpu;
 
@@ -120,6 +122,8 @@ pub struct TaskStateSegment {
 }
 
 impl TaskStateSegment {
+    // TSS struct is 104 bytes — the iomap_base cast always fits in u16.
+    #[allow(clippy::cast_possible_truncation)]
     const fn new() -> Self {
         Self {
             _reserved0: 0,
@@ -225,29 +229,38 @@ pub unsafe fn init() {
         //
         // RSP0: the stack the CPU switches to when an interrupt or
         // syscall transitions from ring 3 to ring 0.
-        TSS.rsp0 = PRIVILEGE_STACK.as_ptr().add(INTERRUPT_STACK_SIZE) as u64;
+        //
+        // SAFETY: We use addr_of!/addr_of_mut! to avoid creating
+        // references to mutable statics (Rust 2024 requirement).
+        let priv_stack_top = addr_of!(PRIVILEGE_STACK).cast::<u8>().add(INTERRUPT_STACK_SIZE);
+        (*addr_of_mut!(TSS)).rsp0 = priv_stack_top as u64;
 
         // IST1: dedicated double-fault stack so a kernel stack overflow
         // doesn't prevent us from handling the double fault.
-        TSS.ist1 = DOUBLE_FAULT_STACK.as_ptr().add(INTERRUPT_STACK_SIZE) as u64;
+        let df_stack_top = addr_of!(DOUBLE_FAULT_STACK).cast::<u8>().add(INTERRUPT_STACK_SIZE);
+        (*addr_of_mut!(TSS)).ist1 = df_stack_top as u64;
 
         // Build the TSS descriptor and write it into the GDT.
-        let tss_base = core::ptr::addr_of!(TSS) as u64;
+        let tss_base = addr_of!(TSS) as u64;
+        // TSS is 104 bytes; limit (103) always fits in u32.
+        #[allow(clippy::cast_possible_truncation)]
         let tss_limit = (size_of::<TaskStateSegment>() - 1) as u32;
         let (tss_low, tss_high) = make_tss_descriptor(tss_base, tss_limit);
 
-        GDT.entries[5] = tss_low;
-        GDT.entries[6] = tss_high;
+        (*addr_of_mut!(GDT)).entries[5] = tss_low;
+        (*addr_of_mut!(GDT)).entries[6] = tss_high;
 
         // Load the GDT.
+        // GDT is 7 × 8 = 56 bytes; limit (55) always fits in u16.
+        #[allow(clippy::cast_possible_truncation)]
         let gdt_ptr = GdtPointer {
             limit: (size_of::<Gdt>() - 1) as u16,
-            base: core::ptr::addr_of!(GDT) as u64,
+            base: addr_of!(GDT) as u64,
         };
 
         core::arch::asm!(
             "lgdt [{}]",
-            in(reg) &gdt_ptr,
+            in(reg) &raw const gdt_ptr,
             options(readonly, nostack, preserves_flags),
         );
 
@@ -272,6 +285,7 @@ pub unsafe fn init() {
     // STAR[63:48] = base for SYSRET       (0x10)
     //   → SYSRET SS = 0x10 + 8 = 0x18 (user data)
     //   → SYSRET CS = 0x10 + 16 = 0x20 (user code)
+    #[allow(clippy::items_after_statements)]
     const IA32_STAR: u32 = 0xC000_0081;
     let star_value: u64 = (u64::from(KERNEL_CS) << 32) | (0x10_u64 << 48);
     // SAFETY: IA32_STAR is a valid MSR on all x86_64 CPUs.
@@ -288,8 +302,9 @@ pub unsafe fn init() {
 /// handler (otherwise a nested interrupt could see a half-written RSP0).
 pub unsafe fn set_kernel_stack(stack_top: u64) {
     // SAFETY: Called under a critical section; no concurrent access.
+    // Using addr_of_mut! to avoid creating a reference to a mutable static.
     unsafe {
-        TSS.rsp0 = stack_top;
+        (*addr_of_mut!(TSS)).rsp0 = stack_top;
     }
 }
 
@@ -307,10 +322,10 @@ unsafe fn reload_segments() {
         core::arch::asm!(
             // Push the new CS selector and the return address, then far-return.
             "push {kcs:r}",       // New CS
-            "lea {tmp}, [rip + 1f]",
+            "lea {tmp}, [rip + 2f]",
             "push {tmp}",         // Return address
             "retfq",              // Far return → loads CS
-            "1:",
+            "2:",
             // Reload data segment registers.
             "mov ds, {kds:x}",
             "mov es, {kds:x}",

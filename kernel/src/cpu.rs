@@ -1,6 +1,6 @@
 //! Low-level CPU control instructions.
 //!
-//! Wrappers around privileged x86_64 instructions that the kernel uses
+//! Wrappers around privileged `x86_64` instructions that the kernel uses
 //! for interrupt management, halting, and other CPU-level operations.
 
 /// Halt the CPU until the next interrupt arrives.
@@ -143,6 +143,9 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 /// a valid value for that MSR.  Writing invalid values can crash the
 /// system or corrupt its state.
 #[inline]
+// Splitting a u64 into two u32 halves for the `wrmsr` instruction is
+// intentionally truncating — each half is a separate 32-bit operand.
+#[allow(clippy::cast_possible_truncation)]
 pub unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;

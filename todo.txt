@@ -1,2 +1,13 @@
 make a docker for the project to make it easy for people to test
 have the agents read "Bugs Rust Won't Catch _ corrode Rust Consulting.html", at least when they're working on the relevant task(s).
+
+## Known Bugs / Limitations
+
+(none currently — pcb::destroy frame leak fixed in page_table::destroy_user_address_space)
+
+## Judgment Calls
+
+- boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from
+  esp/boot/kernel (per limine.conf kernel_path: boot():/boot/kernel).  The
+  esp/EFI/BOOT/ directory is for the bootloader EFI binary, not the kernel.
+  Always copy built kernel to esp/boot/kernel.

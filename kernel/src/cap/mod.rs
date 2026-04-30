@@ -1,13 +1,30 @@
-//! Capability system.
+//! Capability system — unforgeable handles to kernel objects.
 //!
-//! Every kernel object is accessed via unforgeable capability handles
-//! stored in a per-process capability table.  No ambient authority —
-//! if a process doesn't hold a capability, it can't access the resource.
+//! Every kernel object is accessed via capability handles stored in a
+//! per-task (eventually per-process) capability table.  No ambient
+//! authority — if a task doesn't hold a capability, it can't access
+//! the resource.
+//!
+//! ## Design
+//!
+//! Modeled after Fuchsia handles and seL4 capabilities:
+//!
+//! - A **capability** is a (`resource_type`, `resource_id`, `rights`)
+//!   triple stored in a kernel-managed table.
+//! - A **capability handle** (`CapHandle`) is an opaque index into the
+//!   table.  The handle value itself conveys no information — it's just
+//!   a per-task integer.
+//! - **Rights** are a bitfield specifying what operations the holder
+//!   can perform (read, write, create, delete, etc.).
+//! - **Delegation**: a task can grant a subset of its rights to another
+//!   task.  You can't create capabilities you don't have.
+//! - **Revocation**: the kernel can revoke a capability at any time
+//!   (e.g., when a resource is destroyed).
 //!
 //! ## Capability Types (namespaces)
 //!
 //! - `fs.*`       — filesystem (read, write, create, delete, execute, metadata)
-//! - `net.*`      — networking (connect, listen, socket_rw)
+//! - `net.*`      — networking (connect, listen, `socket_rw`)
 //! - `proc.*`     — process management (launch, threads, priority, signal)
 //! - `ipc.*`      — IPC (channels, shared memory, pipes, driver comm)
 //! - `audio.*`    — audio (play, system sounds, volume)
@@ -19,9 +36,65 @@
 //! - `push.*`     — push notification registration
 //! - `hook.*`     — event hooks (filesystem, process, network, etc.)
 //! - `debug.*`    — debugging (attach, memory R/W, breakpoints, tracing)
+//!
+//! ## Current Scope
+//!
+//! This module implements the core infrastructure:
+//! - Capability handle type and rights bitfield.
+//! - Per-task capability table (global for now, per-process later).
+//! - Grant, revoke, and check operations.
+//! - Self-tests verifying the basic flow.
+//!
+//! Typed capabilities for each namespace (fs, net, proc, etc.) will
+//! be added as those subsystems are implemented.
+//!
+//! ## Lock Ordering
+//!
+//! `CAP_TABLE` does not call into the scheduler or other IPC locks.
 
-// TODO: Capability handle type.
-// TODO: Per-process capability table.
-// TODO: Capability delegation and revocation.
-// TODO: Capability-gated syscall checks.
-// TODO: Typed capability definitions for each namespace.
+pub mod rights;
+pub mod table;
+
+pub use rights::Rights;
+pub use table::{CapHandle, CapEntry, CapTable};
+
+use crate::error::KernelResult;
+use crate::serial_println;
+
+// ---------------------------------------------------------------------------
+// Resource types
+// ---------------------------------------------------------------------------
+
+/// The type of kernel resource a capability refers to.
+///
+/// Each variant corresponds to a class of kernel objects.  New
+/// variants are added as subsystems are implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ResourceType {
+    /// An IPC channel endpoint.
+    Channel = 1,
+    /// A pipe (read or write end).
+    Pipe = 2,
+    /// A shared memory region.
+    SharedMemory = 3,
+    /// An eventfd counter.
+    EventFd = 4,
+    /// A completion port.
+    CompletionPort = 5,
+    // Future: File, Directory, Process, Thread, Socket, Timer, etc.
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Run capability system self-tests.
+pub fn self_test() -> KernelResult<()> {
+    serial_println!("[cap] Running capability system self-test...");
+
+    table::self_test()?;
+
+    serial_println!("[cap] Capability system self-test PASSED");
+    Ok(())
+}

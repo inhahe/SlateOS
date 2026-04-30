@@ -7,9 +7,9 @@
 //! - Demand paging and stack growth
 //! - Swap support
 //!
-//! ## Design — 16 KiB Pages on x86_64
+//! ## Design --- 16 KiB Pages on `x86_64`
 //!
-//! x86_64 hardware only supports 4 KiB, 2 MiB, and 1 GiB page sizes.
+//! `x86_64` hardware only supports 4 KiB, 2 MiB, and 1 GiB page sizes.
 //! Our design uses 16 KiB as the *allocator* base unit: every physical
 //! frame allocation hands out 4 contiguous 4 KiB hardware pages (16 KiB
 //! total).  Page table entries still point to 4 KiB pages, but they are
@@ -25,5 +25,8 @@
 //! (internal fragmentation within a 16 KiB page).  The slab allocator
 //! for kernel heap objects mitigates this for small objects.
 
+pub mod fault;
 pub mod frame;
 pub mod heap;
+pub mod page_table;
+pub mod vma;

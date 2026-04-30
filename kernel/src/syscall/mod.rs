@@ -24,7 +24,11 @@
 //!
 //! Trivial syscall round-trip: < 200ns (Linux getpid: ~100ns).
 
-// TODO: syscall entry/exit assembly (switch stacks, save/restore regs).
-// TODO: Syscall dispatch table.
-// TODO: Versioned syscall tables.
+pub mod dispatch;
+pub mod entry;
+mod handlers;
+pub mod number;
+
+pub use dispatch::{dispatch, self_test, SyscallArgs, SyscallResult};
+
 // TODO: io_uring submission path.

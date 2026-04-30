@@ -33,12 +33,12 @@ _The minimum kernel that can run a single userspace process._
 - [ ] Initialize PCI bus enumeration
 
 ### 1.2 Memory manager
-- [ ] Physical page allocator (buddy allocator for 16 KiB pages)
-- [ ] Virtual memory manager (page tables, mapping, unmapping)
-- [ ] Kernel virtual address space layout
-- [ ] Userspace virtual address space layout
-- [ ] Demand paging (page fault handler, lazy allocation)
-- [ ] Stack growth via page fault (guard page at bottom)
+- [x] Physical page allocator (buddy allocator for 16 KiB pages)
+- [x] Virtual memory manager (page tables, mapping, unmapping)
+- [x] Kernel virtual address space layout
+- [x] Userspace virtual address space layout
+- [x] Demand paging (page fault handler, lazy allocation)
+- [x] Stack growth via page fault (guard page at bottom)
 - [ ] Swap file support (not partition)
   - [ ] zswap/zram compressed swap (recommended for desktop)
   - [ ] Swappiness tunable (default 10-20 for desktop)
@@ -48,16 +48,16 @@ _The minimum kernel that can run a single userspace process._
 
 ### 1.3 Scheduler
 _Define scheduler trait interface first, implement one scheduler behind it._
-- [ ] Scheduler trait interface:
+- [x] Scheduler trait interface:
   - `pick_next_task(cpu) -> task`
   - `enqueue_task(task)`
   - `dequeue_task(task)`
   - `task_tick(task)` (timer interrupt)
   - `balance_load()` (periodic)
-- [ ] Priority round-robin scheduler (default):
-  - [ ] 32 or 64 priority levels, real-time levels at top
-  - [ ] Round-robin within each priority level
-  - [ ] Configurable time slices per level (shorter = higher priority)
+- [-] Priority round-robin scheduler (default):
+  - [x] 32 or 64 priority levels, real-time levels at top
+  - [x] Round-robin within each priority level
+  - [x] Configurable time slices per level (shorter = higher priority)
   - [ ] Per-CPU run queues
   - [ ] Work stealing from longest queue when idle (prefer same NUMA node)
   - [ ] Priority inheritance on mutex contention
@@ -67,37 +67,37 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [ ] Workload profile presets for scheduler parameters
 
 ### 1.4 IPC and syscalls
-- [ ] Syscall dispatch (many specialized syscalls, not few generic ones)
-- [ ] Versioned syscall tables
-- [ ] Channel IPC (Fuchsia-style, structured message-passing with capability transfer)
-- [ ] One-way pipes (byte streams)
-- [ ] Shared memory regions
-- [ ] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)
-- [ ] IOCP-like completion port / unified wait:
-  - [ ] Register/unregister waitable objects with arbitrary user-data int
-  - [ ] Wait on: I/O completion, timers, process exit, eventfd counters, semaphores, channel messages
+- [x] Syscall dispatch (many specialized syscalls, not few generic ones)
+- [x] Versioned syscall tables
+- [x] Channel IPC (Fuchsia-style, structured message-passing with capability transfer)
+- [x] One-way pipes (byte streams)
+- [x] Shared memory regions
+- [x] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)
+- [x] IOCP-like completion port / unified wait:
+  - [x] Register/unregister waitable objects with arbitrary user-data int
+  - [-] Wait on: I/O completion, timers, process exit, eventfd counters, semaphores, channel messages
 - [ ] io_uring-style submission queue (optional async path for batch I/O)
-- [ ] Futexes (for userspace synchronization without syscall in uncontended case)
+- [x] Futexes (for userspace synchronization without syscall in uncontended case)
 - [ ] Per-process namespace support (mount table remapping for sandboxing)
 
 ### 1.5 Capability / security model
-- [ ] Per-process capability table (unforgeable handles to kernel objects)
-- [ ] Capability delegation (parent passes subset to child, can't create new ones)
+- [x] Per-process capability table (unforgeable handles to kernel objects)
+- [x] Capability delegation (parent passes subset to child, can't create new ones)
 - [ ] User/group model with named capability groups
 - [ ] File/directory capability tags (AND-composition between groups, OR within a group)
 - [ ] Resource limits as cgroup-like controls (set at launch, kernel-enforced)
-- [ ] Capability-gated syscalls
+- [-] Capability-gated syscalls
 - [ ] "Request capability from user" dialog mechanism
 - [ ] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
 - [ ] Enable LLVM CFI as default for C/C++ compilation
 
 ### 1.6 Process management
-- [ ] ELF binary loader
-- [ ] Process creation / destruction
-- [ ] Thread creation / destruction
-- [ ] fork equivalent (or better: posix_spawn-style that avoids fork's problems)
-- [ ] exec equivalent
-- [ ] Hardware exception → language-level exception (SEH-style, not Unix signals)
+- [x] ELF binary loader
+- [x] Process creation / destruction
+- [x] Thread creation / destruction
+- [x] fork equivalent (or better: posix_spawn-style that avoids fork's problems)
+- [x] exec equivalent
+- [-] Hardware exception → language-level exception (SEH-style, not Unix signals)
 - [ ] Structured shutdown via IPC message, not Unix signals
 - [ ] Process credential / capability management
 
@@ -123,7 +123,8 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [ ] Storage (NVMe, AHCI/SATA)
 - [ ] USB host controller (xHCI)
 - [ ] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
-- [ ] Timer (HPET, APIC timer)
+- [-] Timer (HPET, APIC timer)
+  - [x] Local APIC timer (calibrated via PIT, 100 Hz periodic, preemptive scheduling)
 - [ ] RTC (real-time clock)
 
 ### 2.3 Filesystem

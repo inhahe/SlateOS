@@ -20,17 +20,12 @@
 //! ## References
 //!
 //! - Limine protocol spec: <https://github.com/limine-bootloader/limine/blob/trunk/PROTOCOL.md>
-//! - `limine` crate: <https://docs.rs/limine>
-//!
-//! **Note:** The API calls below target `limine` crate 0.3.x.  If the
-//! crate version changes, method names or module paths may need updating.
-//! Check <https://docs.rs/limine> for the exact API of the version in use.
 
-use limine::BaseRevision;
-use limine::request::{
-    FramebufferRequest, HhdmRequest, MemoryMapRequest,
-    RequestsEndMarker, RequestsStartMarker,
+use crate::limine::{
+    BaseRevision, FramebufferResponse, HhdmResponse, LimineRequest, MemmapEntry,
+    MemmapResponse, RequestsEndMarker, RequestsStartMarker, memmap_type,
 };
+use crate::serial_println;
 
 // ---------------------------------------------------------------------------
 // Protocol markers and requests
@@ -38,17 +33,17 @@ use limine::request::{
 
 /// Start-of-requests marker.  Must be the first item in `.requests_start_marker`.
 #[used]
-#[link_section = ".requests_start_marker"]
+#[unsafe(link_section = ".requests_start_marker")]
 static REQUESTS_START: RequestsStartMarker = RequestsStartMarker::new();
 
 /// End-of-requests marker.  Must be the last item in `.requests_end_marker`.
 #[used]
-#[link_section = ".requests_end_marker"]
+#[unsafe(link_section = ".requests_end_marker")]
 static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
 /// Protocol base revision.  Tells Limine which protocol version we speak.
 #[used]
-#[link_section = ".requests"]
+#[unsafe(link_section = ".requests")]
 static BASE_REVISION: BaseRevision = BaseRevision::with_revision(3);
 
 /// Request: physical memory map.
@@ -57,8 +52,8 @@ static BASE_REVISION: BaseRevision = BaseRevision::with_revision(3);
 /// ACPI reclaimable, etc.).  This is the foundation for the physical
 /// page allocator.
 #[used]
-#[link_section = ".requests"]
-static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+#[unsafe(link_section = ".requests")]
+static MEMORY_MAP_REQUEST: LimineRequest<MemmapResponse> = LimineRequest::MEMMAP;
 
 /// Request: Higher Half Direct Map offset.
 ///
@@ -66,8 +61,8 @@ static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 /// We use this to convert physical addresses to virtual addresses
 /// without setting up our own page tables for the direct map.
 #[used]
-#[link_section = ".requests"]
-static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+#[unsafe(link_section = ".requests")]
+static HHDM_REQUEST: LimineRequest<HhdmResponse> = LimineRequest::HHDM;
 
 /// Request: framebuffer information.
 ///
@@ -75,8 +70,8 @@ static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 /// Limine sets one up.  This lets us display boot text on real hardware
 /// where serial output isn't visible.
 #[used]
-#[link_section = ".requests"]
-static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+#[unsafe(link_section = ".requests")]
+static FRAMEBUFFER_REQUEST: LimineRequest<FramebufferResponse> = LimineRequest::FRAMEBUFFER;
 
 // ---------------------------------------------------------------------------
 // Public accessors
@@ -87,6 +82,11 @@ pub struct BootInfo {
     /// Offset for the Higher Half Direct Map.
     /// Virtual address = `hhdm_offset + physical_address`.
     pub hhdm_offset: u64,
+    /// Physical memory map from the bootloader.
+    ///
+    /// Entries are sorted by base address and do not overlap.  The frame
+    /// allocator uses this to discover usable physical memory.
+    pub memory_map: &'static [&'static MemmapEntry],
 }
 
 /// Parse Limine responses and extract boot information.
@@ -94,6 +94,10 @@ pub struct BootInfo {
 /// Returns `None` if any critical response is missing (which means
 /// the bootloader didn't understand our requests — should never happen
 /// with a compatible Limine version).
+// All arithmetic in this function is for display-only logging (KiB/MiB
+// conversions, address range endpoints).  Overflow is handled via
+// saturating_add where it matters; the divisions are by constants.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn parse_boot_info() -> Option<BootInfo> {
     // Verify the bootloader understood our base revision.
     if !BASE_REVISION.is_supported() {
@@ -102,27 +106,28 @@ pub fn parse_boot_info() -> Option<BootInfo> {
     }
 
     // HHDM offset — needed for physical-to-virtual address translation.
-    let hhdm_response = HHDM_REQUEST.get_response()?;
-    let hhdm_offset = hhdm_response.offset();
+    let hhdm_response = HHDM_REQUEST.response()?;
+    let hhdm_offset = hhdm_response.offset;
     serial_println!("[boot] HHDM offset: {:#x}", hhdm_offset);
 
     // Memory map — log it and pass to the frame allocator.
-    let mmap_response = MEMORY_MAP_REQUEST.get_response()?;
-    serial_println!("[boot] Memory map ({} entries):", mmap_response.entries().len());
+    let mmap_response = MEMORY_MAP_REQUEST.response()?;
+    let entries = mmap_response.entries();
+    serial_println!("[boot] Memory map ({} entries):", entries.len());
     let mut total_usable: u64 = 0;
-    for entry in mmap_response.entries() {
-        let kind = match entry.entry_type {
-            limine::memory_map::EntryType::USABLE => {
+    for entry in entries {
+        let kind = match entry.type_ {
+            memmap_type::USABLE => {
                 total_usable = total_usable.saturating_add(entry.length);
                 "usable"
             }
-            limine::memory_map::EntryType::RESERVED => "reserved",
-            limine::memory_map::EntryType::ACPI_RECLAIMABLE => "ACPI reclaimable",
-            limine::memory_map::EntryType::ACPI_NVS => "ACPI NVS",
-            limine::memory_map::EntryType::BAD_MEMORY => "bad memory",
-            limine::memory_map::EntryType::BOOTLOADER_RECLAIMABLE => "bootloader reclaimable",
-            limine::memory_map::EntryType::KERNEL_AND_MODULES => "kernel+modules",
-            limine::memory_map::EntryType::FRAMEBUFFER => "framebuffer",
+            memmap_type::RESERVED => "reserved",
+            memmap_type::ACPI_RECLAIMABLE => "ACPI reclaimable",
+            memmap_type::ACPI_NVS => "ACPI NVS",
+            memmap_type::BAD_MEMORY => "bad memory",
+            memmap_type::BOOTLOADER_RECLAIMABLE => "bootloader reclaimable",
+            memmap_type::EXECUTABLE_AND_MODULES => "kernel+modules",
+            memmap_type::FRAMEBUFFER => "framebuffer",
             _ => "unknown",
         };
         serial_println!(
@@ -133,21 +138,28 @@ pub fn parse_boot_info() -> Option<BootInfo> {
             entry.length / 1024
         );
     }
-    serial_println!("[boot] Total usable memory: {} MiB", total_usable / (1024 * 1024));
+    serial_println!(
+        "[boot] Total usable memory: {} MiB",
+        total_usable / (1024 * 1024)
+    );
 
     // Framebuffer (optional — log if present).
-    if let Some(fb_response) = FRAMEBUFFER_REQUEST.get_response() {
-        if let Some(fb) = fb_response.framebuffers().next() {
+    if let Some(fb_response) = FRAMEBUFFER_REQUEST.response() {
+        let framebuffers = fb_response.framebuffers();
+        if let Some(fb) = framebuffers.first() {
             serial_println!(
                 "[boot] Framebuffer: {}x{} @ {:#x} (pitch={}, bpp={})",
-                fb.width(),
-                fb.height(),
-                fb.addr() as u64,
-                fb.pitch(),
-                fb.bpp()
+                fb.width,
+                fb.height,
+                fb.address as u64,
+                fb.pitch,
+                fb.bpp
             );
         }
     }
 
-    Some(BootInfo { hhdm_offset })
+    Some(BootInfo {
+        hhdm_offset,
+        memory_map: entries,
+    })
 }

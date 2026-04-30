@@ -6,7 +6,6 @@ authors = ["AI-Generated OS Project"]
 description = "Microkernel for x86_64 desktop OS"
 
 [dependencies]
-limine = "0.3"
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex", "lazy", "once"] }
 bitflags = "2"
 log = "0.4"

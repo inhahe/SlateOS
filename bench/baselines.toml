@@ -1,79 +1,157 @@
 # Performance baselines for critical kernel subsystems.
 #
-# Each section records a measured or published reference latency from
-# Linux, Fuchsia, seL4, or similar, plus our target.  After implementing
-# a subsystem, benchmark it and compare to these numbers.
+# Each section records a measured reference from Linux on the dev machine
+# (WSL2 Ubuntu, same CPU) plus our target.  WSL2 runs a real Linux
+# kernel inside Hyper-V, so the numbers include a thin virtualization
+# layer — same as our kernel under QEMU-WHPX.  This makes the
+# comparison fair: both are hardware-virtualized on the same CPU.
 #
-# Sources should be specific: paper name, kernel version, or "measured
-# on dev machine, Linux X.Y, <hardware description>".
+# Cycle counts (via rdtsc) are hardware-independent and the most
+# reliable metric.  Nanosecond values are derived from the base clock
+# and should be treated as approximate.
+#
+# Measurement hardware:
+#   CPU:    Intel Core i7-8700K @ 3.70 GHz (Coffee Lake, 6C/12T)
+#   Linux:  6.6.87-microsoft-standard-WSL2 (Ubuntu)
+#   Date:   2026-04-29
 
 [syscall_trivial]
-description = "Trivial syscall round-trip (e.g., getpid)"
-linux_ns    = 100
-target_ns   = 200
-source      = "Typical Linux 6.x on modern x86_64 desktop"
+description  = "Trivial syscall round-trip (getpid)"
+linux_cycles = 2589
+linux_ns     = 638
+target_ns    = 1200
+target_cycles = 4800
+source       = "Measured: WSL2 Ubuntu, i7-8700K, 10M iterations"
+notes        = """
+WSL2 adds Hyper-V VM exit/entry overhead (~200-400 cycles). \
+Bare-metal Linux on this CPU would be ~200-400ns. \
+Our target allows 2x the WSL2 measurement since we're also under \
+a hypervisor and are a new OS — beating Linux isn't the first goal, \
+being in the same ballpark is."""
 
 [ipc_channel_roundtrip]
-description = "Channel IPC send+recv round-trip"
-fuchsia_us  = 1.5
-l4_us       = 0.8
-target_us   = 2.0
-source      = "Fuchsia perf docs; seL4 published benchmarks"
+description   = "Channel IPC send+recv round-trip"
+fuchsia_us    = 1.5
+l4_us         = 0.8
+target_us     = 3.0
+source        = "Fuchsia perf docs; seL4 published benchmarks"
+notes         = """
+No local measurement yet — requires our IPC to be built first. \
+Fuchsia/L4 numbers are from published docs on different hardware. \
+Will be replaced with WSL2 pipe round-trip / 2 as a proxy once measured. \
+The real comparison is cycles, not wall-clock time."""
 
 [context_switch]
-description = "Full context switch between two threads"
-linux_us    = 2.0
-target_us   = 5.0
-source      = "Linux 6.x, typical desktop hardware (1-3us range)"
+description   = "Full context switch between two threads"
+# pipe round-trip measures 2 syscalls + 2 context switches + pipe overhead.
+# Pure context switch is lower. Linux lmbench on bare metal: 1-3us.
+linux_pipe_roundtrip_ns = 69281
+target_us     = 10.0
+source        = "Measured: WSL2 pipe bounce, i7-8700K, 500K iterations"
+notes         = """
+The pipe round-trip (69us) is inflated by WSL2 VM overhead and pipe \
+buffer management. Pure context switch on this CPU bare-metal is likely \
+3-5us. Our target is generous (10us) for initial implementation; \
+will tighten after profiling."""
 
 [page_fault_anon]
-description = "Anonymous page fault (demand paging)"
-linux_us    = 3.0
-target_us   = 10.0
-source      = "Linux 6.x anonymous fault, 2-5us typical"
+description   = "Anonymous page fault (demand paging)"
+linux_cycles  = 14314
+linux_ns      = 3943
+target_cycles = 30000
+target_ns     = 8000
+source        = "Measured: WSL2 Ubuntu, i7-8700K, 50K/100K faults"
+notes         = """
+Cycle count is the reliable metric here. Includes TLB miss, page table \
+walk, page zeroing, and PTE installation. Our 16 KiB pages zero 4x more \
+memory per fault, so expect ~1.5-2x Linux per fault but fewer total \
+faults for sequential workloads."""
 
 [page_alloc_free]
-description = "Physical page allocate + free cycle"
-linux_ns    = 300
-target_ns   = 1000
-source      = "Linux buddy allocator, 100-500ns typical"
+description  = "Physical page allocate + free cycle"
+linux_ns     = 300
+target_ns    = 1000
+target_cycles = 3700
+source       = "Linux buddy allocator published range: 100-500ns"
+notes        = """
+No local measurement yet — requires kernel instrumentation. \
+Will be benchmarked host-side via cargo bench against the buddy \
+allocator data structure directly (no virtualization needed). \
+This is the benchmark most amenable to host-side testing."""
 
 [heap_alloc_small]
-description = "Kernel heap allocation, common small size (64-256 bytes)"
-jemalloc_ns = 35
-target_ns   = 200
-source      = "jemalloc small alloc 20-50ns typical"
+description  = "Kernel heap allocation, common small size (64 bytes)"
+linux_ns     = 68
+target_ns    = 200
+source       = "Measured: WSL2 Ubuntu, i7-8700K, glibc malloc(64), 100K allocs"
+notes        = """
+glibc malloc is highly optimized with thread-local caches. Our kernel \
+slab allocator targets similar design (per-CPU caches, size classes). \
+Host-side cargo bench is the right way to tune this."""
 
 [futex_uncontended]
 description = "Futex fast path (uncontended, pure userspace CAS)"
 linux_ns    = 10
 target_ns   = 10
-source      = "By design: uncontended path is pure userspace, no syscall"
+source      = "By design: uncontended path is pure userspace atomic CAS, no syscall"
 
 [futex_contended_wake]
 description = "Futex contended wake (kernel involvement)"
 linux_us    = 2.0
-target_us   = 3.0
-source      = "Linux 6.x, 1-3us typical"
+target_us   = 5.0
+source      = "Linux 6.x published range: 1-3us"
 
 [iouring_sqe_submit]
 description = "io_uring single SQE submission"
 linux_ns    = 150
-target_ns   = 200
-source      = "Linux io_uring, 100-200ns per SQE typical"
+target_ns   = 300
+source      = "Linux io_uring published range: 100-200ns per SQE"
 
 [interrupt_dispatch]
 description = "Total ISR dispatch latency"
 target_us   = 10.0
+target_cycles = 37000
 source      = "Design target: < 10us including deferred work setup"
 
 [vfs_path_component]
 description = "Single path component lookup (cached)"
 linux_ns    = 350
-target_ns   = 500
-source      = "Linux dcache lookup, 200-500ns per component"
+target_ns   = 700
+source      = "Linux dcache lookup published range: 200-500ns per component"
 
 [compositor_frame_4k]
 description = "Full desktop composite at 4K resolution"
 target_ms   = 2.0
 source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
+
+# -------------------------------------------------------------------------
+# Measurement methodology notes
+# -------------------------------------------------------------------------
+#
+# HOW TO GET BASELINE NUMBERS:
+#
+# 1. WSL2 (same CPU, Linux kernel under Hyper-V)
+#    Run microbenchmarks directly. Both our kernel (QEMU-WHPX) and
+#    WSL2 Linux run under a hypervisor on the same CPU, making the
+#    comparison fair. This is the primary method.
+#
+# 2. rdtsc cycle counting (hardware-independent)
+#    Measures actual CPU cycles consumed, unaffected by virtualization
+#    scheduling overhead. Use for micro-benchmarks inside the kernel.
+#    Compare cycle counts, not wall-clock time.
+#
+# 3. Host-side cargo bench (no virtualization)
+#    For algorithms (buddy allocator, scheduler pick_next, path lookup):
+#    benchmark the data structure directly as a Rust library on the host.
+#    No kernel boot, no emulation, exact native performance.
+#    This is the most accurate method for pure-algorithm benchmarks.
+#
+# 4. Relative comparisons (any environment)
+#    "Is version B faster than version A?" is valid under any consistent
+#    test environment. Use for optimization validation and regression
+#    detection.
+#
+# 5. Complexity validation (emulation-independent)
+#    Vary input size (N tasks, N pages, N path components) and verify
+#    O(1)/O(log n) scaling holds. Catches algorithmic regressions
+#    regardless of absolute speed.

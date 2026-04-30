@@ -27,6 +27,42 @@ This OS is built entirely by AI. The human operator does not review code line-by
 
 When AI finishes a feature that has aspects requiring human manual testing, it must document what needs testing and what specifically to look for in `manual-testing.txt`. Not in commit messages (too easy to miss), and not in `todo.txt` (that is the human operator's personal file — AI does not write to it).
 
+### Benchmark Targets and Methodology
+
+Every performance-critical subsystem has a measured baseline and a concrete target. These live in `bench/baselines.toml` — that file is the single source of truth for what "fast enough" means. The targets are not aspirational guesses; they are derived from actual measurements on the dev machine (Intel i7-8700K @ 3.70 GHz).
+
+**How baselines are obtained:**
+
+1. **WSL2 measurement (primary method).** Run microbenchmarks directly under WSL2 on the dev machine. WSL2 runs a real Linux kernel inside Hyper-V — the same hardware virtualization layer our kernel runs under (QEMU with WHPX). This makes the comparison fair: both are hardware-virtualized on the same CPU. Cycle counts via `rdtsc` are the most reliable metric; nanosecond values are derived from the base clock and should be treated as approximate.
+
+2. **Host-side `cargo bench` (for algorithms).** For pure data structures and algorithms (buddy allocator, scheduler `pick_next_task`, path lookup, slab allocator), benchmark the Rust code directly on the host as a library — no kernel boot, no virtualization overhead. This is the most accurate method for tuning algorithmic performance.
+
+3. **`rdtsc` cycle counting inside the kernel.** For in-kernel benchmarks (syscall round-trip, page fault handling, IPC), use `rdtsc`/`rdtscp` to measure actual CPU cycles consumed. Compare cycle counts across environments, not wall-clock time — cycles are hardware-independent and unaffected by virtualization scheduling jitter.
+
+4. **Relative comparison (any environment).** "Is version B faster than version A?" is valid under any consistent test environment. Use for optimization validation and regression detection after initial implementation.
+
+5. **Complexity validation.** Vary input size (N tasks, N pages, N path components) and verify O(1)/O(log n) scaling holds. Catches algorithmic regressions regardless of absolute speed.
+
+**When implementing a performance-critical subsystem:**
+- Check `bench/baselines.toml` for the target before writing code.
+- Write the benchmark first (or alongside), not after.
+- After implementation, run the benchmark and record the result. If it exceeds the target by more than 10%, profile and optimize before moving on.
+- When you apply a non-obvious optimization, add a code comment documenting what it does, why it helps, and the measured improvement (e.g., `// OPT: per-CPU free lists avoid atomic contention. Benchmark: 800ns → 150ns.`).
+- Update `bench/baselines.toml` if you obtain better baseline measurements or need to adjust targets based on architectural reality (e.g., our 16 KiB pages zero 4x more memory per page fault than Linux's 4 KiB pages — the per-fault target is higher, but total faults for sequential workloads are lower).
+
+**Subsystems with benchmark targets** (see `bench/baselines.toml` for exact numbers):
+- Syscall dispatch (trivial round-trip)
+- IPC channel send/recv round-trip
+- Context switch
+- Anonymous page fault (demand paging)
+- Physical page alloc/free
+- Kernel heap allocation (small sizes)
+- Futex fast path and contended wake
+- io_uring SQE submission
+- Interrupt dispatch latency
+- VFS path component lookup (cached)
+- Compositor frame time at 4K
+
 ### Design Principles (non-negotiable)
 
 - **No AI features in the OS** (exceptions: speech I/O, opt-in ML image/video indexer). **No ads.**
@@ -93,18 +129,18 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 ### 1.2 Memory Manager
 
 #### Physical Page Allocator
-- [ ] Buddy allocator for 16 KiB base pages
+- [x] Buddy allocator for 16 KiB base pages
 - [ ] Per-CPU free lists to avoid cross-CPU atomic contention
 - [ ] Benchmark: target < 1us per alloc/free (Linux buddy: 100-500ns)
 
 #### Virtual Memory
-- [ ] Page table management (map, unmap, protect)
-- [ ] Kernel virtual address space layout
+- [x] Page table management (map, unmap, protect)
+- [x] Kernel virtual address space layout
 - [ ] Userspace virtual address space layout
 
 #### Demand Paging and Stack
-- [ ] Page fault handler for demand paging
-- [ ] Lazy allocation (allocate virtual range, commit physical on touch)
+- [x] Page fault handler for demand paging
+- [x] Lazy allocation (allocate virtual range, commit physical on touch)
 - [ ] Stack growth via page fault
 - [ ] Guard page at bottom of stack (clean crash on overflow)
 - [ ] Configurable maximum stack size (default 8-64 MiB, programs can request more or unlimited)
@@ -123,7 +159,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [ ] OOM handling: graceful, no silent kills — fail the allocation
 
 #### Kernel Heap
-- [ ] Slab allocator for common kernel object sizes
+- [x] Slab allocator for common kernel object sizes
 - [ ] Benchmark: target < 200ns for common sizes (jemalloc: 20-50ns)
 
 #### Tunables and Profiles
@@ -135,11 +171,11 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 
 ### 1.3 Scheduler
 
-- [ ] Scheduler trait interface (pick_next_task, enqueue, dequeue, task_tick, balance_load)
-- [ ] Priority round-robin scheduler (default implementation):
-  - [ ] 32 or 64 priority levels, real-time levels at top
-  - [ ] Round-robin within each priority level
-  - [ ] Configurable time slices per level (shorter = higher priority for lower latency)
+- [x] Scheduler trait interface (pick_next_task, enqueue, dequeue, task_tick, balance_load)
+- [-] Priority round-robin scheduler (default implementation):
+  - [x] 32 or 64 priority levels, real-time levels at top
+  - [x] Round-robin within each priority level
+  - [x] Configurable time slices per level (shorter = higher priority for lower latency)
   - [ ] Per-CPU run queues
   - [ ] Work stealing from longest queue when idle (prefer same NUMA node)
   - [ ] Priority inheritance on mutex contention
@@ -155,31 +191,31 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 ### 1.4 IPC and Syscalls
 
 #### Syscall Dispatch
-- [ ] Syscall entry/exit path
-- [ ] Many specialized syscalls (Linux style, individual syscall numbers)
-- [ ] Versioned syscall tables for ABI stability
-- [ ] Syscall number ranges: kernel-core 0-199, kernel-ipc 200-399, kernel-security 400-499, kernel-process 500-599, fs 600-799, net 800-999
+- [ ] Syscall entry/exit path (STAR/LSTAR/SFMASK MSR setup — needs ring 3)
+- [x] Many specialized syscalls (Linux style, individual syscall numbers)
+- [x] Versioned syscall tables for ABI stability
+- [x] Syscall number ranges: kernel-core 0-199, kernel-ipc 200-399, kernel-security 400-499, kernel-process 500-599, fs 600-799, net 800-999
 - [ ] Benchmark: target < 200ns for trivial syscall (Linux getpid: ~100ns)
 
 #### Channel IPC (Primary IPC)
-- [ ] Kernel-managed channel objects with send/receive queues
-- [ ] Structured message passing
+- [x] Kernel-managed channel objects with send/receive queues
+- [x] Structured message passing
 - [ ] Capability handle transfer in messages
-- [ ] Asynchronous (buffered) send — sender writes and continues, receiver reads when ready
+- [x] Asynchronous (buffered) send — sender writes and continues, receiver reads when ready
 - [ ] Synchronous (rendezvous) send as option — sender blocks until receiver reads, no buffering needed (L4-style, faster for request/response patterns)
-- [ ] Backpressure handling (buffer-full conditions)
+- [x] Backpressure handling (buffer-full conditions)
 - [ ] Zero-copy for large messages (page ownership transfer / page flipping, not data copy)
 - [ ] Fast-path register passing for tiny messages (a few words) — pass in CPU registers during context switch, no memory access (L4 optimization)
 - [ ] Benchmark: target < 2us round-trip (Fuchsia: 1-2us, L4: 0.5-1us)
 
 #### Other IPC Mechanisms
-- [ ] One-way pipes (byte streams, no two-way pipes)
+- [x] One-way pipes (byte streams, no two-way pipes)
   - [ ] Splice/vmsplice optimization: move pages between pipe and file handle (or between pipes) without copying to userspace. vmsplice maps userspace pages directly into pipe buffer. Makes pipes nearly zero-copy for large transfers.
-- [ ] Shared memory regions (fastest IPC — direct memory reads/writes after setup)
-  - [ ] Lock-free ring buffer support for shared memory
-  - [ ] Futex-based signaling for sleep/wake on shared memory
-  - [ ] Sequence locks (seqlocks) for one-writer-many-readers pattern — readers never block the writer, no locks at all
-- [ ] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)
+- [x] Shared memory regions (fastest IPC — direct memory reads/writes after setup)
+  - [ ] Lock-free ring buffer support for shared memory (userspace library)
+  - [x] Futex-based signaling for sleep/wake on shared memory (via futex subsystem)
+  - [ ] Sequence locks (seqlocks) for one-writer-many-readers pattern (userspace library)
+- [x] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)
 
 #### Timer Primitives
 - [ ] Monotonic timers: "wake me in N nanoseconds" — unaffected by clock changes, for timeouts/intervals
@@ -188,9 +224,9 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [ ] Recurring wall-clock timers (e.g., "every weekday at 09:00 local") handled correctly across DST boundaries
 
 #### Unified Wait / IOCP-like Completion Port
-- [ ] Register/unregister waitable objects (not limited to file descriptors)
-- [ ] Arbitrary user-data integer per registration (for app-side dispatch)
-- [ ] Wait on: I/O completion, timers, process/thread exit, semaphores/mutexes, channel messages, eventfd counters
+- [x] Register/unregister waitable objects (not limited to file descriptors)
+- [x] Arbitrary user-data integer per registration (for app-side dispatch)
+- [-] Wait on: I/O completion, timers, process/thread exit, semaphores/mutexes, channel messages, eventfd counters
 - [ ] Benchmark: sub-microsecond for ready events
 
 #### io_uring-style Submission Queue
@@ -202,8 +238,8 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [ ] Benchmark: target ~100-200ns per SQE submission (match Linux io_uring)
 
 #### Futexes
-- [ ] Userspace fast path: pure atomic CAS, no syscall for uncontended case
-- [ ] Kernel slow path: sleep/wake on contention
+- [ ] Userspace fast path: pure atomic CAS, no syscall for uncontended case (needs ring 3)
+- [x] Kernel slow path: sleep/wake on contention (futex_wait/futex_wake syscalls)
 - [ ] Benchmark: uncontended = no syscall; contended wake target 1-3us
 
 #### Event Loop Integration
@@ -217,9 +253,9 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 ### 1.5 Capability / Security Model
 
 #### Core Capability System
-- [ ] Per-process capability table (unforgeable handles to kernel objects)
-- [ ] Capability delegation (parent passes subset to child, cannot create new capabilities)
-- [ ] Capability-gated syscalls
+- [x] Per-process capability table (unforgeable handles to kernel objects)
+- [x] Capability delegation (parent passes subset to child, cannot create new capabilities)
+- [-] Capability-gated syscalls
 
 #### User/Group Model
 - [ ] Users with per-user capability sets
@@ -364,10 +400,10 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 
 ### 1.6 Process Management
 
-- [ ] ELF binary loader
-- [ ] Process creation/destruction
-- [ ] Thread creation/destruction
-- [ ] posix_spawn-style process creation (avoid fork's problems)
+- [x] ELF binary loader
+- [x] Process creation/destruction
+- [x] Thread creation/destruction
+- [x] posix_spawn-style process creation (avoid fork's problems)
 - [ ] exec equivalent
 - [ ] Hardware exceptions → language-level exceptions (SEH-style)
   - [ ] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
@@ -1118,6 +1154,385 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] Store messages for apps not currently running, deliver on next launch
 
 _Push notifications use standard channel IPC + RPC serialization (Cap'n Proto/FlatBuffers). No separate wire format. Daemon maintains server connections, delivers via channels, stores for offline apps._
+
+### 4.13 Program Automation Framework
+
+Programs expose events (observable hooks) and actions (invocable functions) through a standard automation protocol. This enables shell scripting, inter-program workflows, accessibility tools, and macro recording — all through the same channel-based IPC the OS already uses.
+
+#### Core Infrastructure
+
+- [ ] Automation channel: every automatable program registers a well-known channel via the service registry (§4.11)
+- [ ] Three meta-commands on the automation channel:
+  - `describe` — returns full schema (all events, actions, properties, with types and documentation)
+  - `subscribe <event_name>` — start receiving notifications when the named event fires
+  - `invoke <action_name> [params...]` — execute a named action with typed parameters, returns result
+- [ ] Self-describing schema format: each event/action includes name, human-readable description, typed parameters (name + type + description + optional/required + default), return type, and version (for backwards compatibility)
+- [ ] Schema versioning: programs declare automation API version; clients can request specific versions
+- [ ] `libautomation` standard library (Rust crate + Python package via fastpy) that handles:
+  - Registering the automation channel with the service registry
+  - Parsing meta-commands and dispatching to user-registered handlers
+  - Schema generation from annotated function signatures (derive macro in Rust, decorator in Python)
+  - Event emission (broadcast to all subscribers)
+  - Typed parameter validation before dispatch
+- [ ] Capability-gated: accessing a program's automation channel requires `automation.connect` capability; subscribing to events requires `automation.subscribe`; invoking actions requires `automation.invoke`. Programs can require additional capabilities for sensitive actions (e.g., `automation.invoke.destructive` for actions that delete data)
+
+#### Automatic Lifecycle Events (all programs get these for free)
+
+Every program using `libautomation` automatically exposes these events without any extra code:
+
+| Event | Fires when | Payload |
+|-------|------------|---------|
+| `lifecycle.launched` | Program starts and automation channel is ready | `{pid, timestamp}` |
+| `lifecycle.focused` | Program window gains focus | `{window_id, timestamp}` |
+| `lifecycle.unfocused` | Program window loses focus | `{window_id, timestamp}` |
+| `lifecycle.minimized` | Program window is minimized | `{window_id, timestamp}` |
+| `lifecycle.restored` | Program window is restored from minimize | `{window_id, timestamp}` |
+| `lifecycle.closing` | Program is about to close (can be subscribed to for cleanup) | `{pid, reason, timestamp}` |
+| `lifecycle.idle` | No user input for configurable duration | `{idle_seconds, timestamp}` |
+| `lifecycle.active` | User input resumes after idle | `{timestamp}` |
+
+#### Shell Integration
+
+- [ ] `on` keyword in the shell for event-driven scripting:
+  ```
+  on chat.message_received --from "Alice" { notify "Message from Alice: $event.text" }
+  on media.track_changed { log "$event.artist - $event.title" >> ~/music-log.txt }
+  on lifecycle.closing --program "text-editor" { invoke text-editor document.save_all }
+  ```
+- [ ] `invoke` shell builtin for calling actions:
+  ```
+  invoke chat send_message --to "Bob" --text "Hello from a script"
+  invoke media set_volume --level 50
+  invoke text-editor document.open --path ~/notes.txt
+  ```
+- [ ] `automate` CLI tool:
+  - `automate list` — list all programs currently exposing automation channels
+  - `automate describe <program>` — print full schema for a program
+  - `automate describe <program> <event-or-action>` — print details for one item
+  - `automate subscribe <program> <event>` — stream events to stdout (for piping)
+  - `automate invoke <program> <action> [args...]` — invoke and print result
+  - `automate record` — record user actions across programs into a replayable script
+  - `automate replay <script>` — replay a recorded automation script
+
+#### Standard Naming Conventions
+
+The tables below are **suggested conventions**, not an exhaustive list. Programs can define any events, actions, and properties they want — these are just the recommended names for common operations in common program categories. The benefit of following them: scripts and tools written against the standard names work across any program that implements them. A script that reacts to `media.track_changed` works with every media player that follows the convention, without per-app special-casing.
+
+Programs are free to add domain-specific events and actions beyond what's listed here. A video editor might expose `timeline.clip_added`, a 3D modeling app might expose `scene.object_selected` — there's no restriction. The conventions simply ensure that the *obvious* operations have *predictable* names.
+
+All automation names use `snake_case`. Events describe what happened (past tense or present continuous). Actions describe what to do (imperative). Properties describe current state (noun or adjective). Names are organized into dot-separated namespaces.
+
+##### Universal (all programs)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `lifecycle.*` | See automatic lifecycle events above |
+| Event | `error.occurred` | `{code, message, severity, context}` |
+| Event | `preference.changed` | `{key, old_value, new_value}` |
+| Action | `window.focus` | Bring window to front |
+| Action | `window.minimize` | Minimize window |
+| Action | `window.maximize` | Maximize/restore window |
+| Action | `window.close` | Close window (may prompt to save) |
+| Action | `window.move` | `{x, y}` — move window |
+| Action | `window.resize` | `{width, height}` — resize window |
+| Property | `window.title` | Current window title (read-only) |
+| Property | `window.geometry` | `{x, y, width, height}` (read-only) |
+| Property | `window.is_focused` | Boolean (read-only) |
+
+##### Chat / Messaging (`chat.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `chat.message_received` | `{sender, text, channel, timestamp, attachments[], is_mention}` |
+| Event | `chat.message_sent` | `{recipient, text, channel, timestamp}` |
+| Event | `chat.typing_started` | `{user, channel}` |
+| Event | `chat.typing_stopped` | `{user, channel}` |
+| Event | `chat.presence_changed` | `{user, status: online/away/dnd/offline}` |
+| Event | `chat.channel_joined` | `{channel, user}` |
+| Event | `chat.channel_left` | `{channel, user}` |
+| Event | `chat.reaction_added` | `{message_id, user, emoji}` |
+| Action | `chat.send_message` | `{to, text, ?channel, ?reply_to}` → `{message_id}` |
+| Action | `chat.set_status` | `{status: online/away/dnd, ?message}` |
+| Action | `chat.join_channel` | `{channel}` |
+| Action | `chat.leave_channel` | `{channel}` |
+| Action | `chat.mark_read` | `{channel, ?up_to_message_id}` |
+| Property | `chat.unread_count` | Total unread messages (read-only) |
+| Property | `chat.current_channel` | Currently viewed channel (read-only) |
+| Property | `chat.online_users` | List of online users (read-only) |
+
+##### Media Player (`media.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `media.track_changed` | `{title, artist, album, duration_ms, track_number, cover_art_path}` |
+| Event | `media.playback_started` | `{title, artist, position_ms}` |
+| Event | `media.playback_paused` | `{title, artist, position_ms}` |
+| Event | `media.playback_stopped` | `{}` |
+| Event | `media.volume_changed` | `{level: 0-100, muted}` |
+| Event | `media.position_changed` | `{position_ms, duration_ms}` (fires on seek, not continuously) |
+| Event | `media.queue_changed` | `{queue_length, action: added/removed/reordered}` |
+| Event | `media.repeat_changed` | `{mode: off/one/all}` |
+| Event | `media.shuffle_changed` | `{enabled}` |
+| Action | `media.play` | `{?uri}` — resume or play specific URI |
+| Action | `media.pause` | Pause playback |
+| Action | `media.stop` | Stop playback |
+| Action | `media.next_track` | Skip to next track |
+| Action | `media.prev_track` | Go to previous track |
+| Action | `media.seek` | `{position_ms}` |
+| Action | `media.set_volume` | `{level: 0-100}` |
+| Action | `media.set_mute` | `{muted}` |
+| Action | `media.queue_add` | `{uri, ?position}` → `{queue_position}` |
+| Action | `media.queue_remove` | `{queue_position}` |
+| Action | `media.set_repeat` | `{mode: off/one/all}` |
+| Action | `media.set_shuffle` | `{enabled}` |
+| Property | `media.current_track` | `{title, artist, album, duration_ms}` or null (read-only) |
+| Property | `media.playback_state` | `playing/paused/stopped` (read-only) |
+| Property | `media.position_ms` | Current position in ms (read-only) |
+| Property | `media.volume` | `{level: 0-100, muted}` (read-only) |
+| Property | `media.queue` | List of queued tracks (read-only) |
+
+##### Text Editor / Document Apps (`document.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `document.opened` | `{path, type, encoding, size_bytes}` |
+| Event | `document.closed` | `{path, saved}` |
+| Event | `document.saved` | `{path, size_bytes}` |
+| Event | `document.modified` | `{path, is_dirty}` (fires when dirty state changes, not on every keystroke) |
+| Event | `document.selection_changed` | `{path, start_line, start_col, end_line, end_col, selected_text}` |
+| Event | `document.cursor_moved` | `{path, line, col}` (fires on deliberate navigation, not every keystroke) |
+| Event | `document.language_changed` | `{path, language}` (for code editors — syntax mode changed) |
+| Action | `document.open` | `{path, ?encoding, ?line, ?col}` |
+| Action | `document.save` | `{?path}` — save current or save-as |
+| Action | `document.save_all` | Save all open documents |
+| Action | `document.close` | `{?path}` — close specific or current document |
+| Action | `document.insert_text` | `{text, ?line, ?col}` — insert at cursor or position |
+| Action | `document.replace_text` | `{start_line, start_col, end_line, end_col, text}` |
+| Action | `document.select` | `{start_line, start_col, end_line, end_col}` |
+| Action | `document.goto` | `{line, ?col}` |
+| Action | `document.find` | `{pattern, ?regex, ?case_sensitive}` → `{matches[]}` |
+| Action | `document.replace` | `{find, replace, ?regex, ?case_sensitive, ?all}` → `{count}` |
+| Action | `document.undo` | Undo last edit |
+| Action | `document.redo` | Redo last undone edit |
+| Property | `document.current_path` | Path of active document (read-only) |
+| Property | `document.open_documents` | List of open document paths (read-only) |
+| Property | `document.is_dirty` | Whether current document has unsaved changes (read-only) |
+| Property | `document.cursor_position` | `{line, col}` (read-only) |
+| Property | `document.language` | Current syntax language (read-only) |
+
+##### Web Browser (`browser.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `browser.tab_opened` | `{tab_id, url, ?opener_tab_id}` |
+| Event | `browser.tab_closed` | `{tab_id, url}` |
+| Event | `browser.tab_switched` | `{tab_id, url, title}` |
+| Event | `browser.navigation_started` | `{tab_id, url}` |
+| Event | `browser.navigation_completed` | `{tab_id, url, title, status_code}` |
+| Event | `browser.download_started` | `{download_id, url, filename, size_bytes}` |
+| Event | `browser.download_completed` | `{download_id, path, size_bytes}` |
+| Event | `browser.download_failed` | `{download_id, url, error}` |
+| Event | `browser.bookmark_added` | `{url, title, folder}` |
+| Event | `browser.bookmark_removed` | `{url, folder}` |
+| Event | `browser.fullscreen_changed` | `{tab_id, is_fullscreen}` |
+| Action | `browser.open_url` | `{url, ?tab_id, ?new_tab, ?background}` → `{tab_id}` |
+| Action | `browser.close_tab` | `{tab_id}` |
+| Action | `browser.switch_tab` | `{tab_id}` |
+| Action | `browser.reload` | `{?tab_id, ?hard}` |
+| Action | `browser.go_back` | `{?tab_id}` |
+| Action | `browser.go_forward` | `{?tab_id}` |
+| Action | `browser.stop_loading` | `{?tab_id}` |
+| Action | `browser.find_in_page` | `{text, ?tab_id, ?case_sensitive}` → `{match_count}` |
+| Action | `browser.add_bookmark` | `{?url, ?title, ?folder}` |
+| Action | `browser.screenshot_tab` | `{?tab_id, ?full_page}` → `{image_path}` |
+| Action | `browser.execute_js` | `{script, ?tab_id}` → `{result}` (requires elevated cap) |
+| Property | `browser.current_url` | URL of active tab (read-only) |
+| Property | `browser.current_title` | Title of active tab (read-only) |
+| Property | `browser.tab_count` | Number of open tabs (read-only) |
+| Property | `browser.tabs` | List of `{tab_id, url, title, is_active}` (read-only) |
+| Property | `browser.is_private` | Whether current window is private/incognito (read-only) |
+
+##### File Manager (`files.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `files.directory_changed` | `{path, entry_count}` |
+| Event | `files.selection_changed` | `{paths[], count}` |
+| Event | `files.file_renamed` | `{old_path, new_path}` |
+| Event | `files.file_copied` | `{source, destination}` |
+| Event | `files.file_moved` | `{source, destination}` |
+| Event | `files.file_deleted` | `{path, to_trash}` |
+| Event | `files.file_created` | `{path, type: file/directory}` |
+| Event | `files.transfer_progress` | `{operation: copy/move, source, destination, bytes_done, bytes_total, files_done, files_total}` |
+| Event | `files.transfer_completed` | `{operation, source, destination, file_count, total_bytes}` |
+| Event | `files.transfer_failed` | `{operation, source, destination, error}` |
+| Action | `files.navigate` | `{path}` — open directory |
+| Action | `files.select` | `{paths[]}` — select items |
+| Action | `files.select_all` | Select all items in current directory |
+| Action | `files.copy` | `{sources[], destination}` |
+| Action | `files.move` | `{sources[], destination}` |
+| Action | `files.delete` | `{paths[], ?to_trash}` (default: to_trash=true) |
+| Action | `files.rename` | `{path, new_name}` |
+| Action | `files.create_directory` | `{path}` |
+| Action | `files.create_file` | `{path}` |
+| Action | `files.open` | `{path}` — open with default application |
+| Action | `files.open_with` | `{path, application}` |
+| Action | `files.get_properties` | `{path}` → `{size, created, modified, type, permissions}` |
+| Action | `files.set_view` | `{mode: icons/list/details/tiles}` |
+| Action | `files.sort_by` | `{field: name/size/date/type, ?ascending}` |
+| Property | `files.current_directory` | Current directory path (read-only) |
+| Property | `files.selected_paths` | List of selected file/directory paths (read-only) |
+| Property | `files.view_mode` | Current view mode (read-only) |
+| Property | `files.sort_field` | Current sort field and direction (read-only) |
+
+##### Terminal Emulator (`terminal.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `terminal.output_received` | `{text, session_id}` (fires on complete lines, not every byte) |
+| Event | `terminal.command_started` | `{command, session_id, pid}` |
+| Event | `terminal.command_finished` | `{command, session_id, pid, exit_code, duration_ms}` |
+| Event | `terminal.session_opened` | `{session_id, shell, cwd}` |
+| Event | `terminal.session_closed` | `{session_id}` |
+| Event | `terminal.directory_changed` | `{session_id, old_cwd, new_cwd}` |
+| Event | `terminal.bell` | `{session_id}` |
+| Event | `terminal.title_changed` | `{session_id, title}` |
+| Action | `terminal.send_input` | `{text, ?session_id}` — send text as if typed |
+| Action | `terminal.send_keys` | `{keys, ?session_id}` — send key sequence (e.g., "ctrl+c") |
+| Action | `terminal.new_session` | `{?shell, ?cwd}` → `{session_id}` |
+| Action | `terminal.close_session` | `{session_id}` |
+| Action | `terminal.switch_session` | `{session_id}` |
+| Action | `terminal.scroll_to` | `{position: top/bottom/?line_number, ?session_id}` |
+| Action | `terminal.get_text` | `{?session_id, ?start_line, ?end_line}` → `{text}` |
+| Action | `terminal.set_font_size` | `{size}` |
+| Action | `terminal.clear` | `{?session_id}` |
+| Property | `terminal.current_session` | Active session ID (read-only) |
+| Property | `terminal.sessions` | List of `{session_id, title, shell, cwd}` (read-only) |
+| Property | `terminal.cwd` | Current working directory of active session (read-only) |
+| Property | `terminal.running_command` | Currently running command or null (read-only) |
+
+##### Email Client (`email.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `email.received` | `{message_id, from, to[], cc[], subject, preview, timestamp, has_attachments, folder}` |
+| Event | `email.sent` | `{message_id, to[], cc[], bcc[], subject, timestamp}` |
+| Event | `email.read` | `{message_id, folder}` |
+| Event | `email.deleted` | `{message_id, folder, permanent}` |
+| Event | `email.moved` | `{message_id, from_folder, to_folder}` |
+| Event | `email.flagged` | `{message_id, flag}` |
+| Event | `email.sync_completed` | `{account, new_count, folder}` |
+| Action | `email.send` | `{to[], ?cc[], ?bcc[], subject, body, ?attachments[], ?html}` → `{message_id}` |
+| Action | `email.reply` | `{message_id, body, ?reply_all}` → `{message_id}` |
+| Action | `email.forward` | `{message_id, to[], ?body}` → `{message_id}` |
+| Action | `email.move` | `{message_id, folder}` |
+| Action | `email.delete` | `{message_id, ?permanent}` |
+| Action | `email.mark_read` | `{message_ids[]}` |
+| Action | `email.mark_unread` | `{message_ids[]}` |
+| Action | `email.flag` | `{message_id, flag}` |
+| Action | `email.search` | `{query, ?folder, ?from, ?date_range}` → `{results[]}` |
+| Action | `email.sync` | `{?account, ?folder}` — trigger manual sync |
+| Property | `email.unread_count` | Total unread across all folders (read-only) |
+| Property | `email.current_folder` | Currently viewed folder (read-only) |
+| Property | `email.accounts` | List of configured accounts (read-only) |
+
+##### Image Viewer / Editor (`image.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `image.opened` | `{path, width, height, format, size_bytes}` |
+| Event | `image.closed` | `{path}` |
+| Event | `image.saved` | `{path, format, size_bytes}` |
+| Event | `image.zoom_changed` | `{level_percent}` |
+| Event | `image.navigated` | `{path, index, total}` (when browsing folder of images) |
+| Event | `image.edited` | `{path, operation}` (crop, rotate, filter applied, etc.) |
+| Action | `image.open` | `{path}` |
+| Action | `image.save` | `{?path, ?format, ?quality}` |
+| Action | `image.zoom` | `{level_percent}` or `{action: in/out/fit/actual}` |
+| Action | `image.rotate` | `{degrees}` (90, 180, 270) |
+| Action | `image.crop` | `{x, y, width, height}` |
+| Action | `image.next` | Next image in folder |
+| Action | `image.prev` | Previous image in folder |
+| Action | `image.slideshow` | `{?interval_ms}` — start/stop slideshow |
+| Action | `image.set_wallpaper` | Set current image as desktop wallpaper |
+| Property | `image.current_path` | Path of current image (read-only) |
+| Property | `image.dimensions` | `{width, height}` (read-only) |
+| Property | `image.zoom_level` | Current zoom percentage (read-only) |
+| Property | `image.format` | Image format (read-only) |
+
+##### System Monitor / Process Explorer (`system.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `system.process_started` | `{pid, name, parent_pid, user}` |
+| Event | `system.process_exited` | `{pid, name, exit_code, cpu_time_ms}` |
+| Event | `system.threshold_crossed` | `{metric: cpu/memory/disk/network, value, threshold, direction: above/below}` |
+| Event | `system.disk_space_low` | `{mount_point, free_bytes, total_bytes, percent_used}` |
+| Action | `system.kill_process` | `{pid, ?force}` (requires elevated cap) |
+| Action | `system.set_priority` | `{pid, priority}` (requires elevated cap) |
+| Action | `system.set_threshold` | `{metric, value, ?direction}` — configure threshold alerts |
+| Action | `system.refresh` | Force refresh of displayed data |
+| Property | `system.cpu_usage` | Overall CPU usage percent (read-only) |
+| Property | `system.memory_usage` | `{used_bytes, total_bytes, percent}` (read-only) |
+| Property | `system.process_count` | Number of running processes (read-only) |
+| Property | `system.uptime_seconds` | System uptime (read-only) |
+
+##### Calendar / Scheduling (`calendar.*`)
+
+| Type | Name | Description |
+|------|------|-------------|
+| Event | `calendar.event_created` | `{event_id, title, start, end, ?location, ?attendees[]}` |
+| Event | `calendar.event_updated` | `{event_id, changes{}}` |
+| Event | `calendar.event_deleted` | `{event_id, title}` |
+| Event | `calendar.reminder` | `{event_id, title, start, minutes_until}` |
+| Event | `calendar.event_starting` | `{event_id, title, start, minutes_until}` |
+| Action | `calendar.create_event` | `{title, start, end, ?location, ?description, ?attendees[], ?reminder_minutes}` → `{event_id}` |
+| Action | `calendar.update_event` | `{event_id, ?title, ?start, ?end, ?location, ?description}` |
+| Action | `calendar.delete_event` | `{event_id}` |
+| Action | `calendar.list_events` | `{start, end, ?calendar}` → `{events[]}` |
+| Action | `calendar.navigate` | `{date}` — jump to date in the UI |
+| Property | `calendar.current_date` | Currently displayed date (read-only) |
+| Property | `calendar.view_mode` | `day/week/month/year` (read-only) |
+| Property | `calendar.next_event` | Next upcoming event or null (read-only) |
+
+#### Naming Convention Rules
+
+1. **Namespace**: Top-level namespace matches program category (`chat`, `media`, `document`, `browser`, `files`, `terminal`, `email`, `image`, `system`, `calendar`). `lifecycle` and `error` are reserved universal namespaces.
+2. **Events** use past tense or present participle: `message_received`, `track_changed`, `typing_started`. Never imperative — events describe what happened, not what to do.
+3. **Actions** use imperative: `send_message`, `play`, `open`. Never past tense — actions describe what to do, not what happened.
+4. **Properties** use nouns or adjectives: `current_track`, `is_dirty`, `unread_count`. Booleans are prefixed with `is_` or `has_`.
+5. **Parameters** use `snake_case`. Optional parameters are prefixed with `?` in documentation. Arrays use `[]` suffix in documentation.
+6. **New program categories** should follow the established patterns. If a program spans multiple categories (e.g., a chat app with video calling), use the primary category as namespace and add sub-namespaces (e.g., `chat.call.started`).
+7. **Custom events/actions**: Programs may define events/actions outside the standard set. Custom names must not conflict with standard names in the same namespace. Prefix custom names with `x_` if there's any risk of future standard name collision (e.g., `chat.x_custom_reaction`).
+8. **Type system**: Standard types are `string`, `int`, `float`, `bool`, `bytes`, `timestamp` (ISO 8601), `path`, `uri`, `duration_ms`. Compound types use `{}` for objects and `[]` for arrays.
+
+#### Developer Adoption Strategy
+
+Automation support is opt-in, but we want it to be the norm rather than the exception. The goal is to make it so easy and so rewarding that developers feel they're missing out if they *don't* support it.
+
+**Make it trivially easy to adopt:**
+- [ ] `libautomation` handles all boilerplate — adding automation to an existing program is ~10 lines of code (Rust: derive macro on handler functions; Python: `@automatable` decorator)
+- [ ] Starter templates: every project template (GUI app, CLI tool, service) includes automation support out of the box, pre-wired with standard events/actions for that category
+- [ ] Automatic lifecycle events come free — just linking `libautomation` gives your program `lifecycle.*` events with zero extra code
+
+**Make it visibly valuable to users:**
+- [ ] Programs that expose automation show an "Automatable" badge in the package manager, app launcher, and about dialog
+- [ ] Settings app includes an "Automation" section where users can see all automatable programs, browse their schemas, and create simple rules ("when X happens in program A, do Y in program B") without writing any code
+- [ ] Shell tab-completion auto-discovers available events and actions from running programs — users see what's possible immediately
+
+**Make it valuable to developers:**
+- [ ] Accessibility tools (screen readers, switch access, voice control) use the automation API — supporting automation means your program is automatically more accessible
+- [ ] The OS's built-in testing framework can drive programs through their automation API — developers get free integration testing infrastructure
+- [ ] `automate record` captures user actions as automation scripts — free macro/replay functionality for any automatable program
+- [ ] Package manager search ranks automatable programs higher (all else being equal) — more visibility
+
+**Documentation and ecosystem:**
+- [ ] Developer documentation prominently features automation as a first-class OS feature, not an afterthought
+- [ ] "How to make your program automatable" guide in the developer docs, with before/after examples showing ~10 lines of code to add full automation support
+- [ ] Example programs in the SDK all include automation support, establishing it as "the way things are done"
+- [ ] Automation API coverage is part of the quality checklist for programs in the official package repository
+
+_The automation framework uses the same channel IPC + RPC serialization (Cap'n Proto/FlatBuffers) as the rest of the OS. `libautomation` is a thin layer on top of the service registry — no new kernel primitives required. Programs that don't opt in are simply not automatable. The standard naming conventions ensure that scripts written for one chat client work with any chat client, one media player work with any media player, etc._
 
 ---
 

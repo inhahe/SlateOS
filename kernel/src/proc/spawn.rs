@@ -261,6 +261,32 @@ pub fn spawn_process(
         }
     }
 
+    // Step 5b: Grant the parent a Process capability for the child.
+    //
+    // This gives the parent the authority to kill, wait on, and
+    // inspect the child process via capability checks.  PID 0
+    // (kernel) doesn't need capabilities — it has implicit authority.
+    if options.parent != 0 {
+        let process_cap_rights = Rights::READ
+            | Rights::WRITE
+            | Rights::DELETE
+            | Rights::WAIT
+            | Rights::SIGNAL
+            | Rights::DUPLICATE;
+        if let Err(e) = pcb::grant_capability(
+            options.parent,
+            ResourceType::Process,
+            pid,
+            process_cap_rights,
+        ) {
+            serial_println!(
+                "[spawn] Warning: failed to grant Process cap to parent {}: {:?}",
+                options.parent, e
+            );
+            // Non-fatal — parent can still use implicit parent authority.
+        }
+    }
+
     // Step 6: Create the entry info struct (heap-allocated, freed by
     // the trampoline when the thread first runs) and spawn the
     // initial thread.

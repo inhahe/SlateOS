@@ -880,6 +880,30 @@ pub fn sys_process_id(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(pid as i64)
 }
 
+/// `SYS_CAP_QUERY` — query the calling process's capabilities.
+///
+/// Returns the number of valid capabilities held by the calling process.
+///
+/// This is a simple count query.  A future extension will support
+/// filling a user-space buffer with detailed capability entries.
+pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    use crate::proc::{pcb, thread};
+
+    let task_id = sched::current_task_id();
+    let pid = thread::owner_process(task_id).unwrap_or(0);
+
+    // PID 0 (kernel) has no per-process cap table.
+    if pid == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    let count = pcb::cap_count(pid).unwrap_or(0);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(count as i64)
+}
+
 /// `SYS_SET_EXCEPTION_HANDLER` — register a per-process exception handler.
 ///
 /// `arg0`: handler function address, or 0 to unregister.
@@ -984,12 +1008,20 @@ pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch:
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Authority check: caller must be the target's parent, or PID 0.
+    // Authority check: caller must be the target's parent, PID 0,
+    // or hold a Process capability with DELETE rights for the target.
     let target_parent = match pcb::parent(target_pid) {
         Some(p) => p,
         None => return SyscallResult::err(KernelError::NoSuchProcess),
     };
-    if caller_pid != 0 && caller_pid != target_parent {
+    let has_parent_auth = caller_pid == 0 || caller_pid == target_parent;
+    let has_cap_auth = pcb::has_capability_for(
+        caller_pid,
+        crate::cap::ResourceType::Process,
+        target_pid,
+        crate::cap::Rights::DELETE,
+    );
+    if !has_parent_auth && !has_cap_auth {
         return SyscallResult::err(KernelError::PermissionDenied);
     }
 

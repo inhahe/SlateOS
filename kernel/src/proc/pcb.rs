@@ -46,6 +46,59 @@ fn alloc_pid() -> ProcessId {
 }
 
 // ---------------------------------------------------------------------------
+// Process credentials
+// ---------------------------------------------------------------------------
+
+/// Process credentials — identity and privilege information.
+///
+/// Every process has credentials that identify it in the user/group
+/// model.  Credentials are inherited from the parent at spawn time
+/// and can be changed by privileged processes.
+///
+/// UID 0 = root/system (full authority).
+/// GID 0 = system group.
+///
+/// During early development, all processes run as uid=0 (root).
+/// The user/group model is enforced once a login service exists.
+#[derive(Debug, Clone)]
+pub struct ProcessCredentials {
+    /// User ID (0 = root/system).
+    pub uid: u32,
+    /// Primary group ID.
+    pub gid: u32,
+    /// Supplementary group IDs.
+    pub groups: Vec<u32>,
+}
+
+impl ProcessCredentials {
+    /// Create default (root) credentials.
+    #[must_use]
+    pub fn root() -> Self {
+        Self {
+            uid: 0,
+            gid: 0,
+            groups: Vec::new(),
+        }
+    }
+
+    /// Create credentials for a specific user/group.
+    #[must_use]
+    pub fn new(uid: u32, gid: u32) -> Self {
+        Self {
+            uid,
+            gid,
+            groups: Vec::new(),
+        }
+    }
+
+    /// Check if this process runs as root.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.uid == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Process state
 // ---------------------------------------------------------------------------
 
@@ -82,6 +135,8 @@ pub struct Process {
     pub cap_table: CapTable,
     /// Exit code (set when all threads have exited).
     pub exit_code: Option<i32>,
+    /// Process credentials (uid, gid, supplementary groups).
+    pub credentials: ProcessCredentials,
     /// PML4 physical address for this process's address space.
     ///
     /// 0 means "uses the kernel address space" (for kernel-mode
@@ -102,6 +157,7 @@ impl Process {
             threads: Vec::new(),
             cap_table: CapTable::new(),
             exit_code: None,
+            credentials: ProcessCredentials::root(),
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
         }
@@ -368,6 +424,55 @@ pub fn name(pid: ProcessId) -> Option<String> {
 pub fn get_pml4(pid: ProcessId) -> Option<u64> {
     let table = PROCESS_TABLE.lock();
     table.get(&pid).map(|p| p.pml4_phys)
+}
+
+/// Check if a process holds a capability for a specific resource
+/// with sufficient rights.
+///
+/// Searches the process's capability table for a valid entry matching
+/// the resource type and ID with the required rights.
+pub fn has_capability_for(
+    pid: ProcessId,
+    resource_type: ResourceType,
+    resource_id: u64,
+    required_rights: Rights,
+) -> bool {
+    let table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get(&pid) {
+        proc.cap_table.has_resource(resource_type, resource_id, required_rights)
+    } else {
+        false
+    }
+}
+
+/// Get the number of valid capabilities a process holds.
+pub fn cap_count(pid: ProcessId) -> Option<usize> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.cap_table.count())
+}
+
+/// Get the credentials for a process.
+pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.credentials.clone())
+}
+
+/// Set the credentials for a process.
+///
+/// Only processes running as root (uid=0) or the kernel (PID 0
+/// caller) should call this.  The authorization check is the
+/// caller's responsibility.
+pub fn set_credentials(
+    pid: ProcessId,
+    credentials: ProcessCredentials,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    proc.credentials = credentials;
+    Ok(())
 }
 
 /// Get the list of thread task IDs for a process.

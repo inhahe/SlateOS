@@ -82,7 +82,11 @@ pub enum ResourceType {
     EventFd = 4,
     /// A completion port.
     CompletionPort = 5,
-    // Future: File, Directory, Process, Thread, Socket, Timer, etc.
+    /// A process (for kill, wait, inspect operations).
+    Process = 6,
+    /// A thread (for suspend, resume, priority change).
+    Thread = 7,
+    // Future: File, Directory, Socket, Timer, etc.
 }
 
 // ---------------------------------------------------------------------------

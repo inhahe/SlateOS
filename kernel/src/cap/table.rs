@@ -255,6 +255,26 @@ impl CapTable {
         self.entries.values().filter(|e| e.valid).count()
     }
 
+    /// Check if the table contains a valid capability for the specified
+    /// resource with sufficient rights.
+    ///
+    /// Used for implicit capability checks (e.g., does this process
+    /// hold a Process capability for PID X with DELETE rights?).
+    #[must_use]
+    pub fn has_resource(
+        &self,
+        resource_type: ResourceType,
+        resource_id: u64,
+        required_rights: Rights,
+    ) -> bool {
+        self.entries.values().any(|e| {
+            e.valid
+                && e.resource_type == resource_type
+                && e.resource_id == resource_id
+                && e.rights.contains(required_rights)
+        })
+    }
+
     /// Revoke all entries referencing a specific resource.
     ///
     /// Called when a kernel object is destroyed (e.g., channel closed).

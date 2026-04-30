@@ -275,6 +275,28 @@ pub fn wake(task_id: TaskId) -> bool {
     false
 }
 
+/// Wake a blocked task using `try_lock` — safe in ISR context.
+///
+/// Same as [`wake`] but uses `try_lock` instead of blocking `lock`.
+/// If the scheduler lock is already held (e.g., the ISR interrupted
+/// code that was holding it), returns `false` without blocking.
+///
+/// The caller (typically the timer ISR's deferred-wake path) should
+/// retry on the next tick if this fails.
+pub fn try_wake(task_id: TaskId) -> bool {
+    if let Some(mut state) = SCHED.try_lock() {
+        if let Some(task) = state.tasks.get_mut(&task_id)
+            && task.state == TaskState::Blocked
+        {
+            task.state = TaskState::Ready;
+            let prio = task.priority;
+            state.scheduler.enqueue(task_id, prio);
+            return true;
+        }
+    }
+    false
+}
+
 /// Handle a timer tick from the APIC timer interrupt.
 ///
 /// Called from the timer ISR with interrupts disabled.  Uses `try_lock`

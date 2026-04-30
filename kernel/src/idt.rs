@@ -277,6 +277,88 @@ isr_stub_no_error!(isr_timer, handle_timer_irq);
 isr_stub_no_error!(isr_spurious, handle_spurious_irq);
 
 // ---------------------------------------------------------------------------
+// External device IRQ stubs (IOAPIC inputs 0–23 → vectors 33–56)
+//
+// Each stub saves all registers, passes the IRQ number in EDI (first
+// argument, System V ABI), calls the common `handle_device_irq` handler
+// in ioapic.rs, restores registers, and returns via IRETQ.
+// ---------------------------------------------------------------------------
+
+/// Generate an assembly stub for an external device IRQ.
+///
+/// The stub passes `$irq` (the IOAPIC input number) to the Rust
+/// handler `handle_device_irq(irq: u32)` defined in `ioapic.rs`.
+macro_rules! isr_irq_stub {
+    ($stub:ident, $irq:literal) => {
+        global_asm!(
+            concat!(".global ", stringify!($stub)),
+            concat!(stringify!($stub), ":"),
+            "push 0",              // dummy error code
+            "push rax",
+            "push rcx",
+            "push rdx",
+            "push rbx",
+            "push rbp",
+            "push rsi",
+            "push rdi",
+            "push r8",
+            "push r9",
+            "push r10",
+            "push r11",
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+            concat!("mov edi, ", stringify!($irq)),
+            "call handle_device_irq",
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop r11",
+            "pop r10",
+            "pop r9",
+            "pop r8",
+            "pop rdi",
+            "pop rsi",
+            "pop rbp",
+            "pop rbx",
+            "pop rdx",
+            "pop rcx",
+            "pop rax",
+            "add rsp, 8",          // pop dummy error code
+            "iretq",
+        );
+        unsafe extern "C" { fn $stub(); }
+    };
+}
+
+isr_irq_stub!(isr_irq0, 0);
+isr_irq_stub!(isr_irq1, 1);
+isr_irq_stub!(isr_irq2, 2);
+isr_irq_stub!(isr_irq3, 3);
+isr_irq_stub!(isr_irq4, 4);
+isr_irq_stub!(isr_irq5, 5);
+isr_irq_stub!(isr_irq6, 6);
+isr_irq_stub!(isr_irq7, 7);
+isr_irq_stub!(isr_irq8, 8);
+isr_irq_stub!(isr_irq9, 9);
+isr_irq_stub!(isr_irq10, 10);
+isr_irq_stub!(isr_irq11, 11);
+isr_irq_stub!(isr_irq12, 12);
+isr_irq_stub!(isr_irq13, 13);
+isr_irq_stub!(isr_irq14, 14);
+isr_irq_stub!(isr_irq15, 15);
+isr_irq_stub!(isr_irq16, 16);
+isr_irq_stub!(isr_irq17, 17);
+isr_irq_stub!(isr_irq18, 18);
+isr_irq_stub!(isr_irq19, 19);
+isr_irq_stub!(isr_irq20, 20);
+isr_irq_stub!(isr_irq21, 21);
+isr_irq_stub!(isr_irq22, 22);
+isr_irq_stub!(isr_irq23, 23);
+
+// ---------------------------------------------------------------------------
 // Ring 3 exception handling
 // ---------------------------------------------------------------------------
 
@@ -927,6 +1009,38 @@ pub unsafe fn init() {
         idt.entries[32] = IdtEntry::new(isr_timer as *const () as u64, cs, 0, 0);
         // Vector 255: APIC spurious interrupt.
         idt.entries[255] = IdtEntry::new(isr_spurious as *const () as u64, cs, 0, 0);
+
+        // Vectors 33–56: External device IRQs (IOAPIC inputs 0–23).
+        // Each stub calls handle_device_irq(irq_number) in ioapic.rs.
+        let irq_stubs: [u64; 24] = [
+            isr_irq0  as *const () as u64,
+            isr_irq1  as *const () as u64,
+            isr_irq2  as *const () as u64,
+            isr_irq3  as *const () as u64,
+            isr_irq4  as *const () as u64,
+            isr_irq5  as *const () as u64,
+            isr_irq6  as *const () as u64,
+            isr_irq7  as *const () as u64,
+            isr_irq8  as *const () as u64,
+            isr_irq9  as *const () as u64,
+            isr_irq10 as *const () as u64,
+            isr_irq11 as *const () as u64,
+            isr_irq12 as *const () as u64,
+            isr_irq13 as *const () as u64,
+            isr_irq14 as *const () as u64,
+            isr_irq15 as *const () as u64,
+            isr_irq16 as *const () as u64,
+            isr_irq17 as *const () as u64,
+            isr_irq18 as *const () as u64,
+            isr_irq19 as *const () as u64,
+            isr_irq20 as *const () as u64,
+            isr_irq21 as *const () as u64,
+            isr_irq22 as *const () as u64,
+            isr_irq23 as *const () as u64,
+        ];
+        for (i, &addr) in irq_stubs.iter().enumerate() {
+            idt.entries[33 + i] = IdtEntry::new(addr, cs, 0, 0);
+        }
 
         // Fill remaining vectors with the default handler.
         let default_addr = isr_default as *const () as u64;

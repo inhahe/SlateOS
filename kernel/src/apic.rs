@@ -421,6 +421,15 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
         eoi();
     }
 
+    // Process deferred IRQ wake-ups.
+    //
+    // Scans IOAPIC pending counters and tries to wake blocked driver
+    // tasks.  Uses try_lock internally — safe in ISR context, and
+    // the scheduler lock was released by timer_tick() above.  If
+    // timer_tick's try_lock failed (lock held by interrupted code),
+    // this will also fail and retry on the next tick.
+    crate::ioapic::process_deferred_wakes();
+
     // If the scheduler says the time slice expired, reschedule.
     if needs_reschedule {
         crate::sched::preempt();

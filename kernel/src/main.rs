@@ -53,6 +53,7 @@ mod cpu;
 mod error;
 mod gdt;
 mod idt;
+mod ioapic;
 mod ipc;
 mod limine;
 mod mm;
@@ -280,6 +281,23 @@ extern "C" fn kmain() -> ! {
     // with interrupts disabled.  Called exactly once.
     unsafe {
         apic::init();
+    }
+
+    // Step 20b: Initialize I/O APIC for external device interrupts.
+    // Disables the legacy 8259 PIC, maps the IOAPIC MMIO registers,
+    // and programs all 24 redirection entries (masked).  Drivers unmask
+    // their IRQ lines individually when ready.
+    //
+    // SAFETY: LAPIC is initialized (required for EOI routing).
+    // Interrupts are disabled.  Called exactly once.
+    unsafe {
+        ioapic::init();
+    }
+
+    // Verify IOAPIC configuration.
+    if let Err(e) = ioapic::self_test() {
+        serial_println!("FATAL: IOAPIC self-test failed: {}", e);
+        cpu::halt_loop();
     }
 
     // Step 21: Enable hardware interrupts.

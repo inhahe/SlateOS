@@ -289,37 +289,42 @@ fn cmd_pci() {
 // Sector formatting uses small arithmetic on known-bounded values.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_disk() {
-    let result = crate::virtio::blk::with_device(|dev| {
-        let cap = dev.capacity();
-        let kib = cap.saturating_mul(512) / 1024;
+    let devices = crate::blkdev::list_devices_full();
+    if devices.is_empty() {
+        crate::console_println!("No block devices registered.");
+        return;
+    }
+    crate::console_println!("Block devices:");
+    for dev in &devices {
+        let kib = dev.sector_count.saturating_mul(u64::from(dev.sector_size)) / 1024;
         let mib = kib / 1024;
-        crate::console_println!("Virtio-blk disk:");
         crate::console_println!(
-            "  Capacity: {} sectors ({} KiB / {} MiB)",
-            cap, kib, mib
+            "  {} — {} sectors ({} KiB / {} MiB){}",
+            dev.name,
+            dev.sector_count,
+            kib,
+            mib,
+            if dev.read_only { " [read-only]" } else { "" }
         );
-    });
-    if result.is_none() {
-        crate::console_println!("No virtio-blk disk present.");
     }
 }
 
 // Hex-dump formatting uses offsets bounded by SECTOR_SIZE (512).
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_blkread(args: &str) {
-    let sector: u64 = match args.parse() {
-        Ok(n) => n,
-        Err(_) => {
-            crate::console_println!("Usage: blkread <sector_number>");
-            return;
-        }
+    // Parse: "blkread <sector>" or "blkread <device> <sector>"
+    let (dev_name, sector) = parse_blkread_args(args);
+    let Some(sector) = sector else {
+        crate::console_println!("Usage: blkread [device] <sector>");
+        crate::console_println!("  e.g., blkread 0  or  blkread vda 0");
+        return;
     };
 
-    let result = crate::virtio::blk::with_device(|dev| {
-        let mut buf = [0u8; crate::virtio::blk::SECTOR_SIZE];
+    let result = crate::blkdev::with_device(&dev_name, |dev| {
+        let mut buf = [0u8; crate::blkdev::SECTOR_SIZE];
         match dev.read_sector(sector, &mut buf) {
             Ok(()) => {
-                crate::console_println!("Sector {}:", sector);
+                crate::console_println!("Sector {} on {}:", sector, dev_name);
                 // Print 32 rows of 16 bytes each (512 bytes total).
                 for row in 0..32 {
                     let offset = row * 16;
@@ -350,7 +355,31 @@ fn cmd_blkread(args: &str) {
         }
     });
     if result.is_none() {
-        crate::console_println!("No virtio-blk disk present.");
+        crate::console_println!("No block device '{}' found.", dev_name);
+    }
+}
+
+/// Parse blkread args: either "<sector>" or "<device> <sector>".
+/// Returns (device_name, Some(sector)) or (_, None) on parse error.
+fn parse_blkread_args(args: &str) -> (alloc::string::String, Option<u64>) {
+    let mut parts = args.split_whitespace();
+    let first = match parts.next() {
+        Some(s) => s,
+        None => return (alloc::string::String::from("vda"), None),
+    };
+
+    if let Some(second) = parts.next() {
+        // Two args: device name + sector
+        match second.parse::<u64>() {
+            Ok(s) => (alloc::string::String::from(first), Some(s)),
+            Err(_) => (alloc::string::String::from("vda"), None),
+        }
+    } else {
+        // One arg: try as sector number (default device "vda")
+        match first.parse::<u64>() {
+            Ok(s) => (alloc::string::String::from("vda"), Some(s)),
+            Err(_) => (alloc::string::String::from("vda"), None),
+        }
     }
 }
 

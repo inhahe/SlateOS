@@ -47,6 +47,7 @@ extern crate alloc;
 
 // Module declarations.
 mod apic;
+mod blkdev;
 mod boot;
 mod cap;
 mod console;
@@ -330,8 +331,13 @@ extern "C" fn kmain() -> ! {
 
     // Step 20d: Probe for virtio-blk storage device.
     // Uses legacy PCI transport (I/O port BAR0) with polling.
-    // The device is stored globally for kshell access.
+    // The device is stored temporarily in the virtio module.
     virtio::blk::init(boot_info.hhdm_offset);
+
+    // Step 20e: Initialize block device abstraction layer.
+    // Moves driver instances from their module globals into the
+    // unified block device registry.
+    blkdev::init();
 
     // Step 21: Enable hardware interrupts.
     // From this point forward, the APIC timer fires periodically and

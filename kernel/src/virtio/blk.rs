@@ -418,6 +418,15 @@ where
     guard.as_mut().map(f)
 }
 
+/// Take the device out of the global slot, transferring ownership
+/// to the caller.  Used by the block device registry to take
+/// ownership of driver instances.
+///
+/// Returns `None` if no device was stored (or already taken).
+pub fn take_device() -> Option<VirtioBlkDevice> {
+    DEVICE.lock().take()
+}
+
 /// Self-test: read sector 0 and verify no error.
 pub fn self_test(dev: &mut VirtioBlkDevice) -> KernelResult<()> {
     crate::serial_println!("[virtio-blk] Running self-test...");

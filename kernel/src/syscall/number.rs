@@ -46,19 +46,50 @@ pub const SYS_CLOCK_MONOTONIC: u64 = 10;
 /// `arg0`: duration in nanoseconds.
 pub const SYS_SLEEP: u64 = 11;
 
-/// Map physical memory into the caller's address space.
+/// Map memory into the caller's address space.
 ///
 /// `arg0`: virtual address hint (0 = kernel picks).
-/// `arg1`: size in bytes.
-/// `arg2`: flags (read/write/execute).
+/// `arg1`: size in bytes (rounded up to frame boundary).
+/// `arg2`: flags (`MAP_*` bitfield).
+/// `arg3`: physical address (only used with `MAP_MMIO`, must be
+///         frame-aligned).
 ///
-/// Returns: virtual address of the mapped region.
+/// ## Flags
+///
+/// | Flag          | Bit | Meaning                                  |
+/// |---------------|-----|------------------------------------------|
+/// | `MAP_READ`    | 0   | Pages are readable                       |
+/// | `MAP_WRITE`   | 1   | Pages are writable                       |
+/// | `MAP_EXEC`    | 2   | Pages are executable                     |
+/// | `MAP_NOCACHE` | 3   | Disable CPU caching (for MMIO)           |
+/// | `MAP_MMIO`    | 4   | Map specific phys addr from `arg3`       |
+/// | `MAP_FIXED`   | 5   | Use exact vaddr from `arg0` (must be set)|
+///
+/// Returns: virtual address of the mapped region, or negative error.
 pub const SYS_MMAP: u64 = 20;
+
+/// Mmap flag: pages are readable.
+pub const MAP_READ: u64    = 1 << 0;
+/// Mmap flag: pages are writable.
+pub const MAP_WRITE: u64   = 1 << 1;
+/// Mmap flag: pages are executable.
+pub const MAP_EXEC: u64    = 1 << 2;
+/// Mmap flag: disable CPU caching (for device MMIO).
+pub const MAP_NOCACHE: u64 = 1 << 3;
+/// Mmap flag: map specific physical address (from `arg3`).
+pub const MAP_MMIO: u64    = 1 << 4;
+/// Mmap flag: use exact virtual address from `arg0`.
+pub const MAP_FIXED: u64   = 1 << 5;
 
 /// Unmap a previously mapped region.
 ///
-/// `arg0`: virtual address.
-/// `arg1`: size in bytes.
+/// `arg0`: virtual address (must be frame-aligned).
+/// `arg1`: size in bytes (rounded up to frame boundary).
+///
+/// Frees anonymous mapping frames.  MMIO mapping frames are not
+/// freed (they belong to device hardware, not the allocator).
+///
+/// Returns: 0 on success, negative error.
 pub const SYS_MUNMAP: u64 = 21;
 
 /// Debug print (temporary — write a byte string to serial).

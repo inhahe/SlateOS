@@ -26,8 +26,9 @@ use super::number::{
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
     SYS_PIPE_READ, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
-    SYS_CAP_QUERY, SYS_PROCESS_ID, SYS_PROCESS_KILL,
-    SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_SET_EXCEPTION_HANDLER,
+    SYS_CAP_QUERY, SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
+    SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT,
+    SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
     SYS_YIELD,
 };
@@ -145,6 +146,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_EXIT as usize] = Some(handlers::sys_exit);
     handlers[SYS_TASK_ID as usize] = Some(handlers::sys_task_id);
     handlers[SYS_DEBUG_PRINT as usize] = Some(handlers::sys_debug_print);
+    handlers[SYS_MMAP as usize] = Some(handlers::sys_mmap);
+    handlers[SYS_MUNMAP as usize] = Some(handlers::sys_munmap);
 
     // IPC (200–399)
     handlers[SYS_CHANNEL_CREATE as usize] = Some(handlers::sys_channel_create);

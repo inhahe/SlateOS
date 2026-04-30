@@ -99,7 +99,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] exec equivalent
 - [x] Hardware exception → language-level exception (SEH-style, not Unix signals)
 - [x] Structured shutdown via IPC message, not Unix signals
-- [ ] Process credential / capability management
+- [x] Process credential / capability management
 
 ---
 

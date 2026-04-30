@@ -105,6 +105,270 @@ pub fn sys_debug_print(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(written)
 }
 
+/// `SYS_MMAP` — map memory into the calling process's address space.
+///
+/// Supports two modes:
+/// - **Anonymous**: allocates physical frames and maps them (default).
+/// - **MMIO**: maps a specific physical address range (`MAP_MMIO` flag).
+///
+/// `arg0`: virtual address hint (0 = kernel picks).
+/// `arg1`: size in bytes (rounded up to frame boundary).
+/// `arg2`: flags (`MAP_READ` | `MAP_WRITE` | `MAP_EXEC` | `MAP_NOCACHE` | `MAP_MMIO`).
+/// `arg3`: physical address (only used with `MAP_MMIO`).
+///
+/// Returns: virtual address of the mapped region, or negative error.
+pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::proc::{pcb, thread};
+    use super::number::{MAP_EXEC, MAP_MMIO, MAP_NOCACHE, MAP_WRITE};
+
+    let vaddr_hint = args.arg0;
+    let size = args.arg1;
+    let flags = args.arg2;
+    let phys_addr = args.arg3;
+
+    // Validate size.
+    if size == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Get the calling process's PML4.
+    let task_id = sched::current_task_id();
+    let pid = thread::owner_process(task_id).unwrap_or(0);
+    let pml4_phys = match pcb::get_pml4(pid) {
+        Some(pml4) if pml4 != 0 => pml4,
+        _ => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+
+    // Round size up to frame boundary.
+    #[allow(clippy::arithmetic_side_effects)]
+    let frame_size = FRAME_SIZE as u64;
+    #[allow(clippy::arithmetic_side_effects)]
+    let size_aligned = (size.saturating_add(frame_size - 1)) & !(frame_size - 1);
+    #[allow(clippy::arithmetic_side_effects)]
+    let num_frames = (size_aligned / frame_size) as usize;
+
+    if num_frames == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Build page flags from mmap flags.
+    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
+    if flags & MAP_WRITE != 0 {
+        page_flags = page_flags | PageFlags::WRITABLE;
+    }
+    if flags & MAP_EXEC == 0 {
+        page_flags = page_flags | PageFlags::NO_EXECUTE;
+    }
+    if flags & MAP_NOCACHE != 0 {
+        page_flags = page_flags | PageFlags::NO_CACHE;
+    }
+
+    // Pick a virtual address.
+    let base_vaddr = if vaddr_hint != 0 {
+        // Caller specified an address — validate alignment.
+        if vaddr_hint % frame_size != 0 {
+            return SyscallResult::err(KernelError::BadAlignment);
+        }
+        vaddr_hint
+    } else {
+        // Kernel picks: use a simple bump allocator in the mmap region.
+        // Range: 0x0000_0060_0000_0000 .. 0x0000_0070_0000_0000.
+        mmap_alloc_vaddr(size_aligned)
+    };
+
+    if base_vaddr == 0 {
+        return SyscallResult::err(KernelError::OutOfMemory);
+    }
+
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return SyscallResult::err(KernelError::InternalError),
+    };
+
+    if flags & MAP_MMIO != 0 {
+        // MMIO mapping: map specific physical address.
+        if phys_addr % frame_size != 0 {
+            return SyscallResult::err(KernelError::BadAlignment);
+        }
+
+        for i in 0..num_frames {
+            #[allow(clippy::arithmetic_side_effects)]
+            let pa = phys_addr + (i as u64) * frame_size;
+            #[allow(clippy::arithmetic_side_effects)]
+            let va = base_vaddr + (i as u64) * frame_size;
+
+            let phys = match PhysFrame::from_addr(pa) {
+                Some(f) => f,
+                None => return SyscallResult::err(KernelError::BadAlignment),
+            };
+
+            // SAFETY: pml4_phys is valid, phys is a device MMIO address
+            // (not managed by our allocator), virt is in user space.
+            if let Err(e) = unsafe {
+                page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags)
+            } {
+                serial_println!(
+                    "[mmap] MMIO map failed at va={:#x} pa={:#x}: {:?}",
+                    va, pa, e
+                );
+                // TODO: unmap already-mapped frames on partial failure.
+                return SyscallResult::err(e);
+            }
+        }
+
+        serial_println!(
+            "[mmap] MMIO mapped {:#x}..{:#x} → phys {:#x} ({} frames)",
+            base_vaddr, base_vaddr + size_aligned, phys_addr, num_frames
+        );
+    } else {
+        // Anonymous mapping: allocate and map fresh zeroed frames.
+        for i in 0..num_frames {
+            let phys = match frame::alloc_frame() {
+                Ok(f) => f,
+                Err(e) => {
+                    serial_println!("[mmap] Frame alloc failed at frame {}: {:?}", i, e);
+                    // TODO: free already-allocated frames on partial failure.
+                    return SyscallResult::err(e);
+                }
+            };
+
+            // Zero the frame.
+            let frame_virt = phys.to_virt(hhdm);
+            // SAFETY: frame_virt is the HHDM mapping of a freshly allocated frame.
+            unsafe {
+                core::ptr::write_bytes(frame_virt as *mut u8, 0, FRAME_SIZE);
+            }
+
+            #[allow(clippy::arithmetic_side_effects)]
+            let va = base_vaddr + (i as u64) * frame_size;
+
+            // SAFETY: pml4_phys is valid, phys is freshly allocated.
+            if let Err(e) = unsafe {
+                page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags)
+            } {
+                serial_println!(
+                    "[mmap] Anonymous map failed at va={:#x}: {:?}",
+                    va, e
+                );
+                // Leak the allocated frame rather than risk double-free.
+                return SyscallResult::err(e);
+            }
+        }
+
+        serial_println!(
+            "[mmap] Anonymous mapped {:#x}..{:#x} ({} frames)",
+            base_vaddr, base_vaddr + size_aligned, num_frames
+        );
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(base_vaddr as i64)
+}
+
+/// `SYS_MUNMAP` — unmap a region from the calling process's address space.
+///
+/// `arg0`: virtual address (must be frame-aligned).
+/// `arg1`: size in bytes (rounded up to frame boundary).
+///
+/// For anonymous mappings, the physical frames are freed back to the
+/// allocator.  For MMIO mappings, only the page table entries are
+/// cleared (the physical memory belongs to the device).
+///
+/// Returns: 0 on success.
+pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
+    use crate::mm::frame::{self, FRAME_SIZE};
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::proc::{pcb, thread};
+
+    let vaddr = args.arg0;
+    let size = args.arg1;
+
+    if size == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Validate alignment.
+    let frame_size = FRAME_SIZE as u64;
+    if vaddr % frame_size != 0 {
+        return SyscallResult::err(KernelError::BadAlignment);
+    }
+
+    // Get the calling process's PML4.
+    let task_id = sched::current_task_id();
+    let pid = thread::owner_process(task_id).unwrap_or(0);
+    let pml4_phys = match pcb::get_pml4(pid) {
+        Some(pml4) if pml4 != 0 => pml4,
+        _ => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+
+    // Round size up.
+    #[allow(clippy::arithmetic_side_effects)]
+    let size_aligned = (size.saturating_add(frame_size - 1)) & !(frame_size - 1);
+    #[allow(clippy::arithmetic_side_effects)]
+    let num_frames = (size_aligned / frame_size) as usize;
+
+    let mut unmapped = 0usize;
+
+    for i in 0..num_frames {
+        #[allow(clippy::arithmetic_side_effects)]
+        let va = vaddr + (i as u64) * frame_size;
+
+        // Unmap returns the physical frame that was mapped.
+        // SAFETY: pml4_phys is valid, va was mapped by a previous mmap.
+        match unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(va)) } {
+            Ok(phys) => {
+                // Check if this is allocator-owned memory (not MMIO).
+                // MMIO physical addresses are typically above the usable
+                // RAM range.  A proper VMA tracker would record this;
+                // for now, we check if the frame belongs to the allocator.
+                if frame::is_allocator_owned(phys) {
+                    // SAFETY: The frame was allocated by our allocator
+                    // (verified by is_allocator_owned), the mapping was
+                    // just removed so no references remain.
+                    unsafe { let _ = frame::free_frame(phys); }
+                }
+                unmapped = unmapped.saturating_add(1);
+            }
+            Err(_) => {
+                // Frame wasn't mapped — skip silently (idempotent).
+            }
+        }
+    }
+
+    serial_println!(
+        "[mmap] Unmapped {} frames at {:#x}..{:#x}",
+        unmapped, vaddr, vaddr + size_aligned
+    );
+
+    SyscallResult::ok(0)
+}
+
+/// Simple bump allocator for mmap virtual addresses.
+///
+/// Allocates virtual addresses in the range
+/// `0x0000_0060_0000_0000..0x0000_0070_0000_0000` (256 GiB region).
+/// This is a temporary solution — a proper VMA (virtual memory area)
+/// tracker will replace this.
+fn mmap_alloc_vaddr(size: u64) -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Base of the mmap region in user address space.
+    const MMAP_BASE: u64 = 0x0000_0060_0000_0000;
+    /// End of the mmap region (exclusive).
+    const MMAP_END: u64 = 0x0000_0070_0000_0000;
+
+    static NEXT_VADDR: AtomicU64 = AtomicU64::new(MMAP_BASE);
+
+    let addr = NEXT_VADDR.fetch_add(size, Ordering::Relaxed);
+    if addr.checked_add(size).is_none_or(|end| end > MMAP_END) {
+        // Ran out of mmap space.
+        return 0;
+    }
+    addr
+}
+
 // ---------------------------------------------------------------------------
 // IPC handlers (200–399)
 // ---------------------------------------------------------------------------

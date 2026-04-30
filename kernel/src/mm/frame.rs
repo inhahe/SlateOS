@@ -796,6 +796,25 @@ pub unsafe fn free_order(frame: PhysFrame, order: usize) -> KernelResult<()> {
     guard.free_inner(frame.addr(), order)
 }
 
+/// Check if a physical frame falls within the allocator's managed range.
+///
+/// Returns `true` if the frame's physical address is within the range
+/// of memory tracked by the buddy allocator.  This is used to
+/// distinguish allocator-owned frames (which should be freed on unmap)
+/// from device MMIO frames (which should not).
+///
+/// Returns `false` if the allocator hasn't been initialized.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn is_allocator_owned(frame: PhysFrame) -> bool {
+    let Some(allocator) = ALLOCATOR.get() else {
+        return false;
+    };
+    let guard = allocator.lock();
+    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+    idx < guard.total_frames
+}
+
 /// Get a snapshot of the current allocator statistics.
 ///
 /// Returns `None` if the allocator has not been initialized.

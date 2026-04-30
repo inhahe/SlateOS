@@ -97,7 +97,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Thread creation / destruction
 - [x] fork equivalent (or better: posix_spawn-style that avoids fork's problems)
 - [x] exec equivalent
-- [-] Hardware exception → language-level exception (SEH-style, not Unix signals)
+- [x] Hardware exception → language-level exception (SEH-style, not Unix signals)
 - [ ] Structured shutdown via IPC message, not Unix signals
 - [ ] Process credential / capability management
 

@@ -35,6 +35,7 @@
 //! `THREAD_OWNERS` → `PROCESS_TABLE` → `CAP_TABLE` → `SCHED`.
 
 pub mod elf;
+pub mod exception;
 pub mod pcb;
 pub mod spawn;
 pub mod thread;

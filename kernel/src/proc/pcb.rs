@@ -335,6 +335,9 @@ pub fn parent(pid: ProcessId) -> Option<ProcessId> {
 /// process's address space (mapped frames, intermediate page tables,
 /// and the PML4 itself).
 pub fn destroy(pid: ProcessId) {
+    // Remove exception handler registration (if any).
+    crate::proc::exception::remove_handler(pid);
+
     let mut table = PROCESS_TABLE.lock();
     if let Some(proc) = table.remove(&pid) {
         // Free the entire user address space (mapped frames,

@@ -576,6 +576,8 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_faulting_process()?;
     test_spawn_stack_growth()?;
     test_exec_process()?;
+    test_seh_handler_exit()?;
+    test_seh_handler_resume()?;
     test_no_frame_leak()?;
 
     Ok(())
@@ -888,7 +890,95 @@ fn test_exec_process() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 7: Verify that destroying a process frees all its frames.
+/// Test 7: SEH — exception handler catches a page fault and calls SYS_EXIT.
+///
+/// Exercises the full exception dispatch path:
+/// 1. Process registers an exception handler via `SYS_SET_EXCEPTION_HANDLER`.
+/// 2. Process triggers a page fault (null pointer dereference).
+/// 3. Kernel pushes an `ExceptionContext` onto the user stack and
+///    redirects execution to the registered handler.
+/// 4. Handler calls `SYS_EXIT(0)`.
+/// 5. Process becomes a zombie — confirming the handler ran.
+///
+/// Without SEH, the page fault would kill the process (same as test 4).
+/// The difference here is that the handler gets control and exits
+/// cleanly, proving the exception dispatch machinery works.
+fn test_seh_handler_exit() -> KernelResult<()> {
+    let elf_data = elf::build_seh_exit_test_elf();
+    let options = SpawnOptions::new("spawn-test-seh-exit");
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // Let the thread run:
+    //   IRETQ → ring 3 → register handler → null deref → #PF →
+    //   kernel dispatches to handler → handler calls SYS_EXIT → zombie
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let s = pcb::state(result.pid);
+    if s != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SEH exit test — expected Zombie, got {:?}",
+            s
+        );
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   SEH handler catches fault (calls SYS_EXIT): OK");
+    Ok(())
+}
+
+/// Test 8: SEH — exception handler resumes execution via `SYS_EXCEPTION_RETURN`.
+///
+/// Exercises the full SEH round-trip:
+/// 1. Process registers an exception handler.
+/// 2. Process executes `ud2` (invalid opcode → `#UD`).
+/// 3. Kernel dispatches to handler with `ExceptionContext` on user stack.
+/// 4. Handler adds 2 to `ctx.rip` (skipping the 2-byte `ud2`).
+/// 5. Handler calls `SYS_EXCEPTION_RETURN(ctx_ptr)`.
+/// 6. Kernel restores the CPU state from the modified context.
+/// 7. Process resumes at the instruction after `ud2`.
+/// 8. Process calls `SYS_EXIT(0)` — becomes a zombie.
+///
+/// This test proves the entire exception → handler → resume flow works,
+/// including context saving, user-space modification, and restoration.
+fn test_seh_handler_resume() -> KernelResult<()> {
+    let elf_data = elf::build_seh_resume_test_elf();
+    let options = SpawnOptions::new("spawn-test-seh-resume");
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // Let the thread run:
+    //   IRETQ → ring 3 → register handler → ud2 → #UD →
+    //   kernel dispatches to handler → handler modifies ctx.rip →
+    //   SYS_EXCEPTION_RETURN → resumes past ud2 → SYS_EXIT → zombie
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let s = pcb::state(result.pid);
+    if s != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SEH resume test — expected Zombie, got {:?}",
+            s
+        );
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   SEH handler resumes execution (SYS_EXCEPTION_RETURN): OK");
+    Ok(())
+}
+
+/// Test 9: Verify that destroying a process frees all its frames.
 ///
 /// Spawns a process, lets it run (allocating ELF segment frames, user
 /// stack frames, and page table pages), then destroys it and checks

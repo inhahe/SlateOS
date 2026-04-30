@@ -1081,6 +1081,282 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a test ELF for SEH: exception handler catches fault and exits.
+///
+/// The ELF contains two code regions:
+///
+/// **Main code** (entry point, offset 0):
+/// ```x86asm
+///   mov eax, 504                ; SYS_SET_EXCEPTION_HANDLER
+///   movabs rdi, handler_addr    ; handler at +64 bytes into code
+///   syscall                     ; register the handler
+///   xor eax, eax                ; rax = 0
+///   mov [rax], eax              ; write to address 0 → #PF
+///   int3                        ; unreachable (handler runs instead)
+/// ```
+///
+/// **Exception handler** (offset 64):
+/// ```x86asm
+///   mov eax, 1                  ; SYS_EXIT
+///   xor edi, edi                ; exit code 0
+///   syscall                     ; exit cleanly
+///   int3
+/// ```
+///
+/// If SEH dispatch works, the process exits cleanly via the handler
+/// instead of being killed by the kernel.
+pub fn build_seh_exit_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let code_size: u64 = 128; // Room for main code + handler.
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+    let handler_offset: u64 = 64; // Handler at +64 bytes within code.
+    #[allow(clippy::arithmetic_side_effects)]
+    let handler_vaddr: u64 = load_vaddr + handler_offset;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // Entry point = main code.
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD, R+X) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_size);
+    write_u64(&mut buf, ph + 40, code_size);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // Fill with INT3 safety net.
+    let c = code_offset as usize;
+    for byte in &mut buf[c..(c + code_size as usize)] {
+        *byte = 0xCC;
+    }
+
+    // --- Main code at offset 0 ---
+
+    // mov eax, 504 (0x1F8)  →  B8 F8 01 00 00
+    buf[c] = 0xB8;
+    buf[c + 1] = 0xF8;
+    buf[c + 2] = 0x01;
+    buf[c + 3] = 0x00;
+    buf[c + 4] = 0x00;
+
+    // movabs rdi, handler_vaddr  →  48 BF <8 bytes LE>
+    buf[c + 5] = 0x48;
+    buf[c + 6] = 0xBF;
+    buf[c + 7..c + 15].copy_from_slice(&handler_vaddr.to_le_bytes());
+
+    // syscall  →  0F 05
+    buf[c + 15] = 0x0F;
+    buf[c + 16] = 0x05;
+
+    // xor eax, eax  →  31 C0
+    buf[c + 17] = 0x31;
+    buf[c + 18] = 0xC0;
+
+    // mov [rax], eax  →  89 00  (write to address 0 → #PF)
+    buf[c + 19] = 0x89;
+    buf[c + 20] = 0x00;
+
+    // int3 at c+21 (already filled by safety net).
+
+    // --- Exception handler at offset 64 ---
+    let h = c + handler_offset as usize;
+
+    // mov eax, 1 (SYS_EXIT)  →  B8 01 00 00 00
+    buf[h] = 0xB8;
+    buf[h + 1] = 0x01;
+    buf[h + 2] = 0x00;
+    buf[h + 3] = 0x00;
+    buf[h + 4] = 0x00;
+
+    // xor edi, edi  →  31 FF
+    buf[h + 5] = 0x31;
+    buf[h + 6] = 0xFF;
+
+    // syscall  →  0F 05
+    buf[h + 7] = 0x0F;
+    buf[h + 8] = 0x05;
+
+    // int3 at h+9 (already filled).
+
+    buf
+}
+
+/// Build a test ELF for full SEH round-trip: handler resumes execution.
+///
+/// The ELF tests the full exception → handler → resume path:
+///
+/// **Main code** (entry point, offset 0):
+/// ```x86asm
+///   mov eax, 504                ; SYS_SET_EXCEPTION_HANDLER
+///   movabs rdi, handler_addr    ; handler at +64 bytes into code
+///   syscall                     ; register the handler
+///   ud2                         ; triggers #UD (2 bytes)
+///   mov eax, 1                  ; SYS_EXIT ← resume point
+///   xor edi, edi                ; exit code 0
+///   syscall                     ; exit cleanly
+///   int3                        ; unreachable
+/// ```
+///
+/// **Exception handler** (offset 64):
+/// ```x86asm
+///   add qword [rdi+16], 2      ; ctx->rip += 2 (skip ud2)
+///   mov eax, 505                ; SYS_EXCEPTION_RETURN
+///   syscall                     ; resume at modified RIP
+///   int3                        ; unreachable
+/// ```
+///
+/// The handler receives a pointer to [`ExceptionContext`] in RDI.
+/// `ExceptionContext.rip` is at byte offset 16 (after `code: u64` and
+/// `aux: u64`).  The handler adds 2 to skip past the 2-byte `ud2`,
+/// then calls `SYS_EXCEPTION_RETURN` which restores the CPU state
+/// and resumes execution at the `mov eax, 1` instruction.
+pub fn build_seh_resume_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let code_size: u64 = 128;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+    let handler_offset: u64 = 64;
+    #[allow(clippy::arithmetic_side_effects)]
+    let handler_vaddr: u64 = load_vaddr + handler_offset;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr);
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD, R+X) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_size);
+    write_u64(&mut buf, ph + 40, code_size);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // Fill with INT3 safety net.
+    let c = code_offset as usize;
+    for byte in &mut buf[c..(c + code_size as usize)] {
+        *byte = 0xCC;
+    }
+
+    // --- Main code at offset 0 ---
+
+    // mov eax, 504 (0x1F8)  →  B8 F8 01 00 00
+    buf[c] = 0xB8;
+    buf[c + 1] = 0xF8;
+    buf[c + 2] = 0x01;
+    buf[c + 3] = 0x00;
+    buf[c + 4] = 0x00;
+
+    // movabs rdi, handler_vaddr  →  48 BF <8 bytes LE>
+    buf[c + 5] = 0x48;
+    buf[c + 6] = 0xBF;
+    buf[c + 7..c + 15].copy_from_slice(&handler_vaddr.to_le_bytes());
+
+    // syscall  →  0F 05
+    buf[c + 15] = 0x0F;
+    buf[c + 16] = 0x05;
+
+    // ud2  →  0F 0B  (triggers #UD; handler will skip these 2 bytes)
+    buf[c + 17] = 0x0F;
+    buf[c + 18] = 0x0B;
+
+    // --- Resume point after handler (entry + 19) ---
+
+    // mov eax, 1 (SYS_EXIT)  →  B8 01 00 00 00
+    buf[c + 19] = 0xB8;
+    buf[c + 20] = 0x01;
+    buf[c + 21] = 0x00;
+    buf[c + 22] = 0x00;
+    buf[c + 23] = 0x00;
+
+    // xor edi, edi  →  31 FF
+    buf[c + 24] = 0x31;
+    buf[c + 25] = 0xFF;
+
+    // syscall  →  0F 05
+    buf[c + 26] = 0x0F;
+    buf[c + 27] = 0x05;
+
+    // int3 at c+28 (already filled).
+
+    // --- Exception handler at offset 64 ---
+    let h = c + handler_offset as usize;
+
+    // add qword [rdi+16], 2  →  48 83 47 10 02
+    // (ExceptionContext.rip is at offset 16: code(u64) + aux(u64) = 16 bytes)
+    buf[h] = 0x48;
+    buf[h + 1] = 0x83;
+    buf[h + 2] = 0x47;
+    buf[h + 3] = 0x10;
+    buf[h + 4] = 0x02;
+
+    // mov eax, 505 (0x1F9) (SYS_EXCEPTION_RETURN)  →  B8 F9 01 00 00
+    buf[h + 5] = 0xB8;
+    buf[h + 6] = 0xF9;
+    buf[h + 7] = 0x01;
+    buf[h + 8] = 0x00;
+    buf[h + 9] = 0x00;
+
+    // syscall  →  0F 05
+    buf[h + 10] = 0x0F;
+    buf[h + 11] = 0x05;
+
+    // int3 at h+12 (already filled).
+
+    buf
+}
+
 /// Build a test ELF with BSS (memsz > filesz).
 fn build_test_elf_with_bss() -> alloc::vec::Vec<u8> {
     use alloc::vec;

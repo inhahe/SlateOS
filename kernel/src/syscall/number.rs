@@ -328,6 +328,30 @@ pub const SYS_PROCESS_ID: u64 = 502;
 /// ELF, out of memory), returns a negative error code.
 pub const SYS_PROCESS_EXEC: u64 = 503;
 
+/// Register an exception handler for the current process.
+///
+/// `arg0`: handler function address (userspace), or 0 to unregister.
+///
+/// The handler is called when a hardware exception (divide error,
+/// access violation, invalid opcode, etc.) occurs in ring 3.  It
+/// receives a pointer to an `ExceptionContext` as its first argument.
+///
+/// Returns: 0 on success.
+pub const SYS_SET_EXCEPTION_HANDLER: u64 = 504;
+
+/// Return from an exception handler, resuming at the saved context.
+///
+/// `arg0`: pointer to the `ExceptionContext` on the user stack.
+///
+/// The kernel restores the CPU state from the context and resumes
+/// execution at the saved RIP.  If the handler modified the context
+/// (e.g., changed RIP to skip the faulting instruction), the new
+/// values take effect.
+///
+/// This syscall does NOT return to the caller — it resumes at the
+/// context's RIP.
+pub const SYS_EXCEPTION_RETURN: u64 = 505;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

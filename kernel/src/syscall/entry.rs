@@ -275,10 +275,13 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // this read).
     let f = unsafe { &mut *frame };
 
-    // Check for SYS_PROCESS_EXEC — it needs to modify the frame
-    // directly (new RIP, new RSP) rather than just returning a value.
+    // Check for syscalls that need to modify the frame directly
+    // (they change RIP/RSP rather than just returning a value).
     if f.syscall_nr == super::number::SYS_PROCESS_EXEC {
         return super::handlers::sys_process_exec_with_frame(f);
+    }
+    if f.syscall_nr == super::number::SYS_EXCEPTION_RETURN {
+        return super::handlers::sys_exception_return_with_frame(f);
     }
 
     // Build SyscallArgs from the frame and dispatch.

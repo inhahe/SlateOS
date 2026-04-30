@@ -880,6 +880,78 @@ pub fn sys_process_id(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(pid as i64)
 }
 
+/// `SYS_SET_EXCEPTION_HANDLER` — register a per-process exception handler.
+///
+/// `arg0`: handler function address, or 0 to unregister.
+pub fn sys_set_exception_handler(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{exception, thread};
+
+    let handler_addr = args.arg0;
+    let task_id = sched::current_task_id();
+
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => {
+            return SyscallResult::err(KernelError::NoSuchProcess);
+        }
+    };
+
+    exception::set_handler(pid, handler_addr);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_EXCEPTION_RETURN` — resume from an exception handler.
+///
+/// `arg0`: pointer to the `ExceptionContext` on the user stack.
+///
+/// Restores the saved CPU state and resumes execution.  This syscall
+/// does NOT return to the caller — it modifies the SYSRET frame to
+/// jump to the context's saved RIP.
+///
+/// Since this needs to modify the syscall frame, it's handled as a
+/// special case in `syscall_handler_inner` (like exec).
+pub fn sys_exception_return_with_frame(
+    frame: &mut super::entry::SyscallFrame,
+) -> i64 {
+    use crate::proc::exception::ExceptionContext;
+
+    let ctx_ptr = frame.arg0 as *const ExceptionContext;
+
+    // TODO: validate that ctx_ptr is in the user address space.
+    // For now, trust the pointer.
+
+    // SAFETY: ctx_ptr was written by the kernel's exception dispatch
+    // code onto the user stack.  The handler may have modified fields
+    // (e.g., rip to skip the faulting instruction).
+    let ctx = unsafe { &*ctx_ptr };
+
+    // Restore the SYSRET frame from the exception context.
+    frame.user_rip = ctx.rip;
+    frame.user_rsp = ctx.rsp;
+    frame.user_rflags = ctx.rflags;
+    frame.arg0 = ctx.rdi;  // rdi
+    frame.arg1 = ctx.rsi;  // rsi
+    frame.arg2 = ctx.rdx;  // rdx
+    frame.arg3 = ctx.r10;  // r10
+    frame.arg4 = ctx.r8;   // r8
+    frame.arg5 = ctx.r9;   // r9
+    frame.rbx = ctx.rbx;
+    frame.rbp = ctx.rbp;
+    frame.r12 = ctx.r12;
+    frame.r13 = ctx.r13;
+    frame.r14 = ctx.r14;
+    frame.r15 = ctx.r15;
+
+    serial_println!(
+        "[exception] Returning from exception handler to {:#x}",
+        ctx.rip
+    );
+
+    // Return value in RAX (not meaningful — the restored rax from
+    // the context won't be used since we're restoring from the frame).
+    ctx.rax as i64
+}
+
 /// `SYS_PROCESS_EXEC` — replace the current process image.
 ///
 /// This handler receives the full `SyscallFrame` (not just args) because

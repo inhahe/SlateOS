@@ -277,7 +277,7 @@ isr_stub_no_error!(isr_timer, handle_timer_irq);
 isr_stub_no_error!(isr_spurious, handle_spurious_irq);
 
 // ---------------------------------------------------------------------------
-// Ring 3 exception handling — kill faulting userspace task
+// Ring 3 exception handling
 // ---------------------------------------------------------------------------
 
 /// The CPL (current privilege level) is stored in bits [1:0] of CS.
@@ -289,13 +289,169 @@ fn is_userspace_exception(frame: &InterruptStackFrame) -> bool {
     (frame.cs & RING_3) == RING_3
 }
 
-/// Kill the current task because it caused an unrecoverable exception
-/// while running in ring 3.
+/// Saved general-purpose registers on the kernel stack.
 ///
-/// Logs the exception, performs thread/process bookkeeping, then calls
-/// `task_exit()` which does a context switch to the next task and never
-/// returns.  The faulting task's kernel stack (with the exception frame
-/// on it) is abandoned and will be freed when the dead task is reaped.
+/// Layout matches the push order in the ISR assembly stubs.  The struct
+/// lives immediately below the error code on the kernel stack (and the
+/// `InterruptStackFrame` is immediately above the error code).
+///
+/// ```text
+/// high address
+///   [InterruptStackFrame: rip, cs, rflags, rsp, ss]
+///   error_code
+///   rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15
+/// low address ← RSP
+/// ```
+#[repr(C)]
+struct SavedRegisters {
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rdi: u64,
+    rsi: u64,
+    rbp: u64,
+    rbx: u64,
+    rdx: u64,
+    rcx: u64,
+    rax: u64,
+}
+
+/// Get a mutable pointer to the saved registers on the kernel stack.
+///
+/// The ISR stub layout is: [saved GPRs][error_code][InterruptStackFrame].
+/// `frame_ptr` points to the InterruptStackFrame.  The saved GPRs start
+/// at `frame_ptr - 8 (error code) - 15*8 (GPRs) = frame_ptr - 128`.
+///
+/// # Safety
+///
+/// `frame_ptr` must point to a valid `InterruptStackFrame` on the
+/// kernel stack, created by an ISR assembly stub.
+unsafe fn saved_registers_from_frame(frame_ptr: *const InterruptStackFrame) -> *mut SavedRegisters {
+    // frame_ptr - 8 (error code) - 120 (15 GPRs × 8) = frame_ptr - 128.
+    // SAFETY: ISR stubs push exactly 15 GPRs + error code below the frame.
+    unsafe { (frame_ptr as *mut u8).sub(128) as *mut SavedRegisters }
+}
+
+/// Try to dispatch a ring 3 exception to the process's registered
+/// exception handler (SEH-style).
+///
+/// If successful, modifies the `InterruptStackFrame` and saved registers
+/// on the kernel stack so that IRETQ returns to the user exception
+/// handler with an `ExceptionContext` on the user stack.
+///
+/// Returns `true` if the exception was dispatched (the ISR should just
+/// return and let IRETQ do its thing).  Returns `false` if no handler
+/// is registered or dispatch failed (caller should kill the task).
+fn try_dispatch_user_exception(
+    frame: &mut InterruptStackFrame,
+    saved: &mut SavedRegisters,
+    code: crate::proc::exception::ExceptionCode,
+    aux: u64,
+) -> bool {
+    use crate::proc::exception::{ExceptionContext, EXCEPTION_CONTEXT_SIZE};
+    use crate::proc::thread;
+
+    // Look up the process's exception handler.
+    let task_id = sched::current_task_id();
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) => pid,
+        None => return false,
+    };
+
+    let handler_addr = match crate::proc::exception::get_handler(pid) {
+        Some(addr) => addr,
+        None => return false, // No handler → kill the process.
+    };
+
+    // Build the ExceptionContext on the user stack.
+    //
+    // We need space for the context struct plus an 8-byte slot for a
+    // "return address" that the handler's RET will pop.  We use 0
+    // (which will fault if the handler tries to return without calling
+    // SYS_EXIT or SYS_EXCEPTION_RETURN — this is intentional).
+    #[allow(clippy::arithmetic_side_effects)]
+    let ctx_size = EXCEPTION_CONTEXT_SIZE as u64;
+    #[allow(clippy::arithmetic_side_effects)]
+    let new_rsp = (frame.rsp - ctx_size - 8) & !0xF; // 16-byte align
+
+    let ctx_addr = new_rsp;
+
+    // Build the context from the faulting state.
+    let ctx = ExceptionContext {
+        code: code as u64,
+        aux,
+        rip: frame.rip,
+        rsp: frame.rsp,
+        rflags: frame.rflags,
+        rax: saved.rax,
+        rbx: saved.rbx,
+        rcx: saved.rcx,
+        rdx: saved.rdx,
+        rsi: saved.rsi,
+        rdi: saved.rdi,
+        rbp: saved.rbp,
+        r8: saved.r8,
+        r9: saved.r9,
+        r10: saved.r10,
+        r11: saved.r11,
+        r12: saved.r12,
+        r13: saved.r13,
+        r14: saved.r14,
+        r15: saved.r15,
+    };
+
+    // Write the context to the user stack.
+    //
+    // Since CR3 is still the process's PML4, the user stack is
+    // accessible.  But we need to ensure the stack page is mapped
+    // (it should be — we only need the page that was already in use
+    // by the faulting code, unless the stack is very small).
+    //
+    // SAFETY: ctx_addr is within the user stack region, which the
+    // process had mapped (it was just executing with this RSP).
+    // The context struct is safely sized.
+    let ctx_ptr = ctx_addr as *mut ExceptionContext;
+    // Write a null return address above the context so the handler
+    // sees a proper call frame.
+    let ret_addr_ptr = (ctx_addr.wrapping_add(ctx_size)) as *mut u64;
+
+    // SAFETY: These addresses are in the user's mapped stack region.
+    unsafe {
+        core::ptr::write(ctx_ptr, ctx);
+        core::ptr::write(ret_addr_ptr, 0u64); // Null return address.
+    }
+
+    // Redirect execution to the handler.
+    // When IRETQ fires, it will load these values:
+    frame.rip = handler_addr;       // Jump to handler.
+    frame.rsp = new_rsp;            // Use new stack position.
+    // CS, SS, RFLAGS stay the same (ring 3, interrupts enabled).
+
+    // Set RDI = pointer to ExceptionContext (first argument per SysV ABI).
+    saved.rdi = ctx_addr;
+
+    // Zero other argument registers for cleanliness.
+    saved.rsi = 0;
+    saved.rdx = 0;
+    saved.rcx = 0;
+    saved.r8 = 0;
+    saved.r9 = 0;
+
+    serial_println!(
+        "[exception] Dispatching {:?} to handler {:#x} for process {} (ctx at {:#x})",
+        code, handler_addr, pid, ctx_addr
+    );
+
+    true
+}
+
+/// Kill the current task because it caused an unrecoverable exception
+/// while running in ring 3 (no exception handler registered).
 ///
 /// This function never returns.
 fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
@@ -309,15 +465,77 @@ fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
 
-    // Thread bookkeeping: remove from process, transition to zombie
-    // if this was the last thread.
     crate::proc::thread::on_thread_exit(task_id);
-
-    // Mark task as dead and switch to next task (never returns).
     sched::task_exit();
-
-    // Unreachable — task_exit() does a context switch.
     cpu::halt_loop();
+}
+
+/// Try to dispatch a ring 3 exception to the user handler.  If no handler
+/// is registered, kill the task.
+///
+/// Unlike `kill_userspace_task` (which diverges unconditionally), this
+/// function returns if the exception was dispatched to a user handler
+/// (the ISR stub will IRETQ to the handler).  If no handler exists,
+/// it diverges by killing the task.
+///
+/// # Safety Model
+///
+/// We need mutable access to the `InterruptStackFrame` and saved
+/// registers on the kernel stack.  The `frame` parameter is `&`
+/// because that's what the assembly stubs provide, but the underlying
+/// memory IS mutable (it's on the kernel stack, exclusively owned by
+/// this ISR invocation).  We recover mutability through pointer
+/// arithmetic from the frame's address, not through `&` → `&mut`
+/// casting.
+/// Raw-pointer variant that avoids `&T` → `&mut T` UB.
+///
+/// # Safety
+///
+/// `frame_ptr` must point to a valid `InterruptStackFrame` on the
+/// kernel stack, created by an ISR assembly stub.  The stack must
+/// be exclusively owned (ISR context, interrupts disabled).
+unsafe fn dispatch_or_kill_userspace_raw(
+    exception_name: &str,
+    frame_ptr: *mut InterruptStackFrame,
+    code: crate::proc::exception::ExceptionCode,
+    aux: u64,
+) {
+    // SAFETY: frame_ptr is valid and exclusive (caller guarantee).
+    let frame_mut = unsafe { &mut *frame_ptr };
+    let saved = unsafe { &mut *saved_registers_from_frame(frame_ptr) };
+
+    if try_dispatch_user_exception(frame_mut, saved, code, aux) {
+        // Dispatched — the ISR stub will IRETQ to the handler.
+        return;
+    }
+
+    // No handler — kill.
+    // SAFETY: frame_ptr is valid.
+    kill_userspace_task(exception_name, unsafe { &*frame_ptr });
+}
+
+/// Convenience wrapper: casts `&InterruptStackFrame` to `*mut` and
+/// calls the raw version.
+///
+/// Sound because ISR handlers run with interrupts disabled on the
+/// kernel stack — the frame is exclusively ours and the assembly stub
+/// will read the (possibly modified) values after we return.
+fn dispatch_or_kill_userspace(
+    exception_name: &str,
+    frame: &InterruptStackFrame,
+    code: crate::proc::exception::ExceptionCode,
+    aux: u64,
+) {
+    // The frame was passed to us from assembly as a pointer in RDI.
+    // Rust's `&` is more restrictive than what the assembly intended.
+    // We recover the raw pointer the assembly originally computed.
+    //
+    // SAFETY: ISR context, single CPU, interrupts disabled, exclusive
+    // access to the kernel stack.
+    let frame_ptr = (frame as *const InterruptStackFrame).cast_mut();
+    unsafe {
+        dispatch_or_kill_userspace_raw(exception_name, frame_ptr, code, aux);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +552,9 @@ fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
 #[unsafe(no_mangle)]
 extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("Divide Error (#DE)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Divide Error (#DE)", frame, ExceptionCode::DivideError, 0);
+        return; // Handler dispatched — IRETQ to user handler.
     }
     serial_println!("EXCEPTION: Divide Error (#DE) at {:#x}", frame.rip);
     cpu::halt_loop();
@@ -358,7 +578,9 @@ extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_overflow(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("Overflow (#OF)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Overflow (#OF)", frame, ExceptionCode::Overflow, 0);
+        return;
     }
     serial_println!("EXCEPTION: Overflow (#OF) at {:#x}", frame.rip);
     cpu::halt_loop();
@@ -367,7 +589,9 @@ extern "C" fn handle_overflow(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("Bound Range Exceeded (#BR)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Bound Range Exceeded (#BR)", frame, ExceptionCode::BoundRangeExceeded, 0);
+        return;
     }
     serial_println!("EXCEPTION: Bound Range Exceeded (#BR) at {:#x}", frame.rip);
     cpu::halt_loop();
@@ -376,7 +600,9 @@ extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("Invalid Opcode (#UD)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Invalid Opcode (#UD)", frame, ExceptionCode::InvalidOpcode, 0);
+        return;
     }
     serial_println!("EXCEPTION: Invalid Opcode (#UD) at {:#x}", frame.rip);
     cpu::halt_loop();
@@ -385,7 +611,11 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("Device Not Available (#NM)", frame);
+        // #NM typically means the FPU context isn't available.
+        // Dispatch as invalid opcode (closest match).
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Device Not Available (#NM)", frame, ExceptionCode::InvalidOpcode, 0);
+        return;
     }
     serial_println!("EXCEPTION: Device Not Available (#NM) at {:#x}", frame.rip);
     cpu::halt_loop();
@@ -421,7 +651,9 @@ extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("Segment Not Present (#NP)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Segment Not Present (#NP)", frame, ExceptionCode::SegmentNotPresent, error);
+        return;
     }
     serial_println!(
         "EXCEPTION: Segment Not Present (#NP) at {:#x}, selector={:#x}",
@@ -434,7 +666,9 @@ extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("Stack-Segment Fault (#SS)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Stack-Segment Fault (#SS)", frame, ExceptionCode::StackSegmentFault, error);
+        return;
     }
     serial_println!(
         "EXCEPTION: Stack-Segment Fault (#SS) at {:#x}, error={:#x}",
@@ -447,7 +681,9 @@ extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("General Protection Fault (#GP)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("General Protection Fault (#GP)", frame, ExceptionCode::GeneralProtectionFault, error);
+        return;
     }
     serial_println!(
         "EXCEPTION: General Protection Fault (#GP) at {:#x}, error={:#x}",
@@ -485,7 +721,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
             return; // Stack grew successfully — retry the instruction.
         }
 
-        // Unresolvable user fault — kill the task.
+        // Unresolvable user fault — try SEH handler, then kill.
         serial_println!(
             "[exception] Killing task {} — Page Fault (#PF) at {:#x}, address={:#x}",
             sched::current_task_id(), frame.rip, cr2
@@ -493,8 +729,11 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         let present = if error & 1 != 0 { "present" } else { "not-present" };
         let write = if error & 2 != 0 { "write" } else { "read" };
         serial_println!("  Cause: {present}, {write}, user");
-        // kill_userspace_task never returns.
-        kill_userspace_task("Page Fault (#PF)", frame);
+
+        // Try SEH dispatch with AccessViolation code and CR2 as aux data.
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Page Fault (#PF)", frame, ExceptionCode::AccessViolation, cr2);
+        return; // Handler dispatched.
     }
 
     // Unresolvable kernel page fault — halt.
@@ -594,7 +833,9 @@ fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
 #[unsafe(no_mangle)]
 extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("x87 Floating-Point (#MF)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("x87 Floating-Point (#MF)", frame, ExceptionCode::FloatingPointError, 0);
+        return;
     }
     serial_println!("EXCEPTION: x87 Floating-Point (#MF) at {:#x}", frame.rip);
     cpu::halt_loop();
@@ -604,7 +845,9 @@ extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
 extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
     // #AC can only occur in ring 3 (when CR0.AM and RFLAGS.AC are set).
     if is_userspace_exception(frame) {
-        kill_userspace_task("Alignment Check (#AC)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("Alignment Check (#AC)", frame, ExceptionCode::AlignmentCheck, error);
+        return;
     }
     serial_println!(
         "EXCEPTION: Alignment Check (#AC) at {:#x}, error={:#x}",
@@ -625,7 +868,9 @@ extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_simd_fp(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
-        kill_userspace_task("SIMD Floating-Point (#XM)", frame);
+        use crate::proc::exception::ExceptionCode;
+        dispatch_or_kill_userspace("SIMD Floating-Point (#XM)", frame, ExceptionCode::SimdFloatingPoint, 0);
+        return;
     }
     serial_println!("EXCEPTION: SIMD Floating-Point (#XM) at {:#x}", frame.rip);
     cpu::halt_loop();

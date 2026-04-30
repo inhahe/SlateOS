@@ -69,6 +69,18 @@ pub enum TaskState {
     Dead,
 }
 
+impl core::fmt::Display for TaskState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Ready => f.write_str("ready"),
+            Self::Running => f.write_str("running"),
+            Self::Blocked => f.write_str("blocked"),
+            Self::Suspended => f.write_str("suspended"),
+            Self::Dead => f.write_str("dead"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CPU context (saved registers for context switch)
 // ---------------------------------------------------------------------------

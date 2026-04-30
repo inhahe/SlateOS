@@ -58,6 +58,7 @@ mod idt;
 mod ioapic;
 mod ipc;
 mod keyboard;
+mod kshell;
 mod limine;
 mod mm;
 mod port;
@@ -358,12 +359,11 @@ extern "C" fn kmain() -> ! {
     // Show boot-complete on the framebuffer console too.
     console_println!("=== Kernel boot complete ===");
 
-    // Idle loop: halt until interrupt, repeat.
-    // The APIC timer wakes us periodically; the scheduler runs
-    // on each timer tick.
-    loop {
-        cpu::hlt();
-    }
+    // Enter the kernel debug shell.
+    // This replaces the idle loop — the shell blocks on keyboard input
+    // using HLT, so it is equally power-efficient.  The APIC timer
+    // still fires and drives the scheduler.
+    kshell::run();
 }
 
 // ---------------------------------------------------------------------------

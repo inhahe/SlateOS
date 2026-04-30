@@ -199,6 +199,14 @@ pub fn putchar(c: u8) {
         b'\r' => {
             con.cursor_col = 0;
         }
+        b'\x08' => {
+            // Backspace: move cursor back one column (if not at start
+            // of line).  Does NOT erase the character — the caller is
+            // responsible for overwriting with a space if desired.
+            if con.cursor_col > 0 {
+                con.cursor_col = con.cursor_col.saturating_sub(1);
+            }
+        }
         b'\t' => {
             // Advance to the next tab stop (multiple of TAB_STOP).
             // If already at or past the last tab stop on the line,

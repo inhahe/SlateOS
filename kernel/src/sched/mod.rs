@@ -439,6 +439,32 @@ pub fn reap_dead_tasks() -> usize {
     reaped
 }
 
+/// Snapshot of a task's key fields for diagnostic display.
+pub struct TaskInfo {
+    /// Task ID.
+    pub id: TaskId,
+    /// Scheduling state.
+    pub state: TaskState,
+    /// Priority level (0 = highest).
+    pub priority: u8,
+}
+
+/// Return a snapshot of all tasks in the scheduler.
+///
+/// Used by the kernel debug shell to implement the `ps` command.
+pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
+    let state = SCHED.lock();
+    state
+        .tasks
+        .iter()
+        .map(|(&id, task)| TaskInfo {
+            id,
+            state: task.state,
+            priority: task.priority,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Core scheduling logic
 // ---------------------------------------------------------------------------

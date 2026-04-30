@@ -136,9 +136,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 _Port ext4 first. Don't write a custom filesystem._
 - [x] VFS (virtual filesystem) layer — FileSystem trait, mount table, path resolution
 - [ ] Port ext4 (primary filesystem, read-write)
-- [-] FAT (USB drives, EFI System Partition — essential)
+- [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
-  - [ ] Test with actual FAT32 disk image
+  - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
 - [ ] ISO 9660 (optical media)
 - [ ] Filesystem features:
   - [ ] Case-sensitive paths, forward slash separator

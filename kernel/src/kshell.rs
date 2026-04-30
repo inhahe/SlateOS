@@ -140,6 +140,7 @@ fn execute(line: &str) {
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
         "echo" => cmd_echo(args),
+        "time" | "date" => cmd_time(),
         "reboot" => cmd_reboot(),
         "irq" => cmd_irq(),
         "version" | "ver" => cmd_version(),
@@ -161,6 +162,7 @@ fn cmd_help() {
     crate::console_println!("  clear     Clear the screen");
     crate::console_println!("  uptime    Show system uptime (tick count)");
     crate::console_println!("  echo ...  Echo text to console");
+    crate::console_println!("  time      Show current date and time (RTC)");
     crate::console_println!("  irq       Show IRQ interrupt counts");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
@@ -243,6 +245,11 @@ fn cmd_uptime() {
 
 fn cmd_echo(args: &str) {
     crate::console_println!("{}", args);
+}
+
+fn cmd_time() {
+    let dt = crate::rtc::read_datetime();
+    crate::console_println!("{}", dt);
 }
 
 fn cmd_irq() {

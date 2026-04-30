@@ -63,6 +63,7 @@ mod limine;
 mod mm;
 mod port;
 mod proc;
+mod rtc;
 mod sched;
 mod security;
 mod serial;
@@ -350,6 +351,14 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = keyboard::self_test() {
         serial_println!("FATAL: Keyboard self-test failed: {}", e);
         cpu::halt_loop();
+    }
+
+    // Step 23: Verify the CMOS Real-Time Clock.
+    // No initialization needed — the RTC is always running on battery.
+    // We just verify we can read a plausible date/time.
+    if let Err(e) = rtc::self_test() {
+        serial_println!("WARNING: RTC self-test failed: {}", e);
+        // Non-fatal — the system can function without a correct clock.
     }
 
     // Boot success marker — the boot test script looks for this.

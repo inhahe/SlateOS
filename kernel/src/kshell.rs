@@ -155,6 +155,7 @@ fn execute(line: &str) {
         "net" | "ifconfig" => cmd_net(),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
+        "dns" | "nslookup" => cmd_dns(args),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -188,6 +189,7 @@ fn cmd_help() {
     crate::console_println!("  net       Show network interface info");
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
     crate::console_println!("  ping IP   Send an ARP probe to an IP");
+    crate::console_println!("  dns NAME  Resolve a domain name to IP");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -653,6 +655,24 @@ fn cmd_ping(args: &str) {
         }
         Err(e) => {
             crate::console_println!("ARP resolve failed: {:?}", e);
+        }
+    }
+}
+
+fn cmd_dns(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: dns <domain-name>");
+        crate::console_println!("  e.g., dns example.com");
+        return;
+    }
+
+    crate::console_println!("Resolving {}...", args);
+    match crate::net::dns::resolve(args) {
+        Ok(ip) => {
+            crate::console_println!("{} -> {}", args, ip);
+        }
+        Err(e) => {
+            crate::console_println!("DNS resolution failed: {:?}", e);
         }
     }
 }

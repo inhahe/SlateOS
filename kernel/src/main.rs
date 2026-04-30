@@ -357,6 +357,7 @@ extern "C" fn kmain() -> ! {
                 serial_println!("[net] DHCP failed: {:?} (non-fatal)", e);
             }
         }
+
     }
 
     // Step 20e: Initialize block device abstraction layer.

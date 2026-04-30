@@ -157,7 +157,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] UDP datagram send/receive with socket layer
   - [x] DHCP client (auto-configure IP/mask/gateway/DNS at boot)
   - [ ] TCP (connection-oriented reliable streams)
-  - [ ] DNS resolver
+  - [x] DNS resolver (A record queries via UDP)
   - [ ] Move to userspace service
 - [ ] Sockets API (not file descriptors — dedicated socket handles)
 - [ ] Firewall (basic packet filtering)

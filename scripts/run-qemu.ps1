@@ -43,21 +43,25 @@ Copy-Item $KernelBin "$EspDir\boot\kernel" -Force
 Copy-Item "$ProjectRoot\limine.conf" "$EspDir\limine.conf" -Force
 
 # Step 3: Run QEMU
-$qemuArgs = @(
-    "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfFw",
-    "-drive", "format=raw,file=fat:rw:$EspDir",
-    "-m", "${Memory}M",
-    "-machine", "q35",
-    "-no-reboot"
-)
+# Note: OVMF and ESP paths may contain spaces (e.g. "C:\Program Files\...").
+# Start-Process -ArgumentList joins array elements with spaces, which breaks
+# paths that contain spaces.  We build a single argument string with quoted
+# paths to avoid this issue.
 
 if ($Test) {
     # Boot test mode: capture serial to file, check for BOOT_OK
     $serialFile = "$ProjectRoot\build\serial-test.txt"
-    $qemuArgs += @("-serial", "file:$serialFile", "-display", "none")
+
+    # Delete stale serial file to prevent false positives if QEMU fails to start.
+    if (Test-Path $serialFile) { Remove-Item $serialFile -Force }
+
+    $argString = "-drive `"if=pflash,format=raw,readonly=on,file=$OvmfFw`" " +
+                 "-drive `"format=raw,file=fat:rw:$EspDir`" " +
+                 "-m ${Memory}M -machine q35 -no-reboot " +
+                 "-serial `"file:$serialFile`" -display none"
 
     Write-Host "Running boot test (timeout: ${Timeout}s)..." -ForegroundColor Cyan
-    $proc = Start-Process -FilePath $QemuExe -ArgumentList $qemuArgs -PassThru -NoNewWindow
+    $proc = Start-Process -FilePath $QemuExe -ArgumentList $argString -PassThru -NoNewWindow
     $elapsed = 0
     while (-not $proc.HasExited -and $elapsed -lt $Timeout) {
         Start-Sleep -Seconds 1
@@ -94,8 +98,17 @@ if ($Test) {
     exit 1
 
 } else {
-    # Interactive mode: serial to console
-    $qemuArgs += @("-serial", "stdio")
+    # Interactive mode: serial to console.
+    # Use call operator (&) with splatting — each array element becomes a
+    # separate argument, and PowerShell handles quoting correctly.
+    $qemuArgs = @(
+        "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfFw",
+        "-drive", "format=raw,file=fat:rw:$EspDir",
+        "-m", "${Memory}M",
+        "-machine", "q35",
+        "-no-reboot",
+        "-serial", "stdio"
+    )
     Write-Host "Starting QEMU (Ctrl+C to exit)..." -ForegroundColor Cyan
     & $QemuExe @qemuArgs
 }

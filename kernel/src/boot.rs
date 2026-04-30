@@ -77,6 +77,23 @@ static FRAMEBUFFER_REQUEST: LimineRequest<FramebufferResponse> = LimineRequest::
 // Public accessors
 // ---------------------------------------------------------------------------
 
+/// Framebuffer information from the bootloader (if available).
+///
+/// Contains the virtual address and geometry needed to initialize
+/// the framebuffer text console.
+pub struct FramebufferInfo {
+    /// Virtual address of the framebuffer start (already mapped by Limine).
+    pub address: u64,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Bytes per row (may include padding beyond visible width).
+    pub pitch: u32,
+    /// Bits per pixel (typically 32 for BGRA).
+    pub bpp: u16,
+}
+
 /// Information extracted from the Limine boot protocol responses.
 pub struct BootInfo {
     /// Offset for the Higher Half Direct Map.
@@ -87,6 +104,8 @@ pub struct BootInfo {
     /// Entries are sorted by base address and do not overlap.  The frame
     /// allocator uses this to discover usable physical memory.
     pub memory_map: &'static [&'static MemmapEntry],
+    /// Framebuffer info for the text console (None if not available).
+    pub framebuffer: Option<FramebufferInfo>,
 }
 
 /// Parse Limine responses and extract boot information.
@@ -143,10 +162,13 @@ pub fn parse_boot_info() -> Option<BootInfo> {
         total_usable / (1024 * 1024)
     );
 
-    // Framebuffer (optional — log if present).
-    if let Some(fb_response) = FRAMEBUFFER_REQUEST.response() {
-        let framebuffers = fb_response.framebuffers();
-        if let Some(fb) = framebuffers.first() {
+    // Framebuffer (optional — extract info for the text console).
+    // Limine provides the framebuffer already mapped at a virtual address.
+    // Dimensions are u64 in the Limine protocol but practically never
+    // exceed u32; the truncation is intentional and safe.
+    #[allow(clippy::cast_possible_truncation)]
+    let framebuffer = FRAMEBUFFER_REQUEST.response().and_then(|fb_response| {
+        fb_response.framebuffers().first().map(|fb| {
             serial_println!(
                 "[boot] Framebuffer: {}x{} @ {:#x} (pitch={}, bpp={})",
                 fb.width,
@@ -155,11 +177,19 @@ pub fn parse_boot_info() -> Option<BootInfo> {
                 fb.pitch,
                 fb.bpp
             );
-        }
-    }
+            FramebufferInfo {
+                address: fb.address as u64,
+                width: fb.width as u32,
+                height: fb.height as u32,
+                pitch: fb.pitch as u32,
+                bpp: fb.bpp,
+            }
+        })
+    });
 
     Some(BootInfo {
         hhdm_offset,
         memory_map: entries,
+        framebuffer,
     })
 }

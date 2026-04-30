@@ -49,8 +49,10 @@ extern crate alloc;
 mod apic;
 mod boot;
 mod cap;
+mod console;
 mod cpu;
 mod error;
+mod font;
 mod gdt;
 mod idt;
 mod ioapic;
@@ -97,6 +99,21 @@ extern "C" fn kmain() -> ! {
 
     serial_println!("[boot] Boot info parsed successfully");
     serial_println!("[boot] HHDM offset: {:#x}", boot_info.hhdm_offset);
+
+    // Step 2b: Initialize framebuffer console (if available).
+    // The framebuffer is already mapped by Limine, so we can start
+    // writing pixels immediately — no page tables or heap needed.
+    // This gives us on-screen text output for the rest of boot.
+    //
+    // SAFETY: Limine guarantees the framebuffer address is a valid,
+    // mapped virtual address covering at least height*pitch bytes.
+    // Called exactly once.
+    if let Some(ref fb) = boot_info.framebuffer {
+        unsafe {
+            console::init(fb.address, fb.width, fb.height, fb.pitch, fb.bpp);
+        }
+        console_println!("=== Framebuffer console active ===");
+    }
 
     // Step 3: Set up our own GDT (replacing the one Limine set up).
     //
@@ -321,6 +338,9 @@ extern "C" fn kmain() -> ! {
     // Boot success marker — the boot test script looks for this.
     serial_println!("BOOT_OK");
     serial_println!("=== Kernel boot complete ===");
+
+    // Show boot-complete on the framebuffer console too.
+    console_println!("=== Kernel boot complete ===");
 
     // Idle loop: halt until interrupt, repeat.
     // The APIC timer wakes us periodically; the scheduler runs

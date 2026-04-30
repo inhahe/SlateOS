@@ -108,9 +108,10 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 
 ### 2.1 Driver framework
-- [ ] Userspace driver framework:
-  - [ ] MMIO mapping into driver process address space (one-time setup)
-  - [ ] Interrupt delivery from kernel to driver via IPC
+- [-] Userspace driver framework:
+  - [x] MMIO mapping into driver process address space (SYS_MMAP + MAP_MMIO)
+  - [x] Interrupt delivery from kernel to driver (IOAPIC + IRQ syscalls)
+  - [x] Port I/O syscalls for legacy devices (SYS_PORT_READ/WRITE)
   - [ ] DMA mapping setup syscalls
   - [ ] Driver crash detection and automatic restart
 - [ ] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)

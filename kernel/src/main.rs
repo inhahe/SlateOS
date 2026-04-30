@@ -342,9 +342,22 @@ extern "C" fn kmain() -> ! {
     virtio::net::init(boot_info.hhdm_offset);
 
     // Step 20d-3: Initialize networking stack.
-    // Sets up the network interface from the virtio-net device.
-    // DHCP discovery will run later from the shell.
+    // Sets up the network interface from the virtio-net device
+    // and attempts DHCP to obtain an IP address.
     net::init();
+
+    // Step 20d-4: Attempt DHCP to obtain an IP address.
+    // Non-fatal — the system works without network connectivity.
+    if net::interface::is_up() {
+        match net::dhcp::discover() {
+            Ok(ip) => {
+                serial_println!("[net] DHCP assigned IP: {}", ip);
+            }
+            Err(e) => {
+                serial_println!("[net] DHCP failed: {:?} (non-fatal)", e);
+            }
+        }
+    }
 
     // Step 20e: Initialize block device abstraction layer.
     // Moves driver instances from their module globals into the

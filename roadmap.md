@@ -150,10 +150,15 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)
-- [ ] TCP/IP stack (userspace service)
-- [ ] UDP
-- [ ] DNS resolver
-- [ ] DHCP client
+- [-] TCP/IP stack (kernel-resident prototype, will move to userspace)
+  - [x] Ethernet frame parsing/building
+  - [x] ARP request/reply with cache
+  - [x] IPv4 packet parsing/building with checksum
+  - [x] UDP datagram send/receive with socket layer
+  - [x] DHCP client (auto-configure IP/mask/gateway/DNS at boot)
+  - [ ] TCP (connection-oriented reliable streams)
+  - [ ] DNS resolver
+  - [ ] Move to userspace service
 - [ ] Sockets API (not file descriptors — dedicated socket handles)
 - [ ] Firewall (basic packet filtering)
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)

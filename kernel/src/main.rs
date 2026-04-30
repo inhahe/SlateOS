@@ -54,6 +54,7 @@ mod console;
 mod cpu;
 mod error;
 mod font;
+mod fs;
 mod gdt;
 mod idt;
 mod ioapic;
@@ -338,6 +339,21 @@ extern "C" fn kmain() -> ! {
     // Moves driver instances from their module globals into the
     // unified block device registry.
     blkdev::init();
+
+    // Step 20f: Mount root filesystem.
+    // Try to mount a FAT16 filesystem from the first block device.
+    // Non-fatal if no filesystem is present (e.g., blank disk).
+    match fs::fat16::init("vda") {
+        Ok(()) => {
+            // Run filesystem self-test.
+            if let Err(e) = fs::fat16::self_test() {
+                serial_println!("WARNING: FAT16 self-test failed: {:?}", e);
+            }
+        }
+        Err(e) => {
+            serial_println!("[fs] No FAT16 filesystem on vda: {:?} (non-fatal)", e);
+        }
+    }
 
     // Step 21: Enable hardware interrupts.
     // From this point forward, the APIC timer fires periodically and

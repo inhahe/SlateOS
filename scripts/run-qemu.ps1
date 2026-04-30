@@ -9,7 +9,7 @@ param(
     [switch]$NoBuild,
     [switch]$Test,
     [int]$Timeout = 30,
-    [int]$Memory = 128
+    [int]$Memory = 256
 )
 
 $ErrorActionPreference = "Stop"

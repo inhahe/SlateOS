@@ -146,6 +146,8 @@ fn execute(line: &str) {
         "pci" => cmd_pci(),
         "disk" | "blkinfo" => cmd_disk(),
         "blkread" => cmd_blkread(args),
+        "ls" | "dir" => cmd_ls(args),
+        "cat" | "type" => cmd_cat(args),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -168,8 +170,10 @@ fn cmd_help() {
     crate::console_println!("  time      Show current date and time (RTC)");
     crate::console_println!("  irq       Show IRQ interrupt counts");
     crate::console_println!("  pci       List PCI devices");
-    crate::console_println!("  disk      Show virtio-blk disk info");
+    crate::console_println!("  disk      Show block device info");
     crate::console_println!("  blkread N Hex-dump sector N from disk");
+    crate::console_println!("  ls [path] List files in directory");
+    crate::console_println!("  cat FILE  Print file contents");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -379,6 +383,74 @@ fn parse_blkread_args(args: &str) -> (alloc::string::String, Option<u64>) {
         match first.parse::<u64>() {
             Ok(s) => (alloc::string::String::from("vda"), Some(s)),
             Err(_) => (alloc::string::String::from("vda"), None),
+        }
+    }
+}
+
+fn cmd_ls(args: &str) {
+    let path = if args.is_empty() { "/" } else { args };
+
+    match crate::fs::Vfs::readdir(path) {
+        Ok(entries) => {
+            if entries.is_empty() {
+                crate::console_println!("(empty directory)");
+                return;
+            }
+            for entry in &entries {
+                let type_indicator = match entry.entry_type {
+                    crate::fs::EntryType::Directory => "<DIR>    ",
+                    crate::fs::EntryType::File => "         ",
+                    crate::fs::EntryType::VolumeLabel => "<VOL>    ",
+                };
+                crate::console_println!(
+                    "  {} {:>8}  {}",
+                    type_indicator, entry.size, entry.name
+                );
+            }
+            crate::console_println!("{} entry(ies)", entries.len());
+        }
+        Err(e) => {
+            crate::console_println!("ls: {}: {:?}", path, e);
+        }
+    }
+}
+
+fn cmd_cat(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: cat <filename>");
+        return;
+    }
+
+    // Prepend "/" if the path doesn't start with one.
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    match crate::fs::Vfs::read_file(&path) {
+        Ok(data) => {
+            // Try to display as UTF-8 text.
+            match core::str::from_utf8(&data) {
+                Ok(text) => {
+                    crate::console_print!("{}", text);
+                    // Ensure there's a newline at the end.
+                    if !text.ends_with('\n') {
+                        crate::console_println!();
+                    }
+                }
+                Err(_) => {
+                    crate::console_println!(
+                        "(binary file, {} bytes — use blkread for hex dump)",
+                        data.len()
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            crate::console_println!("cat: {}: {:?}", path, e);
         }
     }
 }

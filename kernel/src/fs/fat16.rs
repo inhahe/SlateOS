@@ -354,6 +354,120 @@ impl Fat16Fs {
         Ok(entries)
     }
 
+    /// Read directory entries from a cluster chain (for subdirectories).
+    ///
+    /// Subdirectories are stored as files: their data is a chain of clusters
+    /// containing 32-byte directory entries.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn read_dir_cluster(&mut self, first_cluster: u16) -> KernelResult<Vec<FatDirEntry>> {
+        let mut entries = Vec::new();
+        let mut cluster = first_cluster;
+        let mut iterations = 0u32;
+        let max_iterations = 65536u32;
+
+        while cluster >= 2 && cluster <= 0xFFEF {
+            iterations = iterations.wrapping_add(1);
+            if iterations > max_iterations {
+                return Err(KernelError::IoError);
+            }
+
+            let lba = self.bpb.cluster_to_lba(cluster);
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
+
+            for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                self.read_sector(u64::from(lba + s), &mut sector_buf)?;
+
+                for i in 0..entries_per_sector {
+                    let offset = i * 32;
+                    if let Some(raw) = sector_buf.get(offset..offset + 32) {
+                        if raw.first().copied() == Some(0x00) {
+                            return Ok(entries); // End of directory.
+                        }
+                        if let Some(entry) = FatDirEntry::parse(raw) {
+                            // Skip . and .. entries.
+                            if entry.name[0] != b'.' {
+                                entries.push(entry);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Follow the FAT chain.
+            match self.fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => break,
+            }
+        }
+
+        Ok(entries)
+    }
+
+    /// Resolve a path to a directory entry.
+    ///
+    /// Walks path components through the directory tree.
+    /// Returns `(parent_cluster, entry)` where parent_cluster is 0 for root.
+    ///
+    /// For the root directory itself, returns `None` for the entry.
+    fn resolve_path(&mut self, path: &str) -> KernelResult<(u16, Option<FatDirEntry>)> {
+        let path = path.strip_prefix('/').unwrap_or(path);
+        let path = path.trim_end_matches('/');
+
+        if path.is_empty() {
+            // Root directory.
+            return Ok((0, None));
+        }
+
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current_cluster: u16 = 0; // 0 = root directory.
+
+        for (i, component) in components.iter().enumerate() {
+            let is_last = i == components.len() - 1;
+            let target = component.to_uppercase();
+
+            // Read the current directory.
+            let entries = if current_cluster == 0 {
+                self.read_root_dir()?
+            } else {
+                self.read_dir_cluster(current_cluster)?
+            };
+
+            // Find the component.
+            let found = entries.iter().find(|e| {
+                !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(&target)
+            });
+
+            match found {
+                Some(entry) => {
+                    if is_last {
+                        return Ok((current_cluster, Some(entry.clone())));
+                    }
+                    // Must be a directory to traverse into.
+                    if !entry.is_directory() {
+                        return Err(KernelError::NotADirectory);
+                    }
+                    current_cluster = entry.first_cluster;
+                }
+                None => return Err(KernelError::NotFound),
+            }
+        }
+
+        Ok((current_cluster, None))
+    }
+
+    /// Resolve a directory path to its cluster number.
+    ///
+    /// Returns 0 for root directory, or the first cluster of a subdirectory.
+    fn resolve_dir_cluster(&mut self, path: &str) -> KernelResult<u16> {
+        let (parent_cluster, entry) = self.resolve_path(path)?;
+        match entry {
+            None => Ok(parent_cluster),
+            Some(e) if e.is_directory() => Ok(e.first_cluster),
+            Some(_) => Err(KernelError::NotADirectory),
+        }
+    }
+
     /// Read a FAT16 entry for a given cluster.
     ///
     /// Returns the next cluster number, or `None` for end-of-chain /
@@ -449,26 +563,6 @@ impl Fat16Fs {
         }
 
         Ok(data)
-    }
-
-    /// Find a file in the root directory by name.
-    fn find_in_root(&mut self, name: &str) -> KernelResult<FatDirEntry> {
-        let entries = self.read_root_dir()?;
-        let target = name.to_uppercase();
-        // Strip leading slash if present.
-        let target = target.strip_prefix('/').unwrap_or(&target);
-
-        for entry in &entries {
-            if entry.is_volume_label() {
-                continue;
-            }
-            let entry_name = entry.display_name();
-            if entry_name.eq_ignore_ascii_case(target) {
-                return Ok(entry.clone());
-            }
-        }
-
-        Err(KernelError::NotFound)
     }
 
     // -- Write support --
@@ -749,6 +843,104 @@ impl Fat16Fs {
             .ok_or(KernelError::DiskFull)
     }
 
+    /// Find or create a directory entry slot in a given directory.
+    ///
+    /// Dispatches to root directory or subdirectory scanning based on
+    /// `parent_cluster` (0 = root, otherwise first cluster of subdir).
+    fn find_or_create_slot_in(
+        &mut self,
+        parent_cluster: u16,
+        name83: &[u8; 11],
+    ) -> KernelResult<(u64, usize, bool)> {
+        if parent_cluster == 0 {
+            self.find_or_create_dir_slot(name83)
+        } else {
+            self.find_or_create_subdir_slot(parent_cluster, name83)
+        }
+    }
+
+    /// Find or create a directory entry slot in a subdirectory.
+    ///
+    /// Walks the cluster chain looking for a matching entry or a free slot.
+    /// If the directory is full, allocates a new cluster to extend it.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn find_or_create_subdir_slot(
+        &mut self,
+        first_cluster: u16,
+        name83: &[u8; 11],
+    ) -> KernelResult<(u64, usize, bool)> {
+        let mut cluster = first_cluster;
+        let mut last_cluster = first_cluster;
+        let mut iterations = 0u32;
+        let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
+        let mut first_free: Option<(u64, usize)> = None;
+
+        while cluster >= 2 && cluster <= 0xFFEF {
+            iterations = iterations.wrapping_add(1);
+            if iterations > 65536 {
+                return Err(KernelError::IoError);
+            }
+
+            let lba = self.bpb.cluster_to_lba(cluster);
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+
+            for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                let sector_lba = u64::from(lba + s);
+                self.read_sector(sector_lba, &mut sector_buf)?;
+
+                for i in 0..entries_per_sector {
+                    let offset = i * 32;
+                    let first_byte = sector_buf.get(offset).copied().unwrap_or(0);
+
+                    if first_byte == 0x00 || first_byte == 0xE5 {
+                        if first_free.is_none() {
+                            first_free = Some((sector_lba, offset));
+                        }
+                        if first_byte == 0x00 {
+                            // End of directory.
+                            return first_free
+                                .map(|(l, o)| (l, o, false))
+                                .ok_or(KernelError::DiskFull);
+                        }
+                    } else {
+                        // Check for matching name.
+                        if let Some(raw) = sector_buf.get(offset..offset + 11) {
+                            if raw == name83.as_slice() {
+                                return Ok((sector_lba, offset, true));
+                            }
+                        }
+                    }
+                }
+            }
+
+            last_cluster = cluster;
+            match self.fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => break,
+            }
+        }
+
+        // If we found a free slot during scanning, use it.
+        if let Some((l, o)) = first_free {
+            return Ok((l, o, false));
+        }
+
+        // Directory is full — allocate a new cluster to extend it.
+        let new_cluster = self.alloc_cluster()?;
+        self.set_fat_entry(new_cluster, 0xFFFF)?;
+        self.set_fat_entry(last_cluster, new_cluster)?;
+
+        // Zero-fill the new cluster.
+        let lba = self.bpb.cluster_to_lba(new_cluster);
+        let zero_sector = [0u8; SECTOR_SIZE];
+        for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+            self.write_sector(u64::from(lba + s), &zero_sector)?;
+        }
+
+        // First entry of the new cluster.
+        Ok((u64::from(lba), 0, false))
+    }
+
     /// Write a directory entry at the specified location.
     #[allow(clippy::arithmetic_side_effects)]
     fn write_dir_entry(
@@ -758,6 +950,7 @@ impl Fat16Fs {
         name83: &[u8; 11],
         first_cluster: u16,
         file_size: u32,
+        attr: u8,
     ) -> KernelResult<()> {
         let mut sector_buf = [0u8; SECTOR_SIZE];
         self.read_sector(lba, &mut sector_buf)?;
@@ -765,7 +958,7 @@ impl Fat16Fs {
         // Write the 32-byte directory entry.
         if let Some(entry) = sector_buf.get_mut(offset..offset + 32) {
             entry[0..11].copy_from_slice(name83);
-            entry[11] = 0x20; // Archive attribute.
+            entry[11] = attr;
             // Zero out time/date fields.
             entry[12..26].fill(0);
             // First cluster (little-endian u16 at offset 26).
@@ -800,14 +993,26 @@ impl FileSystem for Fat16Fs {
     }
 
     fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
-        // Currently only the root directory is supported.
-        let normalized = path.trim_end_matches('/');
-        if !normalized.is_empty() && normalized != "/" {
-            // Subdirectory — not yet implemented.
-            return Err(KernelError::NotSupported);
-        }
+        let (parent_cluster, entry) = self.resolve_path(path)?;
 
-        let fat_entries = self.read_root_dir()?;
+        // Determine which directory to list.
+        let fat_entries = match entry {
+            None => {
+                // Path resolved to a directory (root or subdirectory).
+                if parent_cluster == 0 {
+                    self.read_root_dir()?
+                } else {
+                    self.read_dir_cluster(parent_cluster)?
+                }
+            }
+            Some(ref e) if e.is_directory() => {
+                self.read_dir_cluster(e.first_cluster)?
+            }
+            Some(_) => {
+                return Err(KernelError::NotADirectory);
+            }
+        };
+
         let vfs_entries = fat_entries
             .iter()
             .filter(|e| !e.is_volume_label())
@@ -818,7 +1023,8 @@ impl FileSystem for Fat16Fs {
     }
 
     fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
-        let entry = self.find_in_root(path)?;
+        let (_parent, entry) = self.resolve_path(path)?;
+        let entry = entry.ok_or(KernelError::NotFound)?;
         if entry.is_directory() {
             return Err(KernelError::IsADirectory);
         }
@@ -826,37 +1032,56 @@ impl FileSystem for Fat16Fs {
     }
 
     fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
-        let normalized = path.trim_start_matches('/');
-        if normalized.is_empty() {
-            // Root directory itself.
-            return Ok(DirEntry {
-                name: String::from("/"),
-                entry_type: EntryType::Directory,
-                size: 0,
-            });
+        let (parent_cluster, entry) = self.resolve_path(path)?;
+        match entry {
+            None => {
+                // Path points to a directory itself.
+                let name = if parent_cluster == 0 {
+                    String::from("/")
+                } else {
+                    // Use the last path component as the name.
+                    let last = path.trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("/");
+                    String::from(last)
+                };
+                Ok(DirEntry {
+                    name,
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                })
+            }
+            Some(e) => Ok(e.to_vfs_entry()),
         }
-
-        let entry = self.find_in_root(path)?;
-        Ok(entry.to_vfs_entry())
     }
 
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
-        let name = path.strip_prefix('/').unwrap_or(path);
-        let name83 = Self::to_83_name(name).ok_or(KernelError::InvalidArgument)?;
+        let (parent_path, filename) = split_path(path);
+        let name83 = Self::to_83_name(filename).ok_or(KernelError::InvalidArgument)?;
 
         // Check file size limit (FAT16 max: 2 GiB, but u32 field caps at ~4 GiB).
         if data.len() > u32::MAX as usize {
             return Err(KernelError::InvalidArgument);
         }
 
-        // Find or create the directory entry.
-        let (dir_lba, dir_offset, exists) = self.find_or_create_dir_slot(&name83)?;
+        // Resolve the parent directory.
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
-        // If overwriting, free the old cluster chain.
+        // Find or create the directory entry in the parent.
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
+            parent_cluster, &name83,
+        )?;
+
+        // If overwriting, check we're not clobbering a directory and free old data.
         if exists {
             let mut sector_buf = [0u8; SECTOR_SIZE];
             self.read_sector(dir_lba, &mut sector_buf)?;
+            let old_attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
+            if old_attr & ATTR_DIRECTORY != 0 {
+                return Err(KernelError::IsADirectory);
+            }
             let old_cluster = read_u16(&sector_buf, dir_offset + 26);
             if old_cluster >= 2 {
                 self.free_chain(old_cluster)?;
@@ -866,36 +1091,46 @@ impl FileSystem for Fat16Fs {
         // Write new data to clusters.
         let first_cluster = self.write_file_data(data)?;
 
-        // Update the directory entry.
+        // Update the directory entry (archive attribute for regular files).
         self.write_dir_entry(
             dir_lba,
             dir_offset,
             &name83,
             first_cluster,
             data.len() as u32,
+            0x20, // Archive attribute.
         )?;
 
         crate::serial_println!(
             "[fat16] Wrote '{}' ({} bytes, cluster {})",
-            name, data.len(), first_cluster
+            path, data.len(), first_cluster
         );
 
         Ok(())
     }
 
     fn remove(&mut self, path: &str) -> KernelResult<()> {
-        let name = path.strip_prefix('/').unwrap_or(path);
-        let name83 = Self::to_83_name(name).ok_or(KernelError::InvalidArgument)?;
+        let (parent_path, filename) = split_path(path);
+        let name83 = Self::to_83_name(filename).ok_or(KernelError::InvalidArgument)?;
 
-        let (dir_lba, dir_offset, exists) = self.find_or_create_dir_slot(&name83)?;
+        // Resolve the parent directory.
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
+
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
+            parent_cluster, &name83,
+        )?;
 
         if !exists {
             return Err(KernelError::NotFound);
         }
 
-        // Read the directory entry to get the first cluster.
+        // Read the directory entry to check type and get the first cluster.
         let mut sector_buf = [0u8; SECTOR_SIZE];
         self.read_sector(dir_lba, &mut sector_buf)?;
+        let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
+        if attr & ATTR_DIRECTORY != 0 {
+            return Err(KernelError::IsADirectory);
+        }
         let first_cluster = read_u16(&sector_buf, dir_offset + 26);
 
         // Free the cluster chain.
@@ -906,7 +1141,75 @@ impl FileSystem for Fat16Fs {
         // Mark directory entry as deleted.
         self.delete_dir_entry(dir_lba, dir_offset)?;
 
-        crate::serial_println!("[fat16] Deleted '{}'", name);
+        crate::serial_println!("[fat16] Deleted '{}'", path);
+        Ok(())
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+        let (parent_path, dirname) = split_path(path);
+        let name83 = Self::to_83_name(dirname).ok_or(KernelError::InvalidArgument)?;
+
+        // Resolve the parent directory.
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
+
+        // Check if the name already exists.
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
+            parent_cluster, &name83,
+        )?;
+
+        if exists {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        // Allocate a cluster for the new directory's contents.
+        let new_cluster = self.alloc_cluster()?;
+        self.set_fat_entry(new_cluster, 0xFFFF)?; // End of chain.
+
+        // Initialize the cluster with "." and ".." entries.
+        let lba = self.bpb.cluster_to_lba(new_cluster);
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+
+        // "." entry — points to this directory.
+        if let Some(dot) = sector_buf.get_mut(0..32) {
+            dot[0..11].copy_from_slice(b".          ");
+            dot[11] = ATTR_DIRECTORY;
+            dot[26] = new_cluster as u8;
+            dot[27] = (new_cluster >> 8) as u8;
+        }
+
+        // ".." entry — points to parent (0 for root).
+        if let Some(dotdot) = sector_buf.get_mut(32..64) {
+            dotdot[0..11].copy_from_slice(b"..         ");
+            dotdot[11] = ATTR_DIRECTORY;
+            dotdot[26] = parent_cluster as u8;
+            dotdot[27] = (parent_cluster >> 8) as u8;
+        }
+
+        // Rest is zeros (end-of-directory marker).
+        self.write_sector(u64::from(lba), &sector_buf)?;
+
+        // Zero-fill remaining sectors in the cluster.
+        let zero_sector = [0u8; SECTOR_SIZE];
+        for s in 1..u32::from(self.bpb.sectors_per_cluster) {
+            self.write_sector(u64::from(lba) + u64::from(s), &zero_sector)?;
+        }
+
+        // Create the directory entry in the parent.
+        self.write_dir_entry(
+            dir_lba,
+            dir_offset,
+            &name83,
+            new_cluster,
+            0, // Directories have size 0 in FAT16.
+            ATTR_DIRECTORY,
+        )?;
+
+        crate::serial_println!(
+            "[fat16] Created directory '{}' (cluster {})",
+            path, new_cluster
+        );
+
         Ok(())
     }
 }
@@ -996,6 +1299,68 @@ pub fn self_test() -> KernelResult<()> {
         Err(e) => return Err(e),
     }
 
+    // Test subdirectory support.
+    crate::serial_println!("[fat16]   Testing mkdir...");
+    crate::fs::Vfs::mkdir("/TESTDIR")?;
+
+    // Verify the directory appears in root listing.
+    let entries = crate::fs::Vfs::readdir("/")?;
+    let has_testdir = entries.iter().any(|e| {
+        e.name.eq_ignore_ascii_case("TESTDIR")
+            && e.entry_type == EntryType::Directory
+    });
+    if !has_testdir {
+        crate::serial_println!("[fat16]   mkdir FAILED: TESTDIR not in root listing");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat16]   mkdir verified: TESTDIR in root");
+
+    // Write a file into the subdirectory.
+    let sub_data = b"File inside a subdirectory.\n";
+    crate::fs::Vfs::write_file("/TESTDIR/SUB.TXT", sub_data)?;
+
+    // Read it back.
+    let sub_readback = crate::fs::Vfs::read_file("/TESTDIR/SUB.TXT")?;
+    if sub_readback.as_slice() != sub_data.as_slice() {
+        crate::serial_println!(
+            "[fat16]   Subdir write FAILED: expected {} bytes, got {}",
+            sub_data.len(),
+            sub_readback.len()
+        );
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat16]   Subdir write+read verified: {} bytes", sub_data.len());
+
+    // List subdirectory contents.
+    let sub_entries = crate::fs::Vfs::readdir("/TESTDIR")?;
+    crate::serial_println!("[fat16]   TESTDIR has {} entries", sub_entries.len());
+    let has_sub_txt = sub_entries.iter().any(|e| {
+        e.name.eq_ignore_ascii_case("SUB.TXT")
+    });
+    if !has_sub_txt {
+        crate::serial_println!("[fat16]   Subdir listing FAILED: SUB.TXT not found");
+        return Err(KernelError::IoError);
+    }
+
+    // Delete the file in the subdirectory.
+    crate::fs::Vfs::remove("/TESTDIR/SUB.TXT")?;
+
+    // Verify it's gone.
+    match crate::fs::Vfs::read_file("/TESTDIR/SUB.TXT") {
+        Err(KernelError::NotFound) => {
+            crate::serial_println!("[fat16]   Subdir delete verified");
+        }
+        Ok(_) => {
+            crate::serial_println!("[fat16]   Subdir delete FAILED: file still exists");
+            return Err(KernelError::IoError);
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Clean up: remove the directory entry manually.
+    // (remove() rejects directories; we'd need rmdir — for now, leave it
+    // as a harmless empty dir on the test disk.)
+
     crate::serial_println!("[fat16] Self-test PASSED");
     Ok(())
 }
@@ -1003,6 +1368,21 @@ pub fn self_test() -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Split a path into (parent directory path, filename).
+///
+/// - `"/file.txt"` → `("/", "file.txt")`
+/// - `"/subdir/file.txt"` → `("/subdir", "file.txt")`
+/// - `"/a/b/file.txt"` → `("/a/b", "file.txt")`
+/// - `"file.txt"` → `("/", "file.txt")`
+fn split_path(path: &str) -> (&str, &str) {
+    let path = path.strip_suffix('/').unwrap_or(path);
+    match path.rfind('/') {
+        Some(0) => ("/", &path[1..]),
+        Some(pos) => (&path[..pos], &path[pos + 1..]),
+        None => ("/", path),
+    }
+}
 
 /// Read a little-endian u16 from a byte slice at the given offset.
 fn read_u16(data: &[u8], offset: usize) -> u16 {

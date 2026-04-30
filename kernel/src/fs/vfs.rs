@@ -194,6 +194,13 @@ impl Vfs {
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.remove(relative)
     }
+
+    /// Create a directory.
+    pub fn mkdir(path: &str) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.mkdir(relative)
+    }
 }
 
 /// Find the mount point that best matches `path`.

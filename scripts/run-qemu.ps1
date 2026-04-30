@@ -66,6 +66,9 @@ if ($Test) {
         $argString += " -drive `"file=$DiskImg,if=virtio,format=raw`""
     }
 
+    # Add virtio-net device with user-mode networking.
+    $argString += " -device virtio-net-pci,netdev=net0 -netdev user,id=net0"
+
     Write-Host "Running boot test (timeout: ${Timeout}s)..." -ForegroundColor Cyan
     $proc = Start-Process -FilePath $QemuExe -ArgumentList $argString -PassThru -NoNewWindow
     $elapsed = 0
@@ -119,6 +122,8 @@ if ($Test) {
     if (Test-Path $DiskImg) {
         $qemuArgs += @("-drive", "file=$DiskImg,if=virtio,format=raw")
     }
+    # Add virtio-net device with user-mode networking.
+    $qemuArgs += @("-device", "virtio-net-pci,netdev=net0", "-netdev", "user,id=net0")
     Write-Host "Starting QEMU (Ctrl+C to exit)..." -ForegroundColor Cyan
     & $QemuExe @qemuArgs
 }

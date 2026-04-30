@@ -335,6 +335,11 @@ extern "C" fn kmain() -> ! {
     // The device is stored temporarily in the virtio module.
     virtio::blk::init(boot_info.hhdm_offset);
 
+    // Step 20d-2: Probe for virtio-net network device.
+    // Uses legacy PCI transport (I/O port BAR0) with polling.
+    // Non-fatal if no NIC is present.
+    virtio::net::init(boot_info.hhdm_offset);
+
     // Step 20e: Initialize block device abstraction layer.
     // Moves driver instances from their module globals into the
     // unified block device registry.

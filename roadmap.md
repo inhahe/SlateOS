@@ -118,6 +118,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing
   - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, polling)
+  - [x] virtio-net driver (legacy PCI transport, RX/TX queues, MAC read, polling)
 
 ### 2.2 Essential drivers
 - [-] Keyboard (PS/2 and USB HID)
@@ -136,7 +137,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] VFS (virtual filesystem) layer — FileSystem trait, mount table, path resolution
 - [ ] Port ext4 (primary filesystem, read-write)
 - [-] FAT32 (USB drives, EFI System Partition — essential)
-  - [x] FAT16 read-only driver (BPB parsing, root dir, FAT chain, file read)
+  - [x] FAT16 read-write driver (BPB parsing, root dir, FAT chain, file read/write/delete)
 - [ ] ISO 9660 (optical media)
 - [ ] Filesystem features:
   - [ ] Case-sensitive paths, forward slash separator

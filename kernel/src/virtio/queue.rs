@@ -105,6 +105,11 @@ pub struct Virtqueue {
 }
 
 impl Virtqueue {
+    /// Return the number of descriptors in this queue.
+    pub fn queue_size(&self) -> u16 {
+        self.queue_size
+    }
+
     /// Allocate and initialize a virtqueue.
     ///
     /// Allocates physically contiguous memory from the frame allocator,

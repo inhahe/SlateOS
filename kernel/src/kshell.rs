@@ -152,6 +152,7 @@ fn execute(line: &str) {
         "rm" | "del" => cmd_rm(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
+        "net" | "ifconfig" => cmd_net(),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -182,6 +183,7 @@ fn cmd_help() {
     crate::console_println!("  rm FILE   Delete a file");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create a test ELF binary on disk");
+    crate::console_println!("  net       Show network interface info");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -582,6 +584,18 @@ fn cmd_mkelf() {
         Err(e) => {
             crate::console_println!("mkelf: failed to write: {:?}", e);
         }
+    }
+}
+
+fn cmd_net() {
+    let result = crate::virtio::net::with_device(|dev| {
+        crate::console_println!("Network interface: virtio-net");
+        crate::console_println!("  MAC address: {}", dev.mac());
+        crate::console_println!("  RX buffers:  {} pending", dev.rx_pending());
+        crate::console_println!("  Status:      up");
+    });
+    if result.is_none() {
+        crate::console_println!("No network device found.");
     }
 }
 

@@ -23,6 +23,7 @@ use super::number::{
     SYS_CHANNEL_SEND, SYS_CHANNEL_TRY_RECV, SYS_CONSOLE_READ_CHAR,
     SYS_CONSOLE_WRITE, SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY,
     SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
+    SYS_CLOCK_MONOTONIC,
     SYS_DEBUG_PRINT, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
@@ -189,6 +190,10 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CP_CLOSE as usize] = Some(handlers::sys_cp_close);
     handlers[SYS_CP_NOTIFY as usize] = Some(handlers::sys_cp_notify);
 
+    // Time (10–19).
+    handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);
+    handlers[SYS_SLEEP as usize] = Some(handlers::sys_sleep);
+
     // Console I/O (100–109).
     handlers[SYS_CONSOLE_WRITE as usize] = Some(handlers::sys_console_write);
     handlers[SYS_CONSOLE_READ_CHAR as usize] = Some(handlers::sys_console_read_char);
@@ -278,6 +283,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_unimplemented()?;
     test_dispatch_out_of_range()?;
     test_dispatch_channel_roundtrip()?;
+    test_dispatch_clock_monotonic()?;
     test_dispatch_console_write()?;
     test_dispatch_fs_roundtrip()?;
 
@@ -326,8 +332,8 @@ fn test_dispatch_unimplemented() -> KernelResult<()> {
         arg0: 0, arg1: 0, arg2: 0,
         arg3: 0, arg4: 0, arg5: 0,
     };
-    // SYS_SLEEP is defined but not yet implemented.
-    let result = dispatch(SYS_SLEEP, &args);
+    // Use a known-undefined number in kernel-core range.
+    let result = dispatch(42, &args);
     if result.value != i64::from(KernelError::NotSupported.code()) {
         serial_println!(
             "[syscall]   FAIL: unimplemented syscall returned {}, expected NotSupported",
@@ -434,6 +440,27 @@ fn test_dispatch_channel_roundtrip() -> KernelResult<()> {
     dispatch(SYS_CHANNEL_CLOSE, &close1_args);
 
     serial_println!("[syscall]   Dispatch channel roundtrip: OK");
+    Ok(())
+}
+
+/// Test clock_monotonic syscall returns a non-negative nanosecond value.
+fn test_dispatch_clock_monotonic() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let result = dispatch(SYS_CLOCK_MONOTONIC, &args);
+    if result.value < 0 {
+        serial_println!(
+            "[syscall]   FAIL: clock_monotonic returned {}",
+            result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   Dispatch SYS_CLOCK_MONOTONIC: OK ({}ns)",
+        result.value
+    );
     Ok(())
 }
 

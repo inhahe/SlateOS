@@ -430,6 +430,10 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     // this will also fail and retry on the next tick.
     crate::ioapic::process_deferred_wakes();
 
+    // Process sleep queue: wake tasks whose sleep deadline has passed.
+    // Lock-free — only uses atomic loads/stores + try_wake.
+    crate::sched::process_sleep_wakeups();
+
     // If the scheduler says the time slice expired, reschedule.
     if needs_reschedule {
         crate::sched::preempt();

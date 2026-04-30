@@ -1587,6 +1587,61 @@ pub fn sys_process_exec_with_frame(
 }
 
 // ---------------------------------------------------------------------------
+// Time and sleep handlers (10–19)
+// ---------------------------------------------------------------------------
+
+/// `SYS_CLOCK_MONOTONIC` — get monotonic time since boot in nanoseconds.
+///
+/// Returns an approximate monotonic clock based on the APIC timer tick
+/// count.  At 100 Hz, resolution is 10 ms.  Good enough for coarse
+/// timing; high-resolution timing will be added via TSC or HPET later.
+pub fn sys_clock_monotonic(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+
+    let ticks = crate::apic::tick_count();
+    // 100 Hz → 10 ms per tick → 10_000_000 ns per tick.
+    let ns = ticks.saturating_mul(10_000_000);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(ns as i64)
+}
+
+/// `SYS_SLEEP` — sleep for a specified duration in nanoseconds.
+///
+/// `arg0`: duration in nanoseconds.
+///
+/// Blocks the calling task until the timer fires a wakeup.  The actual
+/// sleep time is rounded up to the next timer tick (10 ms granularity
+/// at 100 Hz).
+///
+/// Returns: 0 on success.
+pub fn sys_sleep(args: &SyscallArgs) -> SyscallResult {
+    let duration_ns = args.arg0;
+
+    if duration_ns == 0 {
+        // Zero sleep → just yield.
+        sched::yield_now();
+        return SyscallResult::ok(0);
+    }
+
+    // Convert nanoseconds to ticks (100 Hz → 10 ms per tick).
+    // Round up so the task sleeps at least the requested duration.
+    let ticks_needed = duration_ns
+        .saturating_add(9_999_999)
+        .saturating_div(10_000_000);
+
+    // Ensure at least 1 tick.
+    let ticks_needed = ticks_needed.max(1);
+
+    let current_tick = crate::apic::tick_count();
+    let wake_tick = current_tick.saturating_add(ticks_needed);
+
+    sched::sleep_until_tick(wake_tick);
+
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
 // Console I/O handlers (100–109)
 // ---------------------------------------------------------------------------
 

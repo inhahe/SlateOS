@@ -466,6 +466,126 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
 }
 
 // ---------------------------------------------------------------------------
+// Sleep queue — timer-driven wakeups for SYS_SLEEP
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrently sleeping tasks.
+///
+/// Fixed array avoids heap allocation in the ISR path.  256 is generous —
+/// typical desktop workloads have tens of tasks, not hundreds sleeping.
+const MAX_SLEEPERS: usize = 256;
+
+/// A single entry in the sleep queue.
+///
+/// `wake_tick` == 0 means the slot is empty.  Written atomically by
+/// `sleep_until_tick` (which sets wake_tick + task_id) and read by the
+/// timer ISR (which zeroes wake_tick when it fires the wakeup).
+struct SleepEntry {
+    /// Tick count at which to wake.  0 = slot is empty.
+    wake_tick: AtomicU64,
+    /// Task ID to wake.
+    task_id: AtomicU64,
+}
+
+impl SleepEntry {
+    const fn new() -> Self {
+        Self {
+            wake_tick: AtomicU64::new(0),
+            task_id: AtomicU64::new(0),
+        }
+    }
+}
+
+// SAFETY: `SleepEntry` fields are `AtomicU64`, which are `Sync`.
+// The array itself is `Send + Sync` because we only access it
+// through atomic operations with appropriate ordering.
+
+/// The sleep queue.  Scanned by [`process_sleep_wakeups`] on every
+/// timer tick.  Entries are added by [`sleep_until_tick`].
+///
+/// Fixed-size array, lock-free.  Indexed linearly — O(MAX_SLEEPERS)
+/// per tick, which at 100 Hz and 256 entries is trivially fast.
+static SLEEP_QUEUE: [SleepEntry; MAX_SLEEPERS] = {
+    // const-initialize all entries.
+    const EMPTY: SleepEntry = SleepEntry::new();
+    [EMPTY; MAX_SLEEPERS]
+};
+
+/// Put the current task to sleep until the given tick count.
+///
+/// Blocks the current task and registers it in the sleep queue.
+/// The timer ISR will wake it once `tick_count() >= wake_tick`.
+///
+/// Returns the number of nanoseconds actually slept (approximate).
+pub fn sleep_until_tick(wake_tick: u64) {
+    let task_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+
+    // Find an empty slot.
+    let mut found = false;
+    for entry in &SLEEP_QUEUE {
+        // CAS: try to claim an empty slot (wake_tick == 0).
+        if entry
+            .wake_tick
+            .compare_exchange(0, wake_tick, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            entry.task_id.store(task_id, Ordering::Release);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // No free slot — all 256 slots occupied.  Fall back to a
+        // simple spin-yield loop.  This is extremely unlikely.
+        serial_println!(
+            "[sched] WARNING: sleep queue full, task {} falling back to spin",
+            task_id
+        );
+        while crate::apic::tick_count() < wake_tick {
+            yield_now();
+        }
+        return;
+    }
+
+    // Block the task.  The timer ISR will wake it.
+    block_current();
+}
+
+/// Scan the sleep queue and wake tasks whose sleep deadline has passed.
+///
+/// Called from the APIC timer ISR on every tick.  Must be lock-free
+/// in the fast path (only atomic loads/stores, no mutexes).
+///
+/// Uses [`try_wake`] to safely wake tasks even from interrupt context.
+/// If `try_wake` fails (scheduler lock contended), the entry stays in
+/// the queue and will be retried on the next tick.
+pub fn process_sleep_wakeups() {
+    let now = crate::apic::tick_count();
+
+    for entry in &SLEEP_QUEUE {
+        let deadline = entry.wake_tick.load(Ordering::Acquire);
+        if deadline == 0 {
+            // Empty slot — skip.
+            continue;
+        }
+        if now < deadline {
+            // Not yet expired — skip.
+            continue;
+        }
+
+        // Deadline passed.  Try to wake the task.
+        let task_id = entry.task_id.load(Ordering::Acquire);
+        if try_wake(task_id) {
+            // Woken successfully — clear the slot.
+            entry.wake_tick.store(0, Ordering::Release);
+        }
+        // If try_wake fails (lock contended), we leave the entry
+        // and will retry on the next tick.
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core scheduling logic
 // ---------------------------------------------------------------------------
 

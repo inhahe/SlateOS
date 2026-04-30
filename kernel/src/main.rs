@@ -57,6 +57,7 @@ mod gdt;
 mod idt;
 mod ioapic;
 mod ipc;
+mod keyboard;
 mod limine;
 mod mm;
 mod port;
@@ -332,6 +333,21 @@ extern "C" fn kmain() -> ! {
     // Verify the APIC timer is actually firing.
     if let Err(e) = apic::self_test() {
         serial_println!("FATAL: APIC timer self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 22: Initialize PS/2 keyboard.
+    // Unmasks IRQ 1, enables scan code translation.  Keypresses now
+    // appear in the keyboard ring buffer and echo to the console.
+    //
+    // SAFETY: IOAPIC and IDT are initialized, interrupts are enabled.
+    // Called exactly once.
+    unsafe {
+        keyboard::init();
+    }
+
+    if let Err(e) = keyboard::self_test() {
+        serial_println!("FATAL: Keyboard self-test failed: {}", e);
         cpu::halt_loop();
     }
 

@@ -591,6 +591,13 @@ pub fn process_deferred_wakes() {
 /// will retry within ~10 ms.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_device_irq(irq: u32) {
+    // 0. Device-specific handlers that must run in ISR context.
+    //    The keyboard must read its scan code from port 0x60
+    //    immediately — the data is lost after EOI.
+    if irq == 1 {
+        crate::keyboard::handle_scancode();
+    }
+
     // 1. Record the interrupt.
     irq_notify(irq);
 

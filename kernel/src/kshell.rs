@@ -151,6 +151,7 @@ fn execute(line: &str) {
         "write" => cmd_write(args),
         "rm" | "del" => cmd_rm(args),
         "mkdir" => cmd_mkdir(args),
+        "rmdir" => cmd_rmdir(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -187,6 +188,7 @@ fn cmd_help() {
     crate::console_println!("  write F T Write text T to file F");
     crate::console_println!("  rm FILE   Delete a file");
     crate::console_println!("  mkdir DIR Create a directory");
+    crate::console_println!("  rmdir DIR Remove an empty directory");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create a test ELF binary on disk");
     crate::console_println!("  net       Show network interface info");
@@ -555,6 +557,30 @@ fn cmd_mkdir(args: &str) {
         }
         Err(e) => {
             crate::console_println!("mkdir: {}: {:?}", path, e);
+        }
+    }
+}
+
+fn cmd_rmdir(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: rmdir <dirname>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    match crate::fs::Vfs::rmdir(&path) {
+        Ok(()) => {
+            crate::console_println!("Removed directory {}", path);
+        }
+        Err(e) => {
+            crate::console_println!("rmdir: {}: {:?}", path, e);
         }
     }
 }

@@ -18,8 +18,26 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $KernelBin   = "$ProjectRoot\target\x86_64-unknown-none\debug\kernel"
 $EspDir      = "$ProjectRoot\build\esp"
 $QemuExe     = "C:\Program Files\qemu\qemu-system-x86_64.exe"
-$OvmfFw      = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
+$OvmfCode    = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
+$OvmfVars    = "$ProjectRoot\build\ovmf-vars.fd"
 $DiskImg     = "$ProjectRoot\disk.img"
+
+# Step 0: Create OVMF variable store if it doesn't exist.
+#
+# OVMF needs a separate pflash drive for UEFI variables.  Without one
+# it falls back to writing NVVARS files on any writable FAT it finds
+# — which corrupts our virtio-blk test disk between boots.
+#
+# We copy the edk2-i386-vars.fd template (540,672 bytes).  The UEFI
+# variable store format is architecture-independent, so the i386 template
+# works for x86_64 firmware.
+$OvmfVarsTemplate = "C:\Program Files\qemu\share\edk2-i386-vars.fd"
+if (-not (Test-Path $OvmfVars)) {
+    Write-Host "Creating OVMF variable store ($OvmfVars)..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path (Split-Path $OvmfVars) -Force | Out-Null
+    Copy-Item $OvmfVarsTemplate $OvmfVars -Force
+    Write-Host "Copied OVMF vars template." -ForegroundColor Green
+}
 
 # Step 1: Build
 if (-not $NoBuild) {
@@ -49,6 +67,10 @@ Copy-Item "$ProjectRoot\limine.conf" "$EspDir\limine.conf" -Force
 # paths that contain spaces.  We build a single argument string with quoted
 # paths to avoid this issue.
 
+# OVMF pflash: unit 0 = firmware code (read-only), unit 1 = variable store (read-write).
+$pflashArgs = "-drive `"if=pflash,format=raw,readonly=on,file=$OvmfCode`" " +
+              "-drive `"if=pflash,format=raw,file=$OvmfVars`""
+
 if ($Test) {
     # Boot test mode: capture serial to file, check for BOOT_OK
     $serialFile = "$ProjectRoot\build\serial-test.txt"
@@ -56,7 +78,7 @@ if ($Test) {
     # Delete stale serial file to prevent false positives if QEMU fails to start.
     if (Test-Path $serialFile) { Remove-Item $serialFile -Force }
 
-    $argString = "-drive `"if=pflash,format=raw,readonly=on,file=$OvmfFw`" " +
+    $argString = "$pflashArgs " +
                  "-drive `"format=raw,file=fat:rw:$EspDir`" " +
                  "-m ${Memory}M -machine q35 -no-reboot " +
                  "-serial `"file:$serialFile`" -display none"
@@ -111,7 +133,8 @@ if ($Test) {
     # Use call operator (&) with splatting — each array element becomes a
     # separate argument, and PowerShell handles quoting correctly.
     $qemuArgs = @(
-        "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfFw",
+        "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode",
+        "-drive", "if=pflash,format=raw,file=$OvmfVars",
         "-drive", "format=raw,file=fat:rw:$EspDir",
         "-m", "${Memory}M",
         "-machine", "q35",

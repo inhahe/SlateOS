@@ -366,17 +366,17 @@ extern "C" fn kmain() -> ! {
     blkdev::init();
 
     // Step 20f: Mount root filesystem.
-    // Try to mount a FAT16 filesystem from the first block device.
-    // Non-fatal if no filesystem is present (e.g., blank disk).
-    match fs::fat16::init("vda") {
+    // Try to mount a FAT filesystem from the first block device.
+    // Auto-detects FAT16 or FAT32.  Non-fatal if no filesystem is present.
+    match fs::fat::init("vda") {
         Ok(()) => {
             // Run filesystem self-test.
-            if let Err(e) = fs::fat16::self_test() {
-                serial_println!("WARNING: FAT16 self-test failed: {:?}", e);
+            if let Err(e) = fs::fat::self_test() {
+                serial_println!("WARNING: FAT self-test failed: {:?}", e);
             }
         }
         Err(e) => {
-            serial_println!("[fs] No FAT16 filesystem on vda: {:?} (non-fatal)", e);
+            serial_println!("[fs] No FAT filesystem on vda: {:?} (non-fatal)", e);
         }
     }
 

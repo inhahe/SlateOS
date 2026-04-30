@@ -99,6 +99,14 @@ pub trait FileSystem: Send {
         let _ = path;
         Err(KernelError::NotSupported)
     }
+
+    /// Remove an empty directory.
+    ///
+    /// Returns `NotSupported` if the filesystem is read-only.
+    fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+        let _ = path;
+        Err(KernelError::NotSupported)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +208,13 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.mkdir(relative)
+    }
+
+    /// Remove an empty directory.
+    pub fn rmdir(path: &str) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.rmdir(relative)
     }
 }
 

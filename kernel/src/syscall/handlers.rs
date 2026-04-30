@@ -105,6 +105,173 @@ pub fn sys_debug_print(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(written)
 }
 
+// ---------------------------------------------------------------------------
+// IRQ management (30–39)
+// ---------------------------------------------------------------------------
+
+/// `SYS_IRQ_REGISTER` — claim an IRQ line for the calling task.
+///
+/// Registers the task for wakeup notifications and unmasks the IRQ
+/// on the IOAPIC.  Only one task may be registered per IRQ.
+pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
+    let irq = args.arg0;
+
+    if irq >= crate::ioapic::MAX_IRQ as u64 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // TODO: Require a DeviceIrq capability for this IRQ line.
+
+    let task_id = sched::current_task_id();
+
+    #[allow(clippy::cast_possible_truncation)]
+    let irq_u32 = irq as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let irq_u8 = irq as u8;
+
+    crate::ioapic::irq_register_task(irq_u32, task_id);
+
+    // SAFETY: The corresponding IDT entry (vector 33 + irq) has an
+    // ISR stub registered during idt::init().
+    unsafe {
+        crate::ioapic::unmask_irq(irq_u8);
+    }
+
+    SyscallResult::ok(0)
+}
+
+/// `SYS_IRQ_WAIT` — block until an IRQ fires on a registered line.
+///
+/// If the pending counter is already > 0, consumes and returns
+/// immediately.  Otherwise, blocks the calling task until the ISR
+/// increments the counter and the deferred-wake mechanism wakes us.
+pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
+    let irq = args.arg0;
+
+    if irq >= crate::ioapic::MAX_IRQ as u64 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let irq_u32 = irq as u32;
+
+    // Fast path: if interrupts are already pending, consume and return.
+    let count = crate::ioapic::irq_consume(irq_u32);
+    if count > 0 {
+        #[allow(clippy::cast_possible_wrap)]
+        return SyscallResult::ok(count as i64);
+    }
+
+    // Ensure the calling task is registered for this IRQ's wakeup.
+    let task_id = sched::current_task_id();
+    crate::ioapic::irq_register_task(irq_u32, task_id);
+
+    // Slow path: block until IRQ fires.
+    //
+    // The ISR will increment the pending counter and attempt to wake
+    // us immediately (via try_wake).  If that fails, the timer ISR's
+    // deferred-wake scan will catch it within ~10 ms.
+    sched::block_current();
+
+    // We've been woken — consume the pending count.
+    let count = crate::ioapic::irq_consume(irq_u32);
+    // At least 1 interrupt must have fired to wake us.
+    let result = if count > 0 { count } else { 1 };
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(result as i64)
+}
+
+/// `SYS_IRQ_RELEASE` — release a previously registered IRQ line.
+///
+/// Masks the IRQ on the IOAPIC and unregisters the task.
+pub fn sys_irq_release(args: &SyscallArgs) -> SyscallResult {
+    let irq = args.arg0;
+
+    if irq >= crate::ioapic::MAX_IRQ as u64 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let irq_u32 = irq as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let irq_u8 = irq as u8;
+
+    crate::ioapic::mask_irq(irq_u8);
+    crate::ioapic::irq_unregister_task(irq_u32);
+
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Port I/O (40–49)
+// ---------------------------------------------------------------------------
+
+/// `SYS_PORT_READ` — read a value from an I/O port.
+///
+/// `arg0`: port number (0–65535).
+/// `arg1`: access width (1 = byte, 2 = word, 4 = dword).
+///
+/// Returns: the value read.
+pub fn sys_port_read(args: &SyscallArgs) -> SyscallResult {
+    let port = args.arg0;
+    let width = args.arg1;
+
+    if port > u64::from(u16::MAX) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // TODO: Require a PortIo capability for this port range.
+
+    #[allow(clippy::cast_possible_truncation)]
+    let port_u16 = port as u16;
+
+    // SAFETY: The caller is requesting port I/O from a driver process.
+    // Port validity is the caller's responsibility.  Capability gating
+    // will be added to restrict which ports each driver can access.
+    let value: u64 = match width {
+        1 => u64::from(unsafe { crate::port::inb(port_u16) }),
+        2 => u64::from(unsafe { crate::port::inw(port_u16) }),
+        4 => u64::from(unsafe { crate::port::inl(port_u16) }),
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(value as i64)
+}
+
+/// `SYS_PORT_WRITE` — write a value to an I/O port.
+///
+/// `arg0`: port number (0–65535).
+/// `arg1`: access width (1 = byte, 2 = word, 4 = dword).
+/// `arg2`: value to write (low bits used per width).
+///
+/// Returns: 0 on success.
+pub fn sys_port_write(args: &SyscallArgs) -> SyscallResult {
+    let port = args.arg0;
+    let width = args.arg1;
+    let value = args.arg2;
+
+    if port > u64::from(u16::MAX) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // TODO: Require a PortIo capability for this port range.
+
+    #[allow(clippy::cast_possible_truncation)]
+    let port_u16 = port as u16;
+
+    // SAFETY: Same as sys_port_read — caller takes responsibility for
+    // port validity.  Capability gating forthcoming.
+    match width {
+        1 => unsafe { crate::port::outb(port_u16, value as u8) },
+        2 => unsafe { crate::port::outw(port_u16, value as u16) },
+        4 => unsafe { crate::port::outl(port_u16, value as u32) },
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    }
+
+    SyscallResult::ok(0)
+}
+
 /// `SYS_MMAP` — map memory into the calling process's address space.
 ///
 /// Supports two modes:

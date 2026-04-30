@@ -92,6 +92,63 @@ pub const MAP_FIXED: u64   = 1 << 5;
 /// Returns: 0 on success, negative error.
 pub const SYS_MUNMAP: u64 = 21;
 
+/// Register to receive interrupts from an IOAPIC IRQ line.
+///
+/// `arg0`: IRQ number (0–23).
+///
+/// The IRQ line is unmasked on the IOAPIC and the calling task is
+/// registered to receive wakeups when the IRQ fires.  Only one
+/// task may be registered per IRQ line.
+///
+/// Returns: 0 on success, negative error.
+///
+/// TODO: Require a DeviceIrq capability once the cap system covers
+/// hardware resources.
+pub const SYS_IRQ_REGISTER: u64 = 30;
+
+/// Wait for an interrupt on a registered IRQ line (blocking).
+///
+/// `arg0`: IRQ number (0–23).
+///
+/// If the pending counter is already > 0, consumes it and returns
+/// immediately.  Otherwise, blocks the calling task until the IRQ
+/// fires.
+///
+/// Returns: number of interrupts consumed (>= 1).
+pub const SYS_IRQ_WAIT: u64 = 31;
+
+/// Release a previously registered IRQ line.
+///
+/// `arg0`: IRQ number (0–23).
+///
+/// Masks the IRQ on the IOAPIC and unregisters the task.
+///
+/// Returns: 0 on success.
+pub const SYS_IRQ_RELEASE: u64 = 32;
+
+/// Read from an I/O port.
+///
+/// `arg0`: port number (0–65535).
+/// `arg1`: access width (1 = byte, 2 = word, 4 = dword).
+///
+/// Returns: the value read from the port.
+///
+/// TODO: Require a PortIo capability once the cap system covers
+/// hardware resources.
+pub const SYS_PORT_READ: u64 = 40;
+
+/// Write to an I/O port.
+///
+/// `arg0`: port number (0–65535).
+/// `arg1`: access width (1 = byte, 2 = word, 4 = dword).
+/// `arg2`: value to write.
+///
+/// Returns: 0 on success.
+///
+/// TODO: Require a PortIo capability once the cap system covers
+/// hardware resources.
+pub const SYS_PORT_WRITE: u64 = 41;
+
 /// Debug print (temporary — write a byte string to serial).
 ///
 /// `arg0`: pointer to bytes.

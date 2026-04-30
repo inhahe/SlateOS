@@ -952,6 +952,76 @@ pub fn sys_exception_return_with_frame(
     ctx.rax as i64
 }
 
+/// `SYS_PROCESS_KILL` — force-terminate a process.
+///
+/// `arg0`: target process ID.
+/// `arg1`: exit code (i32, sign-extended to u64).
+///
+/// Authority: the caller must be the parent of the target, or PID 0.
+/// Cannot kill PID 0 (kernel) or the calling process itself (use
+/// SYS_EXIT instead).
+///
+/// Returns: number of threads killed.
+pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
+    use crate::proc::{pcb, thread};
+    use super::dispatch::SyscallResult;
+
+    let target_pid = args.arg0;
+    #[allow(clippy::cast_possible_wrap)]
+    let exit_code = args.arg1 as i32;
+
+    // Can't kill PID 0 (kernel).
+    if target_pid == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Get the caller's process ID.
+    let task_id = sched::current_task_id();
+    let caller_pid = thread::owner_process(task_id).unwrap_or(0);
+
+    // Can't kill self — use SYS_EXIT instead.
+    if target_pid == caller_pid {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Authority check: caller must be the target's parent, or PID 0.
+    let target_parent = match pcb::parent(target_pid) {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+    if caller_pid != 0 && caller_pid != target_parent {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    // Check the process isn't already a zombie or gone.
+    match pcb::state(target_pid) {
+        Some(pcb::ProcessState::Zombie) => {
+            return SyscallResult::err(KernelError::ProcessExited);
+        }
+        None => {
+            return SyscallResult::err(KernelError::NoSuchProcess);
+        }
+        _ => {}
+    }
+
+    // Set the exit code before killing threads so the zombie
+    // transition has the correct code.
+    if let Err(e) = pcb::set_exit_code(target_pid, exit_code) {
+        return SyscallResult::err(e);
+    }
+
+    // Kill all threads in the target process.
+    let killed = thread::kill_process_threads(target_pid);
+
+    serial_println!(
+        "[proc] Process {} killed by {} ({} threads, exit_code={})",
+        target_pid, caller_pid, killed, exit_code
+    );
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(killed as i64)
+}
+
 /// `SYS_PROCESS_EXEC` — replace the current process image.
 ///
 /// This handler receives the full `SyscallFrame` (not just args) because

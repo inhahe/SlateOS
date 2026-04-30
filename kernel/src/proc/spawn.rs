@@ -578,6 +578,7 @@ pub fn self_test() -> KernelResult<()> {
     test_exec_process()?;
     test_seh_handler_exit()?;
     test_seh_handler_resume()?;
+    test_process_kill()?;
     test_no_frame_leak()?;
 
     Ok(())
@@ -978,7 +979,74 @@ fn test_seh_handler_resume() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test 9: Verify that destroying a process frees all its frames.
+/// Test 9: Force-kill a process before it runs.
+///
+/// Spawns a process (thread enters the Ready queue) then kills all its
+/// threads without ever yielding.  Verifies:
+/// - The thread is dequeued from the scheduler and marked Dead.
+/// - The process transitions to Zombie with the specified exit code.
+/// - Scheduler resources are properly cleaned up.
+fn test_process_kill() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+    let options = SpawnOptions::new("spawn-test-kill");
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // Process should be Running (initial thread was spawned).
+    let s = pcb::state(result.pid);
+    if s != Some(pcb::ProcessState::Running) {
+        serial_println!(
+            "[spawn]   FAIL: kill test — expected Running, got {:?}",
+            s
+        );
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Set exit code and kill all threads (simulating SYS_PROCESS_KILL).
+    pcb::set_exit_code(result.pid, -9)?;
+    let killed = thread::kill_process_threads(result.pid);
+
+    if killed != 1 {
+        serial_println!(
+            "[spawn]   FAIL: kill test — expected 1 thread killed, got {}",
+            killed
+        );
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Process should now be Zombie.
+    let s = pcb::state(result.pid);
+    if s != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: kill test — expected Zombie after kill, got {:?}",
+            s
+        );
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify exit code.
+    let ec = pcb::exit_code(result.pid);
+    if ec != Some(-9) {
+        serial_println!(
+            "[spawn]   FAIL: kill test — expected exit code -9, got {:?}",
+            ec
+        );
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Reap the dead scheduler task and destroy the process.
+    crate::sched::reap_dead_tasks();
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   Process kill (force-terminate before run): OK");
+    Ok(())
+}
+
+/// Test 10: Verify that destroying a process frees all its frames.
 ///
 /// Spawns a process, lets it run (allocating ELF segment frames, user
 /// stack frames, and page table pages), then destroys it and checks

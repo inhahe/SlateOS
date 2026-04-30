@@ -308,6 +308,64 @@ pub fn preempt() {
     schedule_inner(true);
 }
 
+/// Kill a task remotely (force-terminate without running task code).
+///
+/// Marks the task as [`Dead`](TaskState::Dead) and removes it from
+/// the run queue if it was [`Ready`].  Blocked and Suspended tasks
+/// are simply marked Dead (they won't be woken).
+///
+/// Cannot kill the currently running task — use [`task_exit`] for
+/// self-termination.
+///
+/// Returns `true` if the task was found and killed, `false` if it
+/// was already Dead, not found, or is the current task.
+pub fn kill_task(task_id: TaskId) -> bool {
+    let current = CURRENT_TASK_ID.load(Ordering::Acquire);
+    if task_id == current {
+        // Can't kill the currently running task via this path.
+        // Use task_exit() for self-termination.
+        serial_println!(
+            "[sched] kill_task: refusing to kill current task {}",
+            task_id
+        );
+        return false;
+    }
+
+    let mut state = SCHED.lock();
+    let Some(task) = state.tasks.get_mut(&task_id) else {
+        return false;
+    };
+
+    match task.state {
+        TaskState::Dead => return false,
+        TaskState::Ready => {
+            // Remove from the run queue before marking Dead.
+            let prio = task.priority;
+            task.state = TaskState::Dead;
+            state.scheduler.dequeue(task_id, prio);
+        }
+        TaskState::Blocked | TaskState::Suspended => {
+            // Not in the run queue — just mark Dead.
+            // If anything tries to wake() this task later, it'll
+            // see it's not Blocked and return false.
+            task.state = TaskState::Dead;
+        }
+        TaskState::Running => {
+            // On single-CPU, Running means it's the current task.
+            // We already checked for that above.  If we get here,
+            // something is wrong, but handle it defensively.
+            serial_println!(
+                "[sched] BUG: kill_task: task {} is Running but not current (current={})",
+                task_id, current
+            );
+            task.state = TaskState::Dead;
+        }
+    }
+
+    serial_println!("[sched] Killed task {}", task_id);
+    true
+}
+
 /// Reap all dead tasks: free their kernel stacks and remove them from
 /// the task table.
 ///

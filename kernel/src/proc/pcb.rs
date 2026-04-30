@@ -370,6 +370,15 @@ pub fn get_pml4(pid: ProcessId) -> Option<u64> {
     table.get(&pid).map(|p| p.pml4_phys)
 }
 
+/// Get the list of thread task IDs for a process.
+///
+/// Returns `None` if the process doesn't exist.  Returns an empty
+/// `Vec` if the process exists but has no threads (zombie or creating).
+pub fn get_threads(pid: ProcessId) -> Option<Vec<TaskId>> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|p| p.threads.clone())
+}
+
 /// Get the state of a process.
 #[allow(dead_code)]
 pub fn state(pid: ProcessId) -> Option<ProcessState> {

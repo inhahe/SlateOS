@@ -352,6 +352,18 @@ pub const SYS_SET_EXCEPTION_HANDLER: u64 = 504;
 /// context's RIP.
 pub const SYS_EXCEPTION_RETURN: u64 = 505;
 
+/// Force-terminate a process and all its threads.
+///
+/// `arg0`: target process ID.
+/// `arg1`: exit code to set for the process.
+///
+/// Authority: the caller must be the parent of the target process,
+/// or PID 0 (kernel).  Cannot kill PID 0 or the caller's own
+/// process — use `SYS_EXIT` for self-termination.
+///
+/// Returns: number of threads killed on success.
+pub const SYS_PROCESS_KILL: u64 = 506;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

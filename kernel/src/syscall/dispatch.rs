@@ -26,8 +26,8 @@ use super::number::{
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_PIPE_CLOSE, SYS_PIPE_CREATE,
     SYS_PIPE_READ, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
-    SYS_PROCESS_ID, SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT,
-    SYS_SET_EXCEPTION_HANDLER,
+    SYS_PROCESS_ID, SYS_PROCESS_KILL, SYS_PROCESS_SPAWN,
+    SYS_PROCESS_WAIT, SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
     SYS_YIELD,
 };
@@ -181,6 +181,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_WAIT as usize] = Some(handlers::sys_process_wait);
     handlers[SYS_PROCESS_ID as usize] = Some(handlers::sys_process_id);
     handlers[SYS_SET_EXCEPTION_HANDLER as usize] = Some(handlers::sys_set_exception_handler);
+    handlers[SYS_PROCESS_KILL as usize] = Some(handlers::sys_process_kill);
 
     SyscallTable {
         handlers,

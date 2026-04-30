@@ -187,6 +187,35 @@ pub fn owner_process(task_id: TaskId) -> Option<ProcessId> {
     owners.get(&task_id).copied()
 }
 
+/// Force-kill all threads in a process.
+///
+/// For each thread belonging to the process:
+/// 1. Marks the scheduler task as Dead (and dequeues if Ready).
+/// 2. Removes the thread→process mapping.
+/// 3. Removes the thread from the process's thread list.
+///
+/// When the last thread is removed, the process transitions to Zombie
+/// state (as with normal thread exit).
+///
+/// Returns the number of threads killed.
+pub fn kill_process_threads(pid: ProcessId) -> usize {
+    let task_ids = pcb::get_threads(pid).unwrap_or_default();
+    let mut killed: usize = 0;
+
+    for &task_id in &task_ids {
+        // Mark the scheduler task as Dead and dequeue it.
+        sched::kill_task(task_id);
+
+        // Remove the thread→process mapping and update the PCB.
+        // This may trigger the zombie transition for the last thread.
+        on_thread_exit(task_id);
+
+        killed = killed.saturating_add(1);
+    }
+
+    killed
+}
+
 /// Get the number of registered thread→process mappings.
 ///
 /// Useful for debugging and self-tests.

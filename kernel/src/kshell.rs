@@ -189,7 +189,7 @@ fn cmd_help() {
     crate::console_println!("  mkelf     Create a test ELF binary on disk");
     crate::console_println!("  net       Show network interface info");
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
-    crate::console_println!("  ping IP   Send an ARP probe to an IP");
+    crate::console_println!("  ping IP   Send ICMP echo requests (ping)");
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
     crate::console_println!("  wget URL  Fetch a URL via HTTP GET");
     crate::console_println!("  version   Show kernel version");
@@ -641,24 +641,56 @@ fn cmd_ping(args: &str) {
         return;
     }
 
-    // Parse IP address (simple dotted-quad parser).
-    let ip = match parse_ipv4(args) {
-        Some(ip) => ip,
-        None => {
-            crate::console_println!("Invalid IP address: {}", args);
-            return;
+    // Parse IP address or resolve hostname.
+    let ip = if let Some(ip) = parse_ipv4(args) {
+        ip
+    } else {
+        // Try DNS resolution.
+        match crate::net::dns::resolve(args) {
+            Ok(ip) => {
+                crate::console_println!("PING {} ({})", args, ip);
+                ip
+            }
+            Err(e) => {
+                crate::console_println!("Cannot resolve {}: {:?}", args, e);
+                return;
+            }
         }
     };
 
-    crate::console_println!("ARP probe for {}...", ip);
-    match crate::net::arp::resolve(ip) {
-        Ok(mac) => {
-            crate::console_println!("{} is at {}", ip, mac);
+    // Send 4 ICMP echo requests.
+    let mut sent = 0u32;
+    let mut received = 0u32;
+    for i in 0..4u32 {
+        match crate::net::icmp::ping(ip) {
+            Ok(seq) => {
+                sent = sent.saturating_add(1);
+                if crate::net::icmp::wait_reply(seq, 2000) {
+                    received = received.saturating_add(1);
+                    crate::console_println!(
+                        "Reply from {}: seq={}", ip, seq
+                    );
+                } else {
+                    crate::console_println!("Request timed out: seq={}", seq);
+                }
+            }
+            Err(e) => {
+                crate::console_println!("ping: send failed: {:?}", e);
+            }
         }
-        Err(e) => {
-            crate::console_println!("ARP resolve failed: {:?}", e);
+
+        // Brief delay between pings (if not the last one).
+        if i < 3 {
+            for _ in 0..500_000 {
+                core::hint::spin_loop();
+            }
         }
     }
+
+    crate::console_println!(
+        "--- {} ping statistics: {} sent, {} received ---",
+        ip, sent, received
+    );
 }
 
 /// Parse a simple URL: "http://host/path" or just "host/path" or "host".

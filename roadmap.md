@@ -30,7 +30,7 @@ _The minimum kernel that can run a single userspace process._
 - [ ] Set up 16 KiB page tables (not 4 KiB — design decision)
 - [ ] Set up kernel heap allocator (geometric size class, per-CPU caches)
 - [ ] Initialize serial console for debug output
-- [ ] Initialize PCI bus enumeration
+- [x] Initialize PCI bus enumeration
 
 ### 1.2 Memory manager
 - [x] Physical page allocator (buddy allocator for 16 KiB pages)
@@ -116,7 +116,8 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [ ] Driver crash detection and automatic restart
 - [ ] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
-- [ ] virtio drivers (disk, network, GPU) for VM development/testing
+- [-] virtio drivers (disk, network, GPU) for VM development/testing
+  - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, polling)
 
 ### 2.2 Essential drivers
 - [-] Keyboard (PS/2 and USB HID)
@@ -128,7 +129,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [ ] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
 - [-] Timer (HPET, APIC timer)
   - [x] Local APIC timer (calibrated via PIT, 100 Hz periodic, preemptive scheduling)
-- [ ] RTC (real-time clock)
+- [x] RTC (real-time clock)
 
 ### 2.3 Filesystem
 _Port ext4 first. Don't write a custom filesystem._

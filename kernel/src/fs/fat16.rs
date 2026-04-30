@@ -470,6 +470,328 @@ impl Fat16Fs {
 
         Err(KernelError::NotFound)
     }
+
+    // -- Write support --
+
+    /// Helper: write a sector to the block device.
+    fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
+        let result = blkdev::with_device(&self.device_name, |dev| {
+            dev.write_sector(lba, buf)
+        });
+        match result {
+            Some(Ok(())) => Ok(()),
+            Some(Err(e)) => Err(e),
+            None => Err(KernelError::NoSuchDevice),
+        }
+    }
+
+    /// Helper: read a sector from the block device.
+    fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
+        let result = blkdev::with_device(&self.device_name, |dev| {
+            dev.read_sector(lba, buf)
+        });
+        match result {
+            Some(Ok(())) => Ok(()),
+            Some(Err(e)) => Err(e),
+            None => Err(KernelError::NoSuchDevice),
+        }
+    }
+
+    /// Write a FAT16 entry (update both FAT copies).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn set_fat_entry(&mut self, cluster: u16, value: u16) -> KernelResult<()> {
+        let fat_offset = u32::from(cluster) * 2;
+        let bps = u32::from(self.bpb.bytes_per_sector);
+        let offset_in_sector = (fat_offset % bps) as usize;
+
+        // Update both FAT copies.
+        for fat_idx in 0..u32::from(self.bpb.num_fats) {
+            let fat_base = self.bpb.fat_start_lba()
+                + fat_idx * u32::from(self.bpb.sectors_per_fat);
+            let sector_num = fat_base + fat_offset / bps;
+
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            self.read_sector(u64::from(sector_num), &mut sector_buf)?;
+
+            // Write the 16-bit value in little-endian.
+            if let Some(lo) = sector_buf.get_mut(offset_in_sector) {
+                *lo = value as u8;
+            }
+            if let Some(hi) = sector_buf.get_mut(offset_in_sector + 1) {
+                *hi = (value >> 8) as u8;
+            }
+
+            self.write_sector(u64::from(sector_num), &sector_buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// Find a free cluster in the FAT.
+    ///
+    /// Scans from cluster 2 upward.  Returns `DiskFull` if none found.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn alloc_cluster(&mut self) -> KernelResult<u16> {
+        // Total data clusters.
+        let data_sectors = self.bpb.total_sectors()
+            - u32::from(self.bpb.reserved_sectors)
+            - u32::from(self.bpb.num_fats) * u32::from(self.bpb.sectors_per_fat)
+            - self.bpb.root_dir_sectors();
+        let total_clusters = data_sectors / u32::from(self.bpb.sectors_per_cluster);
+
+        // Scan FAT for a free entry (value == 0x0000).
+        let bps = u32::from(self.bpb.bytes_per_sector);
+        let entries_per_sector = bps / 2;
+        let fat_start = self.bpb.fat_start_lba();
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        let mut last_sector = u32::MAX;
+
+        // Clusters are numbered 2..total_clusters+2.
+        let max_cluster = (total_clusters + 2).min(0xFFEF_u32) as u16;
+
+        for cluster in 2..max_cluster {
+            let fat_offset = u32::from(cluster) * 2;
+            let sector_num = fat_start + fat_offset / bps;
+
+            // Only read the sector if we haven't already.
+            if sector_num != last_sector {
+                self.read_sector(u64::from(sector_num), &mut sector_buf)?;
+                last_sector = sector_num;
+            }
+
+            let offset = (fat_offset % bps) as usize;
+            let value = read_u16(&sector_buf, offset);
+            if value == 0x0000 {
+                return Ok(cluster);
+            }
+        }
+
+        Err(KernelError::DiskFull)
+    }
+
+    /// Free the cluster chain starting at `first_cluster`.
+    fn free_chain(&mut self, first_cluster: u16) -> KernelResult<()> {
+        let mut cluster = first_cluster;
+        let mut iterations = 0u32;
+
+        while cluster >= 2 && cluster <= 0xFFEF {
+            iterations = iterations.wrapping_add(1);
+            if iterations > 65536 {
+                return Err(KernelError::IoError); // Corrupt chain.
+            }
+
+            let next = self.fat_entry(cluster)?;
+            self.set_fat_entry(cluster, 0x0000)?; // Mark free.
+
+            match next {
+                Some(n) => cluster = n,
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Write file data to newly-allocated clusters.
+    ///
+    /// Returns the first cluster number of the chain.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn write_file_data(&mut self, data: &[u8]) -> KernelResult<u16> {
+        if data.is_empty() {
+            return Ok(0); // Empty file — no clusters needed.
+        }
+
+        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
+            * usize::from(self.bpb.bytes_per_sector);
+        let clusters_needed = (data.len() + cluster_bytes - 1) / cluster_bytes;
+
+        // Allocate all needed clusters first.
+        let mut clusters = Vec::with_capacity(clusters_needed);
+        for _ in 0..clusters_needed {
+            let c = self.alloc_cluster()?;
+            // Mark as end-of-chain temporarily so FAT scanner skips it.
+            self.set_fat_entry(c, 0xFFFF)?;
+            clusters.push(c);
+        }
+
+        // Link the chain (each cluster points to the next).
+        for i in 0..clusters.len() {
+            if i + 1 < clusters.len() {
+                self.set_fat_entry(clusters[i], clusters[i + 1])?;
+            }
+            // Last cluster already marked 0xFFFF.
+        }
+
+        // Write data to each cluster.
+        let mut offset = 0usize;
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+
+        for &cluster in &clusters {
+            let lba = u64::from(self.bpb.cluster_to_lba(cluster));
+
+            for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                if offset >= data.len() {
+                    // Zero-fill remaining sectors in the cluster.
+                    sector_buf = [0u8; SECTOR_SIZE];
+                    self.write_sector(lba + u64::from(s), &sector_buf)?;
+                    continue;
+                }
+
+                let to_copy = (data.len() - offset).min(SECTOR_SIZE);
+                sector_buf = [0u8; SECTOR_SIZE];
+                if let Some(src) = data.get(offset..offset + to_copy) {
+                    sector_buf[..to_copy].copy_from_slice(src);
+                }
+                self.write_sector(lba + u64::from(s), &sector_buf)?;
+                offset += to_copy;
+            }
+        }
+
+        Ok(clusters[0])
+    }
+
+    /// Convert a filename to 8.3 format.
+    ///
+    /// Returns `None` if the name is invalid.
+    fn to_83_name(name: &str) -> Option<[u8; 11]> {
+        let name = name.strip_prefix('/').unwrap_or(name);
+        let name = name.to_uppercase();
+
+        let mut result = [b' '; 11];
+
+        if let Some(dot_pos) = name.rfind('.') {
+            let base = &name[..dot_pos];
+            let ext = &name[dot_pos + 1..];
+
+            if base.is_empty() || base.len() > 8 || ext.len() > 3 {
+                return None;
+            }
+
+            for (i, b) in base.bytes().enumerate().take(8) {
+                result[i] = b;
+            }
+            for (i, b) in ext.bytes().enumerate().take(3) {
+                result[8 + i] = b;
+            }
+        } else {
+            // No extension.
+            if name.is_empty() || name.len() > 8 {
+                return None;
+            }
+            for (i, b) in name.bytes().enumerate().take(8) {
+                result[i] = b;
+            }
+        }
+
+        Some(result)
+    }
+
+    /// Find or create a root directory entry slot.
+    ///
+    /// If the file already exists, returns its slot (sector LBA, offset
+    /// within sector).  Otherwise finds the first free or end-of-directory
+    /// slot.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn find_or_create_dir_slot(
+        &mut self,
+        name83: &[u8; 11],
+    ) -> KernelResult<(u64, usize, bool)> {
+        // Returns (sector_lba, byte_offset_in_sector, already_exists).
+        let root_lba = self.bpb.root_dir_start_lba();
+        let root_sectors = self.bpb.root_dir_sectors();
+        let max_entries = self.bpb.root_entry_count;
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        let mut entry_index: u16 = 0;
+        let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
+
+        // First pass: look for existing entry or free slot.
+        let mut first_free: Option<(u64, usize)> = None;
+
+        for sec in 0..root_sectors {
+            let lba = u64::from(root_lba + sec);
+            self.read_sector(lba, &mut sector_buf)?;
+
+            for i in 0..entries_per_sector {
+                if entry_index >= max_entries {
+                    return first_free
+                        .map(|(l, o)| (l, o, false))
+                        .ok_or(KernelError::DiskFull);
+                }
+
+                let offset = i * 32;
+                let first_byte = sector_buf.get(offset).copied().unwrap_or(0);
+
+                if first_byte == 0x00 || first_byte == 0xE5 {
+                    // Free slot.
+                    if first_free.is_none() {
+                        first_free = Some((lba, offset));
+                    }
+                    if first_byte == 0x00 {
+                        // End of directory — no more entries to check.
+                        return first_free
+                            .map(|(l, o)| (l, o, false))
+                            .ok_or(KernelError::DiskFull);
+                    }
+                } else {
+                    // Check if this is the same file.
+                    if let Some(raw) = sector_buf.get(offset..offset + 11) {
+                        if raw == name83.as_slice() {
+                            return Ok((lba, offset, true));
+                        }
+                    }
+                }
+
+                entry_index = entry_index.wrapping_add(1);
+            }
+        }
+
+        first_free
+            .map(|(l, o)| (l, o, false))
+            .ok_or(KernelError::DiskFull)
+    }
+
+    /// Write a directory entry at the specified location.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn write_dir_entry(
+        &mut self,
+        lba: u64,
+        offset: usize,
+        name83: &[u8; 11],
+        first_cluster: u16,
+        file_size: u32,
+    ) -> KernelResult<()> {
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        self.read_sector(lba, &mut sector_buf)?;
+
+        // Write the 32-byte directory entry.
+        if let Some(entry) = sector_buf.get_mut(offset..offset + 32) {
+            entry[0..11].copy_from_slice(name83);
+            entry[11] = 0x20; // Archive attribute.
+            // Zero out time/date fields.
+            entry[12..26].fill(0);
+            // First cluster (little-endian u16 at offset 26).
+            entry[26] = first_cluster as u8;
+            entry[27] = (first_cluster >> 8) as u8;
+            // File size (little-endian u32 at offset 28).
+            entry[28] = file_size as u8;
+            entry[29] = (file_size >> 8) as u8;
+            entry[30] = (file_size >> 16) as u8;
+            entry[31] = (file_size >> 24) as u8;
+        }
+
+        self.write_sector(lba, &sector_buf)
+    }
+
+    /// Delete a directory entry (mark as 0xE5).
+    fn delete_dir_entry(&mut self, lba: u64, offset: usize) -> KernelResult<()> {
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        self.read_sector(lba, &mut sector_buf)?;
+
+        if let Some(byte) = sector_buf.get_mut(offset) {
+            *byte = 0xE5; // Deleted marker.
+        }
+
+        self.write_sector(lba, &sector_buf)
+    }
 }
 
 impl FileSystem for Fat16Fs {
@@ -516,6 +838,76 @@ impl FileSystem for Fat16Fs {
 
         let entry = self.find_in_root(path)?;
         Ok(entry.to_vfs_entry())
+    }
+
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+        let name = path.strip_prefix('/').unwrap_or(path);
+        let name83 = Self::to_83_name(name).ok_or(KernelError::InvalidArgument)?;
+
+        // Check file size limit (FAT16 max: 2 GiB, but u32 field caps at ~4 GiB).
+        if data.len() > u32::MAX as usize {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Find or create the directory entry.
+        let (dir_lba, dir_offset, exists) = self.find_or_create_dir_slot(&name83)?;
+
+        // If overwriting, free the old cluster chain.
+        if exists {
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            self.read_sector(dir_lba, &mut sector_buf)?;
+            let old_cluster = read_u16(&sector_buf, dir_offset + 26);
+            if old_cluster >= 2 {
+                self.free_chain(old_cluster)?;
+            }
+        }
+
+        // Write new data to clusters.
+        let first_cluster = self.write_file_data(data)?;
+
+        // Update the directory entry.
+        self.write_dir_entry(
+            dir_lba,
+            dir_offset,
+            &name83,
+            first_cluster,
+            data.len() as u32,
+        )?;
+
+        crate::serial_println!(
+            "[fat16] Wrote '{}' ({} bytes, cluster {})",
+            name, data.len(), first_cluster
+        );
+
+        Ok(())
+    }
+
+    fn remove(&mut self, path: &str) -> KernelResult<()> {
+        let name = path.strip_prefix('/').unwrap_or(path);
+        let name83 = Self::to_83_name(name).ok_or(KernelError::InvalidArgument)?;
+
+        let (dir_lba, dir_offset, exists) = self.find_or_create_dir_slot(&name83)?;
+
+        if !exists {
+            return Err(KernelError::NotFound);
+        }
+
+        // Read the directory entry to get the first cluster.
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        self.read_sector(dir_lba, &mut sector_buf)?;
+        let first_cluster = read_u16(&sector_buf, dir_offset + 26);
+
+        // Free the cluster chain.
+        if first_cluster >= 2 {
+            self.free_chain(first_cluster)?;
+        }
+
+        // Mark directory entry as deleted.
+        self.delete_dir_entry(dir_lba, dir_offset)?;
+
+        crate::serial_println!("[fat16] Deleted '{}'", name);
+        Ok(())
     }
 }
 
@@ -564,6 +956,42 @@ pub fn self_test() -> KernelResult<()> {
         }
         Err(KernelError::NotFound) => {
             crate::serial_println!("[fat16]   HELLO.TXT not found (OK if disk has no test files)");
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Test write: create a new file, read it back, then delete it.
+    let test_data = b"FAT16 write test: the quick brown fox jumps over the lazy dog.\n";
+    crate::serial_println!("[fat16]   Testing write...");
+
+    crate::fs::Vfs::write_file("/TEST.TXT", test_data)?;
+
+    // Read it back and verify.
+    let readback = crate::fs::Vfs::read_file("/TEST.TXT")?;
+    if readback.as_slice() != test_data.as_slice() {
+        crate::serial_println!(
+            "[fat16]   Write verification FAILED: expected {} bytes, got {}",
+            test_data.len(),
+            readback.len()
+        );
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!(
+        "[fat16]   Write+read verified: {} bytes match",
+        readback.len()
+    );
+
+    // Delete the test file.
+    crate::fs::Vfs::remove("/TEST.TXT")?;
+
+    // Verify it's gone.
+    match crate::fs::Vfs::read_file("/TEST.TXT") {
+        Err(KernelError::NotFound) => {
+            crate::serial_println!("[fat16]   Delete verified: file not found (correct)");
+        }
+        Ok(_) => {
+            crate::serial_println!("[fat16]   Delete verification FAILED: file still exists");
+            return Err(KernelError::IoError);
         }
         Err(e) => return Err(e),
     }

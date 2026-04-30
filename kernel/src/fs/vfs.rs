@@ -74,6 +74,31 @@ pub trait FileSystem: Send {
     ///
     /// Returns a [`DirEntry`] with name, type, and size.
     fn stat(&mut self, path: &str) -> KernelResult<DirEntry>;
+
+    /// Write data to a file, creating it if it doesn't exist.
+    ///
+    /// If the file exists, its contents are replaced entirely.
+    /// Returns `NotSupported` if the filesystem is read-only.
+    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+        let _ = (path, data);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Delete a file.
+    ///
+    /// Returns `NotSupported` if the filesystem is read-only.
+    fn remove(&mut self, path: &str) -> KernelResult<()> {
+        let _ = path;
+        Err(KernelError::NotSupported)
+    }
+
+    /// Create a directory.
+    ///
+    /// Returns `NotSupported` if the filesystem is read-only.
+    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+        let _ = path;
+        Err(KernelError::NotSupported)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +179,20 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.stat(relative)
+    }
+
+    /// Write data to a file (create or overwrite).
+    pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.write_file(relative, data)
+    }
+
+    /// Delete a file.
+    pub fn remove(path: &str) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.remove(relative)
     }
 }
 

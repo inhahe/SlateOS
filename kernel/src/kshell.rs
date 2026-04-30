@@ -148,6 +148,8 @@ fn execute(line: &str) {
         "blkread" => cmd_blkread(args),
         "ls" | "dir" => cmd_ls(args),
         "cat" | "type" => cmd_cat(args),
+        "write" => cmd_write(args),
+        "rm" | "del" => cmd_rm(args),
         "version" | "ver" => cmd_version(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -174,6 +176,8 @@ fn cmd_help() {
     crate::console_println!("  blkread N Hex-dump sector N from disk");
     crate::console_println!("  ls [path] List files in directory");
     crate::console_println!("  cat FILE  Print file contents");
+    crate::console_println!("  write F T Write text T to file F");
+    crate::console_println!("  rm FILE   Delete a file");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  reboot    Reboot the system");
 }
@@ -451,6 +455,66 @@ fn cmd_cat(args: &str) {
         }
         Err(e) => {
             crate::console_println!("cat: {}: {:?}", path, e);
+        }
+    }
+}
+
+fn cmd_write(args: &str) {
+    // Parse: "write FILENAME text to write..."
+    let mut parts = args.splitn(2, ' ');
+    let filename = match parts.next() {
+        Some(f) if !f.is_empty() => f,
+        _ => {
+            crate::console_println!("Usage: write <filename> <text>");
+            return;
+        }
+    };
+    let text = parts.next().unwrap_or("");
+
+    let path = if filename.starts_with('/') {
+        alloc::string::String::from(filename)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(filename);
+        s
+    };
+
+    // Append a newline if the text doesn't have one.
+    let mut data = alloc::vec::Vec::from(text.as_bytes());
+    if !text.ends_with('\n') {
+        data.push(b'\n');
+    }
+
+    match crate::fs::Vfs::write_file(&path, &data) {
+        Ok(()) => {
+            crate::console_println!("Wrote {} bytes to {}", data.len(), path);
+        }
+        Err(e) => {
+            crate::console_println!("write: {}: {:?}", path, e);
+        }
+    }
+}
+
+fn cmd_rm(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: rm <filename>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    match crate::fs::Vfs::remove(&path) {
+        Ok(()) => {
+            crate::console_println!("Deleted {}", path);
+        }
+        Err(e) => {
+            crate::console_println!("rm: {}: {:?}", path, e);
         }
     }
 }

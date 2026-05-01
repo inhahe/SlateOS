@@ -63,7 +63,11 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [ ] Priority inheritance on mutex contention
   - [ ] Interactive task detection (I/O-blocking tasks get small priority boost)
   - [ ] Runtime-tunable time slice durations
-- [ ] Process/thread pause, resume, priority change while running
+- [x] Process/thread pause, resume, priority change while running
+  - [x] sched::suspend/resume for task pause/unpause
+  - [x] sched::set_priority for runtime priority change
+  - [x] SYS_THREAD_SUSPEND (513), SYS_THREAD_RESUME (514), SYS_THREAD_SET_PRIORITY (515)
+  - [x] Same-process authority enforcement
 - [ ] Workload profile presets for scheduler parameters
 
 ### 1.4 IPC and syscalls
@@ -98,6 +102,9 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] ELF binary loader
 - [x] Process creation / destruction
 - [x] Thread creation / destruction
+  - [x] SYS_THREAD_CREATE (510): userspace thread spawn with user-provided RIP/RSP
+  - [x] SYS_THREAD_EXIT (511): thread exit with value, join support
+  - [x] SYS_THREAD_JOIN (512): blocking wait for thread completion with exit value retrieval
 - [x] fork equivalent (or better: posix_spawn-style that avoids fork's problems)
 - [x] exec equivalent
 - [x] Hardware exception → language-level exception (SEH-style, not Unix signals)

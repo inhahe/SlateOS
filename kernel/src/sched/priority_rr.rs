@@ -588,6 +588,27 @@ impl PerCpuScheduler {
             .any(PriorityRoundRobin::has_ready)
     }
 
+    /// Check if a specific CPU's local queue has ready tasks.
+    ///
+    /// Used by the timer tick to detect idle CPUs that should
+    /// proactively try work stealing.
+    #[must_use]
+    pub fn local_has_ready(&self, cpu: usize) -> bool {
+        self.queues.get(cpu).is_some_and(PriorityRoundRobin::has_ready)
+    }
+
+    /// Check if any *other* CPU has ready tasks that could be stolen.
+    ///
+    /// Lightweight probe for the timer tick load balancer: returns true
+    /// if at least one CPU (other than `cpu`) has work in its queue.
+    #[must_use]
+    pub fn others_have_ready(&self, cpu: usize) -> bool {
+        self.queues.iter()
+            .take(self.num_cpus)
+            .enumerate()
+            .any(|(i, q)| i != cpu && q.has_ready())
+    }
+
     // --- Global configuration (applies to all CPUs) ---
 
     /// Set time slice for a priority level on all CPUs.

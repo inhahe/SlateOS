@@ -350,6 +350,29 @@ pub fn try_wake(task_id: TaskId) -> bool {
     false
 }
 
+/// How often (in timer ticks) to check load balance.
+///
+/// At 100 Hz timer, 10 ticks = 100 ms between balance checks.
+/// This is a reasonable trade-off between responsiveness and overhead.
+/// Linux uses 4 ms (HZ/250) for idle CPUs and 64 ms for busy CPUs;
+/// we use a fixed 100 ms interval which is fine for our current
+/// workload patterns.
+const BALANCE_INTERVAL: u64 = 10;
+
+/// Per-CPU tick counters for periodic load balancing.
+///
+/// Each CPU increments its counter on every timer tick.  When the
+/// counter reaches `BALANCE_INTERVAL`, the load balancer checks if
+/// work stealing is beneficial.
+///
+/// Using atomics (not behind the scheduler lock) because the timer
+/// ISR increments this BEFORE acquiring the scheduler lock.  Each
+/// CPU only writes its own slot, so no contention.
+static BALANCE_TICKS: [AtomicU64; 16] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 16]
+};
+
 /// Handle a timer tick from the APIC timer interrupt.
 ///
 /// Called from the timer ISR with interrupts disabled.  Uses `try_lock`
@@ -360,9 +383,15 @@ pub fn try_wake(task_id: TaskId) -> bool {
 /// Also increments the current task's burst tick counter for
 /// interactive task detection.
 ///
-/// Returns `true` if the current task's time slice has expired and a
-/// reschedule is needed.
+/// Periodically checks load balance: if this CPU's local queue is
+/// empty but other CPUs have work, returns `true` to trigger a
+/// preempt (which does work stealing via `schedule_inner`).
+///
+/// Returns `true` if the current task's time slice has expired
+/// (or a load balance steal is warranted) and a reschedule is needed.
 pub fn timer_tick() -> bool {
+    let cpu = current_cpu_id();
+
     // Use try_lock to avoid deadlock with code that holds SCHED
     // when the timer fires.
     if let Some(mut state) = SCHED.try_lock() {
@@ -376,8 +405,33 @@ pub fn timer_tick() -> bool {
             task.tick_burst();
         }
 
-        let cpu = current_cpu_id();
-        state.scheduler.tick(cpu)
+        let time_slice_expired = state.scheduler.tick(cpu);
+        if time_slice_expired {
+            return true;
+        }
+
+        // Periodic load balance: check if this CPU is idle while
+        // others have work.  Only check every BALANCE_INTERVAL ticks
+        // to avoid overhead on every 10ms tick.
+        //
+        // OPT: This proactive check means idle CPUs pull work within
+        // 100ms instead of waiting for the next yield/block event.
+        // Without this, a CPU that enters the idle loop stays idle
+        // until another CPU yields a task (which may never happen if
+        // the busy CPU's tasks don't yield).
+        let tick_count = BALANCE_TICKS[cpu].fetch_add(1, Ordering::Relaxed);
+        if tick_count % BALANCE_INTERVAL == 0 {
+            // Check: is our local queue empty?
+            if !state.scheduler.local_has_ready(cpu) {
+                // Is anyone else overloaded?
+                if state.scheduler.others_have_ready(cpu) {
+                    // Trigger a reschedule — schedule_inner will try_steal.
+                    return true;
+                }
+            }
+        }
+
+        false
     } else {
         // Couldn't acquire lock — skip this tick.
         false

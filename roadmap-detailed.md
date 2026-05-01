@@ -193,6 +193,7 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
   - [x] Configurable time slices per level (shorter = higher priority for lower latency)
   - [x] Per-CPU run queues (PerCpuScheduler, cache-warm enqueue via last_cpu)
   - [x] Work stealing from longest queue when idle (prefer same NUMA node)
+  - [x] Proactive push-based load balancing via SCHED_SOFTIRQ (busy CPUs push excess to lightest CPU, 100ms interval, threshold=2 tasks)
   - [x] Priority inheritance on mutex contention
   - [x] Interactive task detection (I/O-blocking tasks get small priority boost, EWMA burst tracking)
   - [x] Runtime-tunable time slice durations

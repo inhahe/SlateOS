@@ -507,6 +507,73 @@ impl BuddyAllocator {
         Ok(addr)
     }
 
+    /// Allocate a block of `2^order` contiguous frames whose physical
+    /// address is entirely below `max_addr`.
+    ///
+    /// Used by the DMA subsystem for devices with address constraints
+    /// (e.g., 32-bit DMA can only address below 4 GiB).
+    ///
+    /// Walks the free list at each order (from `order` up to `MAX_ORDER`)
+    /// looking for a block whose base address satisfies:
+    ///   `addr + (FRAME_SIZE << order) <= max_addr`
+    ///
+    /// This is O(n) in the number of free blocks at each order, but DMA
+    /// allocation is infrequent and not on a hot path.
+    ///
+    /// Based on Linux's GFP_DMA / GFP_DMA32 zone-aware allocation
+    /// (`mm/page_alloc.c`).
+    #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    fn alloc_inner_constrained(&mut self, order: usize, max_addr: u64) -> KernelResult<u64> {
+        if order > MAX_ORDER {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let alloc_size = (FRAME_SIZE as u64) << order;
+
+        // Scan each order from `order` up to MAX_ORDER.
+        // At higher orders we'll split down, but the lower half is always
+        // at the base address — so checking `addr + alloc_size <= max_addr`
+        // is sufficient regardless of the source order.
+        for source_order in order..=MAX_ORDER {
+            // Walk the doubly-linked free list at this order.
+            let mut addr = self.free_lists[source_order].head;
+            while addr != 0 {
+                // Check if the allocation (the lower portion after splitting)
+                // fits within the constraint.
+                if addr.checked_add(alloc_size).map_or(false, |end| end <= max_addr) {
+                    // Found a suitable block.  Remove it from the list.
+                    self.remove_free(addr, source_order);
+
+                    // Split down to the requested order.
+                    let mut current_order = source_order;
+                    while current_order > order {
+                        current_order -= 1;
+                        let buddy_addr = addr + (FRAME_SIZE as u64 * (1u64 << current_order));
+                        self.push_free(buddy_addr, current_order);
+                    }
+
+                    // Update bookkeeping (same as alloc_inner).
+                    let frames_out = 1usize << order;
+                    self.free_frames = self.free_frames.saturating_sub(frames_out);
+
+                    let base_idx = self.frame_index(addr);
+                    for i in 0..frames_out {
+                        self.set_refcount(base_idx.saturating_add(i), 1);
+                    }
+
+                    return Ok(addr);
+                }
+
+                // Move to the next block in this order's free list.
+                let node_ptr = self.phys_to_virt(addr).cast::<FreeNode>();
+                // SAFETY: addr is on the free list, node is valid.
+                addr = unsafe { (*node_ptr).next };
+            }
+        }
+
+        Err(KernelError::OutOfMemory)
+    }
+
     /// Free a block of 2^order contiguous frames, coalescing with buddies.
     ///
     /// Attempts to merge with the buddy block at each order level,
@@ -1170,6 +1237,44 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
     // Retry allocation after reclamation.
     let mut guard = allocator.lock();
     let addr = guard.alloc_inner(order)?;
+    PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)
+}
+
+/// Allocate a contiguous block of `2^order` physical frames with the
+/// entire allocation below `max_addr`.
+///
+/// Used for DMA buffers where the device has address constraints
+/// (e.g., 32-bit DMA requires all memory below 4 GiB).
+///
+/// Like [`alloc_order`], attempts swap reclamation on first OOM.
+/// Unlike `alloc_order`, does not use per-CPU caches (DMA allocations
+/// are infrequent and the address constraint can't be satisfied by
+/// arbitrary cached frames).
+pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<PhysFrame> {
+    let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
+
+    // First attempt.
+    {
+        let mut guard = allocator.lock();
+        match guard.alloc_inner_constrained(order, max_addr) {
+            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
+            Err(KernelError::OutOfMemory) => {
+                // Fall through to reclamation.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Try reclamation, then retry.
+    let needed = 1usize << order;
+    let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
+
+    if reclaimed == 0 {
+        return Err(KernelError::OutOfMemory);
+    }
+
+    let mut guard = allocator.lock();
+    let addr = guard.alloc_inner_constrained(order, max_addr)?;
     PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)
 }
 

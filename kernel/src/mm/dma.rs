@@ -163,35 +163,15 @@ pub fn alloc(size: usize, constraint: DmaConstraint) -> KernelResult<DmaBuffer> 
 
     let order = size_to_order(size);
 
-    // Allocate via the buddy allocator.
-    let phys_frame = frame::alloc_order(order)?;
-
-    // Check addressing constraint.
-    let phys_end = phys_frame.addr()
-        .checked_add((FRAME_SIZE << order) as u64)
-        .ok_or(KernelError::InternalError)?;
-
-    let max_addr = match constraint {
-        DmaConstraint::None => u64::MAX,
-        DmaConstraint::Below4G => 0x1_0000_0000,
-        DmaConstraint::Below16M => 0x100_0000,
+    // Allocate via the buddy allocator, respecting address constraints.
+    // The constrained allocator walks the free list to find a block
+    // entirely below the device's DMA address limit (like Linux's
+    // GFP_DMA / GFP_DMA32 zone-aware allocation).
+    let phys_frame = match constraint {
+        DmaConstraint::None => frame::alloc_order(order)?,
+        DmaConstraint::Below4G => frame::alloc_order_constrained(order, 0x1_0000_0000)?,
+        DmaConstraint::Below16M => frame::alloc_order_constrained(order, 0x100_0000)?,
     };
-
-    if phys_end > max_addr {
-        // The allocation doesn't satisfy the constraint.  Free it
-        // and return an error.
-        //
-        // TODO: Implement a zone-aware allocator that can target
-        // specific physical address ranges (like Linux's GFP_DMA /
-        // GFP_DMA32).  For now, the buddy allocator doesn't support
-        // address constraints, so we fail if the allocation lands
-        // above the limit.
-        //
-        // SAFETY: We just allocated this frame, and we're the only
-        // reference.
-        let _ = unsafe { frame::free_order(phys_frame, order) };
-        return Err(KernelError::OutOfMemory);
-    }
 
     // Zero the buffer.
     let hhdm = crate::mm::page_table::hhdm()
@@ -471,6 +451,48 @@ pub fn self_test() {
     // SAFETY: We're the only user.
     unsafe { free(buf).expect("DMA free 64K") };
     serial_println!("[dma]   alloc/free 64K: OK");
+
+    // Test 4: Constrained allocation — Below4G.
+    // Our QEMU VM has 256 MiB of RAM (all below 4 GiB), so this should
+    // always succeed.  Verify the result is actually below 4 GiB.
+    let buf = alloc(FRAME_SIZE, DmaConstraint::Below4G)
+        .expect("DMA alloc Below4G");
+    let end = buf.phys_addr() + buf.allocated_size() as u64;
+    assert!(
+        end <= 0x1_0000_0000,
+        "Below4G: end {:#x} exceeds 4 GiB", end
+    );
+    // SAFETY: We're the only user.
+    unsafe { free(buf).expect("DMA free Below4G") };
+    serial_println!("[dma]   constrained Below4G: OK");
+
+    // Test 5: Constrained allocation — Below16M.
+    // ISA DMA zone.  With 256 MiB of RAM, the first 16 MiB should have
+    // free frames.  Verify the result is below 16 MiB.
+    let buf = alloc(FRAME_SIZE, DmaConstraint::Below16M)
+        .expect("DMA alloc Below16M");
+    let end = buf.phys_addr() + buf.allocated_size() as u64;
+    assert!(
+        end <= 0x100_0000,
+        "Below16M: end {:#x} exceeds 16 MiB", end
+    );
+    // SAFETY: We're the only user.
+    unsafe { free(buf).expect("DMA free Below16M") };
+    serial_println!("[dma]   constrained Below16M: OK");
+
+    // Test 6: Constrained allocation — larger buffer below 16M.
+    // 64 KiB (order 2) should still fit in the first 16 MiB.
+    let buf = alloc(64 * 1024, DmaConstraint::Below16M)
+        .expect("DMA alloc 64K Below16M");
+    let end = buf.phys_addr() + buf.allocated_size() as u64;
+    assert!(
+        end <= 0x100_0000,
+        "Below16M 64K: end {:#x} exceeds 16 MiB", end
+    );
+    assert!(buf.order() == 2, "64K → order 2");
+    // SAFETY: We're the only user.
+    unsafe { free(buf).expect("DMA free 64K Below16M") };
+    serial_println!("[dma]   constrained 64K Below16M: OK");
 
     serial_println!("[dma] Self-test PASSED");
 }

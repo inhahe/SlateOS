@@ -311,6 +311,15 @@ struct PerCpuSlabCache {
     heads: [usize; NUM_CLASSES],
     /// Number of free slots in each class's list.
     counts: [u16; NUM_CLASSES],
+    /// Per-CPU slab allocation count.
+    ///
+    /// OPT: Counted with a plain store (interrupts disabled) instead
+    /// of a global `lock xadd`.  Aggregated by `stats()` on demand.
+    /// Saves ~30-50 cycles per alloc/dealloc on the per-CPU fast path
+    /// by avoiding cross-CPU cache line bouncing.
+    slab_allocs: u64,
+    /// Per-CPU slab deallocation count.
+    slab_frees: u64,
 }
 
 impl PerCpuSlabCache {
@@ -318,6 +327,8 @@ impl PerCpuSlabCache {
         Self {
             heads: [0; NUM_CLASSES],
             counts: [0; NUM_CLASSES],
+            slab_allocs: 0,
+            slab_frees: 0,
         }
     }
 }
@@ -373,6 +384,8 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // It points to HHDM-mapped frame memory owned by this allocator.
         cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
         cache.counts[class_idx] -= 1;
+        // OPT: Per-CPU counter — plain increment, no `lock` prefix.
+        cache.slab_allocs += 1;
         // SAFETY: Restoring interrupt state to what it was before.
         unsafe { frame::restore_interrupts(flags); }
         return slot_ptr.cast::<u8>();
@@ -410,6 +423,8 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // SAFETY: same as fast path above.
         cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
         cache.counts[class_idx] -= 1;
+        // OPT: Per-CPU counter (slow path but still per-CPU).
+        cache.slab_allocs += 1;
         // SAFETY: Restoring interrupt state.
         unsafe { frame::restore_interrupts(flags); }
         slot_ptr.cast::<u8>()
@@ -445,6 +460,8 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
         unsafe { (*slot).next = cache.heads[class_idx] as *mut FreeSlot; }
         cache.heads[class_idx] = slot as usize;
         cache.counts[class_idx] += 1;
+        // OPT: Per-CPU counter — plain increment, no `lock` prefix.
+        cache.slab_frees += 1;
         // SAFETY: Restoring interrupt state.
         unsafe { frame::restore_interrupts(flags); }
         return true;
@@ -472,6 +489,8 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
     unsafe { (*slot).next = cache.heads[class_idx] as *mut FreeSlot; }
     cache.heads[class_idx] = slot as usize;
     cache.counts[class_idx] += 1;
+    // OPT: Per-CPU counter (slow path but still per-CPU).
+    cache.slab_frees += 1;
 
     // SAFETY: Restoring interrupt state.
     unsafe { frame::restore_interrupts(flags); }
@@ -490,13 +509,14 @@ unsafe impl GlobalAlloc for KernelHeap {
         let class_idx = HeapInner::size_class_index(&layout);
 
         // Per-CPU slab cache fast path (lock-free).
+        // Stats are counted per-CPU inside pcpu_slab_alloc (plain add,
+        // no `lock` prefix), aggregated by stats() on demand.
         if PCPU_SLAB_ENABLED.load(Ordering::Relaxed) {
             if let Some(idx) = class_idx {
                 // SAFETY: idx is valid (checked by size_class_index),
                 // heap is initialized (PCPU_SLAB_ENABLED is set after init).
                 let ptr = unsafe { pcpu_slab_alloc(idx) };
                 if !ptr.is_null() {
-                    SLAB_ALLOCS.fetch_add(1, Ordering::Relaxed);
                     return ptr;
                 }
                 // Per-CPU path failed (OOM) — fall through to global.
@@ -530,11 +550,11 @@ unsafe impl GlobalAlloc for KernelHeap {
         }
 
         // Per-CPU slab cache fast path.
+        // Stats counted per-CPU inside pcpu_slab_dealloc.
         if PCPU_SLAB_ENABLED.load(Ordering::Relaxed) {
             if let Some(class_idx) = HeapInner::size_class_index(&layout) {
                 // SAFETY: ptr was allocated from slab for this class.
                 if unsafe { pcpu_slab_dealloc(ptr, class_idx) } {
-                    SLAB_FREES.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             }
@@ -589,14 +609,31 @@ pub struct HeapStats {
     pub alloc_failures: u64,
 }
 
-/// Read heap allocator statistics (lock-free).
+/// Read heap allocator statistics.
 ///
-/// Returns a snapshot of the atomic counters.  No lock is needed since
-/// all counters use relaxed atomic operations.
+/// Aggregates per-CPU slab counters (lock-free, plain reads) with the
+/// global atomic counters for large allocs, refills, and failures.
+/// The per-CPU counters may be slightly stale (no cross-CPU fence)
+/// but are accurate for diagnostic/reporting purposes.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn stats() -> HeapStats {
+    // Aggregate per-CPU slab counters.
+    // SAFETY: We read each PerCpuSlabCache's counters.  These are
+    // plain u64 values, but races are benign — we're just reporting
+    // approximate stats.  On x86, aligned u64 reads are atomic.
+    let mut pcpu_allocs = 0u64;
+    let mut pcpu_frees = 0u64;
+    let online = crate::smp::cpu_count().max(1);
+    for cpu in 0..online {
+        // SAFETY: cpu < HEAP_MAX_CPUS (cpu_count is bounded by SMP init).
+        let cache = unsafe { &PCPU_SLAB_CACHES[cpu] };
+        pcpu_allocs = pcpu_allocs.saturating_add(cache.slab_allocs);
+        pcpu_frees = pcpu_frees.saturating_add(cache.slab_frees);
+    }
+
     HeapStats {
-        slab_allocs: SLAB_ALLOCS.load(Ordering::Relaxed),
-        slab_frees: SLAB_FREES.load(Ordering::Relaxed),
+        slab_allocs: pcpu_allocs + SLAB_ALLOCS.load(Ordering::Relaxed),
+        slab_frees: pcpu_frees + SLAB_FREES.load(Ordering::Relaxed),
         large_allocs: LARGE_ALLOCS.load(Ordering::Relaxed),
         large_frees: LARGE_FREES.load(Ordering::Relaxed),
         slab_refills: SLAB_REFILLS.load(Ordering::Relaxed),

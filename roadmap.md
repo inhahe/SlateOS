@@ -207,7 +207,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] System info commands: pid, uptime
   - [x] Userspace pointer validation on all syscall handlers
   - [x] Service spawn/management (init reads ELF from VFS, spawns child, waits for exit)
-- [ ] Dependency-based parallel service startup
+- [x] Dependency-based parallel service startup
 - [ ] Socket activation
 - [x] Automatic crash restart with backoff
 - [ ] Resource limits per service (cgroup-equivalent)

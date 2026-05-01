@@ -134,11 +134,22 @@ static SCHED: Mutex<SchedState> = Mutex::new(SchedState {
     initialized: false,
 });
 
-/// ID of the task currently running on this CPU.
+/// Per-CPU current task IDs.
 ///
-/// For SMP, this would be per-CPU (indexed by LAPIC ID or GS-based).
-/// For now, a single global (only one CPU is online).
-static CURRENT_TASK_ID: AtomicU64 = AtomicU64::new(0);
+/// Each CPU stores the ID of its currently-running task.  Indexed by
+/// the sequential CPU index from `current_cpu_id()`.
+///
+/// Uses an array of `AtomicU64` rather than a plain array because
+/// other CPUs may read a different CPU's slot (e.g., kill_task reads
+/// the target task's state, which was set by the running CPU).
+///
+/// OPT: Each AtomicU64 should ideally be on its own cache line to
+/// avoid false sharing.  For now, the 16-element array (128 bytes)
+/// fits in 2 cache lines, which is acceptable for ≤16 CPUs.
+static CURRENT_TASK_IDS: [AtomicU64; priority_rr::MAX_CPUS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; priority_rr::MAX_CPUS]
+};
 
 /// Get the current CPU ID (sequential index).
 ///
@@ -148,6 +159,29 @@ static CURRENT_TASK_ID: AtomicU64 = AtomicU64::new(0);
 #[must_use]
 pub fn current_cpu_id() -> usize {
     crate::smp::current_cpu_index()
+}
+
+/// Store the current-task ID for a CPU.
+///
+/// # Safety invariant
+///
+/// Only call this for the local CPU (cpu == `current_cpu_id()`), or
+/// while holding the scheduler lock and the CPU is known to be in a
+/// controlled state (e.g., during init before APs start).
+#[inline]
+fn set_current_task(cpu: usize, id: TaskId) {
+    // SAFETY: cpu < MAX_CPUS (guaranteed by smp::current_cpu_index).
+    #[allow(clippy::indexing_slicing)]
+    CURRENT_TASK_IDS[cpu].store(id, Ordering::Release);
+}
+
+/// Read the current-task ID for the calling CPU.
+#[inline]
+fn load_current_task() -> TaskId {
+    let cpu = current_cpu_id();
+    // SAFETY: cpu < MAX_CPUS.
+    #[allow(clippy::indexing_slicing)]
+    CURRENT_TASK_IDS[cpu].load(Ordering::Acquire)
 }
 
 /// Acquire the scheduler lock (for SMP bootstrap to update CPU count).
@@ -192,7 +226,7 @@ pub fn init() {
     // context (kmain), using the bootloader-provided stack.
     let idle = Task::new_idle();
     state.tasks.insert(0, idle);
-    CURRENT_TASK_ID.store(0, Ordering::Release);
+    set_current_task(0, 0); // BSP (CPU 0) starts with idle task 0.
 
     state.initialized = true;
     serial_println!(
@@ -253,7 +287,7 @@ pub fn yield_now() {
 /// entry function returns.  The task is NOT placed back in the run
 /// queue.
 pub fn task_exit() {
-    let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let current_id = load_current_task();
     serial_println!("[sched] Task {} exiting", current_id);
 
     {
@@ -274,7 +308,7 @@ pub fn task_exit() {
 /// Get the ID of the currently running task.
 #[must_use]
 pub fn current_task_id() -> TaskId {
-    CURRENT_TASK_ID.load(Ordering::Acquire)
+    load_current_task()
 }
 
 /// Block the current task and yield to the next runnable task.
@@ -290,7 +324,7 @@ pub fn current_task_id() -> TaskId {
 /// This is used by IPC channels, futexes, and other blocking
 /// primitives.
 pub fn block_current() {
-    let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let current_id = load_current_task();
     {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&current_id) {
@@ -402,7 +436,7 @@ pub fn timer_tick() -> bool {
         }
 
         // Track CPU burst length for interactive task detection.
-        let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+        let current_id = load_current_task();
         if let Some(task) = state.tasks.get_mut(&current_id) {
             task.tick_burst();
         }
@@ -462,7 +496,7 @@ pub fn preempt() {
 /// Returns `true` if the task was suspended, `false` if it was
 /// already Suspended, Dead, or not found.
 pub fn suspend(task_id: TaskId) -> bool {
-    let current = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let current = load_current_task();
 
     {
         let mut state = SCHED.lock();
@@ -600,7 +634,7 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
 /// Returns `true` if the task was found and killed, `false` if it
 /// was already Dead, not found, or is the current task.
 pub fn kill_task(task_id: TaskId) -> bool {
-    let current = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let current = load_current_task();
     if task_id == current {
         // Can't kill the currently running task via this path.
         // Use task_exit() for self-termination.
@@ -656,7 +690,7 @@ pub fn kill_task(task_id: TaskId) -> bool {
 ///
 /// Returns the number of tasks reaped.
 pub fn reap_dead_tasks() -> usize {
-    let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let current_id = load_current_task();
     let mut reaped = 0;
 
     // Collect IDs of dead tasks first, then remove them one by one.
@@ -984,10 +1018,10 @@ pub struct PanicSchedInfo {
 /// Uses `try_lock` to avoid deadlocking if the panic occurred
 /// inside a scheduler critical section.  Returns basic info even
 /// if the lock cannot be acquired (task ID is always available
-/// via the atomic `CURRENT_TASK_ID`).
+/// via the per-CPU `CURRENT_TASK_IDS` array).
 #[must_use]
 pub fn panic_diagnostics() -> PanicSchedInfo {
-    let current_id = CURRENT_TASK_ID.load(Ordering::Relaxed);
+    let current_id = load_current_task();
 
     let mut info = PanicSchedInfo {
         current_task_id: current_id,
@@ -1084,7 +1118,7 @@ static SLEEP_QUEUE: [SleepEntry; MAX_SLEEPERS] = {
 ///
 /// Returns the number of nanoseconds actually slept (approximate).
 pub fn sleep_until_tick(wake_tick: u64) {
-    let task_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let task_id = load_current_task();
 
     // Find an empty slot.
     let mut found = false;
@@ -1168,7 +1202,7 @@ pub fn process_sleep_wakeups() {
 /// once for context pointer extraction), wasting ~100 cycles per switch
 /// on redundant lock + BTreeMap lookups.
 fn schedule_inner(requeue: bool) {
-    let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let current_id = load_current_task();
     let cpu = current_cpu_id();
 
     // Data extracted under the single lock acquisition for the switch.
@@ -1289,7 +1323,7 @@ fn schedule_inner(requeue: bool) {
 
     // --- Context switch (outside the lock) ---
 
-    CURRENT_TASK_ID.store(next_id, Ordering::Release);
+    set_current_task(cpu, next_id);
 
     // Switch CR3 if the new task uses a different address space.
     // pml4_phys == 0 means "kernel address space" → use KERNEL_PML4.

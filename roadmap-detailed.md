@@ -145,6 +145,19 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [ ] Guard page at bottom of stack (clean crash on overflow)
 - [ ] Configurable maximum stack size (default 8-64 MiB, programs can request more or unlimited)
 
+#### Memory Protection (W^X / NX bit)
+- [ ] Enforce W^X (write-xor-execute) on all userspace mappings via the NX bit
+  - Stack and heap pages are non-executable by default
+  - Code pages (.text) are read+execute, never writable
+- [ ] SYS_MPROTECT syscall to change page permissions (read, write, execute)
+  - Cannot set write+execute simultaneously (W^X violation)
+  - Transition path for JIT: allocate writable → write code → mprotect to read+execute → run
+- [ ] Capability-gated JIT memory (`mem.jit` capability)
+  - Programs without `mem.jit` cannot create executable pages outside their initial .text mapping
+  - Programs with `mem.jit` can use SYS_MPROTECT to toggle writable↔executable on anonymous mappings
+  - Required by: language runtimes (V8/JavaScript, LuaJIT, JVM HotSpot, .NET RyuJIT, CPython JIT), browser engines, game engines with shader JIT
+- [ ] Audit: no kernel mappings with both write and execute permissions
+
 #### Swap
 - [ ] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD)
 - [ ] zswap/zram compressed swap (recommended for desktop)
@@ -604,6 +617,20 @@ _nircmd: full feature set (see `nircmd.html`). CLI wrapper over system functions
 - [ ] Resizable, remembers last size and location
 - [ ] Word wrap option (if off, horizontal scroll to longest line)
 - [ ] tmux-like session detach/reattach
+- [ ] Readline-style line editing (shared library for terminal + any CLI app):
+  - [ ] Left/right arrow to move cursor within line
+  - [ ] Home/End to jump to start/end of line
+  - [ ] Up/down arrow to navigate input history
+  - [ ] Ctrl+R to reverse-search history
+  - [ ] Shift+arrow keys to select text (character-level)
+  - [ ] Shift+Home/End to select to start/end of line
+  - [ ] Ctrl+Shift+arrow to select word-by-word
+  - [ ] Copy selected text (Ctrl+C when selection active, Ctrl+C without selection = interrupt)
+  - [ ] Paste from clipboard (Ctrl+V)
+  - [ ] Shift+Enter for newline (multiline input mode)
+  - [ ] Ctrl+A to select all text in current input
+  - [ ] Ctrl+K / Ctrl+U to kill to end/start of line (with kill ring)
+  - [ ] Undo (Ctrl+Z) for input edits
 
 #### CLI Copy/Move
 - [ ] Command-line copy/move using same mechanism as file explorer drag-drop
@@ -683,6 +710,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Terminal shortcut
 - [ ] Power options: off, logout, reboot, hibernate, sleep, reboot in safe mode
 - [ ] Input field for finding and running apps
+- [ ] Start menu icon: round, shrunken version of the XOR logo (`xor2.png`)
 
 _Kexec-style OS reboot without rebooting the PC, available as a power menu option._
 
@@ -1114,12 +1142,27 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 
 ### 4.8 Development Tools
 
+#### Compilers and Toolchains
 - [ ] gcc, cmake, make, pkg-config (via POSIX layer)
 - [ ] Rust toolchain (for kernel recompilation)
 - [ ] CPython (latest, for ecosystem compatibility and fastpy bootstrapping)
 - [ ] fastpy compiler (AOT Python compiler — first-class language for OS userspace)
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
+
+#### Programming Language Support
+- [ ] Rust (native, first-class — kernel language)
+- [ ] Python (via fastpy AOT compiler + CPython interpreter)
+- [ ] C and C++ (via gcc/clang, POSIX layer)
+- [ ] JavaScript and TypeScript (via Node.js / V8 — requires `mem.jit` capability)
+- [ ] Java (via OpenJDK — requires `mem.jit` capability)
+- [ ] PHP (via php-src port)
+- [ ] Lua (via LuaJIT — requires `mem.jit` capability — or PUC-Rio Lua interpreter)
+- [ ] Ruby (via CRuby/MRI port)
+- [ ] Nim (native compiler, needs C backend which uses gcc)
+- [ ] Zig (self-hosted compiler, minimal runtime)
+
+_Goal: a developer should be able to use any mainstream language on this OS. Languages with JIT compilers require the `mem.jit` capability for full performance; they can fall back to interpreter mode without it._
 
 ### 4.9 Remote Desktop
 

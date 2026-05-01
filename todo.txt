@@ -1,11 +1,3 @@
-can programs utilize the cpu function to separate code from data and not execute stuff in data space? and can programs get around this or not use it or something for JIT? should we have that in roadmap-detailed.md?
-
-i want to have something like linux's readline function for the terminal. it should support history, arrow keys, home, end, shift+arrow/home/end to select text, copy, paste, shift+enter for newline, etc. should we add that to roadmap-detailed.md?
-
-for the start menu icon, maybe use a round, shrunken version of "D:\mypage\lightgallery\my pics, etc\pics of me, etc\xor2.png"? should that be in roadmap-detailed.md?
-
-add to roadmap-detailed.md to support a number of programming languages. rust, python, c++, c, javascript, typsecript, java, php, lua, ruby, nim, zig, etc.
-
 ## Known Bugs / Limitations
 
 - Debug kernel binary too large for Limine: The debug build (~9MB) causes

@@ -524,6 +524,12 @@ extern "C" fn kmain() -> ! {
     // Auto-detects FAT16 or FAT32.  Non-fatal if no filesystem is present.
     match fs::fat::init("vda") {
         Ok(()) => {
+            // Mount an in-memory filesystem at /tmp for temporary files.
+            // This is volatile (lost on reboot) and heap-backed.
+            if let Err(e) = fs::memfs::mount("/tmp") {
+                serial_println!("[boot] WARNING: failed to mount memfs at /tmp: {:?}", e);
+            }
+
             // Initialize the change journal (persistent change tracking).
             // Must happen before self-tests so all VFS operations are captured.
             fs::journal::init();

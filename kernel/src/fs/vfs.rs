@@ -211,8 +211,8 @@ pub struct Vfs;
 impl Vfs {
     /// Mount a filesystem at the given path.
     ///
-    /// `mount_path` must start with `/`.  Currently only `"/"` is
-    /// supported (single root mount).
+    /// `mount_path` must start with `/`.  Multiple mounts are supported;
+    /// the VFS uses longest-prefix matching to route operations.
     pub fn mount(mount_path: &str, fs: Box<dyn FileSystem>) -> KernelResult<()> {
         if !mount_path.starts_with('/') {
             return Err(KernelError::InvalidArgument);
@@ -242,11 +242,34 @@ impl Vfs {
     }
 
     /// List entries in a directory.
+    ///
+    /// If other filesystems are mounted at sub-paths of `path`, their
+    /// mount points appear as directory entries in the listing (even if
+    /// the underlying filesystem doesn't have a physical directory there).
     pub fn readdir(path: &str) -> KernelResult<Vec<DirEntry>> {
         validate_path(path)?;
         let mut vfs = VFS.lock();
+
+        // Collect mount-point names that are direct children of `path`.
+        // E.g., if path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"].
+        // Nested mounts like "/mnt/usb" are NOT direct children of "/".
+        let submount_names: Vec<String> = Self::submount_children(&vfs, path);
+
         let (mp, relative) = find_mount(&mut vfs, path)?;
-        mp.fs.readdir(relative)
+        let mut entries = mp.fs.readdir(relative)?;
+
+        // Inject submount directories that the underlying FS doesn't know about.
+        for name in submount_names {
+            if !entries.iter().any(|e| e.name == name) {
+                entries.push(DirEntry {
+                    name,
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
+            }
+        }
+
+        Ok(entries)
     }
 
     /// Read a file's contents.
@@ -381,6 +404,61 @@ impl Vfs {
         Ok(())
     }
 
+    /// List mount points that appear in the VFS.
+    ///
+    /// Returns a list of `(mount_path, fs_type)` pairs.
+    pub fn mounts() -> Vec<(String, String)> {
+        let vfs = VFS.lock();
+        vfs.mounts
+            .iter()
+            .map(|mp| (mp.path.clone(), String::from(mp.fs.fs_type())))
+            .collect()
+    }
+
+    /// Find mount-point names that are direct children of `dir_path`.
+    ///
+    /// For example, if `dir_path` is `"/"` and there are mounts at
+    /// `"/tmp"` and `"/mnt/usb"`, this returns `["tmp"]` — only the
+    /// immediate child, not nested mounts.
+    fn submount_children(vfs: &VfsInner, dir_path: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let prefix = if dir_path == "/" {
+            "/"
+        } else {
+            dir_path
+        };
+
+        for mp in &vfs.mounts {
+            // Skip the mount that *is* this directory (root mount for "/").
+            if mp.path == prefix && prefix == "/" {
+                continue;
+            }
+            if mp.path == dir_path {
+                continue;
+            }
+
+            // Check if this mount is directly under dir_path.
+            if prefix == "/" {
+                // Mount "/tmp" → child name "tmp" (strip leading /).
+                // Mount "/mnt/usb" → not a direct child of "/".
+                let tail = &mp.path[1..]; // strip leading /
+                if !tail.is_empty() && !tail.contains('/') {
+                    names.push(String::from(tail));
+                }
+            } else if mp.path.starts_with(prefix)
+                && mp.path.as_bytes().get(prefix.len()) == Some(&b'/')
+            {
+                // Mount "/mnt/usb" under dir_path "/mnt" → child "usb".
+                let tail = &mp.path[prefix.len() + 1..];
+                if !tail.is_empty() && !tail.contains('/') {
+                    names.push(String::from(tail));
+                }
+            }
+        }
+
+        names
+    }
+
     /// Return debug statistics for the filesystem mounted at `path`.
     pub fn debug_stats(path: &str) -> KernelResult<String> {
         let vfs = VFS.lock();
@@ -480,7 +558,32 @@ pub fn normalize_path(path: &str) -> String {
 // Mount point lookup
 // ---------------------------------------------------------------------------
 
+/// Check if `path` matches mount point `mount_path` with proper
+/// path-boundary semantics.
+///
+/// A mount at `"/tmp"` must match `"/tmp"` and `"/tmp/foo"` but
+/// NOT `"/tmpfile"`.  The root mount `"/"` matches everything.
+fn mount_matches(mount_path: &str, path: &str) -> bool {
+    if !path.starts_with(mount_path) {
+        return false;
+    }
+    // Root mount matches everything.
+    if mount_path == "/" {
+        return true;
+    }
+    // Exact match (e.g., path == "/tmp" and mount == "/tmp").
+    if path.len() == mount_path.len() {
+        return true;
+    }
+    // The character after the mount prefix must be '/' to ensure
+    // we're on a path boundary.  "/tmp/foo" → ok, "/tmpfile" → no.
+    path.as_bytes().get(mount_path.len()) == Some(&b'/')
+}
+
 /// Find the mount point that best matches `path`.
+///
+/// Uses longest-prefix matching with path-boundary checks so that
+/// a mount at `"/tmp"` doesn't accidentally capture `"/tmpfile"`.
 ///
 /// Returns a mutable reference to the mount point and the
 /// path relative to that mount's root.
@@ -494,7 +597,7 @@ fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a
     let mut best_len = 0;
 
     for (i, mp) in vfs.mounts.iter().enumerate() {
-        if path.starts_with(&mp.path) && mp.path.len() >= best_len {
+        if mount_matches(&mp.path, path) && mp.path.len() >= best_len {
             best_idx = Some(i);
             best_len = mp.path.len();
         }

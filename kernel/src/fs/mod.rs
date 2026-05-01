@@ -18,9 +18,12 @@
 //!   driver (virtio-blk, NVMe, …)
 //! ```
 //!
-//! ## Current limitations
+//! ## Mount table
 //!
-//! - Single mount point (will become a mount table)
+//! Multiple filesystems can be mounted at different paths (e.g., `/`
+//! for the root FAT volume and `/tmp` for a volatile ramfs).  The VFS
+//! uses longest-prefix matching to route operations to the correct
+//! filesystem.
 
 pub mod cache;
 pub mod fat;

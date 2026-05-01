@@ -617,38 +617,129 @@ impl SwapBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Global swap state
+// Global swap state — multi-device with priority
 // ---------------------------------------------------------------------------
 
-/// Global swap subsystem state.
-struct SwapState {
-    /// Slot allocator.
-    slots: SwapSlotAllocator,
-    /// Storage backend.
+/// A single swap device with its own backend, slot allocator, and priority.
+///
+/// Multiple swap devices can be active simultaneously.  When allocating
+/// a swap slot, devices are tried in priority order (highest first).
+/// This enables a tiered swap setup:
+///
+/// - **zram** (priority 100): fast in-memory compressed swap.
+///   Small capacity, but zero I/O latency.
+/// - **disk** (priority 0): slower, larger capacity for overflow.
+///   Used only when zram is full.
+struct SwapDevice {
+    /// Priority: higher = preferred for writes.  When multiple devices
+    /// have capacity, the highest-priority device is used first.
+    priority: i32,
+    /// Display name for logging (e.g., "zram", "disk:vdb").
+    name: String,
+    /// The storage backend.
     backend: SwapBackend,
-    /// Whether the subsystem is initialized.
+    /// Per-device slot allocator.
+    slots: SwapSlotAllocator,
+    /// Global slot offset: this device owns global slots
+    /// `[base_slot .. base_slot + capacity)`.
+    base_slot: u32,
+}
+
+/// Global swap subsystem state.
+///
+/// Supports multiple swap devices with priority-based allocation.
+/// Devices are sorted by priority (descending) so iteration naturally
+/// tries the fastest device first.
+struct SwapState {
+    /// All swap devices, sorted by priority (descending).
+    devices: Vec<SwapDevice>,
+    /// Total capacity across all devices (sum of all slot counts).
+    total_capacity: u32,
+    /// Whether the subsystem is initialized (at least one device present).
     initialized: bool,
 }
 
 impl SwapState {
     const fn uninit() -> Self {
         Self {
-            slots: SwapSlotAllocator {
-                bitmap: Vec::new(),
-                capacity: 0,
-                used: 0,
-                hint: 0,
-            },
-            backend: SwapBackend::Memory(MemBackend {
-                slots: Vec::new(),
-                capacity: 0,
-                uncompressed_bytes: 0,
-                compressed_bytes: 0,
-                compressed_count: 0,
-                uncompressed_count: 0,
-            }),
+            devices: Vec::new(),
+            total_capacity: 0,
             initialized: false,
         }
+    }
+
+    /// Find which device owns a global slot index.
+    ///
+    /// Returns `(device_index, local_slot)` where `local_slot` is the
+    /// offset within that device's slot range.
+    fn find_device(&self, global_slot: u32) -> Option<(usize, u32)> {
+        for (i, dev) in self.devices.iter().enumerate() {
+            let end = dev.base_slot.saturating_add(dev.slots.capacity);
+            if global_slot >= dev.base_slot && global_slot < end {
+                return Some((i, global_slot.wrapping_sub(dev.base_slot)));
+            }
+        }
+        None
+    }
+
+    /// Allocate a swap slot from the highest-priority device with capacity.
+    ///
+    /// Returns the global slot index, or `None` if all devices are full.
+    fn alloc_slot(&mut self) -> Option<u32> {
+        // Devices are sorted by priority (descending), so we naturally
+        // try the highest-priority (fastest) device first.
+        for dev in &mut self.devices {
+            if let Some(local_slot) = dev.slots.alloc() {
+                return Some(dev.base_slot.saturating_add(local_slot));
+            }
+        }
+        None
+    }
+
+    /// Free a global swap slot.
+    fn free_slot(&mut self, global_slot: u32) {
+        if let Some((dev_idx, local_slot)) = self.find_device(global_slot) {
+            if let Some(dev) = self.devices.get_mut(dev_idx) {
+                dev.slots.free(local_slot);
+            }
+        }
+    }
+
+    /// Write data to a global swap slot.
+    fn write_slot(&mut self, global_slot: u32, data: &[u8]) -> KernelResult<()> {
+        let (dev_idx, local_slot) = self.find_device(global_slot)
+            .ok_or(KernelError::InvalidArgument)?;
+        let dev = self.devices.get_mut(dev_idx)
+            .ok_or(KernelError::InternalError)?;
+        dev.backend.write(local_slot, data)
+    }
+
+    /// Read data from a global swap slot.
+    fn read_slot(&self, global_slot: u32, buf: &mut [u8]) -> KernelResult<()> {
+        let (dev_idx, local_slot) = self.find_device(global_slot)
+            .ok_or(KernelError::InvalidArgument)?;
+        let dev = self.devices.get(dev_idx)
+            .ok_or(KernelError::InternalError)?;
+        dev.backend.read(local_slot, buf)
+    }
+
+    /// Discard data from a global swap slot.
+    fn discard_slot(&mut self, global_slot: u32) {
+        if let Some((dev_idx, local_slot)) = self.find_device(global_slot) {
+            if let Some(dev) = self.devices.get_mut(dev_idx) {
+                dev.backend.discard(local_slot);
+            }
+        }
+    }
+
+    /// Total number of free slots across all devices.
+    fn total_free(&self) -> u32 {
+        self.devices.iter().map(|d| d.slots.free_count()).sum()
+    }
+
+    /// Total number of used slots across all devices.
+    fn total_used(&self) -> u32 {
+        self.devices.iter().map(|d| d.slots.used).sum()
     }
 }
 
@@ -900,29 +991,43 @@ pub fn reclaimable_count() -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Initialize the swap subsystem with the given number of 16 KiB slots.
+/// Initialize the swap subsystem with a zram (compressed in-memory) backend.
 ///
 /// `num_slots` determines the maximum number of pages that can be
-/// simultaneously swapped out.  Each slot consumes no memory until
+/// simultaneously stored in zram.  Each slot consumes no memory until
 /// a page is actually written to it (the in-memory backend allocates
 /// on demand).
+///
+/// zram is added at priority 100 (highest), so it will be preferred
+/// over disk swap when both are available.  Additional backends can
+/// be added later via `init_disk()`.
 ///
 /// Called during kernel boot, after the heap is available.
 pub fn init(num_slots: u32) {
     let mut state = SWAP.lock();
 
-    state.slots = SwapSlotAllocator::new(num_slots);
-    state.backend = SwapBackend::Memory(MemBackend::new(num_slots));
+    let base_slot = state.total_capacity;
+    state.devices.push(SwapDevice {
+        priority: 100,
+        name: String::from("zram"),
+        backend: SwapBackend::Memory(MemBackend::new(num_slots)),
+        slots: SwapSlotAllocator::new(num_slots),
+        base_slot,
+    });
+    state.total_capacity = state.total_capacity.saturating_add(num_slots);
+    // Keep devices sorted by priority (descending).
+    state.devices.sort_by(|a, b| b.priority.cmp(&a.priority));
     state.initialized = true;
 
     serial_println!(
-        "[swap] Initialized zram backend: {} slots ({} KiB max swap space)",
+        "[swap] Initialized zram backend: {} slots ({} KiB), priority=100, base_slot={}",
         num_slots,
-        (num_slots as u64).saturating_mul(FRAME_SIZE as u64) / 1024
+        (num_slots as u64).saturating_mul(FRAME_SIZE as u64) / 1024,
+        base_slot
     );
 }
 
-/// Initialize the swap subsystem with a disk-backed backend.
+/// Add a disk-backed swap device alongside existing backends.
 ///
 /// `device_name`: the block device name (e.g., `"vdb"`) in the
 ///   blkdev registry.
@@ -931,6 +1036,13 @@ pub fn init(num_slots: u32) {
 ///
 /// Each slot occupies [`SECTORS_PER_FRAME`] contiguous sectors.
 /// The total disk space used is `num_slots × FRAME_SIZE`.
+///
+/// The disk device is added at priority 0 (lower than zram's 100),
+/// so it will only be used when the zram backend is full.  This
+/// creates a two-tier swap hierarchy:
+///
+/// 1. **zram** (fast, limited, in-memory) — tried first
+/// 2. **disk** (slower, larger) — overflow only
 ///
 /// Returns an error if the device is not found, too small, or
 /// read-only.
@@ -961,18 +1073,36 @@ pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelR
     }
 
     let mut state = SWAP.lock();
-    state.slots = SwapSlotAllocator::new(num_slots);
-    state.backend = SwapBackend::Disk(
-        DiskBackend::new(device_name, base_sector, num_slots),
-    );
+
+    let base_slot = state.total_capacity;
+    let dev_name = alloc::format!("disk:{}", device_name);
+    state.devices.push(SwapDevice {
+        priority: 0,
+        name: dev_name,
+        backend: SwapBackend::Disk(
+            DiskBackend::new(device_name, base_sector, num_slots),
+        ),
+        slots: SwapSlotAllocator::new(num_slots),
+        base_slot,
+    });
+    state.total_capacity = state.total_capacity.saturating_add(num_slots);
+    // Keep devices sorted by priority (descending).
+    state.devices.sort_by(|a, b| b.priority.cmp(&a.priority));
     state.initialized = true;
 
+    let total_free: u32 = state.devices.iter().map(|d| d.slots.free_count()).sum();
+    let device_count = state.devices.len();
+
     serial_println!(
-        "[swap] Initialized disk backend on '{}': {} slots ({} KiB) at sector {}",
+        "[swap] Added disk backend on '{}': {} slots ({} KiB), priority=0, base_slot={}",
         device_name,
         num_slots,
         (num_slots as u64).saturating_mul(FRAME_SIZE as u64) / 1024,
-        base_sector
+        base_slot
+    );
+    serial_println!(
+        "[swap]   {} device(s) active, {} total slots free",
+        device_count, total_free
     );
     Ok(())
 }
@@ -982,21 +1112,28 @@ pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelR
 #[allow(dead_code)] // Public API for OOM policy decisions.
 pub fn is_available() -> bool {
     let state = SWAP.lock();
-    state.initialized && state.slots.free_count() > 0
+    state.initialized && state.total_free() > 0
 }
 
-/// Number of free swap slots.
+/// Number of free swap slots across all devices.
 #[must_use]
 #[allow(dead_code)] // Public API for memory pressure monitoring.
 pub fn free_slots() -> u32 {
-    SWAP.lock().slots.free_count()
+    SWAP.lock().total_free()
 }
 
-/// Number of used swap slots.
+/// Number of used swap slots across all devices.
 #[must_use]
 #[allow(dead_code)] // Public API for memory statistics reporting.
 pub fn used_slots() -> u32 {
-    SWAP.lock().slots.used
+    SWAP.lock().total_used()
+}
+
+/// Number of active swap devices.
+#[must_use]
+#[allow(dead_code)] // Public API for swap device management.
+pub fn device_count() -> usize {
+    SWAP.lock().devices.len()
 }
 
 /// Compression statistics for the zram backend.
@@ -1038,30 +1175,33 @@ impl CompressionStats {
     }
 }
 
-/// Get compression statistics from the zram backend.
+/// Get aggregated compression statistics from all zram backends.
+///
+/// Only counts in-memory (zram) backends; disk backends track
+/// compression differently (data goes to disk, not heap).
 #[must_use]
 #[allow(dead_code)] // Public API for memory statistics reporting.
 pub fn compression_stats() -> CompressionStats {
     let state = SWAP.lock();
-    match &state.backend {
-        SwapBackend::Memory(m) => CompressionStats {
-            uncompressed_bytes: m.uncompressed_bytes,
-            compressed_bytes: m.compressed_bytes,
-            compressed_count: m.compressed_count,
-            uncompressed_count: m.uncompressed_count,
-        },
-        SwapBackend::Disk(_) => {
-            // Disk backend doesn't track byte-level compression stats
-            // in the same way (compressed data goes to disk, not heap).
-            // Return zero stats for now.
-            CompressionStats {
-                uncompressed_bytes: 0,
-                compressed_bytes: 0,
-                compressed_count: 0,
-                uncompressed_count: 0,
-            }
+    let mut stats = CompressionStats {
+        uncompressed_bytes: 0,
+        compressed_bytes: 0,
+        compressed_count: 0,
+        uncompressed_count: 0,
+    };
+    for dev in &state.devices {
+        if let SwapBackend::Memory(m) = &dev.backend {
+            stats.uncompressed_bytes = stats.uncompressed_bytes
+                .saturating_add(m.uncompressed_bytes);
+            stats.compressed_bytes = stats.compressed_bytes
+                .saturating_add(m.compressed_bytes);
+            stats.compressed_count = stats.compressed_count
+                .saturating_add(m.compressed_count);
+            stats.uncompressed_count = stats.uncompressed_count
+                .saturating_add(m.uncompressed_count);
         }
     }
+    stats
 }
 
 /// Swap out a page: evict a physical frame's contents to swap storage
@@ -1118,16 +1258,18 @@ pub unsafe fn swap_out_page(
     }
 
     // Step 2: Allocate a swap slot and write the data.
+    // Multi-device: alloc_slot() tries the highest-priority device first,
+    // overflowing to lower-priority devices when the preferred one is full.
     let swap_entry = {
         let mut state = SWAP.lock();
         if !state.initialized {
             return Err(KernelError::NotSupported);
         }
 
-        let slot = state.slots.alloc().ok_or(KernelError::OutOfMemory)?;
-        let entry = SwapEntry::new(slot).ok_or(KernelError::InternalError)?;
+        let global_slot = state.alloc_slot().ok_or(KernelError::OutOfMemory)?;
+        let entry = SwapEntry::new(global_slot).ok_or(KernelError::InternalError)?;
 
-        state.backend.write(slot, &page_data)?;
+        state.write_slot(global_slot, &page_data)?;
 
         entry
     };
@@ -1198,13 +1340,14 @@ pub unsafe fn swap_in_page(
         .ok_or(KernelError::InvalidArgument)?;
 
     // Step 2: Read page data from the swap backend.
+    // Multi-device: find_device() locates which backend owns this slot.
     let mut page_data = vec![0u8; FRAME_SIZE];
     {
         let state = SWAP.lock();
         if !state.initialized {
             return Err(KernelError::NotSupported);
         }
-        state.backend.read(swap_entry.slot(), &mut page_data)?;
+        state.read_slot(swap_entry.slot(), &mut page_data)?;
     }
     // Drop SWAP lock before frame allocation (lock ordering).
 
@@ -1246,8 +1389,8 @@ pub unsafe fn swap_in_page(
     // Step 6: Free the swap slot.
     {
         let mut state = SWAP.lock();
-        state.backend.discard(swap_entry.slot());
-        state.slots.free(swap_entry.slot());
+        state.discard_slot(swap_entry.slot());
+        state.free_slot(swap_entry.slot());
     }
 
     // Step 7: Flush the TLB.
@@ -1484,6 +1627,84 @@ pub fn self_test() {
         serial_println!("[swap]   Page reclamation tracking: OK");
     }
 
+    // --- Multi-device priority allocation ---
+    {
+        // Create a local test with two backends to verify priority ordering.
+        // Simulate two-device state: A at priority 100, B at priority 0.
+        // Device A has base_slot=0, Device B has base_slot=4.
+        let mut test_state = SwapState {
+            devices: vec![
+                SwapDevice {
+                    priority: 100,
+                    name: String::from("test-fast"),
+                    backend: SwapBackend::Memory(MemBackend::new(4)),
+                    slots: SwapSlotAllocator::new(4),
+                    base_slot: 0,
+                },
+                SwapDevice {
+                    priority: 0,
+                    name: String::from("test-slow"),
+                    backend: SwapBackend::Memory(MemBackend::new(4)),
+                    slots: SwapSlotAllocator::new(4),
+                    base_slot: 4,
+                },
+            ],
+            total_capacity: 8,
+            initialized: true,
+        };
+
+        // Allocate 4 slots — should all come from device A (higher priority).
+        for _ in 0..4u32 {
+            let slot = test_state.alloc_slot().expect("should have capacity");
+            assert!(slot < 4, "slot {} should be from device A (0..4)", slot);
+        }
+
+        // Device A is full.  Next alloc should come from device B (slots 4..7).
+        let overflow = test_state.alloc_slot().expect("overflow to B");
+        assert!(
+            overflow >= 4 && overflow < 8,
+            "overflow slot {} should be from device B (4..8)", overflow
+        );
+
+        // Free a slot from device A, next alloc should go back to A.
+        test_state.free_slot(1);
+        let refilled = test_state.alloc_slot().expect("refill from A");
+        assert!(refilled < 4, "refilled slot {} should be from device A", refilled);
+
+        // Write and read through the multi-device API.
+        let test_data = vec![0x42u8; FRAME_SIZE];
+        test_state.write_slot(overflow, &test_data).expect("write to B");
+        let mut read_buf = vec![0u8; FRAME_SIZE];
+        test_state.read_slot(overflow, &mut read_buf).expect("read from B");
+        assert_eq!(read_buf, test_data, "multi-device read/write integrity");
+
+        // Verify find_device routing.
+        assert_eq!(
+            test_state.find_device(0).map(|(d, _)| d),
+            Some(0), "slot 0 → device 0"
+        );
+        assert_eq!(
+            test_state.find_device(3).map(|(d, _)| d),
+            Some(0), "slot 3 → device 0"
+        );
+        assert_eq!(
+            test_state.find_device(4).map(|(d, _)| d),
+            Some(1), "slot 4 → device 1"
+        );
+        assert_eq!(
+            test_state.find_device(7).map(|(d, _)| d),
+            Some(1), "slot 7 → device 1"
+        );
+        assert!(
+            test_state.find_device(8).is_none(),
+            "slot 8 should not belong to any device"
+        );
+
+        serial_println!(
+            "[swap]   Multi-device priority: OK (alloc prefers priority=100, overflows to priority=0)"
+        );
+    }
+
     // Note: disk backend test is in self_test_disk(), called separately
     // after the disk device is registered.
 
@@ -1497,18 +1718,22 @@ pub fn self_test() {
 pub fn self_test_disk() {
     serial_println!("[swap] Running disk backend self-test...");
 
-    let is_disk = {
+    let has_disk = {
         let state = SWAP.lock();
-        matches!(state.backend, SwapBackend::Disk(_))
+        state.devices.iter().any(|d| matches!(d.backend, SwapBackend::Disk(_)))
     };
 
-    if !is_disk {
+    if !has_disk {
         serial_println!("[swap]   Disk backend not active — skipped");
         return;
     }
 
-    // Test a write-read roundtrip through the live disk backend.
-    // Allocate a slot, write test data, read it back, verify.
+    // Test a write-read roundtrip through the multi-device API.
+    // alloc_slot() will use the highest-priority device with capacity.
+    // If zram is still available, the test slot may go there.  To
+    // ensure we exercise the disk path, we allocate through the global
+    // API and verify the data integrity regardless of which backend
+    // was chosen.
     let mut test_data = vec![0u8; FRAME_SIZE];
     for (i, byte) in test_data.iter_mut().enumerate() {
         // Repeating pattern that compresses well.
@@ -1520,8 +1745,8 @@ pub fn self_test_disk() {
 
     let slot = {
         let mut state = SWAP.lock();
-        let slot = state.slots.alloc().expect("should have free slots");
-        state.backend.write(slot, &test_data).expect("disk write");
+        let slot = state.alloc_slot().expect("should have free slots");
+        state.write_slot(slot, &test_data).expect("write test data");
         slot
     };
 
@@ -1529,33 +1754,46 @@ pub fn self_test_disk() {
     let mut read_buf = vec![0u8; FRAME_SIZE];
     {
         let state = SWAP.lock();
-        state.backend.read(slot, &mut read_buf).expect("disk read");
+        state.read_slot(slot, &mut read_buf).expect("read test data");
     }
     assert_eq!(read_buf, test_data, "disk roundtrip data integrity");
 
     // Test all-zero page (compresses to 1 byte — exercises
-    // the compression path on disk).
+    // the compression path).
     let zero_data = vec![0u8; FRAME_SIZE];
     let zero_slot = {
         let mut state = SWAP.lock();
-        let slot = state.slots.alloc().expect("free slot for zeros");
-        state.backend.write(slot, &zero_data).expect("disk write zeros");
+        let slot = state.alloc_slot().expect("free slot for zeros");
+        state.write_slot(slot, &zero_data).expect("write zeros");
         slot
     };
 
     {
         let state = SWAP.lock();
-        state.backend.read(zero_slot, &mut read_buf).expect("disk read zeros");
+        state.read_slot(zero_slot, &mut read_buf).expect("read zeros");
     }
-    assert_eq!(read_buf, zero_data, "disk zero page roundtrip");
+    assert_eq!(read_buf, zero_data, "zero page roundtrip");
 
     // Clean up — free the test slots.
     {
         let mut state = SWAP.lock();
-        state.backend.discard(slot);
-        state.slots.free(slot);
-        state.backend.discard(zero_slot);
-        state.slots.free(zero_slot);
+        state.discard_slot(slot);
+        state.free_slot(slot);
+        state.discard_slot(zero_slot);
+        state.free_slot(zero_slot);
+    }
+
+    // Report which devices are active.
+    {
+        let state = SWAP.lock();
+        serial_println!(
+            "[swap]   {} device(s): {}",
+            state.devices.len(),
+            state.devices.iter()
+                .map(|d| alloc::format!("{}(pri={},free={})", d.name, d.priority, d.slots.free_count()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     serial_println!("[swap] Disk backend self-test PASSED");

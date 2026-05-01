@@ -502,15 +502,16 @@ extern "C" fn kmain() -> ! {
     console::boot_step(console::BootStatus::Running, "Storage & filesystems");
     blkdev::init();
 
-    // Step 20e-2: Try to upgrade swap from zram to disk-backed.
-    // Look for a dedicated swap device.  In QEMU, a second virtio-blk
-    // disk is available as "vda" (or "vdb" if the boot disk is also
-    // virtio).  Try known swap device names in order.
+    // Step 20e-2: Add disk-backed swap alongside zram.
+    // Multi-device swap: zram (priority 100) handles most evictions with
+    // zero I/O latency; disk (priority 0) catches overflow when zram is full.
+    // In QEMU, a second virtio-blk disk is available as "vda" (or "vdb"
+    // if the boot disk is also virtio).  Try known swap device names.
     //
     // Each slot = 16 KiB = 32 sectors.  512 slots = 16 MiB.
     for swap_dev in &["vdb", "vda"] {
         if mm::swap::init_disk(swap_dev, 0, 512).is_ok() {
-            serial_println!("[boot] Swap upgraded to disk backend on {}", swap_dev);
+            serial_println!("[boot] Disk swap added on {} (zram + disk tiered)", swap_dev);
             // Run the disk-specific self-test now that a disk backend
             // is active.
             mm::swap::self_test_disk();

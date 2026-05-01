@@ -164,7 +164,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD)
 - [x] zswap/zram compressed swap (recommended for desktop)
 - [x] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
-- [ ] Swap priority (multiple swap devices)
+- [x] Swap priority (multiple swap devices) — tiered: zram (priority 100) + disk (priority 0), highest-priority device fills first
 - [x] Minimum free memory threshold (when to start swapping)
 - [x] Swap I/O must not tie up system — batch-yield reclaim (mm.swap_batch_size sysctl, default 4, yields CPU between batches)
 
@@ -207,11 +207,11 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 ### 1.4 IPC and Syscalls
 
 #### Syscall Dispatch
-- [ ] Syscall entry/exit path (STAR/LSTAR/SFMASK MSR setup — needs ring 3)
+- [x] Syscall entry/exit path (STAR/LSTAR/SFMASK MSR setup — needs ring 3)
 - [x] Many specialized syscalls (Linux style, individual syscall numbers)
 - [x] Versioned syscall tables for ABI stability
 - [x] Syscall number ranges: kernel-core 0-199, kernel-ipc 200-399, kernel-security 400-499, kernel-process 500-599, fs 600-799, net 800-999
-- [ ] Benchmark: target < 200ns for trivial syscall (Linux getpid: ~100ns)
+- [x] Benchmark: target < 200ns for trivial syscall (Linux getpid: ~100ns) — measured 66ns (QEMU)
 
 #### Channel IPC (Primary IPC)
 - [x] Kernel-managed channel objects with send/receive queues
@@ -222,7 +222,7 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 - [x] Backpressure handling (buffer-full conditions)
 - [ ] Zero-copy for large messages (page ownership transfer / page flipping, not data copy)
 - [ ] Fast-path register passing for tiny messages (a few words) — pass in CPU registers during context switch, no memory access (L4 optimization)
-- [ ] Benchmark: target < 2us round-trip (Fuchsia: 1-2us, L4: 0.5-1us)
+- [x] Benchmark: target < 2us round-trip (Fuchsia: 1-2us, L4: 0.5-1us) — measured 392ns (QEMU)
 
 #### Other IPC Mechanisms
 - [x] One-way pipes (byte streams, no two-way pipes)

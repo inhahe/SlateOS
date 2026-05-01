@@ -33,7 +33,7 @@
 //! - OSDev wiki: <https://wiki.osdev.org/Symmetric_Multiprocessing>
 //! - Based on Linux `arch/x86/kernel/smpboot.c` AP bootstrap pattern.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use crate::error::KernelResult;
 use crate::serial_println;
 
@@ -82,9 +82,24 @@ const DATA_STARTED: usize = 0x31C;
 /// Number of online CPUs (starts at 1 for the BSP).
 static NUM_CPUS_ONLINE: AtomicU32 = AtomicU32::new(1);
 
-/// LAPIC ID → sequential CPU index mapping.
+/// LAPIC ID → sequential CPU index mapping (lock-free).
+///
 /// Index: APIC ID (0–255).  Value: CPU index (0xFF = unmapped).
-static APIC_TO_CPU: spin::Mutex<[u8; 256]> = spin::Mutex::new([0xFF; 256]);
+///
+/// Lock-free to avoid deadlock: `current_cpu_index()` is called from
+/// the timer ISR (via `sched::timer_tick()` → `current_cpu_id()`).
+/// If this were behind a spinlock and the ISR fired while the lock was
+/// held on the same CPU, the non-reentrant spinlock would deadlock.
+///
+/// Writes happen only during SMP bootstrap (before APs start their
+/// timers).  `SMP_INITIALIZED` (Release/Acquire) provides the
+/// happens-before guarantee: all `store(Relaxed)` writes to this
+/// table are visible to any reader that sees `SMP_INITIALIZED == true`
+/// via `load(Acquire)`.
+static APIC_TO_CPU: [AtomicU8; 256] = {
+    const UNMAPPED: AtomicU8 = AtomicU8::new(0xFF);
+    [UNMAPPED; 256]
+};
 
 /// Whether SMP has been initialized.
 static SMP_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -106,14 +121,18 @@ pub fn cpu_count() -> usize {
 ///
 /// Returns 0 (BSP) if SMP has not been initialized.
 /// After SMP init, reads the LAPIC ID and maps it to a CPU index.
+///
+/// This function is lock-free and safe to call from ISR context
+/// (timer interrupt, IPI handlers, etc.).
 #[must_use]
 pub fn current_cpu_index() -> usize {
-    if !SMP_INITIALIZED.load(Ordering::Relaxed) {
+    // Acquire load synchronizes with the Release store in `init()`,
+    // ensuring all APIC_TO_CPU writes during bootstrap are visible.
+    if !SMP_INITIALIZED.load(Ordering::Acquire) {
         return 0;
     }
     let apic_id = crate::apic::read_id();
-    let table = APIC_TO_CPU.lock();
-    let idx = table[apic_id as usize];
+    let idx = APIC_TO_CPU[apic_id as usize].load(Ordering::Relaxed);
     if idx == 0xFF { 0 } else { idx as usize }
 }
 
@@ -605,15 +624,10 @@ extern "C" fn ap_entry() -> ! {
         crate::apic::init_ap();
     }
 
-    // Register this AP's APIC ID → CPU index mapping.
+    // Register this AP's APIC ID → CPU index mapping (lock-free).
     let apic_id = crate::apic::read_id();
-    {
-        let mut table = APIC_TO_CPU.lock();
-        if let Some(slot) = table.get_mut(apic_id as usize) {
-            #[allow(clippy::cast_possible_truncation)]
-            { *slot = cpu_index as u8; }
-        }
-    }
+    #[allow(clippy::cast_possible_truncation)]
+    APIC_TO_CPU[apic_id as usize].store(cpu_index as u8, Ordering::Relaxed);
 
     // Bump the online CPU count.
     NUM_CPUS_ONLINE.fetch_add(1, Ordering::Release);
@@ -832,11 +846,8 @@ pub fn init() {
 
 /// Register the BSP in the APIC→CPU index mapping.
 fn register_bsp(bsp_apic_id: u8) {
-    let mut table = APIC_TO_CPU.lock();
-    if let Some(slot) = table.get_mut(bsp_apic_id as usize) {
-        #[allow(clippy::cast_possible_truncation)]
-        { *slot = BSP_CPU_INDEX as u8; }
-    }
+    #[allow(clippy::cast_possible_truncation)]
+    APIC_TO_CPU[bsp_apic_id as usize].store(BSP_CPU_INDEX as u8, Ordering::Relaxed);
 }
 
 /// Busy-wait for approximately `us` microseconds using TSC.
@@ -881,10 +892,7 @@ pub fn self_test() {
 
     // Verify BSP APIC ID is mapped.
     let bsp_apic = crate::apic::bsp_id();
-    let mapped_idx = {
-        let table = APIC_TO_CPU.lock();
-        table[bsp_apic as usize]
-    };
+    let mapped_idx = APIC_TO_CPU[bsp_apic as usize].load(Ordering::Relaxed);
     assert!(mapped_idx == 0, "BSP APIC ID should map to CPU 0");
 
     serial_println!("[smp] Self-test PASSED");

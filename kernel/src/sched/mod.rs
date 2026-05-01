@@ -404,9 +404,9 @@ const BALANCE_INTERVAL: u64 = 10;
 /// Using atomics (not behind the scheduler lock) because the timer
 /// ISR increments this BEFORE acquiring the scheduler lock.  Each
 /// CPU only writes its own slot, so no contention.
-static BALANCE_TICKS: [AtomicU64; 16] = {
+static BALANCE_TICKS: [AtomicU64; priority_rr::MAX_CPUS] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; 16]
+    [ZERO; priority_rr::MAX_CPUS]
 };
 
 /// Handle a timer tick from the APIC timer interrupt.
@@ -455,7 +455,9 @@ pub fn timer_tick() -> bool {
         // Without this, a CPU that enters the idle loop stays idle
         // until another CPU yields a task (which may never happen if
         // the busy CPU's tasks don't yield).
-        let tick_count = BALANCE_TICKS[cpu].fetch_add(1, Ordering::Relaxed);
+        // SAFETY: cpu < MAX_CPUS (guaranteed by smp::current_cpu_index).
+        let Some(balance_counter) = BALANCE_TICKS.get(cpu) else { return false; };
+        let tick_count = balance_counter.fetch_add(1, Ordering::Relaxed);
         if tick_count % BALANCE_INTERVAL == 0 {
             // Check: is our local queue empty?
             if !state.scheduler.local_has_ready(cpu) {

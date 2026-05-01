@@ -396,6 +396,17 @@ pub fn run_all() {
         });
     }
 
+    // --- HPET read overhead ---
+    //
+    // Measures the cost of reading the HPET main counter register
+    // via MMIO.  This is the overhead for every hpet::elapsed_ns()
+    // call, which SYS_CLOCK_MONOTONIC should use.
+    if crate::hpet::is_available() {
+        run("hpet_read", 5000, || {
+            let _ = core::hint::black_box(crate::hpet::read_counter());
+        });
+    }
+
     // --- Context switch (yield to another task and back) ---
     //
     // Measures the round-trip time: current task → other task → back.

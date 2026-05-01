@@ -40,6 +40,12 @@ use crate::serial_println;
 /// Parsed MADT data, available after `init()` returns.
 static MADT_DATA: Mutex<Option<MadtInfo>> = Mutex::new(None);
 
+/// Physical address of the HPET ACPI table, if found.
+///
+/// Stored during `init()` so that `hpet::init()` can read the table
+/// without re-scanning the RSDT/XSDT.
+static HPET_TABLE_PHYS: Mutex<Option<u64>> = Mutex::new(None);
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -364,6 +370,7 @@ pub unsafe fn init(
 
     // Enumerate all SDT entries and find tables we care about.
     let mut madt_phys: Option<u64> = None;
+    let mut hpet_phys: Option<u64> = None;
     let mut table_count: usize = 0;
 
     let process_entry = |phys: u64| {
@@ -386,6 +393,8 @@ pub unsafe fn init(
 
         if &sig == b"APIC" {
             madt_phys = Some(phys);
+        } else if &sig == b"HPET" {
+            hpet_phys = Some(phys);
         }
     };
 
@@ -422,6 +431,11 @@ pub unsafe fn init(
         *MADT_DATA.lock() = Some(madt_info);
     } else {
         serial_println!("[acpi] WARNING: No MADT found — using default hardware config");
+    }
+
+    // Store HPET table address for hpet::init().
+    if let Some(phys) = hpet_phys {
+        *HPET_TABLE_PHYS.lock() = Some(phys);
     }
 
     serial_println!("[acpi] ACPI table parsing complete");
@@ -495,6 +509,14 @@ pub fn has_legacy_pic() -> bool {
         .as_ref()
         .map(|madt| madt.pcat_compat)
         .unwrap_or(true) // Assume present if no MADT (safe default).
+}
+
+/// Get the physical address of the HPET ACPI table, if present.
+///
+/// Used by `hpet::init()` to parse the HPET description table and
+/// discover the HPET's MMIO base address.
+pub fn hpet_table_phys() -> Option<u64> {
+    *HPET_TABLE_PHYS.lock()
 }
 
 /// Get the number of enabled processors discovered in the MADT.

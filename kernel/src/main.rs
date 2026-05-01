@@ -60,6 +60,7 @@ mod error;
 mod font;
 mod fs;
 mod gdt;
+mod hpet;
 mod idt;
 mod ioapic;
 mod ipc;
@@ -378,6 +379,21 @@ extern "C" fn kmain() -> ! {
         if let Err(e) = acpi::self_test() {
             serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
         }
+    }
+
+    // Step 19c: Initialize HPET (High Precision Event Timer).
+    // Provides a high-resolution monotonic counter (~10-25 MHz) for
+    // precise time measurement.  The ACPI table gives us the MMIO base
+    // address.  Must run after ACPI parsing and page table init (needs
+    // HHDM and MMIO mapping).
+    //
+    // SAFETY: ACPI tables parsed, page tables initialized, single-threaded
+    // early boot with interrupts disabled.
+    unsafe {
+        hpet::init();
+    }
+    if let Err(e) = hpet::self_test() {
+        serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
     }
 
     // Step 20: Initialize Local APIC and start the timer.

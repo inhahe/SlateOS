@@ -227,6 +227,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [ ] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
 - [-] Timer (HPET, APIC timer)
   - [x] Local APIC timer (calibrated via PIT, 100 Hz periodic, preemptive scheduling)
+  - [x] HPET (High Precision Event Timer): ACPI table discovery, MMIO mapping, 100 MHz monotonic counter, ticks_to_ns conversion, self-test
 - [x] RTC (real-time clock)
 
 ### 2.3 Filesystem

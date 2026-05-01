@@ -19,6 +19,16 @@ add to roadmap-detailed.md to support a number of programming languages. rust, p
   This is fine for most workloads but should be added when multi-level
   lock nesting becomes common.
 
+## Cross-Zone Requests
+
+- kernel-ipc: Wire SYS_CLOCK_MONOTONIC (syscall/handlers.rs) to use
+  hpet::elapsed_ns() when HPET is available, falling back to the APIC tick
+  counter if not.  The HPET gives 10 ns resolution vs 10 ms from the APIC
+  timer.  hpet::is_available() and hpet::elapsed_ns() are the public API.
+
+- kernel-ipc: Wire SYS_SLEEP (syscall/handlers.rs) to use HPET-based
+  timing for sub-10ms sleep accuracy.  Currently rounds up to 10 ms ticks.
+
 ## Judgment Calls
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from

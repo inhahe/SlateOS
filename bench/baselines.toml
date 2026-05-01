@@ -136,8 +136,8 @@ source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 # Optimizations: O(1) size_class_index, rdtscp CPU identification
 
 [qemu_tcg.page_alloc_free]
-min_ns    = 2330
-min_cycles = 8580
+min_ns    = 1700
+min_cycles = 6260
 
 [qemu_tcg.heap_alloc_small_64]
 min_ns    = 3276
@@ -164,8 +164,16 @@ min_ns    = 6969
 min_cycles = 25660
 
 [qemu_tcg.page_fault_anonymous]
-min_ns    = 30323
-min_cycles = 111644
+min_ns    = 29261
+min_cycles = 107728
+
+[qemu_tcg.hpet_read]
+min_ns    = 902
+min_cycles = 3324
+
+[qemu_tcg.rdtsc_overhead]
+min_ns    = 160
+min_cycles = 590
 
 # -------------------------------------------------------------------------
 # Measurement methodology notes

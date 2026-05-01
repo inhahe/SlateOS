@@ -921,6 +921,20 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
+
+    // Print task context for debugging (uses try_lock).
+    let sched_info = sched::panic_diagnostics();
+    let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);
+    let task_name = core::str::from_utf8(name_slice).unwrap_or("?");
+    serial_println!(
+        "  Task: {} ({:?}), priority {}, cpu {}",
+        sched_info.current_task_id,
+        task_name,
+        sched_info.priority,
+        sched::current_cpu_id(),
+    );
+
+    serial_println!("FATAL: Unrecoverable kernel #GP. Halting.");
     cpu::halt_loop();
 }
 
@@ -1025,6 +1039,19 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
 
+    // Print task context for easier debugging (uses try_lock).
+    let sched_info = sched::panic_diagnostics();
+    let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);
+    let task_name = core::str::from_utf8(name_slice).unwrap_or("?");
+    serial_println!(
+        "  Task: {} ({:?}), priority {}, cpu {}",
+        sched_info.current_task_id,
+        task_name,
+        sched_info.priority,
+        sched::current_cpu_id(),
+    );
+
+    serial_println!("FATAL: Unrecoverable kernel page fault. Halting.");
     cpu::halt_loop();
 }
 

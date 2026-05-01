@@ -1170,14 +1170,16 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
 pub fn alloc_frame() -> KernelResult<PhysFrame> {
     // Fast path: try per-CPU cache (no global lock needed).
     if PCPU_ENABLED.load(core::sync::atomic::Ordering::Acquire) {
-        // Disable interrupts to prevent preemption on this CPU.
+        // SAFETY: We're in ring 0; pushfq+cli is always valid here.
+        // The returned flags value will be restored below.
         let flags = unsafe { disable_interrupts() };
         let cpu = crate::smp::current_cpu_index();
 
-        // Try to pop from the local cache.
-        // SAFETY: interrupts disabled, cpu < MAX_CPUS.
+        // SAFETY: interrupts disabled, cpu < MAX_CPUS (bounded by
+        // smp::current_cpu_index()), exclusive per-CPU access.
         let cached = unsafe { PCPU_CACHES[cpu].pop() };
         if let Some(addr) = cached {
+            // SAFETY: flags from disable_interrupts() above.
             unsafe { restore_interrupts(flags); }
             return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
         }
@@ -1187,14 +1189,16 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
         let refilled = pcpu_refill(cpu);
 
         if refilled > 0 {
-            // Now try again — the cache should have frames.
+            // SAFETY: interrupts still disabled, same cpu, exclusive access.
             let cached = unsafe { PCPU_CACHES[cpu].pop() };
+            // SAFETY: flags from disable_interrupts() above.
             unsafe { restore_interrupts(flags); }
             if let Some(addr) = cached {
                 return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
             }
         }
 
+        // SAFETY: flags from disable_interrupts() above.
         unsafe { restore_interrupts(flags); }
         // Fall through to global allocator (reclamation path).
     }
@@ -1307,22 +1311,26 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
             if idx < guard.page_info_len && guard.get_refcount(idx) > 1 {
                 // Shared frame — decrement refcount via global path.
                 drop(guard);
+                // SAFETY: Caller guarantees frame was validly allocated.
                 return unsafe { free_order(frame, 0) };
             }
             drop(guard);
         }
 
+        // SAFETY: We're in ring 0; pushfq+cli is always valid.
         let flags = unsafe { disable_interrupts() };
         let cpu = crate::smp::current_cpu_index();
 
-        // SAFETY: interrupts disabled, cpu < MAX_CPUS.
+        // SAFETY: interrupts disabled, cpu < MAX_CPUS, exclusive access.
         let full = unsafe { PCPU_CACHES[cpu].is_full() };
         if full {
             // Cache full — drain half back to global.
             pcpu_drain(cpu);
         }
 
+        // SAFETY: interrupts disabled, cpu < MAX_CPUS, exclusive access.
         let pushed = unsafe { PCPU_CACHES[cpu].push(frame.addr()) };
+        // SAFETY: flags from disable_interrupts() above.
         unsafe { restore_interrupts(flags); }
 
         if pushed {

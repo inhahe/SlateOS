@@ -687,7 +687,7 @@ pub fn translate(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
         return None;
     }
 
-    // PDPT entry.
+    // SAFETY: pml4e is present, so phys_addr() is a valid PDPT table.
     let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
     if !pdpte.is_present() {
         return None;
@@ -697,7 +697,7 @@ pub fn translate(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
         return Some(pdpte.phys_addr() + (virt.as_u64() & 0x3FFF_FFFF));
     }
 
-    // PD entry.
+    // SAFETY: pdpte is present and not huge, so phys_addr() is a valid PD table.
     let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
     if !pde.is_present() {
         return None;
@@ -707,7 +707,7 @@ pub fn translate(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
         return Some(pde.phys_addr() + (virt.as_u64() & 0x1F_FFFF));
     }
 
-    // PT entry (leaf level).
+    // SAFETY: pde is present and not huge, so phys_addr() is a valid PT table.
     let pte = unsafe { read_entry(pde.phys_addr(), virt.pt_index(), hhdm) };
     if !pte.is_present() {
         return None;
@@ -754,13 +754,17 @@ pub unsafe fn map_4k_if_absent(
     // Walk PML4 → PDPT → PD → PT, creating intermediate tables as
     // needed.  This may fail if a huge page is encountered (which would
     // mean the target is already mapped via a large page).
-    // SAFETY: pml4_phys is valid (caller guarantee).
+    // SAFETY: pml4_phys is valid (caller guarantee).  Each subsequent
+    // call uses a table returned by walk_or_create, which guarantees a
+    // valid, present page table at the returned physical address.
     let pdpt = unsafe {
         walk_or_create(pml4_phys, virt.pml4_index(), true, user, hhdm)?
     };
+    // SAFETY: pdpt returned by walk_or_create above.
     let pd = unsafe {
         walk_or_create(pdpt, virt.pdpt_index(), true, user, hhdm)?
     };
+    // SAFETY: pd returned by walk_or_create above.
     let pt = unsafe {
         walk_or_create(pd, virt.pd_index(), true, user, hhdm)?
     };
@@ -827,15 +831,17 @@ pub unsafe fn map_frame(
 
     let user = virt.is_user();
 
-    // Walk PML4 → PDPT → PD, creating intermediate tables as needed.
-    // SAFETY: pml4_phys is valid (caller guarantee).  Indices are from
-    // VirtAddr which masks to 0..511.
+    // Walk PML4 → PDPT → PD → PT, creating intermediate tables as needed.
+    // SAFETY: pml4_phys is valid (caller guarantee).  Each subsequent
+    // level uses a table returned by walk_or_create, guaranteed valid.
     let pdpt = unsafe {
         walk_or_create(pml4_phys, virt.pml4_index(), true, user, hhdm)?
     };
+    // SAFETY: pdpt returned by walk_or_create above.
     let pd = unsafe {
         walk_or_create(pdpt, virt.pdpt_index(), true, user, hhdm)?
     };
+    // SAFETY: pd returned by walk_or_create above.
     let pt = unsafe {
         walk_or_create(pd, virt.pd_index(), true, user, hhdm)?
     };
@@ -917,11 +923,13 @@ pub unsafe fn unmap_frame(
         return Err(KernelError::InvalidAddress);
     }
 
+    // SAFETY: pml4e is present, so phys_addr() is a valid PDPT table.
     let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
     if !pdpte.is_present() || pdpte.is_huge() {
         return Err(KernelError::InvalidAddress);
     }
 
+    // SAFETY: pdpte is present and not huge, so phys_addr() is a valid PD.
     let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
     if !pde.is_present() || pde.is_huge() {
         return Err(KernelError::InvalidAddress);
@@ -930,7 +938,7 @@ pub unsafe fn unmap_frame(
     let pt = pde.phys_addr();
     let base_pt_index = virt.pt_index();
 
-    // Read the first PTE to determine the frame's base address.
+    // SAFETY: pt from pde which is present, index < 512.
     let first_pte = unsafe { read_entry(pt, base_pt_index, hhdm) };
     if !first_pte.is_present() {
         return Err(KernelError::InvalidAddress);
@@ -986,11 +994,13 @@ pub unsafe fn unmap_4k(
         return Err(KernelError::InvalidAddress);
     }
 
+    // SAFETY: pml4e present → valid PDPT table.
     let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
     if !pdpte.is_present() || pdpte.is_huge() {
         return Err(KernelError::InvalidAddress);
     }
 
+    // SAFETY: pdpte present, not huge → valid PD table.
     let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
     if !pde.is_present() || pde.is_huge() {
         return Err(KernelError::InvalidAddress);
@@ -999,7 +1009,7 @@ pub unsafe fn unmap_4k(
     let pt = pde.phys_addr();
     let pt_idx = virt.pt_index();
 
-    // SAFETY: pt is a valid page table, pt_idx < 512.
+    // SAFETY: pt from present pde, pt_idx < 512 (from VirtAddr mask).
     let pte = unsafe { read_entry(pt, pt_idx, hhdm) };
     if !pte.is_present() {
         return Err(KernelError::InvalidAddress);
@@ -1007,8 +1017,7 @@ pub unsafe fn unmap_4k(
 
     let phys = pte.phys_addr();
 
-    // Clear the PTE.
-    // SAFETY: pt valid, pt_idx < 512.
+    // SAFETY: pt valid, pt_idx < 512, exclusive access (caller guarantee).
     unsafe {
         write_entry(pt, pt_idx, PageTableEntry::EMPTY, hhdm);
     }

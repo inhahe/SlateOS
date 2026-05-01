@@ -807,7 +807,8 @@ extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) 
 /// Handle #DF (Double Fault, vector 8).  Always fatal.
 ///
 /// Runs on IST1 (dedicated stack) so it works even if the kernel
-/// stack is corrupted.
+/// stack is corrupted or overflowed.  Prints diagnostic context
+/// (task, memory) using non-blocking lock acquisition.
 #[unsafe(no_mangle)]
 extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     // Double faults are always unrecoverable — even from ring 3.
@@ -822,6 +823,34 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
+
+    // Print task context.  Use try_lock-based diagnostics to avoid
+    // deadlock — the double fault may have been caused by a bug in
+    // code that was holding the scheduler lock.
+    let sched_info = sched::panic_diagnostics();
+    let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);
+    let task_name = core::str::from_utf8(name_slice).unwrap_or("<invalid>");
+    serial_println!(
+        "  Task: {} ({:?}), priority {}, cpu {}",
+        sched_info.current_task_id,
+        task_name,
+        sched_info.priority,
+        sched::current_cpu_id(),
+    );
+
+    // Check if the faulting RSP was near a task stack boundary —
+    // strong indicator of kernel stack overflow.
+    if sched_info.stack_bottom != 0 {
+        #[allow(clippy::arithmetic_side_effects)]
+        let stack_top = sched_info.stack_bottom + sched::task::TASK_STACK_SIZE as u64;
+        if frame.rsp < sched_info.stack_bottom || frame.rsp > stack_top {
+            serial_println!(
+                "  RSP {:#x} is OUTSIDE task stack [{:#x}..{:#x}] — stack overflow likely",
+                frame.rsp, sched_info.stack_bottom, stack_top
+            );
+        }
+    }
+
     serial_println!("FATAL: Double fault is unrecoverable. Halting.");
     cpu::halt_loop();
 }

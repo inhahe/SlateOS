@@ -1854,8 +1854,9 @@ fn test_per_cpu_work_stealing() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // The first stolen task is returned directly.
-    let first_stolen = stolen.expect("just checked");
+    // The first stolen task is returned directly.  `stolen` is `Some`
+    // because we checked `is_none()` above and returned on None.
+    let first_stolen = stolen.unwrap_or(0);
 
     // The rest were enqueued on CPU 0.  Pick them all.
     let mut picked = alloc::vec![first_stolen];

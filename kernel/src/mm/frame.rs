@@ -911,6 +911,52 @@ fn pcpu_drain(cpu: usize) -> usize {
 // See `bench/baselines.toml` — page fault latency is dominated by the
 // 16 KiB zero; this optimization removes it from the critical path.
 
+/// Zero a 16 KiB region using non-temporal (streaming) stores.
+///
+/// Non-temporal stores bypass the CPU cache and write directly to memory.
+/// This is ideal for the idle-loop zero pool refill path because:
+///
+/// 1. The zeroed frame will be consumed later (possibly on a different CPU),
+///    so caching zeros here wastes L1/L2 capacity on this CPU's working set.
+/// 2. Streaming stores can saturate memory bandwidth without the
+///    read-for-ownership overhead of regular stores (no cache line fetch
+///    before write).
+/// 3. The idle CPU has nothing better to use its cache for, but other CPUs
+///    sharing LLC will benefit from not having their data evicted.
+///
+/// Uses 8-byte `movnti` writes (available on all x86-64 CPUs, no SSE/AVX
+/// feature detection needed).  Followed by `sfence` to ensure all NT
+/// stores are visible before the frame is handed to another CPU.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid, exclusively-owned 16 KiB region.
+/// The pointer must be at least 8-byte aligned (16 KiB frame addresses
+/// always satisfy this).
+#[inline]
+unsafe fn zero_frame_nontemporal(ptr: *mut u8) {
+    // FRAME_SIZE (16384) / 8 = 2048 iterations of 8-byte stores.
+    // Using movnti (64-bit non-temporal store) avoids polluting the cache.
+    let qwords = FRAME_SIZE / 8;
+    let ptr64 = ptr.cast::<u64>();
+
+    // SAFETY: Caller guarantees the region is valid and exclusively owned.
+    // movnti requires only 4-byte alignment; our 16 KiB aligned pointer
+    // satisfies this trivially.  We write exactly FRAME_SIZE bytes.
+    unsafe {
+        for i in 0..qwords {
+            core::arch::x86_64::_mm_stream_si64(
+                ptr64.add(i).cast::<i64>(),
+                0,
+            );
+        }
+        // sfence: ensure all non-temporal stores complete before we hand
+        // this frame to another CPU.  Without this, the pool consumer
+        // could see stale (non-zero) data.
+        core::arch::x86_64::_mm_sfence();
+    }
+}
+
 /// Maximum number of pre-zeroed frames in the pool.
 ///
 /// 64 frames × 16 KiB = 1 MiB of pre-zeroed memory.  This covers
@@ -1037,12 +1083,17 @@ pub fn refill_zero_pool() -> usize {
             Err(_) => break, // Low memory — stop refilling.
         };
 
-        // Zero the frame outside any lock.
+        // Zero the frame outside any lock using non-temporal stores.
+        // OPT: Non-temporal (streaming) stores bypass the cache, avoiding
+        // pollution of this CPU's L1/L2 with zeros that won't be used by
+        // this CPU.  The zeroed frame will be consumed by alloc_frame_zeroed
+        // later, possibly on a different CPU.
         let virt = frame.to_virt(hhdm) as *mut u8;
         // SAFETY: frame is freshly allocated and exclusively ours.
-        // HHDM mapping is valid for all physical memory.
+        // HHDM mapping is valid for all physical memory.  The frame
+        // address is 16 KiB aligned, exceeding the 8-byte requirement.
         unsafe {
-            core::ptr::write_bytes(virt, 0, FRAME_SIZE);
+            zero_frame_nontemporal(virt);
         }
 
         // Push to the pool.

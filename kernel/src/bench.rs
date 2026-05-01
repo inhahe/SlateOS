@@ -319,6 +319,18 @@ pub fn run_all() {
         }
     }
 
+    // --- Page allocation with zeroing (alloc_zeroed + free cycle) ---
+    // This is the standard allocation pattern for page faults, stack
+    // growth, and process creation.  Measures alloc + 16 KiB zero + free.
+    {
+        use crate::mm::frame;
+        run("page_alloc_zeroed_free", 500, || {
+            let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
+            // SAFETY: frame was just allocated, exclusively ours.
+            unsafe { frame::free_frame(f).expect("bench: free"); }
+        });
+    }
+
     // --- Heap allocation (small, 64 bytes) ---
     {
         use alloc::vec;

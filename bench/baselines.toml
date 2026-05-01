@@ -141,6 +141,12 @@ source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 min_ns    = 234
 min_cycles = 868
 
+[qemu.page_alloc_zeroed_free]
+# Measures alloc + 16 KiB zero + free.  Zeroing adds ~11600 cycles
+# (~3.1µs) on top of the raw alloc/free (868 cycles).
+min_ns    = 3351
+min_cycles = 12468
+
 [qemu.heap_alloc_small_64]
 min_ns    = 294
 min_cycles = 1092

@@ -23,7 +23,7 @@
 
 use crate::limine::{
     BaseRevision, FramebufferResponse, HhdmResponse, LimineRequest, MemmapEntry,
-    MemmapResponse, RequestsEndMarker, RequestsStartMarker, memmap_type,
+    MemmapResponse, RequestsEndMarker, RequestsStartMarker, RsdpResponse, memmap_type,
 };
 use crate::serial_println;
 
@@ -73,6 +73,15 @@ static HHDM_REQUEST: LimineRequest<HhdmResponse> = LimineRequest::HHDM;
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: LimineRequest<FramebufferResponse> = LimineRequest::FRAMEBUFFER;
 
+/// Request: ACPI RSDP (Root System Description Pointer).
+///
+/// Limine provides the virtual address of the RSDP, which is the
+/// entry point into the ACPI table hierarchy.  We parse this to
+/// discover hardware topology (I/O APICs, processors, IRQ routing).
+#[used]
+#[unsafe(link_section = ".requests")]
+static RSDP_REQUEST: LimineRequest<RsdpResponse> = LimineRequest::RSDP;
+
 // ---------------------------------------------------------------------------
 // Public accessors
 // ---------------------------------------------------------------------------
@@ -106,6 +115,10 @@ pub struct BootInfo {
     pub memory_map: &'static [&'static MemmapEntry],
     /// Framebuffer info for the text console (None if not available).
     pub framebuffer: Option<FramebufferInfo>,
+    /// Virtual address of the ACPI RSDP (None if not available).
+    ///
+    /// Used by `acpi::init()` to discover hardware topology.
+    pub rsdp_address: Option<u64>,
 }
 
 /// Parse Limine responses and extract boot information.
@@ -187,9 +200,23 @@ pub fn parse_boot_info() -> Option<BootInfo> {
         })
     });
 
+    // RSDP (optional — needed for ACPI hardware discovery).
+    // Limine provides the address of the RSDP directly.
+    let rsdp_address = RSDP_REQUEST.response().map(|rsdp| {
+        serial_println!(
+            "[boot] RSDP address from Limine: {:#x}",
+            rsdp.address
+        );
+        rsdp.address
+    });
+    if rsdp_address.is_none() {
+        serial_println!("[boot] WARNING: No RSDP from bootloader — ACPI unavailable");
+    }
+
     Some(BootInfo {
         hhdm_offset,
         memory_map: entries,
         framebuffer,
+        rsdp_address,
     })
 }

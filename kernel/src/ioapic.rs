@@ -56,8 +56,8 @@ use crate::serial_println;
 
 /// Standard IOAPIC physical base address (82093AA default, same in QEMU).
 ///
-/// TODO: Parse from ACPI MADT when ACPI support is implemented.
-const IOAPIC_BASE_PHYS: u64 = 0xFEC0_0000;
+/// Used as fallback when ACPI MADT is not available.
+const IOAPIC_DEFAULT_PHYS: u64 = 0xFEC0_0000;
 
 /// IOREGSEL register offset — write the indirect register index here.
 const IOREGSEL: u32 = 0x00;
@@ -331,10 +331,17 @@ pub unsafe fn init() {
     }
 
     // Step 2: Map the IOAPIC MMIO region.
-    let hhdm = page_table::hhdm().expect("HHDM not initialized");
-    let ioapic_virt = IOAPIC_BASE_PHYS.wrapping_add(hhdm);
+    // Use the ACPI MADT if available, otherwise fall back to the
+    // standard default (0xFEC0_0000).
+    let ioapic_base_phys = crate::acpi::io_apic_address().unwrap_or_else(|| {
+        serial_println!("[ioapic] No ACPI MADT — using default address {:#x}", IOAPIC_DEFAULT_PHYS);
+        IOAPIC_DEFAULT_PHYS
+    });
 
-    let ioapic_frame = PhysFrame::from_addr(IOAPIC_BASE_PHYS)
+    let hhdm = page_table::hhdm().expect("HHDM not initialized");
+    let ioapic_virt = ioapic_base_phys.wrapping_add(hhdm);
+
+    let ioapic_frame = PhysFrame::from_addr(ioapic_base_phys)
         .expect("IOAPIC base not frame-aligned");
     let ioapic_va = VirtAddr::new(ioapic_virt);
     let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
@@ -391,15 +398,38 @@ pub unsafe fn init() {
 
     // Step 4: Program all redirection table entries.
     //
-    // Each entry: vector = IRQ_VECTOR_BASE + N, fixed delivery,
+    // Default: vector = IRQ_VECTOR_BASE + N, fixed delivery,
     // physical destination mode, edge-triggered, active-high,
     // destination = LAPIC ID 0 (BSP), masked.
+    //
+    // ACPI interrupt source overrides may change the trigger mode
+    // and polarity for specific IRQ lines (e.g., ISA IRQ 0 → GSI 2,
+    // ISA IRQ 9 → level-triggered active-low).
+    let overrides = crate::acpi::interrupt_overrides();
+
     for irq in 0..usable {
         #[allow(clippy::cast_possible_truncation)]
         let irq_u8 = irq as u8;
         let vector = u64::from(IRQ_VECTOR_BASE.wrapping_add(irq_u8));
         // Destination LAPIC ID 0 in bits [63:56].
-        let entry = vector | REDIR_MASKED;
+        let mut entry = vector | REDIR_MASKED;
+
+        // Check if this IOAPIC input has an ACPI interrupt source
+        // override that changes the trigger mode or polarity.
+        // The override GSI tells us which IOAPIC pin to configure,
+        // but the trigger/polarity flags must be applied to the
+        // redirection entry for that pin.
+        for ovr in &overrides {
+            if ovr.gsi as usize == irq {
+                if ovr.is_level_triggered() {
+                    entry |= REDIR_LEVEL_TRIGGER;
+                }
+                if ovr.is_active_low() {
+                    entry |= REDIR_ACTIVE_LOW;
+                }
+                break;
+            }
+        }
 
         // SAFETY: IOAPIC is initialized, irq < num_entries.
         unsafe {
@@ -411,6 +441,12 @@ pub unsafe fn init() {
         "[ioapic] {} redirection entries programmed (all masked)",
         usable,
     );
+    if !overrides.is_empty() {
+        serial_println!(
+            "[ioapic] Applied {} ACPI interrupt source override(s)",
+            overrides.len(),
+        );
+    }
     serial_println!(
         "[ioapic] IRQ vector range: {}–{}",
         IRQ_VECTOR_BASE,

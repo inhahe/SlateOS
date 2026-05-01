@@ -46,6 +46,7 @@
 extern crate alloc;
 
 // Module declarations.
+mod acpi;
 mod apic;
 mod blkdev;
 mod boot;
@@ -310,6 +311,33 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 19b: Parse ACPI tables for hardware discovery.
+    // Locates the MADT to discover I/O APIC addresses, processor Local
+    // APICs, and interrupt source overrides.  Must run after heap init
+    // (allocates Vecs) and before APIC/IOAPIC init (which uses the data).
+    if let Some(rsdp) = boot_info.rsdp_address {
+        // SAFETY: rsdp is a valid RSDP address from Limine, HHDM maps
+        // all physical memory.  Heap is initialized for Vec allocation.
+        // Memory map is passed for fallback RSDP scanning.
+        unsafe {
+            acpi::init(rsdp, boot_info.hhdm_offset, boot_info.memory_map);
+        }
+
+        if let Err(e) = acpi::self_test() {
+            serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
+        }
+    } else {
+        // No RSDP from Limine — try scanning memory directly.
+        serial_println!("[acpi] No RSDP from bootloader — scanning memory...");
+        unsafe {
+            acpi::init(0, boot_info.hhdm_offset, boot_info.memory_map);
+        }
+
+        if let Err(e) = acpi::self_test() {
+            serial_println!("WARNING: ACPI self-test failed: {} — using defaults", e);
+        }
+    }
+
     // Step 20: Initialize Local APIC and start the timer.
     // The APIC timer provides periodic interrupts for preemptive
     // scheduling.  Before this point, scheduling is purely cooperative.
@@ -323,7 +351,9 @@ extern "C" fn kmain() -> ! {
     // Step 20b: Initialize I/O APIC for external device interrupts.
     // Disables the legacy 8259 PIC, maps the IOAPIC MMIO registers,
     // and programs all 24 redirection entries (masked).  Drivers unmask
-    // their IRQ lines individually when ready.
+    // their IRQ lines individually when ready.  Uses I/O APIC address
+    // from ACPI MADT if available, otherwise falls back to the standard
+    // default (0xFEC0_0000).
     //
     // SAFETY: LAPIC is initialized (required for EOI routing).
     // Interrupts are disabled.  Called exactly once.

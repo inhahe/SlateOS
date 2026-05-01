@@ -654,6 +654,71 @@ pub fn translate(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
     Some(pte.phys_addr() + virt.page_offset() as u64)
 }
 
+/// Map a single 4 KiB hardware page if not already mapped.
+///
+/// Unlike [`map_frame`], this operates on individual 4 KiB pages and
+/// does not require 16 KiB alignment.  If the page is already present,
+/// returns `Ok(false)`.  If it was newly mapped, returns `Ok(true)`.
+///
+/// This is used for filling HHDM gaps where the bootloader may have
+/// mapped some but not all 4 KiB pages within a 16 KiB frame boundary
+/// (e.g., at the edge between a reserved and ACPI reclaimable region).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidAddress`] — `virt` is non-canonical, or a
+///   huge page was found at an intermediate level.
+/// - [`KernelError::NotSupported`] — subsystem not initialized.
+///
+/// # Safety
+///
+/// - `pml4_phys` must be a valid PML4 table.
+/// - `virt` must be 4 KiB aligned and canonical.
+/// - `phys_4k` must be a valid 4 KiB-aligned physical address.
+pub unsafe fn map_4k_if_absent(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    phys_4k: u64,
+    flags: PageFlags,
+) -> KernelResult<bool> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+
+    if !virt.is_canonical() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let user = virt.is_user();
+
+    // Walk PML4 → PDPT → PD → PT, creating intermediate tables as
+    // needed.  This may fail if a huge page is encountered (which would
+    // mean the target is already mapped via a large page).
+    // SAFETY: pml4_phys is valid (caller guarantee).
+    let pdpt = unsafe {
+        walk_or_create(pml4_phys, virt.pml4_index(), true, user, hhdm)?
+    };
+    let pd = unsafe {
+        walk_or_create(pdpt, virt.pdpt_index(), true, user, hhdm)?
+    };
+    let pt = unsafe {
+        walk_or_create(pd, virt.pd_index(), true, user, hhdm)?
+    };
+
+    let pt_idx = virt.pt_index();
+
+    // SAFETY: pt is a valid page table, pt_idx < 512.
+    let existing = unsafe { read_entry(pt, pt_idx, hhdm) };
+    if existing.is_present() {
+        return Ok(false); // Already mapped, nothing to do.
+    }
+
+    let entry = PageTableEntry::new(phys_4k, flags);
+    // SAFETY: pt valid, pt_idx < 512, existing is not-present so no
+    // conflict.
+    unsafe { write_entry(pt, pt_idx, entry, hhdm); }
+
+    Ok(true)
+}
+
 /// Map a 16 KiB physical frame at a virtual address.
 ///
 /// Sets 4 consecutive page table entries (one per 4 KiB hardware page

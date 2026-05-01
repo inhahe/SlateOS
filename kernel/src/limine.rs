@@ -307,3 +307,26 @@ impl FramebufferResponse {
 impl LimineRequest<FramebufferResponse> {
     pub const FRAMEBUFFER: Self = Self::new([0x9d58_27dc_d881_dd75, 0xa314_8604_f6fa_b11b]);
 }
+
+// ---------------------------------------------------------------------------
+// RSDP (Root System Description Pointer)
+// ---------------------------------------------------------------------------
+
+/// RSDP response from the bootloader.
+///
+/// Contains a virtual address pointing to the ACPI RSDP structure.
+/// The RSDP is in HHDM-mapped memory and remains valid for the
+/// entire kernel lifetime.
+#[repr(C)]
+pub struct RsdpResponse {
+    pub revision: u64,
+    /// Virtual address of the RSDP (already mapped via HHDM).
+    pub address: u64,
+}
+
+impl LimineRequest<RsdpResponse> {
+    /// Limine RSDP feature request ID.
+    ///
+    /// Reference: Limine Protocol v8.x, RSDP Feature.
+    pub const RSDP: Self = Self::new([0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487]);
+}

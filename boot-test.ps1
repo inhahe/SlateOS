@@ -5,6 +5,12 @@ $cwd = "D:\visual studio projects\os"
 Set-Location $cwd
 Remove-Item serial.log -ErrorAction SilentlyContinue
 
+# Copy freshly built kernel to ESP so QEMU picks up the latest binary.
+$kernelBin = "$cwd\target\x86_64-unknown-none\debug\kernel"
+if (Test-Path $kernelBin) {
+    Copy-Item $kernelBin "$cwd\esp\boot\kernel" -Force
+}
+
 $proc = Start-Process -FilePath $qemu -ArgumentList @(
     "-drive", "`"if=pflash,format=raw,readonly=on,file=$fw`"",
     "-drive", "format=raw,file=fat:rw:esp",

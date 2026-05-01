@@ -273,6 +273,8 @@ isr_stub_no_error!(isr_default, handle_default);
 // Hardware IRQ handlers (vectors 32+).
 // Timer (vector 32) — driven by the Local APIC timer.
 isr_stub_no_error!(isr_timer, handle_timer_irq);
+// TLB shootdown IPI (vector 251) — sent by other CPUs to request TLB flush.
+isr_stub_no_error!(isr_tlb_shootdown, handle_tlb_shootdown_irq);
 // Spurious (vector 255) — APIC spurious interrupts.
 isr_stub_no_error!(isr_spurious, handle_spurious_irq);
 
@@ -1133,6 +1135,8 @@ pub unsafe fn init() {
         // Hardware IRQ vectors.
         // Vector 32: APIC timer interrupt.
         idt.entries[32] = IdtEntry::new(isr_timer as *const () as u64, cs, 0, 0);
+        // Vector 251: TLB shootdown IPI.
+        idt.entries[251] = IdtEntry::new(isr_tlb_shootdown as *const () as u64, cs, 0, 0);
         // Vector 255: APIC spurious interrupt.
         idt.entries[255] = IdtEntry::new(isr_spurious as *const () as u64, cs, 0, 0);
 

@@ -525,6 +525,29 @@ pub unsafe fn send_sipi(apic_id: u8, vector: u8) {
     wait_icr_idle();
 }
 
+/// Send a fixed-mode IPI with the given vector to all CPUs except self.
+///
+/// Uses the "all excluding self" shorthand destination (ICR bits 19:18 = 11)
+/// so no specific APIC ID is needed.  The receiving CPUs will execute the
+/// ISR registered at `vector`.
+///
+/// # Safety
+///
+/// APIC must be initialized.  The vector must have a valid ISR in the IDT.
+pub unsafe fn send_ipi_all_excluding_self(vector: u8) {
+    wait_icr_idle();
+
+    // ICR low: fixed delivery (000), physical dest, edge, all-excl-self.
+    // Bits 19:18 = 11 (all excluding self), delivery = fixed (000).
+    // = 0x000C_0000 | vector
+    // SAFETY: Valid APIC register write, triggers the IPI.
+    unsafe {
+        apic_write(APIC_ICR_LOW, 0x000C_0000 | u32::from(vector));
+    }
+
+    wait_icr_idle();
+}
+
 /// Initialize the Local APIC on an Application Processor.
 ///
 /// Reuses the BSP's calibrated timer count (APs don't recalibrate via PIT).

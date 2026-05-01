@@ -79,6 +79,7 @@ mod serial;
 mod smp;
 mod syscall;
 mod sysctl;
+mod tlb;
 mod virtio;
 
 // ---------------------------------------------------------------------------
@@ -522,6 +523,10 @@ extern "C" fn kmain() -> ! {
     //                scheduler (per-CPU queues), page tables (identity mapping).
     smp::init();
     smp::self_test();
+
+    // Step 22c: TLB shootdown self-test.
+    // Now that all CPUs are online, verify the TLB shootdown IPI works.
+    tlb::self_test();
 
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is

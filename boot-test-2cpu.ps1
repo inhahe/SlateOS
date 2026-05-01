@@ -1,8 +1,19 @@
 $fw = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
 $qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 
-Set-Location "D:\visual studio projects\os"
+$cwd = "D:\visual studio projects\os"
+Set-Location $cwd
 Remove-Item serial.log -ErrorAction SilentlyContinue
+
+# Copy freshly built kernel to ESP so QEMU picks up the latest binary.
+# Prefer release build (much faster in QEMU, 12x smaller), fall back to debug.
+$kernelBin = "$cwd\target\x86_64-unknown-none\release\kernel"
+if (-not (Test-Path $kernelBin)) {
+    $kernelBin = "$cwd\target\x86_64-unknown-none\debug\kernel"
+}
+if (Test-Path $kernelBin) {
+    Copy-Item $kernelBin "$cwd\esp\boot\kernel" -Force
+}
 
 $proc = Start-Process -FilePath $qemu -ArgumentList @(
     "-drive", "`"if=pflash,format=raw,readonly=on,file=$fw`"",

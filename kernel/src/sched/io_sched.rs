@@ -10,9 +10,15 @@
 //!
 //! - **Per-process queues**: each process (identified by PID) gets its
 //!   own sorted queue of I/O requests.
-//! - **Budget-based fairness**: each process receives a budget (in sectors)
-//!   per service round.  When a process exhausts its budget, the scheduler
-//!   moves to the next process.
+//! - **Budget-based fairness**: each process receives a budget per service
+//!   round.  When a process exhausts its budget, the scheduler moves to
+//!   the next process.
+//! - **Small-I/O pass-through**: requests ≤ 16 sectors (8 KiB) cost only
+//!   1 budget unit regardless of size, so processes doing metadata reads,
+//!   directory walks, or small random I/O get up to 128 operations per
+//!   round.  Bulk sequential I/O costs its full sector count.  This
+//!   prevents heavy I/O (e.g., large file copies) from making the system
+//!   unresponsive.
 //! - **Priority classes**: realtime (audio/video), best-effort (normal),
 //!   idle (background).  Higher priority classes are served first.
 //! - **Elevator ordering**: within a process's queue, requests are sorted
@@ -141,14 +147,51 @@ pub struct IoRequest {
 // Per-process I/O queue
 // ---------------------------------------------------------------------------
 
-/// Default budget per process per service round (in sectors).
-const DEFAULT_BUDGET: u32 = 128; // 64 KiB at 512B sectors
+/// Default budget per process per service round (in budget units).
+///
+/// For large requests (> `SMALL_IO_THRESHOLD` sectors), one budget unit
+/// equals one sector.  For small requests (≤ threshold), the cost is
+/// capped at 1 unit regardless of sector count.  This ensures small
+/// random I/O (metadata, directory traversal) gets many operations per
+/// round, while bulk sequential I/O yields sooner — keeping the system
+/// responsive under heavy I/O load.
+const DEFAULT_BUDGET: u32 = 128;
 
 /// Budget multiplier for realtime I/O (2× normal).
 const REALTIME_BUDGET_MULT: u32 = 2;
 
 /// Budget divisor for idle I/O (½ normal).
 const IDLE_BUDGET_DIV: u32 = 2;
+
+/// Sector count threshold for "small I/O" budget discount.
+///
+/// Requests of ≤ this many sectors cost only 1 budget unit (instead of
+/// their actual sector count).  This prevents bulk sequential I/O from
+/// monopolizing the device while small reads/writes are starved.
+///
+/// 16 sectors × 512 B/sector = 8 KiB.  Covers typical metadata reads,
+/// inode lookups, directory entries, and small file reads.
+const SMALL_IO_THRESHOLD: u32 = 16;
+
+/// Compute the budget cost for a request of `count` sectors.
+///
+/// Small requests (≤ `SMALL_IO_THRESHOLD` sectors) cost only 1 unit,
+/// giving small-I/O processes up to `DEFAULT_BUDGET` operations per
+/// round.  Large requests cost their full sector count.
+///
+/// OPT: This is the key mechanism for "prevent heavy I/O from making
+/// the system unusable."  A process doing 4-sector metadata reads gets
+/// 128 operations per round; a process doing 64-sector bulk writes
+/// gets only 2 operations.  Both processes get fair budget rotation,
+/// but small I/O stays responsive.
+#[inline]
+const fn budget_cost(count: u32) -> u32 {
+    if count <= SMALL_IO_THRESHOLD {
+        1
+    } else {
+        count
+    }
+}
 
 /// A per-process I/O queue.
 ///
@@ -329,6 +372,10 @@ impl IoSchedulerInner {
     /// budget.  When a process exhausts its budget, the scheduler
     /// rotates to the next eligible process at the same (or higher)
     /// priority class, ensuring fair bandwidth distribution.
+    ///
+    /// Small requests (≤ `SMALL_IO_THRESHOLD` sectors) cost only 1 budget
+    /// unit via [`budget_cost`], so processes doing small random I/O get
+    /// many more operations per round than those doing bulk sequential I/O.
     fn dispatch(&mut self, device_id: u32) -> Option<IoRequest> {
         // If there's an active process with remaining budget, continue
         // servicing it.
@@ -337,7 +384,7 @@ impl IoSchedulerInner {
                 if !queue.is_empty() && queue.budget > 0 {
                     if let Some(req) = queue.pop_first() {
                         if req.device_id == device_id {
-                            queue.budget = queue.budget.saturating_sub(req.count);
+                            queue.budget = queue.budget.saturating_sub(budget_cost(req.count));
                             self.pending_count = self.pending_count.saturating_sub(1);
                             self.total_dispatched = self.total_dispatched.wrapping_add(1);
                             return Some(req);
@@ -399,7 +446,7 @@ impl IoSchedulerInner {
                     queue.reset_budget();
                     if let Some(req) = queue.pop_first() {
                         if req.device_id == device_id {
-                            queue.budget = queue.budget.saturating_sub(req.count);
+                            queue.budget = queue.budget.saturating_sub(budget_cost(req.count));
                             self.pending_count = self.pending_count.saturating_sub(1);
                             self.total_dispatched = self.total_dispatched.wrapping_add(1);
                             return Some(req);
@@ -563,6 +610,9 @@ pub fn self_test() {
     // Test 6: Capability-gated realtime priority.
     test_realtime_cap_gate();
 
+    // Test 7: Small I/O pass-through (budget discount).
+    test_small_io_passthrough();
+
     serial_println!("[io_sched] Self-test PASSED");
 }
 
@@ -648,9 +698,12 @@ fn test_budget_fairness() {
     // Sectors are spaced 1000 apart to prevent merge coalescence, so
     // each request remains individual and the budget rotation is
     // actually exercised.
-    for i in 0..32u64 {
-        submit(0, i * 1000, 8, IoDirection::Read, prio, 50);
-        submit(0, 500_000 + i * 1000, 8, IoDirection::Read, prio, 51);
+    //
+    // Use 32-sector requests (above SMALL_IO_THRESHOLD of 16) so that
+    // budget_cost = actual sector count and budget rotation occurs.
+    for i in 0..16u64 {
+        submit(0, i * 1000, 32, IoDirection::Read, prio, 50);
+        submit(0, 500_000 + i * 1000, 32, IoDirection::Read, prio, 51);
     }
 
     // Dispatch all — track how many consecutive requests each PID gets.
@@ -675,12 +728,13 @@ fn test_budget_fairness() {
         max_consecutive = consecutive;
     }
 
-    // With budget of 128 sectors and requests of 8 sectors each,
-    // each process should get 16 requests per round (128/8 = 16).
-    // With 32 requests per process, we expect ~2 rounds each.
-    assert!(dispatched == 64, "expected 64 dispatched, got {}", dispatched);
+    // With budget of 128 and requests of 32 sectors each (above
+    // SMALL_IO_THRESHOLD, so budget_cost = 32), each process gets
+    // 4 requests per round (128/32 = 4).  With 16 requests per
+    // process, we expect ~4 rounds each.
+    assert!(dispatched == 32, "expected 32 dispatched, got {}", dispatched);
     assert!(
-        max_consecutive <= 20, // 16 + some slack
+        max_consecutive <= 6, // 4 + some slack
         "max consecutive {} too high (budget fairness broken)",
         max_consecutive
     );
@@ -720,4 +774,103 @@ fn test_realtime_cap_gate() {
 
     assert!(dispatch(0).is_none(), "no more");
     serial_println!("[io_sched]   Realtime capability gate: OK");
+}
+
+fn test_small_io_passthrough() {
+    let prio = IoPriority::DEFAULT;
+
+    // Two processes: one doing small random reads (4 sectors each),
+    // one doing large sequential writes (64 sectors each).
+    //
+    // Small requests cost 1 budget unit (below SMALL_IO_THRESHOLD).
+    // Large requests cost 64 budget units (above threshold).
+    //
+    // With budget=128:
+    //   - Small-I/O process: 128 ops per round (budget 128 / cost 1)
+    //   - Large-I/O process: 2 ops per round (budget 128 / cost 64)
+    //
+    // We submit 256 small and 4 large requests.  Expected dispatch:
+    //   Round 1: Small gets 128 ops (budget 128 / cost 1, exhausted)
+    //   Round 2: Large gets 2 ops (budget 128 / cost 64, exhausted)
+    //   Round 3: Small gets 128 ops (256 done)
+    //   Round 4: Large gets 2 ops (4 done)
+    //
+    // Both processes exhaust their requests at the same time, ensuring
+    // proper interleaving throughout the test (no tail where one
+    // process runs unopposed).
+
+    // PID 70: 256 small reads (4 sectors each), spaced to prevent merging.
+    for i in 0..256u64 {
+        submit(0, 10_000 + i * 100, 4, IoDirection::Read, prio, 70);
+    }
+    // PID 71: 4 large writes (64 sectors each), spaced to prevent merging.
+    for i in 0..4u64 {
+        submit(0, 500_000 + i * 1000, 64, IoDirection::Write, prio, 71);
+    }
+
+    // Dispatch all and count per-PID consecutive runs.
+    let mut small_count = 0u32;
+    let mut large_count = 0u32;
+    let mut small_max_consec = 0u32;
+    let mut large_max_consec = 0u32;
+    let mut consec = 0u32;
+    let mut last_pid = 0u32;
+
+    while let Some(req) = dispatch(0) {
+        if req.pid == 70 {
+            small_count += 1;
+        } else {
+            large_count += 1;
+        }
+
+        if req.pid == last_pid {
+            consec += 1;
+        } else {
+            // Record the run that just ended.
+            if last_pid == 70 && consec > small_max_consec {
+                small_max_consec = consec;
+            }
+            if last_pid == 71 && consec > large_max_consec {
+                large_max_consec = consec;
+            }
+            consec = 1;
+            last_pid = req.pid;
+        }
+    }
+    // Final run.
+    if last_pid == 70 && consec > small_max_consec {
+        small_max_consec = consec;
+    }
+    if last_pid == 71 && consec > large_max_consec {
+        large_max_consec = consec;
+    }
+
+    // All 260 requests should be dispatched.
+    let total = small_count + large_count;
+    assert!(
+        total == 260,
+        "expected 260 total, got {} (small={}, large={})",
+        total, small_count, large_count
+    );
+
+    // Key invariant: the small-I/O process should get a long consecutive
+    // run (up to 128 per budget round) because each 4-sector request
+    // costs only 1 budget unit.  The large-I/O process should get at
+    // most 2 per round (128/64 = 2).
+    assert!(
+        small_max_consec >= 64,
+        "small I/O should get many consecutive ops (got {}), budget discount not working",
+        small_max_consec
+    );
+    assert!(
+        large_max_consec <= 3,
+        "large I/O should rotate quickly (got {} consecutive)",
+        large_max_consec
+    );
+
+    serial_println!(
+        "[io_sched]   Small I/O pass-through: OK (small_consec={}, large_consec={})",
+        small_max_consec,
+        large_max_consec
+    );
 }

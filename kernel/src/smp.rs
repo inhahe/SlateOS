@@ -806,13 +806,13 @@ pub fn init() {
             crate::apic::send_init_ipi(ap.apic_id);
 
             // Wait 10 ms (Intel SDM §8.4.4.1 recommends 10 ms after INIT).
-            busy_wait_us(10_000);
+            crate::cpu::delay_us(10_000);
 
             // First SIPI.
             crate::apic::send_sipi(ap.apic_id, SIPI_VECTOR);
 
             // Wait 200 µs.
-            busy_wait_us(200);
+            crate::cpu::delay_us(200);
 
             // Second SIPI (in case the first was lost — per Intel spec).
             crate::apic::send_sipi(ap.apic_id, SIPI_VECTOR);
@@ -927,30 +927,6 @@ fn detect_rdtscp() -> bool {
         );
     }
     edx & (1 << 27) != 0
-}
-
-/// Busy-wait for approximately `us` microseconds using TSC.
-///
-/// Uses the calibrated TSC frequency from `bench::tsc_freq()`.
-/// Falls back to a simple loop if TSC is not calibrated.
-fn busy_wait_us(us: u64) {
-    let freq = crate::bench::tsc_freq();
-    if freq == 0 {
-        // Fallback: assume ~1 GHz TSC, loop approximately.
-        let target_ticks = us * 1000;
-        let start = crate::bench::rdtsc();
-        while crate::bench::rdtsc().wrapping_sub(start) < target_ticks {
-            core::hint::spin_loop();
-        }
-        return;
-    }
-
-    // target_cycles = us * freq / 1_000_000
-    let target_cycles = us.saturating_mul(freq) / 1_000_000;
-    let start = crate::bench::rdtsc();
-    while crate::bench::rdtsc().wrapping_sub(start) < target_cycles {
-        core::hint::spin_loop();
-    }
 }
 
 // ---------------------------------------------------------------------------

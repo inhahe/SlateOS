@@ -135,6 +135,93 @@ where
     result
 }
 
+// ---------------------------------------------------------------------------
+// TSC-based precise delay functions
+// ---------------------------------------------------------------------------
+
+/// Busy-wait for approximately `us` microseconds using the TSC.
+///
+/// Uses the calibrated TSC frequency from `bench::tsc_freq()`.
+/// Falls back to an estimated loop if TSC is not yet calibrated
+/// (assumes ~1 GHz TSC as a conservative estimate).
+///
+/// This is the standard delay primitive for hardware initialization
+/// (reset waits, register polling, PCI config space timing).  For
+/// sleep-style waiting that yields the CPU to other tasks, use the
+/// timer/scheduler sleep instead.
+///
+/// # Performance
+///
+/// TSC resolution is typically 1-4 GHz on modern hardware (0.25-1ns
+/// per tick), so microsecond delays are highly accurate.  Under QEMU
+/// TCG, TSC emulation introduces ~20x overhead but relative delays
+/// are still correct.
+#[inline]
+pub fn delay_us(us: u64) {
+    let freq = crate::bench::tsc_freq();
+    if freq == 0 {
+        // Fallback: assume ~1 GHz TSC, loop approximately.
+        let target_ticks = us.saturating_mul(1000);
+        let start = crate::bench::rdtsc();
+        while crate::bench::rdtsc().wrapping_sub(start) < target_ticks {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+
+    // target_cycles = us * freq / 1_000_000
+    let target_cycles = us.saturating_mul(freq) / 1_000_000;
+    let start = crate::bench::rdtsc();
+    while crate::bench::rdtsc().wrapping_sub(start) < target_cycles {
+        core::hint::spin_loop();
+    }
+}
+
+/// Busy-wait for approximately `ns` nanoseconds using the TSC.
+///
+/// For sub-microsecond hardware timing requirements (register settling,
+/// PHY reset hold times).  Accuracy depends on TSC resolution — delays
+/// shorter than ~100ns are dominated by measurement overhead.
+///
+/// # Performance
+///
+/// The overhead of calling this function and reading rdtsc is typically
+/// 20-200 cycles (~10-100ns), so very short delays (< 100ns) should
+/// use `core::hint::spin_loop()` directly instead.
+#[inline]
+#[allow(dead_code)] // Public API for drivers and hardware init timing.
+pub fn delay_ns(ns: u64) {
+    let freq = crate::bench::tsc_freq();
+    if freq == 0 {
+        // Fallback: best-effort short spin.  Each spin_loop() is ~1ns
+        // on modern hardware with PAUSE instruction.
+        for _ in 0..ns {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+
+    // target_cycles = ns * freq / 1_000_000_000
+    // To avoid overflow on large ns values: split the division.
+    // freq / 1000 loses at most 999 Hz of precision (~0.0001% for GHz clocks).
+    let target_cycles = ns
+        .saturating_mul(freq / 1000)
+        / 1_000_000;
+    if target_cycles == 0 {
+        // Sub-cycle delay — just do a single spin.
+        core::hint::spin_loop();
+        return;
+    }
+    let start = crate::bench::rdtsc();
+    while crate::bench::rdtsc().wrapping_sub(start) < target_cycles {
+        core::hint::spin_loop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model-Specific Register (MSR) access
+// ---------------------------------------------------------------------------
+
 /// Read a Model-Specific Register (MSR).
 ///
 /// # Safety

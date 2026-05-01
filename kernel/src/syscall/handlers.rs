@@ -3215,6 +3215,401 @@ pub fn sys_fs_journal_flush(_args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Metadata handlers (628–636)
+// ---------------------------------------------------------------------------
+
+/// Helper: read a path string from user pointers (arg0=ptr, arg1=len).
+///
+/// Returns the path as a `&str`.  Validates memory and UTF-8.
+unsafe fn read_user_path<'a>(ptr: u64, len: u64) -> Result<&'a str, SyscallResult> {
+    let path_ptr = ptr as *const u8;
+    let path_len = (len as usize).min(256);
+    if path_ptr.is_null() || path_len == 0 {
+        return Err(SyscallResult::err(KernelError::InvalidArgument));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(ptr, path_len) {
+        return Err(SyscallResult::err(e));
+    }
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let bytes = core::slice::from_raw_parts(path_ptr, path_len);
+    core::str::from_utf8(bytes).map_err(|_| SyscallResult::err(KernelError::InvalidArgument))
+}
+
+/// `SYS_FS_METADATA` — get rich file metadata.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+/// `arg2`: pointer to output buffer (FS_META_SIZE = 64 bytes).
+#[allow(clippy::cast_possible_truncation)]
+pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let out_ptr = args.arg2 as *mut u8;
+    if out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(
+        args.arg2,
+        crate::syscall::number::FS_META_SIZE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    let meta = match crate::fs::Vfs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Marshal to output buffer.
+    // SAFETY: out_ptr validated for FS_META_SIZE bytes.
+    unsafe {
+        core::ptr::write(out_ptr as *mut u64, meta.size);
+        *out_ptr.add(8) = match meta.entry_type {
+            crate::fs::EntryType::File => 0,
+            crate::fs::EntryType::Directory => 1,
+            crate::fs::EntryType::VolumeLabel => 2,
+            crate::fs::EntryType::Symlink => 3,
+        };
+        // [9..16] padding (zero)
+        core::ptr::write_bytes(out_ptr.add(9), 0, 7);
+        core::ptr::write(out_ptr.add(16) as *mut u64, meta.created_ns);
+        core::ptr::write(out_ptr.add(24) as *mut u64, meta.modified_ns);
+        core::ptr::write(out_ptr.add(32) as *mut u64, meta.accessed_ns);
+        core::ptr::write(out_ptr.add(40) as *mut u64, meta.changed_ns);
+        core::ptr::write(out_ptr.add(48) as *mut u32, meta.uid);
+        core::ptr::write(out_ptr.add(52) as *mut u32, meta.gid);
+        core::ptr::write(out_ptr.add(56) as *mut u16, meta.permissions);
+        core::ptr::write(out_ptr.add(58) as *mut u32, meta.attributes.bits());
+        core::ptr::write_bytes(out_ptr.add(62), 0, 2);
+    }
+
+    SyscallResult::ok(0)
+}
+
+/// `SYS_FS_SET_ATTR` — set file attributes.
+///
+/// `arg0`: path pointer.  `arg1`: path length.  `arg2`: attribute bits.
+pub fn sys_fs_set_attr(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let attrs = crate::fs::FileAttr::from_bits(args.arg2 as u32);
+    match crate::fs::Vfs::set_attributes(path, attrs) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SET_OWNER` — set file ownership.
+///
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: uid.  `arg3`: gid.
+#[allow(clippy::cast_possible_truncation)]
+pub fn sys_fs_set_owner(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match crate::fs::Vfs::set_owner(path, args.arg2 as u32, args.arg3 as u32) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SET_PERMS` — set permission bits.
+///
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: permission bits (u16).
+#[allow(clippy::cast_possible_truncation)]
+pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match crate::fs::Vfs::set_permissions(path, args.arg2 as u16) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SET_TIMES` — set timestamps.
+///
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: accessed_ns (0 = unchanged).  `arg3`: modified_ns (0 = unchanged).
+pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match crate::fs::Vfs::set_times(path, args.arg2, args.arg3) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_GET_XATTR` — get an extended attribute.
+///
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: key pointer (null-terminated).  `arg3`: output buffer pointer.
+/// `arg4`: buffer capacity.
+#[allow(clippy::cast_possible_truncation)]
+pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // Read key from arg2 (null-terminated string, max 255 bytes).
+    let key_ptr = args.arg2 as *const u8;
+    if key_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated above, scan for null within 256 bytes.
+    let key = unsafe {
+        let mut len = 0usize;
+        while len < 256 {
+            if *key_ptr.add(len) == 0 {
+                break;
+            }
+            len = len.wrapping_add(1);
+        }
+        let bytes = core::slice::from_raw_parts(key_ptr, len);
+        match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        }
+    };
+
+    let out_ptr = args.arg3 as *mut u8;
+    let capacity = args.arg4 as usize;
+    if out_ptr.is_null() || capacity == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, capacity) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::fs::Vfs::get_xattr(path, key) {
+        Ok(val) => {
+            let copy_len = val.len().min(capacity);
+            // SAFETY: out_ptr validated for capacity bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(val.as_ptr(), out_ptr, copy_len);
+            }
+            SyscallResult::ok(copy_len as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SET_XATTR` — set an extended attribute.
+///
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: key pointer (null-terminated).  `arg3`: value pointer.
+/// `arg4`: value length.
+pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // Read key.
+    let key_ptr = args.arg2 as *const u8;
+    if key_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated.
+    let key = unsafe {
+        let mut len = 0usize;
+        while len < 256 {
+            if *key_ptr.add(len) == 0 {
+                break;
+            }
+            len = len.wrapping_add(1);
+        }
+        let bytes = core::slice::from_raw_parts(key_ptr, len);
+        match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        }
+    };
+    // Read value.
+    let val_ptr = args.arg3 as *const u8;
+    let val_len = (args.arg4 as usize).min(65536);
+    if val_ptr.is_null() && val_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if val_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, val_len) {
+            return SyscallResult::err(e);
+        }
+    }
+    // SAFETY: Validated.
+    let value = if val_len > 0 {
+        unsafe { core::slice::from_raw_parts(val_ptr, val_len) }
+    } else {
+        &[]
+    };
+
+    match crate::fs::Vfs::set_xattr(path, key, value) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_REMOVE_XATTR` — remove an extended attribute.
+///
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: key pointer (null-terminated).
+pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let key_ptr = args.arg2 as *const u8;
+    if key_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated.
+    let key = unsafe {
+        let mut len = 0usize;
+        while len < 256 {
+            if *key_ptr.add(len) == 0 {
+                break;
+            }
+            len = len.wrapping_add(1);
+        }
+        let bytes = core::slice::from_raw_parts(key_ptr, len);
+        match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        }
+    };
+
+    match crate::fs::Vfs::remove_xattr(path, key) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_LIST_XATTRS` — list extended attribute keys.
+///
+/// `arg0`: path pointer.  `arg1`: path length.
+/// `arg2`: output buffer pointer.  `arg3`: buffer capacity.
+#[allow(clippy::cast_possible_truncation)]
+pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let out_ptr = args.arg2 as *mut u8;
+    let capacity = args.arg3 as usize;
+    if out_ptr.is_null() || capacity == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
+        return SyscallResult::err(e);
+    }
+
+    let keys = match crate::fs::Vfs::list_xattrs(path) {
+        Ok(k) => k,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Pack keys as null-terminated strings.
+    let mut offset = 0usize;
+    for key in &keys {
+        let needed = key.len().wrapping_add(1); // +1 for null terminator
+        if offset.wrapping_add(needed) > capacity {
+            break;
+        }
+        // SAFETY: out_ptr validated for capacity bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(key.as_ptr(), out_ptr.add(offset), key.len());
+            *out_ptr.add(offset.wrapping_add(key.len())) = 0;
+        }
+        offset = offset.wrapping_add(needed);
+    }
+
+    SyscallResult::ok(offset as i64)
+}
+
+// ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 

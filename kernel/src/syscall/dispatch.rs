@@ -36,6 +36,9 @@ use super::number::{
     SYS_FS_TRASH, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRASH_EMPTY,
     SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_CLOSE,
     SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_READ, SYS_FS_JOURNAL_FLUSH,
+    SYS_FS_METADATA, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
+    SYS_FS_SET_TIMES, SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
+    SYS_FS_LIST_XATTRS,
     SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
@@ -297,6 +300,17 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_JOURNAL_CURSOR as usize] = Some(handlers::sys_fs_journal_cursor);
     handlers[SYS_FS_JOURNAL_READ as usize] = Some(handlers::sys_fs_journal_read);
     handlers[SYS_FS_JOURNAL_FLUSH as usize] = Some(handlers::sys_fs_journal_flush);
+
+    // Metadata (628–636).
+    handlers[SYS_FS_METADATA as usize] = Some(handlers::sys_fs_metadata);
+    handlers[SYS_FS_SET_ATTR as usize] = Some(handlers::sys_fs_set_attr);
+    handlers[SYS_FS_SET_OWNER as usize] = Some(handlers::sys_fs_set_owner);
+    handlers[SYS_FS_SET_PERMS as usize] = Some(handlers::sys_fs_set_perms);
+    handlers[SYS_FS_SET_TIMES as usize] = Some(handlers::sys_fs_set_times);
+    handlers[SYS_FS_GET_XATTR as usize] = Some(handlers::sys_fs_get_xattr);
+    handlers[SYS_FS_SET_XATTR as usize] = Some(handlers::sys_fs_set_xattr);
+    handlers[SYS_FS_REMOVE_XATTR as usize] = Some(handlers::sys_fs_remove_xattr);
+    handlers[SYS_FS_LIST_XATTRS as usize] = Some(handlers::sys_fs_list_xattrs);
 
     // Networking (800–999).
     handlers[SYS_TCP_CONNECT as usize] = Some(handlers::sys_tcp_connect);

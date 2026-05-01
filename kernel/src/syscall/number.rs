@@ -1092,6 +1092,107 @@ pub const FS_JOURNAL_ENTRY_SIZE: usize = 529;
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_JOURNAL_FLUSH: u64 = 627;
 
+// ---------------------------------------------------------------------------
+// Metadata syscalls (628–639)
+// ---------------------------------------------------------------------------
+
+/// Get rich file metadata.
+///
+/// `arg0`: pointer to null-terminated path string.
+/// `arg1`: pointer to output buffer (`FS_META_SIZE` bytes).
+///
+/// Output layout (see `FS_META_SIZE`):
+/// - `[0..8]`:   file size (u64 LE)
+/// - `[8]`:      entry type (0=file, 1=dir, 2=vol, 3=symlink)
+/// - `[9..16]`:  padding
+/// - `[16..24]`: created_ns (u64 LE)
+/// - `[24..32]`: modified_ns (u64 LE)
+/// - `[32..40]`: accessed_ns (u64 LE)
+/// - `[40..48]`: changed_ns (u64 LE)
+/// - `[48..52]`: uid (u32 LE)
+/// - `[52..56]`: gid (u32 LE)
+/// - `[56..58]`: permissions (u16 LE)
+/// - `[58..62]`: attributes (u32 LE, FileAttr bits)
+/// - `[62..64]`: padding
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_METADATA: u64 = 628;
+
+/// Size of metadata output buffer for `SYS_FS_METADATA`.
+pub const FS_META_SIZE: usize = 64;
+
+/// Set file attributes (immutable, append-only, etc.).
+///
+/// `arg0`: pointer to null-terminated path string.
+/// `arg1`: attribute bits (FileAttr::bits()).
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_SET_ATTR: u64 = 629;
+
+/// Set file ownership (uid/gid).
+///
+/// `arg0`: pointer to null-terminated path string.
+/// `arg1`: uid (u32).
+/// `arg2`: gid (u32).
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_SET_OWNER: u64 = 630;
+
+/// Set Unix-style permission bits.
+///
+/// `arg0`: pointer to null-terminated path string.
+/// `arg1`: permission bits (u16, rwxrwxrwx).
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_SET_PERMS: u64 = 631;
+
+/// Set file timestamps.
+///
+/// `arg0`: pointer to null-terminated path string.
+/// `arg1`: accessed_ns (0 = leave unchanged).
+/// `arg2`: modified_ns (0 = leave unchanged).
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_SET_TIMES: u64 = 632;
+
+/// Get an extended attribute value.
+///
+/// `arg0`: pointer to null-terminated file path.
+/// `arg1`: pointer to null-terminated attribute key.
+/// `arg2`: pointer to output buffer.
+/// `arg3`: buffer capacity.
+///
+/// Returns: number of bytes written to buffer, or negative error.
+pub const SYS_FS_GET_XATTR: u64 = 633;
+
+/// Set an extended attribute.
+///
+/// `arg0`: pointer to null-terminated file path.
+/// `arg1`: pointer to null-terminated attribute key.
+/// `arg2`: pointer to value data.
+/// `arg3`: value length.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_SET_XATTR: u64 = 634;
+
+/// Remove an extended attribute.
+///
+/// `arg0`: pointer to null-terminated file path.
+/// `arg1`: pointer to null-terminated attribute key.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_REMOVE_XATTR: u64 = 635;
+
+/// List extended attribute keys.
+///
+/// `arg0`: pointer to null-terminated file path.
+/// `arg1`: pointer to output buffer (null-separated key names).
+/// `arg2`: buffer capacity.
+///
+/// Returns: total bytes of key data, or negative error.
+/// Keys are written as null-terminated strings packed sequentially.
+pub const SYS_FS_LIST_XATTRS: u64 = 636;
+
 /// Seek whence: from start of file.
 pub const SEEK_SET: u64 = 0;
 /// Seek whence: from current offset.

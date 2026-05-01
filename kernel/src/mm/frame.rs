@@ -77,6 +77,29 @@ const MAX_ORDER: usize = 10;
 /// usable memory).
 const INFO_ALLOCATED: u8 = 0xFF;
 
+// ---------------------------------------------------------------------------
+// Lock-free refcount snapshot (set once during init, never changes)
+// ---------------------------------------------------------------------------
+
+/// Cached pointer to the refcount array (HHDM virtual address).
+///
+/// OPT: `free_frame()` needs to check the refcount to decide whether
+/// a shared (CoW) frame should go through the global allocator for
+/// ref_dec.  Without this cache, it takes the global lock on EVERY
+/// free just to read a u16.  By caching the immutable refcount pointer
+/// and total_frames count here, the common case (refcount == 1) avoids
+/// the lock entirely.
+///
+/// Safety argument: The refcount array is allocated once during `init()`
+/// and never moves or reallocates.  Reads are `read_volatile` to pick
+/// up the latest write from any CPU.  Refcount increments (ref_inc)
+/// happen under the global lock which provides a memory fence; our
+/// read sees the latest value because the freeing CPU was the owner —
+/// any fork's ref_inc must have completed before the original process
+/// unmaps the page.
+static REFCOUNT_PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static REFCOUNT_LEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Physical memory below this address is never added to the free lists.
 ///
 /// The first 1 MiB of physical address space on x86 is reserved for:
@@ -1151,6 +1174,11 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
         (allocator.free_frames * FRAME_SIZE) / (1024 * 1024)
     );
 
+    // Cache the refcount pointer and length for lock-free reads in free_frame().
+    // These never change after init.
+    REFCOUNT_PTR.store(allocator.refcount as u64, core::sync::atomic::Ordering::Release);
+    REFCOUNT_LEN.store(allocator.page_info_len as u64, core::sync::atomic::Ordering::Release);
+
     // Store in the global singleton.
     ALLOCATOR.call_once(|| Mutex::new(allocator));
 
@@ -1301,20 +1329,34 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
 pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
     // Fast path: push to per-CPU cache (no global lock needed).
     if PCPU_ENABLED.load(core::sync::atomic::Ordering::Acquire) {
-        // Check refcount — only cache frames with refcount ≤ 1.
-        // Shared (CoW) frames with refcount > 1 must go through the
-        // global allocator to properly decrement and potentially free.
-        let allocator_opt = ALLOCATOR.get();
-        if let Some(allocator) = allocator_opt {
-            let guard = allocator.lock();
-            let idx = guard.frame_index(frame.addr());
-            if idx < guard.page_info_len && guard.get_refcount(idx) > 1 {
-                // Shared frame — decrement refcount via global path.
-                drop(guard);
-                // SAFETY: Caller guarantees frame was validly allocated.
-                return unsafe { free_order(frame, 0) };
+        // OPT: Lock-free refcount check.  Shared (CoW) frames with
+        // refcount > 1 must go through the global allocator for ref_dec.
+        // Non-shared frames (refcount == 1, the common case) skip the
+        // global lock entirely.
+        //
+        // Previously this took the global lock on EVERY free_frame call
+        // just to read the refcount — defeating per-CPU caching on the
+        // free path.  Now we read the immutable refcount pointer directly.
+        let rc_ptr = REFCOUNT_PTR.load(core::sync::atomic::Ordering::Acquire);
+        let rc_len = REFCOUNT_LEN.load(core::sync::atomic::Ordering::Relaxed);
+        if rc_ptr != 0 {
+            #[allow(clippy::arithmetic_side_effects)]
+            let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+            if (idx as u64) < rc_len {
+                // SAFETY: rc_ptr is a valid HHDM pointer to the refcount
+                // array, set during init() and never moved.  idx < rc_len
+                // is bounds-checked above.  read_volatile ensures we see
+                // the latest write (ref_inc is done under the global lock
+                // which provides a memory fence on the writing side).
+                let rc = unsafe {
+                    (rc_ptr as *const u16).add(idx).read_volatile()
+                };
+                if rc > 1 {
+                    // Shared frame — go through global path for ref_dec.
+                    // SAFETY: Caller guarantees frame was validly allocated.
+                    return unsafe { free_order(frame, 0) };
+                }
             }
-            drop(guard);
         }
 
         // SAFETY: We're in ring 0; pushfq+cli is always valid.

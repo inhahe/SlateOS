@@ -371,7 +371,7 @@ pub fn enable_pcpu_slab_caches() {
 unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
     // SAFETY: We need to disable interrupts for exclusive per-CPU access.
     let flags = unsafe { frame::disable_interrupts() };
-    let cpu = crate::smp::current_cpu_index();
+    let cpu = crate::smp::fast_cpu_index();
 
     // SAFETY: Interrupts are disabled, so no concurrent access from
     // this CPU.  `cpu` is a valid index (< HEAP_MAX_CPUS).
@@ -448,7 +448,7 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
 unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
     // SAFETY: We need to disable interrupts for exclusive per-CPU access.
     let flags = unsafe { frame::disable_interrupts() };
-    let cpu = crate::smp::current_cpu_index();
+    let cpu = crate::smp::fast_cpu_index();
 
     // SAFETY: Interrupts disabled, exclusive access to this CPU's cache.
     let cache = unsafe { &mut PCPU_SLAB_CACHES[cpu] };

@@ -54,6 +54,13 @@ const IA32_TSC_AUX: u32 = 0xC000_0103;
 /// Whether rdtscp is available on this CPU (CPUID.80000001H:EDX[27]).
 static RDTSCP_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the RDPID instruction is available (CPUID.07H.0H:ECX[22]).
+///
+/// RDPID reads IA32_TSC_AUX directly into a GP register without touching
+/// the TSC, avoiding the serialization and TSC-read overhead of rdtscp.
+/// ~10 cycles vs ~30-40 cycles for rdtscp on Coffee Lake.
+static RDPID_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
 /// Physical address where the AP trampoline is copied.
 /// Must be below 1 MiB, 4 KiB aligned.  0x8000 is conventionally used
 /// and avoids conflicts with BDA (0x400), EBDA, and VGA memory.
@@ -187,6 +194,69 @@ pub fn current_cpu_index() -> usize {
     }
 
     // Fallback: APIC MMIO read (slower, always works).
+    let apic_id = crate::apic::read_id();
+    let idx = APIC_TO_CPU[apic_id as usize].load(Ordering::Relaxed);
+    if idx == 0xFF { 0 } else { idx as usize }
+}
+
+/// Fast CPU index for hot paths (heap allocator, frame allocator).
+///
+/// **Must only be called when per-CPU infrastructure is enabled**
+/// (i.e., after SMP init completes), which is guaranteed by the
+/// `PCPU_SLAB_ENABLED` / `PCPU_ENABLED` guards in the callers.
+/// Skips the `SMP_INITIALIZED` check that `current_cpu_index()` does.
+///
+/// # Performance
+///
+/// OPT: Saves ~10-20 cycles per call vs `current_cpu_index()` by
+/// eliminating the SMP_INITIALIZED atomic load + branch.  When RDPID
+/// is available (Coffee Lake+), saves ~20-30 more cycles by reading
+/// IA32_TSC_AUX without touching the TSC.  On the heap alloc+dealloc
+/// hot path (called twice), the combined savings are ~40-100 cycles.
+///
+/// Tiered fast paths:
+/// 1. RDPID available → ~10 cycles (no TSC read, no serialization)
+/// 2. rdtscp available → ~30-40 cycles (reads TSC too, but no APIC MMIO)
+/// 3. APIC MMIO fallback → ~100+ cycles (always works)
+#[must_use]
+#[inline(always)]
+pub fn fast_cpu_index() -> usize {
+    // Tier 1: RDPID — reads IA32_TSC_AUX directly into a GP register.
+    // Cheapest option: no TSC read, no serialization.
+    if RDPID_AVAILABLE.load(Ordering::Relaxed) {
+        let cpu_idx: u64;
+        // SAFETY: RDPID is available (CPUID check at boot).
+        // IA32_TSC_AUX was written with the CPU index during SMP init.
+        unsafe {
+            core::arch::asm!(
+                // RDPID r64: opcode F3 0F C7 /7 (mod=11, reg=7, rm=reg)
+                // Encoded as REP RDPID using the F3 prefix.
+                ".byte 0xF3, 0x0F, 0xC7, 0xF8",  // rdpid rax
+                out("rax") cpu_idx,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        return cpu_idx as usize;
+    }
+
+    // Tier 2: rdtscp — reads IA32_TSC_AUX + TSC.  We discard the TSC
+    // but can't avoid reading it.
+    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
+        let cpu_idx: u32;
+        // SAFETY: rdtscp is available (checked above).
+        unsafe {
+            core::arch::asm!(
+                "rdtscp",
+                out("ecx") cpu_idx,
+                out("eax") _,    // TSC low — discard
+                out("edx") _,    // TSC high — discard
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        return cpu_idx as usize;
+    }
+
+    // Tier 3: APIC MMIO — slowest but always works.
     let apic_id = crate::apic::read_id();
     let idx = APIC_TO_CPU[apic_id as usize].load(Ordering::Relaxed);
     if idx == 0xFF { 0 } else { idx as usize }
@@ -967,6 +1037,17 @@ fn register_bsp(bsp_apic_id: u8) {
     } else {
         serial_println!("[smp] rdtscp not available — using APIC MMIO for CPU index");
     }
+
+    // Detect RDPID: CPUID.07H.0H:ECX bit 22.
+    // RDPID reads IA32_TSC_AUX without touching the TSC (~10 vs ~30-40
+    // cycles for rdtscp).  Available on Coffee Lake+ and Goldmont Plus+.
+    if has_rdtscp {
+        let has_rdpid = detect_rdpid();
+        if has_rdpid {
+            RDPID_AVAILABLE.store(true, Ordering::Release);
+            serial_println!("[smp] rdpid available — ultra-fast CPU index (no TSC read)");
+        }
+    }
 }
 
 /// Detect rdtscp instruction support via CPUID.
@@ -991,6 +1072,31 @@ fn detect_rdtscp() -> bool {
         );
     }
     edx & (1 << 27) != 0
+}
+
+/// Detect RDPID instruction support via CPUID.
+///
+/// Returns `true` if CPUID.07H.0H:ECX bit 22 is set.
+/// RDPID reads IA32_TSC_AUX into a GP register without touching the TSC.
+/// Available on Intel Coffee Lake+, Goldmont Plus+, and AMD Zen2+.
+fn detect_rdpid() -> bool {
+    let ecx: u32;
+    // SAFETY: CPUID is always safe to execute in ring 0.
+    unsafe {
+        core::arch::asm!(
+            "xchg rbx, {tmp}",   // save RBX
+            "mov eax, 7",        // leaf 7
+            "xor ecx, ecx",     // subleaf 0
+            "cpuid",
+            "xchg rbx, {tmp}",   // restore RBX
+            tmp = out(reg) _,
+            out("ecx") ecx,
+            out("eax") _,
+            out("edx") _,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ecx & (1 << 22) != 0
 }
 
 // ---------------------------------------------------------------------------

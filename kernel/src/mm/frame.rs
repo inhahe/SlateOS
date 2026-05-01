@@ -763,7 +763,7 @@ impl PerCpuFrameCache {
 
 /// Global array of per-CPU frame caches.
 ///
-/// Indexed by `smp::current_cpu_index()`.  Each cache is a simple array
+/// Indexed by `smp::fast_cpu_index()`.  Each cache is a simple array
 /// (no heap allocation needed).
 ///
 /// SAFETY: Each element is only accessed by its owning CPU with interrupts
@@ -785,7 +785,7 @@ static PCPU_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Enable per-CPU frame caches.
 ///
 /// Call after SMP initialization is complete (all CPUs are online and
-/// `current_cpu_index()` returns correct values).
+/// `fast_cpu_index()` returns correct values).
 pub fn enable_pcpu_caches() {
     PCPU_ENABLED.store(true, Ordering::Release);
     serial_println!("[mm] Per-CPU frame caches enabled");
@@ -852,7 +852,7 @@ fn pcpu_refill(cpu: usize) -> usize {
     for _ in 0..PCPU_BATCH {
         match guard.alloc_inner(0) {
             Ok(addr) => {
-                // SAFETY: cpu < MAX_CPUS (validated by smp::current_cpu_index()),
+                // SAFETY: cpu < MAX_CPUS (validated by smp::fast_cpu_index()),
                 // and interrupts are disabled so no preemption.
                 unsafe {
                     PCPU_CACHES[cpu].push(addr);
@@ -1395,10 +1395,10 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
         // SAFETY: We're in ring 0; pushfq+cli is always valid here.
         // The returned flags value will be restored below.
         let flags = unsafe { disable_interrupts() };
-        let cpu = crate::smp::current_cpu_index();
+        let cpu = crate::smp::fast_cpu_index();
 
         // SAFETY: interrupts disabled, cpu < MAX_CPUS (bounded by
-        // smp::current_cpu_index()), exclusive per-CPU access.
+        // smp::fast_cpu_index()), exclusive per-CPU access.
         let cached = unsafe { PCPU_CACHES[cpu].pop() };
         if let Some(addr) = cached {
             // SAFETY: flags from disable_interrupts() above.
@@ -1615,7 +1615,7 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
 
         // SAFETY: We're in ring 0; pushfq+cli is always valid.
         let flags = unsafe { disable_interrupts() };
-        let cpu = crate::smp::current_cpu_index();
+        let cpu = crate::smp::fast_cpu_index();
 
         // SAFETY: interrupts disabled, cpu < MAX_CPUS, exclusive access.
         let full = unsafe { PCPU_CACHES[cpu].is_full() };

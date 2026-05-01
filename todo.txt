@@ -2,14 +2,6 @@ can programs utilize the cpu function to separate code from data and not execute
 
 ## Known Bugs / Limitations
 
-- Exception self-test infinite loop: The exception handler dispatch test
-  (process 18, task 24) creates a page fault at address 0x0 that triggers
-  the registered exception handler, which page faults again, creating an
-  infinite dispatch loop.  This prevents BOOT_OK from being reached.  The
-  exception handler test needs a loop-break counter or the handler stub
-  needs to actually resolve the fault (e.g., skip the faulting instruction).
-  File: kernel/src/proc/ (exception handling area).
-
 - Debug kernel binary too large for Limine: The debug build (~9MB) causes
   Limine to panic "High memory allocator: Out of memory" with 128M QEMU.
   Workaround: use release builds for boot testing, or increase QEMU memory

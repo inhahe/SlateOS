@@ -429,14 +429,34 @@ unsafe fn saved_registers_from_frame(frame_ptr: *const InterruptStackFrame) -> *
 /// Returns `true` if the exception was dispatched (the ISR should just
 /// return and let IRETQ do its thing).  Returns `false` if no handler
 /// is registered or dispatch failed (caller should kill the task).
+///
+/// # Why raw pointers + volatile
+///
+/// The ISR assembly stubs pass the frame pointer through Rust handler
+/// signatures typed as `&InterruptStackFrame` (immutable reference).
+/// Creating `&mut` from `&` is undefined behavior — the compiler may
+/// assume memory behind `&` is never mutated and optimize away our
+/// writes.  In release builds this caused an infinite exception loop
+/// because `frame.rip` was never actually updated on the stack.
+///
+/// We avoid all `&`/`&mut` to the frame and saved registers here.
+/// Instead we use `addr_of!`/`addr_of_mut!` (which yield raw pointers
+/// without creating references) combined with `read_volatile`/
+/// `write_volatile` to guarantee the loads and stores reach memory.
+///
+/// # Safety
+///
+/// `frame` and `saved` must point to valid structs on the kernel stack,
+/// exclusively owned by this ISR invocation (interrupts disabled).
 fn try_dispatch_user_exception(
-    frame: &mut InterruptStackFrame,
-    saved: &mut SavedRegisters,
+    frame: *mut InterruptStackFrame,
+    saved: *mut SavedRegisters,
     code: crate::proc::exception::ExceptionCode,
     aux: u64,
 ) -> bool {
     use crate::proc::exception::{ExceptionContext, EXCEPTION_CONTEXT_SIZE};
     use crate::proc::thread;
+    use core::ptr::{read_volatile, write_volatile};
 
     // Look up the process's exception handler.
     let task_id = sched::current_task_id();
@@ -450,6 +470,47 @@ fn try_dispatch_user_exception(
         None => return false, // No handler → kill the process.
     };
 
+    // Read current frame values via volatile through raw pointers.
+    // `addr_of!` on a raw-pointer deref yields `*const field_ty` without
+    // ever creating an intermediate `&InterruptStackFrame` reference.
+    //
+    // SAFETY: frame points to a valid InterruptStackFrame on the kernel
+    // stack, exclusively owned by this ISR invocation.
+    let (rip, rsp, rflags) = unsafe {
+        (
+            read_volatile(addr_of!((*frame).rip)),
+            read_volatile(addr_of!((*frame).rsp)),
+            read_volatile(addr_of!((*frame).rflags)),
+        )
+    };
+
+    // Read saved general-purpose register values.
+    //
+    // SAFETY: saved points to valid SavedRegisters on the kernel stack.
+    let (rax, rbx, rcx, rdx, rsi, rdi, rbp) = unsafe {
+        (
+            read_volatile(addr_of!((*saved).rax)),
+            read_volatile(addr_of!((*saved).rbx)),
+            read_volatile(addr_of!((*saved).rcx)),
+            read_volatile(addr_of!((*saved).rdx)),
+            read_volatile(addr_of!((*saved).rsi)),
+            read_volatile(addr_of!((*saved).rdi)),
+            read_volatile(addr_of!((*saved).rbp)),
+        )
+    };
+    let (r8, r9, r10, r11, r12, r13, r14, r15) = unsafe {
+        (
+            read_volatile(addr_of!((*saved).r8)),
+            read_volatile(addr_of!((*saved).r9)),
+            read_volatile(addr_of!((*saved).r10)),
+            read_volatile(addr_of!((*saved).r11)),
+            read_volatile(addr_of!((*saved).r12)),
+            read_volatile(addr_of!((*saved).r13)),
+            read_volatile(addr_of!((*saved).r14)),
+            read_volatile(addr_of!((*saved).r15)),
+        )
+    };
+
     // Build the ExceptionContext on the user stack.
     //
     // We need space for the context struct plus an 8-byte slot for a
@@ -459,7 +520,7 @@ fn try_dispatch_user_exception(
     #[allow(clippy::arithmetic_side_effects)]
     let ctx_size = EXCEPTION_CONTEXT_SIZE as u64;
     #[allow(clippy::arithmetic_side_effects)]
-    let new_rsp = (frame.rsp - ctx_size - 8) & !0xF; // 16-byte align
+    let new_rsp = (rsp - ctx_size - 8) & !0xF; // 16-byte align
 
     let ctx_addr = new_rsp;
 
@@ -467,24 +528,24 @@ fn try_dispatch_user_exception(
     let ctx = ExceptionContext {
         code: code as u64,
         aux,
-        rip: frame.rip,
-        rsp: frame.rsp,
-        rflags: frame.rflags,
-        rax: saved.rax,
-        rbx: saved.rbx,
-        rcx: saved.rcx,
-        rdx: saved.rdx,
-        rsi: saved.rsi,
-        rdi: saved.rdi,
-        rbp: saved.rbp,
-        r8: saved.r8,
-        r9: saved.r9,
-        r10: saved.r10,
-        r11: saved.r11,
-        r12: saved.r12,
-        r13: saved.r13,
-        r14: saved.r14,
-        r15: saved.r15,
+        rip,
+        rsp,
+        rflags,
+        rax,
+        rbx,
+        rcx,
+        rdx,
+        rsi,
+        rdi,
+        rbp,
+        r8,
+        r9,
+        r10,
+        r11,
+        r12,
+        r13,
+        r14,
+        r15,
     };
 
     // Write the context to the user stack.
@@ -508,21 +569,34 @@ fn try_dispatch_user_exception(
         core::ptr::write(ret_addr_ptr, 0u64); // Null return address.
     }
 
-    // Redirect execution to the handler.
-    // When IRETQ fires, it will load these values:
-    frame.rip = handler_addr;       // Jump to handler.
-    frame.rsp = new_rsp;            // Use new stack position.
-    // CS, SS, RFLAGS stay the same (ring 3, interrupts enabled).
+    // Redirect execution to the handler via volatile writes.
+    //
+    // These writes MUST be volatile: the ISR assembly stubs expose the
+    // frame pointer through `&InterruptStackFrame` (immutable), so the
+    // compiler is entitled to assume the underlying memory doesn't
+    // change.  Volatile writes force the stores to actually reach the
+    // kernel stack, where the assembly stub's register-restore sequence
+    // and IRETQ will pick them up.
+    //
+    // SAFETY: frame and saved are valid, exclusively ours (ISR context,
+    // interrupts disabled on this CPU).
+    unsafe {
+        // Jump to the user's exception handler on return from ISR.
+        write_volatile(addr_of_mut!((*frame).rip), handler_addr);
+        // Use the new stack position (below the ExceptionContext).
+        write_volatile(addr_of_mut!((*frame).rsp), new_rsp);
+        // CS, SS, RFLAGS stay the same (ring 3, interrupts enabled).
 
-    // Set RDI = pointer to ExceptionContext (first argument per SysV ABI).
-    saved.rdi = ctx_addr;
+        // Set RDI = pointer to ExceptionContext (first arg, SysV ABI).
+        write_volatile(addr_of_mut!((*saved).rdi), ctx_addr);
 
-    // Zero other argument registers for cleanliness.
-    saved.rsi = 0;
-    saved.rdx = 0;
-    saved.rcx = 0;
-    saved.r8 = 0;
-    saved.r9 = 0;
+        // Zero other argument registers for cleanliness.
+        write_volatile(addr_of_mut!((*saved).rsi), 0);
+        write_volatile(addr_of_mut!((*saved).rdx), 0);
+        write_volatile(addr_of_mut!((*saved).rcx), 0);
+        write_volatile(addr_of_mut!((*saved).r8), 0);
+        write_volatile(addr_of_mut!((*saved).r9), 0);
+    }
 
     serial_println!(
         "[exception] Dispatching {:?} to handler {:#x} for process {} (ctx at {:#x})",
@@ -582,17 +656,23 @@ unsafe fn dispatch_or_kill_userspace_raw(
     code: crate::proc::exception::ExceptionCode,
     aux: u64,
 ) {
+    // Pass raw pointers directly — never create `&mut` from the frame
+    // pointer.  See `try_dispatch_user_exception` docs for the full
+    // rationale (TL;DR: `&` → `&mut` is UB and the compiler elides
+    // writes in release builds).
+    //
     // SAFETY: frame_ptr is valid and exclusive (caller guarantee).
-    let frame_mut = unsafe { &mut *frame_ptr };
-    let saved = unsafe { &mut *saved_registers_from_frame(frame_ptr) };
+    // saved_registers_from_frame computes the GPR save area from the
+    // frame pointer using the ISR stub's known layout.
+    let saved_ptr = unsafe { saved_registers_from_frame(frame_ptr) };
 
-    if try_dispatch_user_exception(frame_mut, saved, code, aux) {
+    if try_dispatch_user_exception(frame_ptr, saved_ptr, code, aux) {
         // Dispatched — the ISR stub will IRETQ to the handler.
         return;
     }
 
     // No handler — kill.
-    // SAFETY: frame_ptr is valid.
+    // SAFETY: frame_ptr is valid; creating `&` for reading is fine.
     kill_userspace_task(exception_name, unsafe { &*frame_ptr });
 }
 
@@ -804,13 +884,12 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         }
 
         // Unresolvable user fault — try SEH handler, then kill.
-        serial_println!(
-            "[exception] Killing task {} — Page Fault (#PF) at {:#x}, address={:#x}",
-            sched::current_task_id(), frame.rip, cr2
-        );
         let present = if error & 1 != 0 { "present" } else { "not-present" };
         let write = if error & 2 != 0 { "write" } else { "read" };
-        serial_println!("  Cause: {present}, {write}, user");
+        serial_println!(
+            "[exception] User page fault (task {}) at {:#x}, addr={:#x} ({}, {}) — trying SEH",
+            sched::current_task_id(), frame.rip, cr2, present, write
+        );
 
         // Try SEH dispatch with AccessViolation code and CR2 as aux data.
         use crate::proc::exception::ExceptionCode;

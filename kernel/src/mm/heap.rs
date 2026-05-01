@@ -16,12 +16,20 @@
 //!
 //! ## Thread Safety
 //!
-//! Protected by a global spinlock.  Per-CPU caches will be added when
-//! SMP support is implemented.
+//! Two-tier locking:
+//!
+//! 1. **Per-CPU slab caches** (fast path): each CPU has a small free
+//!    list per size class, accessed with interrupts disabled (no lock).
+//!    Hits the common case without cross-CPU contention.
+//!
+//! 2. **Global slab allocator** (slow path): protected by a spinlock.
+//!    Used for batch refill/drain of per-CPU caches and for large
+//!    allocations.
 //!
 //! ## Performance Target
 //!
 //! Common-size allocation: < 200ns (jemalloc: 20-50ns).
+//! Per-CPU cache hit (uncontended): ~30-50ns (interrupt disable + pop).
 //! See `bench/baselines.toml` for measured targets.
 
 use crate::error::{KernelError, KernelResult};
@@ -29,6 +37,7 @@ use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::serial_println;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -244,11 +253,213 @@ impl HeapInner {
 }
 
 // ---------------------------------------------------------------------------
+// Per-CPU slab caches
+// ---------------------------------------------------------------------------
+
+/// Maximum free slots per size class per CPU.
+///
+/// 16 is enough to absorb short alloc/free bursts without contending
+/// on the global lock.  Batch refill/drain transfers half at a time.
+const PCPU_SLAB_MAX: usize = 16;
+
+/// Batch size for refilling/draining per-CPU caches (half of max).
+const PCPU_SLAB_BATCH: usize = PCPU_SLAB_MAX / 2;
+
+/// Maximum CPUs (mirrors smp::MAX_CPUS).
+const HEAP_MAX_CPUS: usize = 16;
+
+/// Per-CPU slab cache: one singly-linked free list per size class.
+///
+/// Accessed only with interrupts disabled on the owning CPU.
+/// No lock needed — interrupt-disable serializes access on a single CPU.
+///
+/// We store the free list heads as `usize` (cast from `*mut FreeSlot`)
+/// to avoid raw-pointer Sync issues in a static.  Zero means empty.
+struct PerCpuSlabCache {
+    /// Free list heads for each size class (HHDM virtual addresses).
+    heads: [usize; NUM_CLASSES],
+    /// Number of free slots in each class's list.
+    counts: [u16; NUM_CLASSES],
+}
+
+impl PerCpuSlabCache {
+    const fn new() -> Self {
+        Self {
+            heads: [0; NUM_CLASSES],
+            counts: [0; NUM_CLASSES],
+        }
+    }
+}
+
+// SAFETY: Each PerCpuSlabCache is only accessed by one CPU at a time
+// (interrupt-disabled serialization).  The usize values are interpreted
+// as *mut FreeSlot only on the owning CPU.
+unsafe impl Send for PerCpuSlabCache {}
+unsafe impl Sync for PerCpuSlabCache {}
+
+/// Static array of per-CPU slab caches.
+static mut PCPU_SLAB_CACHES: [PerCpuSlabCache; HEAP_MAX_CPUS] = {
+    const INIT: PerCpuSlabCache = PerCpuSlabCache::new();
+    [INIT; HEAP_MAX_CPUS]
+};
+
+/// Whether per-CPU slab caches are enabled.
+///
+/// Starts `false` — enabled after SMP bootstrap via [`enable_pcpu_slab_caches`].
+static PCPU_SLAB_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable per-CPU slab caches.
+///
+/// Call after SMP bootstrap when `current_cpu_index()` works correctly.
+pub fn enable_pcpu_slab_caches() {
+    PCPU_SLAB_ENABLED.store(true, Ordering::Release);
+    serial_println!("[heap] Per-CPU slab caches enabled");
+}
+
+/// Try to allocate from the per-CPU slab cache.
+///
+/// Returns a pointer to the allocated slot, or null if the local cache
+/// is empty and batch refill also failed.
+///
+/// # Safety
+///
+/// Must be called with a valid `class_idx` (0..NUM_CLASSES).
+/// The global heap must be initialized.
+#[allow(clippy::cast_ptr_alignment)]
+unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
+    let flags = frame::disable_interrupts();
+    let cpu = crate::smp::current_cpu_index();
+
+    // SAFETY: Interrupts are disabled, so no concurrent access from
+    // this CPU.  `cpu` is a valid index (< HEAP_MAX_CPUS).
+    let cache = unsafe { &mut PCPU_SLAB_CACHES[cpu] };
+
+    if cache.counts[class_idx] > 0 {
+        // Fast path: pop from local cache.
+        let slot_ptr = cache.heads[class_idx] as *mut FreeSlot;
+        // SAFETY: slot_ptr is non-null (count > 0 means head is valid).
+        // It points to HHDM-mapped frame memory owned by this allocator.
+        cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
+        cache.counts[class_idx] -= 1;
+        frame::restore_interrupts(flags);
+        return slot_ptr.cast::<u8>();
+    }
+
+    // Slow path: batch refill from global allocator.
+    // Take the global lock while still interrupt-disabled (leaf lock).
+    let mut inner = HEAP.inner.lock();
+    let mut transferred = 0u16;
+
+    for _ in 0..PCPU_SLAB_BATCH {
+        let head = inner.free_lists[class_idx];
+        if head.is_null() {
+            // Global free list empty — try to refill it.
+            if !inner.refill(class_idx) {
+                break; // OOM — stop refilling.
+            }
+            continue; // Retry after refill added new slots.
+        }
+        // Pop from global, push to local.
+        // SAFETY: head is non-null, points to valid HHDM memory.
+        inner.free_lists[class_idx] = unsafe { (*head).next };
+        unsafe { (*head).next = cache.heads[class_idx] as *mut FreeSlot; }
+        cache.heads[class_idx] = head as usize;
+        transferred += 1;
+    }
+    // Release global lock.
+    drop(inner);
+
+    cache.counts[class_idx] += transferred;
+
+    if cache.counts[class_idx] > 0 {
+        // Got at least one slot — pop it.
+        let slot_ptr = cache.heads[class_idx] as *mut FreeSlot;
+        // SAFETY: same as fast path above.
+        cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
+        cache.counts[class_idx] -= 1;
+        frame::restore_interrupts(flags);
+        slot_ptr.cast::<u8>()
+    } else {
+        // Couldn't get any slots (OOM).
+        frame::restore_interrupts(flags);
+        ptr::null_mut()
+    }
+}
+
+/// Try to free to the per-CPU slab cache.
+///
+/// Returns `true` if the slot was cached locally, `false` if the
+/// per-CPU path couldn't handle it (shouldn't happen in practice).
+///
+/// # Safety
+///
+/// `ptr` must have been allocated from the slab for `class_idx`.
+#[allow(clippy::cast_ptr_alignment)]
+unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
+    let flags = frame::disable_interrupts();
+    let cpu = crate::smp::current_cpu_index();
+
+    // SAFETY: Interrupts disabled, exclusive access to this CPU's cache.
+    let cache = unsafe { &mut PCPU_SLAB_CACHES[cpu] };
+
+    if cache.counts[class_idx] < PCPU_SLAB_MAX as u16 {
+        // Fast path: push to local cache.
+        let slot = ptr.cast::<FreeSlot>();
+        // SAFETY: ptr is a valid slab slot (caller guarantee).
+        unsafe { (*slot).next = cache.heads[class_idx] as *mut FreeSlot; }
+        cache.heads[class_idx] = slot as usize;
+        cache.counts[class_idx] += 1;
+        frame::restore_interrupts(flags);
+        return true;
+    }
+
+    // Local cache full — drain half to global.
+    let mut inner = HEAP.inner.lock();
+    for _ in 0..PCPU_SLAB_BATCH {
+        if cache.counts[class_idx] == 0 {
+            break;
+        }
+        let slot_ptr = cache.heads[class_idx] as *mut FreeSlot;
+        // SAFETY: slot_ptr is valid (count > 0).
+        cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
+        cache.counts[class_idx] -= 1;
+        // Push to global free list.
+        unsafe { (*slot_ptr).next = inner.free_lists[class_idx]; }
+        inner.free_lists[class_idx] = slot_ptr;
+    }
+    drop(inner);
+
+    // Now push the new slot to the (no longer full) local cache.
+    let slot = ptr.cast::<FreeSlot>();
+    // SAFETY: ptr is a valid slab slot.
+    unsafe { (*slot).next = cache.heads[class_idx] as *mut FreeSlot; }
+    cache.heads[class_idx] = slot as usize;
+    cache.counts[class_idx] += 1;
+
+    frame::restore_interrupts(flags);
+    true
+}
+
+// ---------------------------------------------------------------------------
 // GlobalAlloc implementation
 // ---------------------------------------------------------------------------
 
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Per-CPU slab cache fast path (lock-free).
+        if PCPU_SLAB_ENABLED.load(Ordering::Relaxed) {
+            if let Some(class_idx) = HeapInner::size_class_index(&layout) {
+                // SAFETY: class_idx is valid (checked by size_class_index),
+                // heap is initialized (PCPU_SLAB_ENABLED is set after init).
+                let ptr = unsafe { pcpu_slab_alloc(class_idx) };
+                if !ptr.is_null() {
+                    return ptr;
+                }
+                // Per-CPU path failed (OOM) — fall through to global.
+            }
+        }
+
+        // Global locked path.
         let mut inner = self.inner.lock();
         if !inner.initialized {
             return ptr::null_mut();
@@ -265,6 +476,17 @@ unsafe impl GlobalAlloc for KernelHeap {
             return;
         }
 
+        // Per-CPU slab cache fast path.
+        if PCPU_SLAB_ENABLED.load(Ordering::Relaxed) {
+            if let Some(class_idx) = HeapInner::size_class_index(&layout) {
+                // SAFETY: ptr was allocated from slab for this class.
+                if unsafe { pcpu_slab_dealloc(ptr, class_idx) } {
+                    return;
+                }
+            }
+        }
+
+        // Global locked path.
         let mut inner = self.inner.lock();
         if !inner.initialized {
             return;

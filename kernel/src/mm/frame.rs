@@ -735,14 +735,15 @@ pub fn enable_pcpu_caches() {
 
 /// Disable interrupts and return the previous RFLAGS value.
 ///
-/// Used by the per-CPU cache to prevent preemption during cache access.
+/// Used by per-CPU caches (frame and heap) to prevent preemption
+/// during cache access on the local CPU.
 ///
 /// # Safety
 ///
 /// Caller must restore interrupts via [`restore_interrupts`] promptly.
 /// Holding interrupts disabled for too long causes latency issues.
 #[inline]
-unsafe fn disable_interrupts() -> u64 {
+pub(crate) unsafe fn disable_interrupts() -> u64 {
     let flags: u64;
     // SAFETY: pushfq/popfq + cli is safe in ring 0.
     unsafe {
@@ -763,7 +764,7 @@ unsafe fn disable_interrupts() -> u64 {
 ///
 /// `flags` must be a value from a prior [`disable_interrupts`] call.
 #[inline]
-unsafe fn restore_interrupts(flags: u64) {
+pub(crate) unsafe fn restore_interrupts(flags: u64) {
     // SAFETY: Restoring RFLAGS to a previously-saved value is safe.
     unsafe {
         core::arch::asm!(

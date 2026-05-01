@@ -540,6 +540,7 @@ extern "C" fn kmain() -> ! {
     // Now that all CPUs are online and current_cpu_index() works,
     // enable the per-CPU frame cache for lock-free order-0 allocation.
     mm::frame::enable_pcpu_caches();
+    mm::heap::enable_pcpu_slab_caches();
 
     // Step 22g: I/O scheduler self-test.
     // BFQ-style budget fair queueing with per-process queues,

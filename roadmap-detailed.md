@@ -166,7 +166,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
 - [ ] Swap priority (multiple swap devices)
 - [x] Minimum free memory threshold (when to start swapping)
-- [ ] Swap I/O must not tie up system — throttle or lower I/O priority
+- [x] Swap I/O must not tie up system — batch-yield reclaim (mm.swap_batch_size sysctl, default 4, yields CPU between batches)
 
 #### Memory Allocation Modes
 - [x] Committed memory by default (guaranteed backed by RAM + swap)

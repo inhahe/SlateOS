@@ -39,6 +39,7 @@ use super::number::{
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
     SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
+    SYS_THREAD_SUSPEND, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_DNS_RESOLVE,
     SYS_YIELD,
@@ -219,6 +220,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
     handlers[SYS_THREAD_EXIT as usize] = Some(handlers::sys_thread_exit);
     handlers[SYS_THREAD_JOIN as usize] = Some(handlers::sys_thread_join);
+    handlers[SYS_THREAD_SUSPEND as usize] = Some(handlers::sys_thread_suspend);
+    handlers[SYS_THREAD_RESUME as usize] = Some(handlers::sys_thread_resume);
+    handlers[SYS_THREAD_SET_PRIORITY as usize] = Some(handlers::sys_thread_set_priority);
 
     // Filesystem (600–799).
     handlers[SYS_FS_READ_FILE as usize] = Some(handlers::sys_fs_read_file);

@@ -330,6 +330,130 @@ pub fn preempt() {
     schedule_inner(true);
 }
 
+/// Suspend a task (pause execution).
+///
+/// Transitions the task from [`Ready`] to [`Suspended`], removing
+/// it from the run queue.  If the task is [`Running`] (the current
+/// task), it is suspended and the scheduler picks another task.
+/// If the task is [`Blocked`], it transitions directly to
+/// [`Suspended`] — when the blocking event fires, the wake will
+/// find it in Suspended state and leave it there.
+///
+/// Returns `true` if the task was suspended, `false` if it was
+/// already Suspended, Dead, or not found.
+pub fn suspend(task_id: TaskId) -> bool {
+    let current = CURRENT_TASK_ID.load(Ordering::Acquire);
+
+    {
+        let mut state = SCHED.lock();
+        let Some(task) = state.tasks.get_mut(&task_id) else {
+            return false;
+        };
+
+        match task.state {
+            TaskState::Ready => {
+                let prio = task.priority;
+                task.state = TaskState::Suspended;
+                state.scheduler.dequeue(task_id, prio);
+            }
+            TaskState::Running => {
+                // Suspending the current task — mark it and yield
+                // without re-enqueuing.
+                task.state = TaskState::Suspended;
+            }
+            TaskState::Blocked => {
+                // Suspend a blocked task.  When the wake event fires,
+                // wake() will see it's not Blocked and skip it.  The
+                // task stays Suspended until resume() is called.
+                task.state = TaskState::Suspended;
+            }
+            TaskState::Suspended | TaskState::Dead => {
+                return false;
+            }
+        }
+    }
+
+    // If we just suspended the current task, yield to another task.
+    if task_id == current {
+        schedule_inner(false);
+    }
+
+    serial_println!("[sched] Suspended task {}", task_id);
+    true
+}
+
+/// Resume a suspended task (unpause execution).
+///
+/// Transitions the task from [`Suspended`] to [`Ready`] and places
+/// it back in the run queue.
+///
+/// Returns `true` if the task was resumed, `false` if it was not
+/// in the Suspended state.
+pub fn resume(task_id: TaskId) -> bool {
+    let mut state = SCHED.lock();
+    let Some(task) = state.tasks.get_mut(&task_id) else {
+        return false;
+    };
+
+    if task.state != TaskState::Suspended {
+        return false;
+    }
+
+    task.state = TaskState::Ready;
+    let prio = task.priority;
+    state.scheduler.enqueue(task_id, prio);
+
+    serial_println!("[sched] Resumed task {}", task_id);
+    true
+}
+
+/// Change a task's scheduling priority.
+///
+/// If the task is in the run queue ([`Ready`] state), it is dequeued
+/// at the old priority and re-enqueued at the new priority.  For
+/// other states (Running, Blocked, Suspended), the new priority takes
+/// effect when the task next enters the run queue.
+///
+/// Priority is clamped to `0..NUM_PRIORITIES` (0 = highest, 31 =
+/// lowest).
+///
+/// Returns the old priority, or `None` if the task was not found.
+pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
+    let clamped = new_priority.min(
+        #[allow(clippy::cast_possible_truncation)]
+        { (NUM_PRIORITIES - 1) as u8 }
+    );
+
+    let mut state = SCHED.lock();
+    let task = state.tasks.get(&task_id)?;
+    let old_priority = task.priority;
+    let task_state = task.state;
+
+    if old_priority == clamped {
+        return Some(old_priority);
+    }
+
+    // If the task is Ready (in the run queue), move it to the new
+    // priority queue.  We do the dequeue/enqueue first with the
+    // scheduler, then update the task's stored priority, to avoid
+    // two mutable borrows of `state`.
+    if task_state == TaskState::Ready {
+        state.scheduler.dequeue(task_id, old_priority);
+        state.scheduler.enqueue(task_id, clamped);
+    }
+
+    // Now update the task's stored priority.
+    if let Some(task) = state.tasks.get_mut(&task_id) {
+        task.priority = clamped;
+    }
+
+    serial_println!(
+        "[sched] Task {} priority: {} → {}",
+        task_id, old_priority, clamped
+    );
+    Some(old_priority)
+}
+
 /// Kill a task remotely (force-terminate without running task code).
 ///
 /// Marks the task as [`Dead`](TaskState::Dead) and removes it from
@@ -768,6 +892,16 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[sched] Running scheduler self-test...");
 
+    test_cooperative_scheduling()?;
+    test_suspend_resume()?;
+    test_set_priority()?;
+
+    serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// Test 1: Cooperative scheduling — spawn tasks, yield, verify.
+fn test_cooperative_scheduling() -> KernelResult<()> {
     TEST_COUNTER.store(0, Ordering::SeqCst);
 
     // Spawn two test tasks.
@@ -811,9 +945,151 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!("[sched]   Cleanup (free dead task stacks): OK");
-
-    serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
+}
+
+/// Test 2: Suspend and resume a task.
+///
+/// Spawns a task, suspends it before it runs, verifies it doesn't
+/// execute, then resumes it and verifies it runs.
+fn test_suspend_resume() -> KernelResult<()> {
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+
+    // Spawn a task that increments the counter.
+    let id = spawn(b"test-suspend", 16, test_task_incr, 100, 0)?;
+
+    // Suspend it before it gets a chance to run.
+    if !suspend(id) {
+        serial_println!("[sched]   FAIL: suspend returned false");
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify the task is Suspended.
+    {
+        let state = SCHED.lock();
+        if let Some(task) = state.tasks.get(&id) {
+            if task.state != TaskState::Suspended {
+                serial_println!(
+                    "[sched]   FAIL: expected Suspended, got {:?}",
+                    task.state
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // Yield a few times — the suspended task should NOT run.
+    yield_now();
+    yield_now();
+
+    let count_after_yields = TEST_COUNTER.load(Ordering::SeqCst);
+    if count_after_yields != 0 {
+        serial_println!(
+            "[sched]   FAIL: suspended task ran (counter={})",
+            count_after_yields
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Resume the task.
+    if !resume(id) {
+        serial_println!("[sched]   FAIL: resume returned false");
+        return Err(KernelError::InternalError);
+    }
+
+    // Now yield — the task should run and increment the counter.
+    yield_now();
+    yield_now();
+
+    let count_after_resume = TEST_COUNTER.load(Ordering::SeqCst);
+    if count_after_resume != 100 {
+        serial_println!(
+            "[sched]   FAIL: after resume, counter={}, expected 100",
+            count_after_resume
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    {
+        let mut state = SCHED.lock();
+        if let Some(mut task) = state.tasks.remove(&id)
+            && task.state == TaskState::Dead
+            && task.stack_phys != 0
+        {
+            unsafe { let _ = task.free_stack(); }
+            task.stack_phys = 0;
+        }
+    }
+
+    serial_println!("[sched]   Suspend/resume: OK");
+    Ok(())
+}
+
+/// Test 3: Change a task's scheduling priority.
+fn test_set_priority() -> KernelResult<()> {
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+
+    // Spawn at priority 16.
+    let id = spawn(b"test-prio", 16, test_task_incr, 50, 0)?;
+
+    // Change priority to 8.
+    match set_priority(id, 8) {
+        Some(16) => {} // Old priority was 16.
+        other => {
+            serial_println!(
+                "[sched]   FAIL: set_priority returned {:?}, expected Some(16)",
+                other
+            );
+            kill_task(id);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Verify the new priority.
+    {
+        let state = SCHED.lock();
+        if let Some(task) = state.tasks.get(&id) {
+            if task.priority != 8 {
+                serial_println!(
+                    "[sched]   FAIL: priority should be 8, got {}",
+                    task.priority
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // Let the task run and clean up.
+    yield_now();
+    yield_now();
+
+    if TEST_COUNTER.load(Ordering::SeqCst) != 50 {
+        serial_println!("[sched]   FAIL: task didn't run after priority change");
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    {
+        let mut state = SCHED.lock();
+        if let Some(mut task) = state.tasks.remove(&id)
+            && task.state == TaskState::Dead
+            && task.stack_phys != 0
+        {
+            unsafe { let _ = task.free_stack(); }
+            task.stack_phys = 0;
+        }
+    }
+
+    serial_println!("[sched]   Set priority: OK");
+    Ok(())
+}
+
+/// Simple test task: adds `arg` to `TEST_COUNTER`, then exits.
+///
+/// Used by suspend/resume and priority change tests.
+extern "C" fn test_task_incr(arg: u64) {
+    TEST_COUNTER.fetch_add(arg, Ordering::SeqCst);
 }
 
 /// Test task A: adds `arg` to `TEST_COUNTER`, yields, adds again, exits.

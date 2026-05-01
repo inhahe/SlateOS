@@ -2330,6 +2330,111 @@ pub fn sys_thread_join(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_THREAD_SUSPEND` — pause a thread.
+///
+/// `arg0`: task ID of the thread to suspend.
+///
+/// Returns: 0 on success.
+pub fn sys_thread_suspend(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let target_task = args.arg0;
+
+    // Get the calling process's PID for authority check.
+    let caller_task = sched::current_task_id();
+    let caller_pid = thread::owner_process(caller_task).unwrap_or(0);
+
+    // Can't suspend the idle task.
+    if target_task == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Verify the target belongs to the same process (or caller is PID 0).
+    if caller_pid != 0 {
+        let target_pid = thread::owner_process(target_task);
+        if target_pid != Some(caller_pid) {
+            return SyscallResult::err(KernelError::PermissionDenied);
+        }
+    }
+
+    if sched::suspend(target_task) {
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidArgument)
+    }
+}
+
+/// `SYS_THREAD_RESUME` — resume a suspended thread.
+///
+/// `arg0`: task ID of the thread to resume.
+///
+/// Returns: 0 on success.
+pub fn sys_thread_resume(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let target_task = args.arg0;
+
+    // Get the calling process's PID for authority check.
+    let caller_task = sched::current_task_id();
+    let caller_pid = thread::owner_process(caller_task).unwrap_or(0);
+
+    // Verify the target belongs to the same process (or caller is PID 0).
+    if caller_pid != 0 {
+        let target_pid = thread::owner_process(target_task);
+        if target_pid != Some(caller_pid) {
+            return SyscallResult::err(KernelError::PermissionDenied);
+        }
+    }
+
+    if sched::resume(target_task) {
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidArgument)
+    }
+}
+
+/// `SYS_THREAD_SET_PRIORITY` — change a thread's scheduling priority.
+///
+/// `arg0`: task ID (0 = current thread).
+/// `arg1`: new priority (0–31).
+///
+/// Returns: old priority on success.
+pub fn sys_thread_set_priority(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let target_task = if args.arg0 == 0 {
+        sched::current_task_id()
+    } else {
+        args.arg0
+    };
+
+    let new_priority = args.arg1;
+    if new_priority > 31 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Get the calling process's PID for authority check.
+    let caller_task = sched::current_task_id();
+    let caller_pid = thread::owner_process(caller_task).unwrap_or(0);
+
+    // Verify the target belongs to the same process (or caller is PID 0).
+    if caller_pid != 0 && target_task != caller_task {
+        let target_pid = thread::owner_process(target_task);
+        if target_pid != Some(caller_pid) {
+            return SyscallResult::err(KernelError::PermissionDenied);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    match sched::set_priority(target_task, new_priority as u8) {
+        Some(old) => {
+            #[allow(clippy::cast_lossless)]
+            SyscallResult::ok(old as i64)
+        }
+        None => SyscallResult::err(KernelError::NoSuchProcess),
+    }
+}
+
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.
 ///
 /// `arg0`: pointer to hostname string.

@@ -536,6 +536,36 @@ pub const SYS_THREAD_EXIT: u64 = 511;
 /// Returns: the target thread's exit value on success.
 pub const SYS_THREAD_JOIN: u64 = 512;
 
+/// Suspend (pause) a thread.
+///
+/// `arg0`: task ID of the thread to suspend.
+///
+/// The target thread must belong to the calling process.  A suspended
+/// thread does not execute until resumed via `SYS_THREAD_RESUME`.
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_THREAD_SUSPEND: u64 = 513;
+
+/// Resume a suspended thread.
+///
+/// `arg0`: task ID of the thread to resume.
+///
+/// The target thread must belong to the calling process and must be
+/// in the Suspended state.
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_THREAD_RESUME: u64 = 514;
+
+/// Change a thread's scheduling priority.
+///
+/// `arg0`: task ID of the thread (0 = current thread).
+/// `arg1`: new priority (0 = highest, 31 = lowest).
+///
+/// The target thread must belong to the calling process.
+///
+/// Returns: the old priority on success, negative error on failure.
+pub const SYS_THREAD_SET_PRIORITY: u64 = 515;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

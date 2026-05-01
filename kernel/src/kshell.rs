@@ -234,6 +234,27 @@ fn cmd_meminfo() {
             crate::console_println!("Error: frame allocator not initialized");
         }
     }
+
+    // Heap allocator stats (always available, lock-free).
+    let h = crate::mm::heap::stats();
+    crate::console_println!("Kernel heap:");
+    crate::console_println!(
+        "  Slab:  {} allocs, {} frees (live: {})",
+        h.slab_allocs,
+        h.slab_frees,
+        h.slab_allocs.saturating_sub(h.slab_frees)
+    );
+    crate::console_println!(
+        "  Large: {} allocs, {} frees (live: {})",
+        h.large_allocs,
+        h.large_frees,
+        h.large_allocs.saturating_sub(h.large_frees)
+    );
+    crate::console_println!(
+        "  Refills: {}, Failures: {}",
+        h.slab_refills,
+        h.alloc_failures
+    );
 }
 
 fn cmd_ps() {

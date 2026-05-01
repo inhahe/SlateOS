@@ -37,8 +37,25 @@ use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::serial_println;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
+
+// ---------------------------------------------------------------------------
+// Allocation statistics (lock-free, atomic counters)
+// ---------------------------------------------------------------------------
+
+/// Total number of slab allocations since boot.
+static SLAB_ALLOCS: AtomicU64 = AtomicU64::new(0);
+/// Total number of slab deallocations since boot.
+static SLAB_FREES: AtomicU64 = AtomicU64::new(0);
+/// Total number of large allocations (> MAX_SLAB_SIZE) since boot.
+static LARGE_ALLOCS: AtomicU64 = AtomicU64::new(0);
+/// Total number of large deallocations since boot.
+static LARGE_FREES: AtomicU64 = AtomicU64::new(0);
+/// Total number of slab refills (new frame carved into slots).
+static SLAB_REFILLS: AtomicU64 = AtomicU64::new(0);
+/// Total number of failed allocations (OOM).
+static ALLOC_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -179,6 +196,7 @@ impl HeapInner {
             self.free_lists[class_idx] = slot_ptr;
         }
 
+        SLAB_REFILLS.fetch_add(1, Ordering::Relaxed);
         true
     }
 
@@ -466,6 +484,8 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
 
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let is_slab = HeapInner::size_class_index(&layout).is_some();
+
         // Per-CPU slab cache fast path (lock-free).
         if PCPU_SLAB_ENABLED.load(Ordering::Relaxed) {
             if let Some(class_idx) = HeapInner::size_class_index(&layout) {
@@ -473,6 +493,7 @@ unsafe impl GlobalAlloc for KernelHeap {
                 // heap is initialized (PCPU_SLAB_ENABLED is set after init).
                 let ptr = unsafe { pcpu_slab_alloc(class_idx) };
                 if !ptr.is_null() {
+                    SLAB_ALLOCS.fetch_add(1, Ordering::Relaxed);
                     return ptr;
                 }
                 // Per-CPU path failed (OOM) — fall through to global.
@@ -485,10 +506,19 @@ unsafe impl GlobalAlloc for KernelHeap {
             return ptr::null_mut();
         }
 
-        match HeapInner::size_class_index(&layout) {
+        let ptr = match HeapInner::size_class_index(&layout) {
             Some(class_idx) => inner.slab_alloc(class_idx),
             None => inner.large_alloc(&layout),
+        };
+
+        if ptr.is_null() {
+            ALLOC_FAILURES.fetch_add(1, Ordering::Relaxed);
+        } else if is_slab {
+            SLAB_ALLOCS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);
         }
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -501,6 +531,7 @@ unsafe impl GlobalAlloc for KernelHeap {
             if let Some(class_idx) = HeapInner::size_class_index(&layout) {
                 // SAFETY: ptr was allocated from slab for this class.
                 if unsafe { pcpu_slab_dealloc(ptr, class_idx) } {
+                    SLAB_FREES.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             }
@@ -513,15 +544,73 @@ unsafe impl GlobalAlloc for KernelHeap {
         }
 
         match HeapInner::size_class_index(&layout) {
-            Some(class_idx) => inner.slab_dealloc(ptr, class_idx),
+            Some(class_idx) => {
+                inner.slab_dealloc(ptr, class_idx);
+                SLAB_FREES.fetch_add(1, Ordering::Relaxed);
+            }
             // SAFETY: Caller guarantees ptr was allocated with this layout.
-            None => unsafe { inner.large_dealloc(ptr, &layout) },
+            None => {
+                unsafe { inner.large_dealloc(ptr, &layout) };
+                LARGE_FREES.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Public API
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Statistics API
+// ---------------------------------------------------------------------------
+
+/// Snapshot of heap allocator statistics.
+///
+/// All counters are cumulative since boot.  They use relaxed atomic
+/// loads, so a snapshot may not be perfectly self-consistent under
+/// heavy concurrent allocation, but individual counters are accurate.
+#[derive(Debug, Clone, Copy)]
+pub struct HeapStats {
+    /// Total slab-path allocations since boot.
+    pub slab_allocs: u64,
+    /// Total slab-path deallocations since boot.
+    pub slab_frees: u64,
+    /// Total large (buddy-path) allocations since boot.
+    pub large_allocs: u64,
+    /// Total large (buddy-path) deallocations since boot.
+    pub large_frees: u64,
+    /// Number of slab refills (new frame carved into slots).
+    pub slab_refills: u64,
+    /// Number of failed allocations (OOM).
+    pub alloc_failures: u64,
+}
+
+/// Read heap allocator statistics (lock-free).
+///
+/// Returns a snapshot of the atomic counters.  No lock is needed since
+/// all counters use relaxed atomic operations.
+pub fn stats() -> HeapStats {
+    HeapStats {
+        slab_allocs: SLAB_ALLOCS.load(Ordering::Relaxed),
+        slab_frees: SLAB_FREES.load(Ordering::Relaxed),
+        large_allocs: LARGE_ALLOCS.load(Ordering::Relaxed),
+        large_frees: LARGE_FREES.load(Ordering::Relaxed),
+        slab_refills: SLAB_REFILLS.load(Ordering::Relaxed),
+        alloc_failures: ALLOC_FAILURES.load(Ordering::Relaxed),
+    }
+}
+
+/// Read heap statistics without blocking (alias for [`stats`]).
+///
+/// Since the stats are atomic counters (no lock needed), this always
+/// succeeds.  Provided for API consistency with [`frame::try_stats`].
+pub fn try_stats() -> Option<HeapStats> {
+    Some(stats())
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
 // ---------------------------------------------------------------------------
 
 /// Initialize the kernel heap allocator.

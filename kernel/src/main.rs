@@ -812,6 +812,15 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         serial_println!("  Memory: <allocator lock held or not initialized>");
     }
 
+    // --- Heap summary (lock-free, always available) ---
+    let heap = mm::heap::stats();
+    serial_println!(
+        "  Heap: slab={}/{} allocs/frees, large={}/{}, refills={}, failures={}",
+        heap.slab_allocs, heap.slab_frees,
+        heap.large_allocs, heap.large_frees,
+        heap.slab_refills, heap.alloc_failures,
+    );
+
     serial_println!("--- end panic ---");
 
     cpu::halt_loop();

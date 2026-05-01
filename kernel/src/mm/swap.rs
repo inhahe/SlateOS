@@ -46,6 +46,7 @@
 //! The swap subsystem uses its own spinlock.  Lock ordering:
 //! SWAP → page table manipulation → frame allocator.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
@@ -401,6 +402,220 @@ impl MemBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Disk-backed swap backend
+// ---------------------------------------------------------------------------
+
+/// Disk-backed swap backend using a block device.
+///
+/// Writes swap slot data directly to a named block device.  Each swap
+/// slot occupies `SECTORS_PER_FRAME` contiguous sectors starting from
+/// a configurable base offset.
+///
+/// ## Sector layout
+///
+/// ```text
+/// Disk: [... unused ...][base_sector][slot 0 = 32 sectors][slot 1 = 32 sectors]...
+/// ```
+///
+/// Data is compressed before writing (like the zram backend), so each
+/// slot's actual I/O may be less than `FRAME_SIZE` bytes, but we always
+/// write full `FRAME_SIZE` for simplicity (the trailing bytes are
+/// padding).  Compression metadata is stored in-memory (the slot
+/// allocation bitmap + a length array).
+///
+/// ## Limitations
+///
+/// - Synchronous I/O (blocking, no DMA batching).
+/// - Single-device only (no multi-device swap tiering yet).
+struct DiskBackend {
+    /// Name of the block device (e.g., "vdb") in the blkdev registry.
+    device_name: String,
+    /// Starting sector offset on the disk.
+    base_sector: u64,
+    /// Number of swap slots.
+    capacity: u32,
+    /// Per-slot stored size (actual compressed bytes).  Needed for
+    /// decompression: we must know the compressed length.
+    /// `None` = slot not written.
+    slot_sizes: Vec<Option<u32>>,
+    /// Whether each slot is stored compressed or uncompressed.
+    slot_compressed: Vec<bool>,
+}
+
+/// Number of 512-byte sectors per 16 KiB frame.
+const SECTORS_PER_FRAME: u32 = (FRAME_SIZE / 512) as u32;
+
+impl DiskBackend {
+    /// Create a new disk backend on the named block device.
+    ///
+    /// `base_sector`: first sector used for swap.
+    /// `capacity`: number of swap slots.
+    fn new(device_name: &str, base_sector: u64, capacity: u32) -> Self {
+        let mut slot_sizes = Vec::with_capacity(capacity as usize);
+        let mut slot_compressed = Vec::with_capacity(capacity as usize);
+        for _ in 0..capacity {
+            slot_sizes.push(None);
+            slot_compressed.push(false);
+        }
+        Self {
+            device_name: String::from(device_name),
+            base_sector,
+            capacity,
+            slot_sizes,
+            slot_compressed,
+        }
+    }
+
+    /// Sector offset for a given slot.
+    fn slot_sector(&self, slot: u32) -> u64 {
+        self.base_sector
+            .saturating_add((slot as u64).saturating_mul(SECTORS_PER_FRAME as u64))
+    }
+
+    /// Write page data to a swap slot on disk.
+    ///
+    /// Compresses data first.  Writes the (possibly compressed) data
+    /// to the slot's sector range, padded with zeros.
+    fn write(&mut self, slot: u32, data: &[u8]) -> KernelResult<()> {
+        if slot >= self.capacity {
+            return Err(KernelError::InvalidArgument);
+        }
+        if data.len() != FRAME_SIZE {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Try to compress the data.
+        let (write_buf, compressed, stored_size) =
+            match super::compress::compress(data) {
+                Some(compressed) => {
+                    let size = compressed.len();
+                    // Pad to FRAME_SIZE for writing full sectors.
+                    let mut padded = compressed;
+                    padded.resize(FRAME_SIZE, 0);
+                    (padded, true, size)
+                }
+                None => {
+                    (data.to_vec(), false, FRAME_SIZE)
+                }
+            };
+
+        let sector = self.slot_sector(slot);
+        let device_name = self.device_name.clone();
+
+        crate::blkdev::with_device(&device_name, |dev| {
+            dev.write_sectors(sector, SECTORS_PER_FRAME, &write_buf)
+        })
+        .ok_or(KernelError::NotSupported)?
+        .map_err(|_| KernelError::IoError)?;
+
+        if let Some(size_entry) = self.slot_sizes.get_mut(slot as usize) {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *size_entry = Some(stored_size as u32);
+            }
+        }
+        if let Some(comp) = self.slot_compressed.get_mut(slot as usize) {
+            *comp = compressed;
+        }
+
+        Ok(())
+    }
+
+    /// Read page data from a swap slot on disk.
+    ///
+    /// Reads the slot's sectors, then decompresses if necessary.
+    fn read(&self, slot: u32, buf: &mut [u8]) -> KernelResult<()> {
+        if slot >= self.capacity {
+            return Err(KernelError::InvalidArgument);
+        }
+        if buf.len() != FRAME_SIZE {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let stored_size = self
+            .slot_sizes
+            .get(slot as usize)
+            .and_then(|s| *s)
+            .ok_or(KernelError::InvalidArgument)?;
+
+        let is_compressed = self
+            .slot_compressed
+            .get(slot as usize)
+            .copied()
+            .unwrap_or(false);
+
+        // Read the full sector range from disk.
+        let mut disk_buf = vec![0u8; FRAME_SIZE];
+        let sector = self.slot_sector(slot);
+        let device_name = self.device_name.clone();
+
+        crate::blkdev::with_device(&device_name, |dev| {
+            dev.read_sectors(sector, SECTORS_PER_FRAME, &mut disk_buf)
+        })
+        .ok_or(KernelError::NotSupported)?
+        .map_err(|_| KernelError::IoError)?;
+
+        if is_compressed {
+            let compressed = disk_buf
+                .get(..stored_size as usize)
+                .ok_or(KernelError::InternalError)?;
+            let decompressed = super::compress::decompress(compressed, FRAME_SIZE)
+                .map_err(|_| KernelError::InternalError)?;
+            buf.copy_from_slice(&decompressed);
+        } else {
+            buf.copy_from_slice(&disk_buf);
+        }
+
+        Ok(())
+    }
+
+    /// Discard a slot (mark it as unused).
+    fn discard(&mut self, slot: u32) {
+        if let Some(size_entry) = self.slot_sizes.get_mut(slot as usize) {
+            *size_entry = None;
+        }
+        if let Some(comp) = self.slot_compressed.get_mut(slot as usize) {
+            *comp = false;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unified swap backend
+// ---------------------------------------------------------------------------
+
+/// The swap backend: either compressed in-memory (zram) or disk-backed.
+enum SwapBackend {
+    /// Compressed in-memory swap (zram style).
+    Memory(MemBackend),
+    /// Disk-backed swap with compression.
+    Disk(DiskBackend),
+}
+
+impl SwapBackend {
+    fn write(&mut self, slot: u32, data: &[u8]) -> KernelResult<()> {
+        match self {
+            Self::Memory(m) => m.write(slot, data),
+            Self::Disk(d) => d.write(slot, data),
+        }
+    }
+
+    fn read(&self, slot: u32, buf: &mut [u8]) -> KernelResult<()> {
+        match self {
+            Self::Memory(m) => m.read(slot, buf),
+            Self::Disk(d) => d.read(slot, buf),
+        }
+    }
+
+    fn discard(&mut self, slot: u32) {
+        match self {
+            Self::Memory(m) => m.discard(slot),
+            Self::Disk(d) => d.discard(slot),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Global swap state
 // ---------------------------------------------------------------------------
 
@@ -409,7 +624,7 @@ struct SwapState {
     /// Slot allocator.
     slots: SwapSlotAllocator,
     /// Storage backend.
-    backend: MemBackend,
+    backend: SwapBackend,
     /// Whether the subsystem is initialized.
     initialized: bool,
 }
@@ -423,14 +638,14 @@ impl SwapState {
                 used: 0,
                 hint: 0,
             },
-            backend: MemBackend {
+            backend: SwapBackend::Memory(MemBackend {
                 slots: Vec::new(),
                 capacity: 0,
                 uncompressed_bytes: 0,
                 compressed_bytes: 0,
                 compressed_count: 0,
                 uncompressed_count: 0,
-            },
+            }),
             initialized: false,
         }
     }
@@ -678,14 +893,69 @@ pub fn init(num_slots: u32) {
     let mut state = SWAP.lock();
 
     state.slots = SwapSlotAllocator::new(num_slots);
-    state.backend = MemBackend::new(num_slots);
+    state.backend = SwapBackend::Memory(MemBackend::new(num_slots));
     state.initialized = true;
 
     serial_println!(
-        "[swap] Initialized: {} slots ({} KiB max swap space)",
+        "[swap] Initialized zram backend: {} slots ({} KiB max swap space)",
         num_slots,
         (num_slots as u64).saturating_mul(FRAME_SIZE as u64) / 1024
     );
+}
+
+/// Initialize the swap subsystem with a disk-backed backend.
+///
+/// `device_name`: the block device name (e.g., `"vdb"`) in the
+///   blkdev registry.
+/// `base_sector`: first sector on the device used for swap.
+/// `num_slots`: number of 16 KiB swap slots.
+///
+/// Each slot occupies [`SECTORS_PER_FRAME`] contiguous sectors.
+/// The total disk space used is `num_slots × FRAME_SIZE`.
+///
+/// Returns an error if the device is not found, too small, or
+/// read-only.
+pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelResult<()> {
+    // Verify the device exists and has enough capacity.
+    let (sector_count, read_only) = crate::blkdev::with_device(device_name, |dev| {
+        let info = dev.info();
+        (info.sector_count, info.read_only)
+    })
+    .ok_or(KernelError::NoSuchDevice)?;
+
+    if read_only {
+        serial_println!(
+            "[swap] Device '{}' is read-only, cannot use for swap",
+            device_name
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let sectors_needed = (num_slots as u64).saturating_mul(SECTORS_PER_FRAME as u64);
+    let end_sector = base_sector.saturating_add(sectors_needed);
+    if end_sector > sector_count {
+        serial_println!(
+            "[swap] Device '{}' too small: need {} sectors from base {}, device has {}",
+            device_name, sectors_needed, base_sector, sector_count
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut state = SWAP.lock();
+    state.slots = SwapSlotAllocator::new(num_slots);
+    state.backend = SwapBackend::Disk(
+        DiskBackend::new(device_name, base_sector, num_slots),
+    );
+    state.initialized = true;
+
+    serial_println!(
+        "[swap] Initialized disk backend on '{}': {} slots ({} KiB) at sector {}",
+        device_name,
+        num_slots,
+        (num_slots as u64).saturating_mul(FRAME_SIZE as u64) / 1024,
+        base_sector
+    );
+    Ok(())
 }
 
 /// Check if the swap subsystem is initialized and has capacity.
@@ -747,11 +1017,24 @@ impl CompressionStats {
 #[must_use]
 pub fn compression_stats() -> CompressionStats {
     let state = SWAP.lock();
-    CompressionStats {
-        uncompressed_bytes: state.backend.uncompressed_bytes,
-        compressed_bytes: state.backend.compressed_bytes,
-        compressed_count: state.backend.compressed_count,
-        uncompressed_count: state.backend.uncompressed_count,
+    match &state.backend {
+        SwapBackend::Memory(m) => CompressionStats {
+            uncompressed_bytes: m.uncompressed_bytes,
+            compressed_bytes: m.compressed_bytes,
+            compressed_count: m.compressed_count,
+            uncompressed_count: m.uncompressed_count,
+        },
+        SwapBackend::Disk(_) => {
+            // Disk backend doesn't track byte-level compression stats
+            // in the same way (compressed data goes to disk, not heap).
+            // Return zero stats for now.
+            CompressionStats {
+                uncompressed_bytes: 0,
+                compressed_bytes: 0,
+                compressed_count: 0,
+                uncompressed_count: 0,
+            }
+        }
     }
 }
 
@@ -1176,5 +1459,79 @@ pub fn self_test() {
         serial_println!("[swap]   Page reclamation tracking: OK");
     }
 
+    // Note: disk backend test is in self_test_disk(), called separately
+    // after the disk device is registered.
+
     serial_println!("[swap] Self-test PASSED");
+}
+
+/// Run self-test for the disk-backed swap backend.
+///
+/// Called after `init_disk()` succeeds.  Tests write-read roundtrip
+/// through the live disk backend with compressed and uncompressed data.
+pub fn self_test_disk() {
+    serial_println!("[swap] Running disk backend self-test...");
+
+    let is_disk = {
+        let state = SWAP.lock();
+        matches!(state.backend, SwapBackend::Disk(_))
+    };
+
+    if !is_disk {
+        serial_println!("[swap]   Disk backend not active — skipped");
+        return;
+    }
+
+    // Test a write-read roundtrip through the live disk backend.
+    // Allocate a slot, write test data, read it back, verify.
+    let mut test_data = vec![0u8; FRAME_SIZE];
+    for (i, byte) in test_data.iter_mut().enumerate() {
+        // Repeating pattern that compresses well.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            *byte = ((i * 7 + 13) & 0xFF) as u8;
+        }
+    }
+
+    let slot = {
+        let mut state = SWAP.lock();
+        let slot = state.slots.alloc().expect("should have free slots");
+        state.backend.write(slot, &test_data).expect("disk write");
+        slot
+    };
+
+    // Read back and verify.
+    let mut read_buf = vec![0u8; FRAME_SIZE];
+    {
+        let state = SWAP.lock();
+        state.backend.read(slot, &mut read_buf).expect("disk read");
+    }
+    assert_eq!(read_buf, test_data, "disk roundtrip data integrity");
+
+    // Test all-zero page (compresses to 1 byte — exercises
+    // the compression path on disk).
+    let zero_data = vec![0u8; FRAME_SIZE];
+    let zero_slot = {
+        let mut state = SWAP.lock();
+        let slot = state.slots.alloc().expect("free slot for zeros");
+        state.backend.write(slot, &zero_data).expect("disk write zeros");
+        slot
+    };
+
+    {
+        let state = SWAP.lock();
+        state.backend.read(zero_slot, &mut read_buf).expect("disk read zeros");
+    }
+    assert_eq!(read_buf, zero_data, "disk zero page roundtrip");
+
+    // Clean up — free the test slots.
+    {
+        let mut state = SWAP.lock();
+        state.backend.discard(slot);
+        state.slots.free(slot);
+        state.backend.discard(zero_slot);
+        state.slots.free(zero_slot);
+    }
+
+    serial_println!("[swap] Disk backend self-test PASSED");
 }

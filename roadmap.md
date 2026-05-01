@@ -39,7 +39,7 @@ _The minimum kernel that can run a single userspace process._
 - [x] Userspace virtual address space layout
 - [x] Demand paging (page fault handler, lazy allocation)
 - [x] Stack growth via page fault (guard page at bottom)
-- [-] Swap file support (not partition)
+- [x] Swap file support (not partition)
   - [x] Swap subsystem infrastructure: slot allocator (bitmap), swap entry PTE format, in-memory backend
   - [x] `swap_out_page()` and `swap_in_page()` for evicting/restoring user pages
   - [x] Page fault handler integration: detects swap PTEs and triggers swap-in
@@ -58,7 +58,13 @@ _The minimum kernel that can run a single userspace process._
     - [x] SlotData::Compressed vs ::Uncompressed storage per slot
     - [x] CompressionStats API: ratio_percent(), bytes_saved()
     - [x] Self-test: zero page (16K→1B), repeating (98% savings), sparse (>99% savings)
-  - [ ] Disk-backed swap via virtio-blk
+  - [x] Disk-backed swap via virtio-blk
+    - [x] DiskBackend: reads/writes compressed page data to block device sectors
+    - [x] SwapBackend enum: unifies Memory (zram) and Disk backends
+    - [x] init_disk(): validates device capacity, configures sector layout
+    - [x] Boot sequence: starts with zram, upgrades to disk when device available
+    - [x] QEMU boot-test.sh: 16 MiB swap disk image, virtio-blk-pci device
+    - [x] Self-test: write-read roundtrip (patterned data + zero page) on disk
 - [x] Committed vs. lazy memory allocation modes
   - [x] Default: committed (immediate frame allocation, the design spec's mandate)
   - [x] MAP_LAZY flag (bit 6) for opt-in demand-paged allocation via SYS_MMAP

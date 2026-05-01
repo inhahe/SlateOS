@@ -222,11 +222,10 @@ extern "C" fn kmain() -> ! {
     sysctl::init();
     sysctl::self_test();
 
-    // Step 9c: Initialize swap subsystem.
-    // The in-memory swap backend stores evicted pages in kernel heap.
-    // 256 slots = 4 MiB of swap capacity.  This is a test/development
-    // configuration; a disk-backed or compressed backend will be added
-    // later for production use.
+    // Step 9c: Initialize swap subsystem (zram initially).
+    // The in-memory compressed (zram) backend is always available.
+    // We'll try to upgrade to disk-backed swap after virtio-blk
+    // and blkdev init (Step 20e).
     mm::swap::init(256);
     mm::swap::self_test();
     mm::compress::self_test();
@@ -441,6 +440,22 @@ extern "C" fn kmain() -> ! {
     // Moves driver instances from their module globals into the
     // unified block device registry.
     blkdev::init();
+
+    // Step 20e-2: Try to upgrade swap from zram to disk-backed.
+    // Look for a dedicated swap device.  In QEMU, a second virtio-blk
+    // disk is available as "vda" (or "vdb" if the boot disk is also
+    // virtio).  Try known swap device names in order.
+    //
+    // Each slot = 16 KiB = 32 sectors.  512 slots = 16 MiB.
+    for swap_dev in &["vdb", "vda"] {
+        if mm::swap::init_disk(swap_dev, 0, 512).is_ok() {
+            serial_println!("[boot] Swap upgraded to disk backend on {}", swap_dev);
+            // Run the disk-specific self-test now that a disk backend
+            // is active.
+            mm::swap::self_test_disk();
+            break;
+        }
+    }
 
     // Step 20f: Mount root filesystem.
     // Try to mount a FAT filesystem from the first block device.

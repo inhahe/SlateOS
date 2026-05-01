@@ -99,7 +99,15 @@ cp "$PROJECT_ROOT/limine/BOOTX64.EFI" "$ESP_DIR/EFI/BOOT/BOOTX64.EFI"
 cp "$KERNEL_BIN" "$ESP_DIR/boot/kernel"
 cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"
 
-# Step 3: Boot QEMU
+# Step 3: Create a small swap disk image (16 MiB) for disk-backed swap testing.
+SWAP_IMG="$PROJECT_ROOT/build/swap.img"
+SWAP_IMG_WIN="$(to_win_path "$SWAP_IMG")"
+if [ ! -f "$SWAP_IMG" ]; then
+    echo "=== Creating 16 MiB swap disk image ==="
+    dd if=/dev/zero of="$SWAP_IMG" bs=1M count=16 status=none 2>/dev/null
+fi
+
+# Step 4: Boot QEMU
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s) ==="
 rm -f "$SERIAL_FILE"
 
@@ -107,6 +115,8 @@ OVMF_WIN="$(to_win_path "$OVMF")"
 "$QEMU" \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
+    -device virtio-blk-pci,drive=swap-disk \
+    -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     -serial "file:$SERIAL_FILE_WIN" \
     -display none \
     -no-reboot \

@@ -699,15 +699,32 @@ extern "C" fn ap_entry() -> ! {
 
     // Enter the AP idle loop.
     //
-    // Identical to the BSP's idle_loop in main.rs: reap dead tasks,
-    // refill the zeroed frame pool, yield, then HLT.  The scheduler
-    // treats this task like any other — it gets enqueued at IDLE_PRIORITY
-    // and picked only when no higher-priority task is ready.
+    // The timer ISR calls preempt() on every tick, which runs
+    // schedule_inner and switches to any ready task.  We do NOT call
+    // yield_now() here — it would redundantly acquire the SCHED lock
+    // (spinlock contention with other CPUs), re-enqueue the idle task,
+    // pick it right back, and return.  That contention was measured at
+    // ~4x regression on the context switch benchmark.
+    //
+    // Maintenance tasks (reap + refill) run at reduced frequency to
+    // avoid lock thrashing: reap every ~1 second (100 ticks), refill
+    // on every wake.
+    let mut tick_counter = 0u32;
     loop {
-        crate::sched::reap_dead_tasks();
+        crate::cpu::hlt(); // Sleep until next interrupt (timer tick).
+
+        tick_counter = tick_counter.wrapping_add(1);
+
+        // Reap dead tasks once per second (~100 ticks at 100 Hz).
+        // reap_dead_tasks allocates Vecs and acquires the SCHED lock
+        // even when nothing is dead, so throttling reduces contention.
+        if tick_counter % 100 == 0 {
+            crate::sched::reap_dead_tasks();
+        }
+
+        // Refill the pre-zeroed frame pool.  This doesn't contend on
+        // the SCHED lock, only the frame allocator (per-CPU fast path).
         crate::mm::frame::refill_zero_pool();
-        crate::sched::yield_now();
-        crate::cpu::hlt();
     }
 }
 

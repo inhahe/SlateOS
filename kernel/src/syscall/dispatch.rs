@@ -36,6 +36,8 @@ use super::number::{
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
     SYS_PORT_READ, SYS_PORT_WRITE,
+    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE,
+    SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
     SYS_CAP_QUERY, SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
@@ -170,6 +172,13 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_IRQ_RELEASE as usize] = Some(handlers::sys_irq_release);
     handlers[SYS_PORT_READ as usize] = Some(handlers::sys_port_read);
     handlers[SYS_PORT_WRITE as usize] = Some(handlers::sys_port_write);
+
+    // Scheduler configuration (50–59).
+    handlers[SYS_SCHED_SET_TIMESLICE as usize] = Some(handlers::sys_sched_set_timeslice);
+    handlers[SYS_SCHED_GET_TIMESLICE as usize] = Some(handlers::sys_sched_get_timeslice);
+    handlers[SYS_SCHED_RECONFIGURE as usize] = Some(handlers::sys_sched_reconfigure);
+    handlers[SYS_SCHED_SET_PROFILE as usize] = Some(handlers::sys_sched_set_profile);
+    handlers[SYS_SCHED_GET_PROFILE as usize] = Some(handlers::sys_sched_get_profile);
 
     // IPC (200–399)
     handlers[SYS_CHANNEL_CREATE as usize] = Some(handlers::sys_channel_create);

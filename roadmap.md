@@ -73,13 +73,22 @@ _Define scheduler trait interface first, implement one scheduler behind it._
     - [x] Per-task EWMA burst tracking (fixed-point x8, α=1/8)
     - [x] Tasks with avg burst < 5 ticks (50ms) get +2 priority boost
     - [x] Boost applied on wake/yield/resume, decays with long bursts
-  - [ ] Runtime-tunable time slice durations
+  - [x] Runtime-tunable time slice durations
+    - [x] `set_time_slice(level, ticks)`, `time_slice(level)`, `reconfigure_slices(base, increment)` on PriorityRoundRobin
+    - [x] Public sched module API: `set_time_slice()`, `get_time_slice()`, `reconfigure_time_slices()`
+    - [x] SYS_SCHED_SET_TIMESLICE (50), SYS_SCHED_GET_TIMESLICE (51), SYS_SCHED_RECONFIGURE (52)
+    - [x] Self-test validating set/get/reconfigure + boundary conditions
 - [x] Process/thread pause, resume, priority change while running
   - [x] sched::suspend/resume for task pause/unpause
   - [x] sched::set_priority for runtime priority change
   - [x] SYS_THREAD_SUSPEND (513), SYS_THREAD_RESUME (514), SYS_THREAD_SET_PRIORITY (515)
   - [x] Same-process authority enforcement
-- [ ] Workload profile presets for scheduler parameters
+- [x] Workload profile presets for scheduler parameters
+  - [x] `WorkloadProfile` enum: Desktop (0), Server (1), Development (2), Gaming (3)
+  - [x] Each profile encodes (base, increment) for time slice formula
+  - [x] `apply_profile()` on PriorityRoundRobin, `apply_workload_profile()` / `current_workload_profile()` on sched module
+  - [x] SYS_SCHED_SET_PROFILE (53), SYS_SCHED_GET_PROFILE (54) syscalls
+  - [x] Self-test: all 4 profiles, invalid IDs rejected, manual tuning detected
 
 ### 1.4 IPC and syscalls
 - [x] Syscall dispatch (many specialized syscalls, not few generic ones)

@@ -43,6 +43,7 @@ use spin::Mutex;
 
 use self::context::switch_context;
 use self::priority_rr::PriorityRoundRobin;
+pub use self::priority_rr::WorkloadProfile;
 use self::task::{Context, Task, TaskId, TaskState, NUM_PRIORITIES};
 
 // ---------------------------------------------------------------------------
@@ -595,6 +596,88 @@ pub fn reap_dead_tasks() -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Time slice configuration
+// ---------------------------------------------------------------------------
+
+/// Set the time slice (in timer ticks) for a specific priority level.
+///
+/// `level` must be in `0..NUM_PRIORITIES` (0–31) and `ticks` must be >= 1.
+/// A zero-tick time slice would starve the task.
+///
+/// Returns `true` on success, `false` if the level or ticks are invalid.
+pub fn set_time_slice(level: usize, ticks: u32) -> bool {
+    let mut state = SCHED.lock();
+    state.scheduler.set_time_slice(level, ticks)
+}
+
+/// Get the time slice (in timer ticks) for a specific priority level.
+///
+/// Returns `None` if the level is out of range.
+#[must_use]
+pub fn get_time_slice(level: usize) -> Option<u32> {
+    let state = SCHED.lock();
+    state.scheduler.time_slice(level)
+}
+
+/// Reconfigure all time slices with a new base and increment.
+///
+/// Formula: `time_slice[level] = base + level * increment`.
+/// `base` must be >= 1 (zero would starve priority-0 tasks).
+///
+/// Returns `true` on success, `false` if `base` is 0.
+pub fn reconfigure_time_slices(base: u32, increment: u32) -> bool {
+    let mut state = SCHED.lock();
+    state.scheduler.reconfigure_slices(base, increment)
+}
+
+/// Apply a named workload profile preset.
+///
+/// Profiles (from the design spec):
+/// - **Desktop** (0): balanced interactivity, base=2, inc=1
+/// - **Server** (1): throughput-oriented, base=4, inc=2
+/// - **Development** (2): quick context switches, base=1, inc=1
+/// - **Gaming** (3): minimal latency for foreground, base=1, inc=2
+///
+/// Returns `true` on success, `false` if the profile ID is invalid.
+pub fn apply_workload_profile(profile_id: u8) -> bool {
+    let Some(profile) = WorkloadProfile::from_u8(profile_id) else {
+        return false;
+    };
+    let mut state = SCHED.lock();
+    state.scheduler.apply_profile(profile);
+    serial_println!(
+        "[sched] Applied workload profile: {} (base={}, inc={})",
+        profile.name(), profile.base(), profile.increment()
+    );
+    true
+}
+
+/// Get the currently active workload profile, if the time slices
+/// match any known profile.
+///
+/// Returns `None` if the time slices have been manually tuned and
+/// don't match any profile.
+#[must_use]
+pub fn current_workload_profile() -> Option<WorkloadProfile> {
+    let state = SCHED.lock();
+    // Check each profile by comparing the time slice at level 0 and 1.
+    // This identifies the (base, increment) pair.
+    for profile_id in 0..=3u8 {
+        if let Some(profile) = WorkloadProfile::from_u8(profile_id) {
+            let base = profile.base();
+            let inc = profile.increment();
+            // Verify level 0 and level 1 match this profile's formula.
+            let l0 = state.scheduler.time_slice(0);
+            let l1 = state.scheduler.time_slice(1);
+            if l0 == Some(base) && l1 == Some(base.saturating_add(inc)) {
+                return Some(profile);
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Priority Inheritance support
 // ---------------------------------------------------------------------------
 
@@ -1055,6 +1138,8 @@ pub fn self_test() -> KernelResult<()> {
     test_suspend_resume()?;
     test_set_priority()?;
     test_interactive_detection()?;
+    test_time_slice_config()?;
+    test_workload_profiles()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -1332,6 +1417,213 @@ fn test_interactive_detection() -> KernelResult<()> {
         "[sched]   Interactive detection (threshold={}ticks, boost={}): OK",
         INTERACTIVE_THRESHOLD_TICKS, INTERACTIVE_BOOST
     );
+    Ok(())
+}
+
+/// Test 5: Runtime time slice configuration.
+///
+/// Verifies `set_time_slice`, `get_time_slice`, and `reconfigure_time_slices`
+/// through the sched module's public API.
+fn test_time_slice_config() -> KernelResult<()> {
+    // Read the default time slice for level 0 (should be BASE=2).
+    let default_0 = get_time_slice(0);
+    if default_0 != Some(2) {
+        serial_println!(
+            "[sched]   FAIL: default time slice for level 0 is {:?}, expected Some(2)",
+            default_0
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Read default for level 10: BASE + 10 * INCREMENT = 2 + 10 = 12.
+    let default_10 = get_time_slice(10);
+    if default_10 != Some(12) {
+        serial_println!(
+            "[sched]   FAIL: default time slice for level 10 is {:?}, expected Some(12)",
+            default_10
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Out-of-range level should return None.
+    if get_time_slice(32).is_some() {
+        serial_println!("[sched]   FAIL: get_time_slice(32) should return None");
+        return Err(KernelError::InternalError);
+    }
+
+    // Set level 5 to 100 ticks.
+    if !set_time_slice(5, 100) {
+        serial_println!("[sched]   FAIL: set_time_slice(5, 100) returned false");
+        return Err(KernelError::InternalError);
+    }
+    if get_time_slice(5) != Some(100) {
+        serial_println!("[sched]   FAIL: after set, level 5 is {:?}", get_time_slice(5));
+        return Err(KernelError::InternalError);
+    }
+
+    // Zero ticks should be rejected.
+    if set_time_slice(5, 0) {
+        serial_println!("[sched]   FAIL: set_time_slice(5, 0) should return false");
+        return Err(KernelError::InternalError);
+    }
+
+    // Out-of-range level should be rejected.
+    if set_time_slice(32, 10) {
+        serial_println!("[sched]   FAIL: set_time_slice(32, 10) should return false");
+        return Err(KernelError::InternalError);
+    }
+
+    // Reconfigure all: base=4, increment=2. Level 5 should become 4+5*2=14.
+    if !reconfigure_time_slices(4, 2) {
+        serial_println!("[sched]   FAIL: reconfigure_time_slices(4, 2) returned false");
+        return Err(KernelError::InternalError);
+    }
+    if get_time_slice(0) != Some(4) {
+        serial_println!("[sched]   FAIL: after reconfig, level 0 is {:?}", get_time_slice(0));
+        return Err(KernelError::InternalError);
+    }
+    if get_time_slice(5) != Some(14) {
+        serial_println!("[sched]   FAIL: after reconfig, level 5 is {:?}", get_time_slice(5));
+        return Err(KernelError::InternalError);
+    }
+
+    // Zero base should be rejected.
+    if reconfigure_time_slices(0, 1) {
+        serial_println!("[sched]   FAIL: reconfigure(0, 1) should return false");
+        return Err(KernelError::InternalError);
+    }
+
+    // Restore defaults: base=2, increment=1.
+    if !reconfigure_time_slices(2, 1) {
+        serial_println!("[sched]   FAIL: could not restore default time slices");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[sched]   Time slice configuration: OK");
+    Ok(())
+}
+
+/// Test 6: Workload profile presets.
+///
+/// Verifies that each profile applies the correct time slice formula
+/// and that the profile can be queried back.
+fn test_workload_profiles() -> KernelResult<()> {
+    // Desktop profile (id=0): base=2, inc=1.
+    if !apply_workload_profile(0) {
+        serial_println!("[sched]   FAIL: apply Desktop profile returned false");
+        return Err(KernelError::InternalError);
+    }
+    if get_time_slice(0) != Some(2) || get_time_slice(1) != Some(3) {
+        serial_println!(
+            "[sched]   FAIL: Desktop profile: level0={:?}, level1={:?}, expected 2, 3",
+            get_time_slice(0), get_time_slice(1)
+        );
+        return Err(KernelError::InternalError);
+    }
+    match current_workload_profile() {
+        Some(p) if p == WorkloadProfile::Desktop => {}
+        other => {
+            serial_println!(
+                "[sched]   FAIL: current_workload_profile after Desktop = {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Server profile (id=1): base=4, inc=2.
+    if !apply_workload_profile(1) {
+        serial_println!("[sched]   FAIL: apply Server profile returned false");
+        return Err(KernelError::InternalError);
+    }
+    if get_time_slice(0) != Some(4) || get_time_slice(1) != Some(6) {
+        serial_println!(
+            "[sched]   FAIL: Server profile: level0={:?}, level1={:?}, expected 4, 6",
+            get_time_slice(0), get_time_slice(1)
+        );
+        return Err(KernelError::InternalError);
+    }
+    match current_workload_profile() {
+        Some(p) if p == WorkloadProfile::Server => {}
+        other => {
+            serial_println!(
+                "[sched]   FAIL: current_workload_profile after Server = {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Development profile (id=2): base=1, inc=1.
+    if !apply_workload_profile(2) {
+        serial_println!("[sched]   FAIL: apply Development profile returned false");
+        return Err(KernelError::InternalError);
+    }
+    if get_time_slice(0) != Some(1) || get_time_slice(1) != Some(2) {
+        serial_println!(
+            "[sched]   FAIL: Development profile: level0={:?}, level1={:?}, expected 1, 2",
+            get_time_slice(0), get_time_slice(1)
+        );
+        return Err(KernelError::InternalError);
+    }
+    match current_workload_profile() {
+        Some(p) if p == WorkloadProfile::Development => {}
+        other => {
+            serial_println!(
+                "[sched]   FAIL: current_workload_profile after Development = {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Gaming profile (id=3): base=1, inc=2.
+    if !apply_workload_profile(3) {
+        serial_println!("[sched]   FAIL: apply Gaming profile returned false");
+        return Err(KernelError::InternalError);
+    }
+    if get_time_slice(0) != Some(1) || get_time_slice(1) != Some(3) {
+        serial_println!(
+            "[sched]   FAIL: Gaming profile: level0={:?}, level1={:?}, expected 1, 3",
+            get_time_slice(0), get_time_slice(1)
+        );
+        return Err(KernelError::InternalError);
+    }
+    match current_workload_profile() {
+        Some(p) if p == WorkloadProfile::Gaming => {}
+        other => {
+            serial_println!(
+                "[sched]   FAIL: current_workload_profile after Gaming = {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Invalid profile ID should be rejected.
+    if apply_workload_profile(4) {
+        serial_println!("[sched]   FAIL: profile ID 4 should be rejected");
+        return Err(KernelError::InternalError);
+    }
+    if apply_workload_profile(255) {
+        serial_println!("[sched]   FAIL: profile ID 255 should be rejected");
+        return Err(KernelError::InternalError);
+    }
+
+    // After manual tuning, current_workload_profile should return None.
+    let _ = set_time_slice(0, 99);
+    if current_workload_profile().is_some() {
+        serial_println!("[sched]   FAIL: profile should be None after manual tuning");
+        return Err(KernelError::InternalError);
+    }
+
+    // Restore default Desktop profile.
+    if !apply_workload_profile(0) {
+        serial_println!("[sched]   FAIL: could not restore Desktop profile");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[sched]   Workload profiles: OK (Desktop/Server/Development/Gaming)");
     Ok(())
 }
 

@@ -40,6 +40,105 @@ const BASE_TIME_SLICE: u32 = 2;
 const SLICE_INCREMENT: u32 = 1;
 
 // ---------------------------------------------------------------------------
+// Workload profiles
+// ---------------------------------------------------------------------------
+
+/// Predefined workload profiles that tune scheduler time slices.
+///
+/// From the design spec (§ "Workload profiles"):
+/// > Workload profiles would just be named presets of these runtime
+/// > parameters.  The user selects a profile, the OS applies the preset
+/// > values, no recompile needed.
+///
+/// Each profile tunes the time slice formula `base + level * increment`
+/// for the 32 priority levels.  At 100 Hz timer tick rate, 1 tick = 10 ms.
+///
+/// The numeric encoding matches the syscall argument (0–3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WorkloadProfile {
+    /// Balanced for general desktop use.  Moderate time slices across
+    /// all priorities; interactive tasks (detected via burst tracking)
+    /// get a priority boost.  Good for mixed workloads: browsing,
+    /// document editing, background builds.
+    ///
+    /// base=2 (20 ms), increment=1 → level 0: 20 ms, level 31: 330 ms.
+    Desktop = 0,
+
+    /// Database / server workloads.  Longer time slices to reduce
+    /// context switch overhead and maximize throughput.  Tasks run
+    /// longer before preemption, reducing scheduling jitter for
+    /// sustained CPU-bound work.
+    ///
+    /// base=4 (40 ms), increment=2 → level 0: 40 ms, level 31: 660 ms.
+    Server = 1,
+
+    /// Software development workloads.  Many short-lived processes
+    /// (compiler invocations, test runners, build scripts) benefit
+    /// from quick scheduling.  Short base slices keep context-switch
+    /// latency low for parallel `make -j` or `cargo build` runs.
+    ///
+    /// base=1 (10 ms), increment=1 → level 0: 10 ms, level 31: 320 ms.
+    Development = 2,
+
+    /// Gaming and real-time workloads.  Very short slices at high
+    /// priorities for minimal input-to-frame latency.  Low-priority
+    /// background tasks get generous slices to avoid starving them
+    /// entirely, but the foreground game (high priority) preempts
+    /// quickly.
+    ///
+    /// base=1 (10 ms), increment=2 → level 0: 10 ms, level 31: 630 ms.
+    Gaming = 3,
+}
+
+impl WorkloadProfile {
+    /// Try to convert a raw u8 to a profile.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Desktop),
+            1 => Some(Self::Server),
+            2 => Some(Self::Development),
+            3 => Some(Self::Gaming),
+            _ => None,
+        }
+    }
+
+    /// Get the time slice base for this profile (in timer ticks).
+    #[must_use]
+    pub const fn base(self) -> u32 {
+        match self {
+            Self::Desktop     => 2,
+            Self::Server      => 4,
+            Self::Development => 1,
+            Self::Gaming      => 1,
+        }
+    }
+
+    /// Get the time slice increment per priority level.
+    #[must_use]
+    pub const fn increment(self) -> u32 {
+        match self {
+            Self::Desktop     => 1,
+            Self::Server      => 2,
+            Self::Development => 1,
+            Self::Gaming      => 2,
+        }
+    }
+
+    /// Human-readable name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Desktop     => "Desktop",
+            Self::Server      => "Server",
+            Self::Development => "Development",
+            Self::Gaming      => "Gaming",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Priority round-robin scheduler
 // ---------------------------------------------------------------------------
 
@@ -181,5 +280,57 @@ impl PriorityRoundRobin {
     #[must_use]
     pub fn has_ready(&self) -> bool {
         self.bitmap != 0
+    }
+
+    /// Set the time slice for a specific priority level.
+    ///
+    /// `level` must be in `0..NUM_PRIORITIES` and `ticks` must be at
+    /// least 1 (a zero-tick time slice would starve the task).
+    ///
+    /// Returns `true` on success, `false` if the level is out of range
+    /// or ticks is 0.
+    pub fn set_time_slice(&mut self, level: usize, ticks: u32) -> bool {
+        if level >= NUM_PRIORITIES || ticks == 0 {
+            return false;
+        }
+        self.time_slices[level] = ticks;
+        true
+    }
+
+    /// Get the current time slice for a priority level (in timer ticks).
+    ///
+    /// Returns `None` if the level is out of range.
+    #[must_use]
+    pub fn time_slice(&self, level: usize) -> Option<u32> {
+        self.time_slices.get(level).copied()
+    }
+
+    /// Reconfigure all time slices with a new base and increment.
+    ///
+    /// Formula: `time_slice[level] = base + level * increment`.
+    /// Both `base` and `increment` must be >= 1.
+    ///
+    /// Returns `true` on success.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    pub fn reconfigure_slices(&mut self, base: u32, increment: u32) -> bool {
+        if base == 0 {
+            return false;
+        }
+        for (i, slot) in self.time_slices.iter_mut().enumerate() {
+            *slot = base.saturating_add((i as u32).saturating_mul(increment));
+        }
+        true
+    }
+
+    /// Apply a workload profile preset.
+    ///
+    /// Reconfigures all time slices to the profile's base and increment.
+    /// The currently-running task's remaining slice is NOT changed — the
+    /// new configuration takes effect on the next `pick_next()`.
+    pub fn apply_profile(&mut self, profile: WorkloadProfile) {
+        // apply_profile delegates to reconfigure_slices, which always
+        // succeeds because profile bases are all >= 1.
+        let ok = self.reconfigure_slices(profile.base(), profile.increment());
+        debug_assert!(ok, "WorkloadProfile base must be >= 1");
     }
 }

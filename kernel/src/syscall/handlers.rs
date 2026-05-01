@@ -3134,3 +3134,90 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
         Err(e) => SyscallResult::err(e),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scheduler configuration (50–59)
+// ---------------------------------------------------------------------------
+
+/// `SYS_SCHED_SET_TIMESLICE` — set time slice for a priority level.
+///
+/// `arg0`: priority level (0–31).
+/// `arg1`: time slice in timer ticks (>= 1).
+pub fn sys_sched_set_timeslice(args: &SyscallArgs) -> SyscallResult {
+    let level = args.arg0 as usize;
+    let ticks = args.arg1 as u32;
+
+    if sched::set_time_slice(level, ticks) {
+        serial_println!(
+            "[syscall] sched_set_timeslice: level {} = {} ticks",
+            level, ticks
+        );
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidArgument)
+    }
+}
+
+/// `SYS_SCHED_GET_TIMESLICE` — get time slice for a priority level.
+///
+/// `arg0`: priority level (0–31).
+pub fn sys_sched_get_timeslice(args: &SyscallArgs) -> SyscallResult {
+    let level = args.arg0 as usize;
+
+    match sched::get_time_slice(level) {
+        Some(ticks) => {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                SyscallResult::ok(ticks as i64)
+            }
+        }
+        None => SyscallResult::err(KernelError::InvalidArgument),
+    }
+}
+
+/// `SYS_SCHED_RECONFIGURE` — reconfigure all time slices.
+///
+/// `arg0`: base time slice in ticks (>= 1).
+/// `arg1`: increment per priority level.
+pub fn sys_sched_reconfigure(args: &SyscallArgs) -> SyscallResult {
+    let base = args.arg0 as u32;
+    let increment = args.arg1 as u32;
+
+    if sched::reconfigure_time_slices(base, increment) {
+        serial_println!(
+            "[syscall] sched_reconfigure: base={}, increment={}",
+            base, increment
+        );
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidArgument)
+    }
+}
+
+/// `SYS_SCHED_SET_PROFILE` — apply a workload profile preset.
+///
+/// `arg0`: profile ID (0=Desktop, 1=Server, 2=Development, 3=Gaming).
+pub fn sys_sched_set_profile(args: &SyscallArgs) -> SyscallResult {
+    let profile_id = args.arg0 as u8;
+
+    if sched::apply_workload_profile(profile_id) {
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidArgument)
+    }
+}
+
+/// `SYS_SCHED_GET_PROFILE` — query the current workload profile.
+pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+
+    match sched::current_workload_profile() {
+        Some(profile) => {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                SyscallResult::ok(profile as u8 as i64)
+            }
+        }
+        None => SyscallResult::err(KernelError::InvalidArgument),
+    }
+}

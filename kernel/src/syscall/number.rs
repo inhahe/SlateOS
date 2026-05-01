@@ -170,6 +170,58 @@ pub const SYS_TIMER_CANCEL: u64 = 13;
 /// Timer flag: periodic (re-arms after each expiry).
 pub const TIMER_PERIODIC: u64 = 1 << 0;
 
+/// Set the time slice (in timer ticks) for a scheduler priority level.
+///
+/// `arg0`: priority level (0–31, where 0 = highest priority).
+/// `arg1`: time slice in ticks (must be >= 1).
+///
+/// Returns: 0 on success, `InvalidArgument` if level is out of range
+/// or ticks is 0.
+///
+/// Requires no special capability currently (will be gated behind a
+/// scheduler-admin capability once the capability system covers
+/// scheduler configuration).
+pub const SYS_SCHED_SET_TIMESLICE: u64 = 50;
+
+/// Get the time slice (in timer ticks) for a scheduler priority level.
+///
+/// `arg0`: priority level (0–31).
+///
+/// Returns: time slice in ticks on success, `InvalidArgument` if level
+/// is out of range.
+pub const SYS_SCHED_GET_TIMESLICE: u64 = 51;
+
+/// Reconfigure all scheduler time slices with a base and increment.
+///
+/// `arg0`: base time slice in ticks (must be >= 1).
+/// `arg1`: increment per priority level.
+///
+/// Formula: `time_slice[level] = base + level * increment`.
+/// Higher-priority levels (lower numbers) get shorter slices for
+/// lower latency; lower-priority levels get longer slices for
+/// better throughput.
+///
+/// Returns: 0 on success, `InvalidArgument` if base is 0.
+pub const SYS_SCHED_RECONFIGURE: u64 = 52;
+
+/// Apply a named workload profile preset to the scheduler.
+///
+/// `arg0`: profile ID.
+///   - 0 = Desktop (balanced interactivity)
+///   - 1 = Server (throughput-oriented)
+///   - 2 = Development (quick context switches)
+///   - 3 = Gaming (minimal foreground latency)
+///
+/// Returns: 0 on success, `InvalidArgument` if ID is unknown.
+pub const SYS_SCHED_SET_PROFILE: u64 = 53;
+
+/// Query the current workload profile.
+///
+/// Returns: profile ID (0–3) if the current time slices match a
+/// known profile, or `InvalidArgument` if the configuration has been
+/// manually tuned.
+pub const SYS_SCHED_GET_PROFILE: u64 = 54;
+
 /// Debug print (temporary — write a byte string to serial).
 ///
 /// `arg0`: pointer to bytes.

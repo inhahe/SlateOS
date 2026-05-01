@@ -632,13 +632,13 @@ pub fn kill_task(task_id: TaskId) -> bool {
             task.state = TaskState::Dead;
         }
         TaskState::Running => {
-            // On single-CPU, Running means it's the current task.
-            // We already checked for that above.  If we get here,
-            // something is wrong, but handle it defensively.
-            serial_println!(
-                "[sched] BUG: kill_task: task {} is Running but not current (current={})",
-                task_id, current
-            );
+            // On SMP, the task may be Running on another CPU while
+            // we kill it from this CPU.  Mark it Dead — the other
+            // CPU will notice the state change at its next preemption
+            // or yield (schedule_inner checks state before re-enqueue).
+            //
+            // On single-CPU, this case shouldn't be reachable (we
+            // checked for current task above), but handle it safely.
             task.state = TaskState::Dead;
         }
     }
@@ -1187,11 +1187,23 @@ fn schedule_inner(requeue: bool) {
         }
 
         // Re-enqueue the current task if requested (on its current CPU).
+        //
+        // Guard: only re-enqueue if the task is still Running.  Another
+        // CPU may have called kill_task() or suspend() while we were
+        // executing, changing the state to Dead or Suspended.  If we
+        // blindly overwrite to Ready, the task would be re-enqueued
+        // despite being killed/suspended — a correctness bug on SMP.
         if requeue {
             if let Some(task) = state.tasks.get_mut(&current_id) {
-                task.state = TaskState::Ready;
-                let prio = task.effective_priority();
-                state.scheduler.enqueue(current_id, prio, cpu);
+                if task.state == TaskState::Running {
+                    task.state = TaskState::Ready;
+                    let prio = task.effective_priority();
+                    state.scheduler.enqueue(current_id, prio, cpu);
+                }
+                // If state is Dead/Suspended (set by another CPU),
+                // don't re-enqueue — the task is being terminated or
+                // paused.  It will not run again (Dead) or will be
+                // re-enqueued by resume() (Suspended).
             }
         }
 
@@ -1343,6 +1355,7 @@ pub fn self_test() -> KernelResult<()> {
 
     test_stack_canary()?;
     test_cooperative_scheduling()?;
+    test_kill_and_reap()?;
     test_suspend_resume()?;
     test_set_priority()?;
     test_interactive_detection()?;
@@ -1448,6 +1461,109 @@ fn test_cooperative_scheduling() -> KernelResult<()> {
         }
     }
     serial_println!("[sched]   Cleanup (free dead task stacks): OK");
+    Ok(())
+}
+
+/// Test 1b: Kill a task remotely and reap dead tasks.
+///
+/// Verifies:
+/// - kill_task() prevents a Ready task from ever running
+/// - kill_task() on a Blocked task marks it Dead
+/// - kill_task() refuses to kill the current task
+/// - kill_task() on an already-Dead task returns false
+/// - reap_dead_tasks() frees stacks and removes tasks from the table
+fn test_kill_and_reap() -> KernelResult<()> {
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+
+    // Spawn a task but kill it before it gets a chance to run.
+    let id_kill = spawn(b"test-kill-ready", 16, test_task_incr, 999, 0)?;
+
+    // The task is in Ready state.  Kill it.
+    if !kill_task(id_kill) {
+        serial_println!("[sched]   FAIL: kill_task returned false for Ready task");
+        return Err(KernelError::InternalError);
+    }
+
+    // Yield a few times — the killed task should NOT run.
+    yield_now();
+    yield_now();
+
+    let counter = TEST_COUNTER.load(Ordering::SeqCst);
+    if counter != 0 {
+        serial_println!(
+            "[sched]   FAIL: killed task ran (counter={}, expected 0)",
+            counter
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   kill_task(Ready): OK (task did not run)");
+
+    // Verify double-kill returns false.
+    if kill_task(id_kill) {
+        serial_println!("[sched]   FAIL: double kill_task returned true");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   kill_task(Dead): OK (returned false)");
+
+    // Verify killing the current task is refused.
+    let current = current_task_id();
+    if kill_task(current) {
+        serial_println!("[sched]   FAIL: kill_task(current) should return false");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   kill_task(current): OK (refused)");
+
+    // Test kill of a Blocked task.  Spawn a task and let it block itself
+    // by calling block_current.  We use a special task entry for this.
+    let id_block = spawn(b"test-kill-block", 16, test_task_block_self, 0, 0)?;
+
+    // Let it run — it will block itself.
+    yield_now();
+    yield_now();
+
+    // Verify it's blocked.
+    {
+        let state = SCHED.lock();
+        let task_state = state.tasks.get(&id_block).map(|t| t.state);
+        if task_state != Some(TaskState::Blocked) {
+            serial_println!(
+                "[sched]   FAIL: expected Blocked, got {:?}",
+                task_state
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Kill the blocked task.
+    if !kill_task(id_block) {
+        serial_println!("[sched]   FAIL: kill_task returned false for Blocked task");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   kill_task(Blocked): OK");
+
+    // Now test reap_dead_tasks.
+    let reaped = reap_dead_tasks();
+    if reaped < 2 {
+        serial_println!(
+            "[sched]   FAIL: reap_dead_tasks returned {} (expected >= 2)",
+            reaped
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify the tasks are gone from the table.
+    {
+        let state = SCHED.lock();
+        if state.tasks.contains_key(&id_kill) || state.tasks.contains_key(&id_block) {
+            serial_println!("[sched]   FAIL: reaped tasks still in table");
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[sched]   reap_dead_tasks: OK ({} reaped, tasks removed from table)",
+        reaped
+    );
+
     Ok(())
 }
 
@@ -1991,4 +2107,15 @@ extern "C" fn test_task_b(arg: u64) {
     TEST_COUNTER.fetch_add(arg, Ordering::SeqCst);
     serial_println!("[test-b] Second run, counter += {}", arg);
     // Returns → task_entry_trampoline calls task_finished.
+}
+
+/// Test task that blocks itself immediately.
+///
+/// Used by `test_kill_and_reap` to create a Blocked task that can
+/// be killed from outside.  The task calls `block_current()` and
+/// never wakes — it must be killed to clean up.
+extern "C" fn test_task_block_self(_arg: u64) {
+    serial_println!("[test-block] Blocking self...");
+    block_current();
+    // If we get here, someone woke us — just exit.
 }

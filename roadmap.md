@@ -209,7 +209,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Service spawn/management (init reads ELF from VFS, spawns child, waits for exit)
 - [ ] Dependency-based parallel service startup
 - [ ] Socket activation
-- [ ] Automatic crash restart with backoff
+- [x] Automatic crash restart with backoff
 - [ ] Resource limits per service (cgroup-equivalent)
 - [x] JSON-lines structured logging (text-based, not binary)
 - [ ] "Service ready" notification API

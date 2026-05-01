@@ -114,14 +114,14 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 ### 1.1 Boot and Hardware Init
 
 - [x] UEFI boot entry point (via Limine boot protocol)
-- [ ] Parse ACPI tables for hardware discovery (x86 uses ACPI, not DeviceTree)
+- [x] Parse ACPI tables for hardware discovery (x86 uses ACPI, not DeviceTree)
 - [x] Initialize GDT (with TSS for privilege transitions and IST for double-fault stack)
 - [x] Initialize IDT (all 20 exception handlers + default handler for remaining 236 vectors)
 - [x] Set up interrupt handlers (exception handlers log to serial and halt; IRQ handlers TBD with APIC)
-- [ ] Set up 16 KiB page tables (not 4 KiB — design decision)
-- [ ] Set up kernel heap allocator (geometric size class, per-CPU caches)
+- [x] Set up 16 KiB page tables (not 4 KiB — design decision)
+- [x] Set up kernel heap allocator (geometric size class, per-CPU caches)
 - [x] Initialize serial console for debug output (COM1, 115200 baud, 8N1)
-- [ ] Initialize PCI bus enumeration
+- [x] Initialize PCI bus enumeration
 - [ ] Boot task list display (optional, show what the OS is doing during boot)
 - [ ] Optimize boot time — minimize kernel to get to usable state fast
 - [ ] Low-priority HD access for background service/library loading during boot
@@ -130,20 +130,20 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 
 #### Physical Page Allocator
 - [x] Buddy allocator for 16 KiB base pages
-- [ ] Per-CPU free lists to avoid cross-CPU atomic contention
-- [ ] Benchmark: target < 1us per alloc/free (Linux buddy: 100-500ns)
+- [x] Per-CPU free lists to avoid cross-CPU atomic contention
+- [x] Benchmark: target < 1us per alloc/free (Linux buddy: 100-500ns) — measured 234ns
 
 #### Virtual Memory
 - [x] Page table management (map, unmap, protect)
 - [x] Kernel virtual address space layout
-- [ ] Userspace virtual address space layout
+- [x] Userspace virtual address space layout
 
 #### Demand Paging and Stack
 - [x] Page fault handler for demand paging
 - [x] Lazy allocation (allocate virtual range, commit physical on touch)
-- [ ] Stack growth via page fault
-- [ ] Guard page at bottom of stack (clean crash on overflow)
-- [ ] Configurable maximum stack size (default 8-64 MiB, programs can request more or unlimited)
+- [x] Stack growth via page fault
+- [x] Guard page at bottom of stack (clean crash on overflow)
+- [x] Configurable maximum stack size (default 8-64 MiB, programs can request more or unlimited)
 
 #### Memory Protection (W^X / NX bit)
 - [ ] Enforce W^X (write-xor-execute) on all userspace mappings via the NX bit
@@ -159,25 +159,25 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [ ] Audit: no kernel mappings with both write and execute permissions
 
 #### Swap
-- [ ] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD)
-- [ ] zswap/zram compressed swap (recommended for desktop)
-- [ ] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
+- [x] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD)
+- [x] zswap/zram compressed swap (recommended for desktop)
+- [x] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
 - [ ] Swap priority (multiple swap devices)
-- [ ] Minimum free memory threshold (when to start swapping)
+- [x] Minimum free memory threshold (when to start swapping)
 - [ ] Swap I/O must not tie up system — throttle or lower I/O priority
 
 #### Memory Allocation Modes
-- [ ] Committed memory by default (guaranteed backed by RAM + swap)
-- [ ] Lazy/overcommit memory as opt-in (programs request explicitly)
-- [ ] OOM handling: graceful, no silent kills — fail the allocation
+- [x] Committed memory by default (guaranteed backed by RAM + swap)
+- [x] Lazy/overcommit memory as opt-in (programs request explicitly)
+- [x] OOM handling: graceful, no silent kills — fail the allocation
 
 #### Kernel Heap
 - [x] Slab allocator for common kernel object sizes
 - [ ] Benchmark: target < 200ns for common sizes (jemalloc: 20-50ns)
 
 #### Tunables and Profiles
-- [ ] Runtime-tunable memory parameters via sysctl-like interface
-- [ ] Workload profiles as named presets: Desktop, Database, Development, Gaming
+- [x] Runtime-tunable memory parameters via sysctl-like interface
+- [x] Workload profiles as named presets: Desktop, Database, Development, Gaming
 - [ ] Settings UI can select workload type to populate tuning fields
 
 _Four workload profiles: Desktop (default, interactive/responsive), Database (high throughput, big caches — also covers server), Development (parallel compilation, many processes — also covers game dev), Gaming (low-latency, prioritize foreground app)._
@@ -185,21 +185,21 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
 ### 1.3 Scheduler
 
 - [x] Scheduler trait interface (pick_next_task, enqueue, dequeue, task_tick, balance_load)
-- [-] Priority round-robin scheduler (default implementation):
+- [x] Priority round-robin scheduler (default implementation):
   - [x] 32 or 64 priority levels, real-time levels at top
   - [x] Round-robin within each priority level
   - [x] Configurable time slices per level (shorter = higher priority for lower latency)
-  - [ ] Per-CPU run queues
-  - [ ] Work stealing from longest queue when idle (prefer same NUMA node)
-  - [ ] Priority inheritance on mutex contention
-  - [ ] Interactive task detection (I/O-blocking tasks get small priority boost)
-  - [ ] Runtime-tunable time slice durations
-- [ ] Process/thread pause while running
-- [ ] Process/thread resume while running
-- [ ] Process/thread priority change while running
-- [ ] Workload profile presets for scheduler parameters
-- [ ] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
-- [ ] Benchmark: context switch target < 5us (Linux: 1-3us)
+  - [x] Per-CPU run queues (PerCpuScheduler, cache-warm enqueue via last_cpu)
+  - [x] Work stealing from longest queue when idle (prefer same NUMA node)
+  - [x] Priority inheritance on mutex contention
+  - [x] Interactive task detection (I/O-blocking tasks get small priority boost, EWMA burst tracking)
+  - [x] Runtime-tunable time slice durations
+- [x] Process/thread pause while running
+- [x] Process/thread resume while running
+- [x] Process/thread priority change while running
+- [x] Workload profile presets for scheduler parameters
+- [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
+- [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
 
 ### 1.4 IPC and Syscalls
 

@@ -62,6 +62,7 @@ pub fn halt_loop() -> ! {
 
 /// Read the current value of the RFLAGS register.
 #[inline]
+#[allow(dead_code)] // Used by without_interrupts and future CPU state inspection.
 pub fn read_rflags() -> u64 {
     let rflags: u64;
     // SAFETY: Reading RFLAGS is always safe.
@@ -79,6 +80,7 @@ pub fn read_rflags() -> u64 {
 /// Check whether hardware interrupts are currently enabled.
 #[inline]
 #[must_use]
+#[allow(dead_code)] // Used by without_interrupts and debugging.
 pub fn interrupts_enabled() -> bool {
     const IF_FLAG: u64 = 1 << 9;
     read_rflags() & IF_FLAG != 0
@@ -94,6 +96,7 @@ pub fn interrupts_enabled() -> bool {
 ///
 /// The closure must not enable interrupts itself, and must complete
 /// quickly to avoid excessive interrupt latency.
+#[allow(dead_code)] // Standard critical-section primitive, will be used widely.
 pub fn without_interrupts<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,

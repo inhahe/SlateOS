@@ -284,6 +284,7 @@ impl PriorityRoundRobin {
 
     /// Check if any task is ready to run.
     #[must_use]
+    #[allow(dead_code)] // Used by idle loop to decide hlt vs spin.
     pub fn has_ready(&self) -> bool {
         self.bitmap != 0
     }
@@ -468,6 +469,7 @@ impl PerCpuScheduler {
 
     /// Number of online CPUs.
     #[must_use]
+    #[allow(dead_code)] // Public API for topology queries and load balancing.
     pub fn num_cpus(&self) -> usize {
         self.num_cpus
     }

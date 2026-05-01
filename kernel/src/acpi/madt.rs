@@ -65,6 +65,7 @@ const MADT_LOCAL_APIC_ADDR_OVERRIDE: u8 = 5;
 
 /// Information about a processor's Local APIC (MADT type 0).
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Fields used by SMP bootstrap and hot-plug CPU support.
 pub struct ProcessorInfo {
     /// ACPI processor UID (unique per processor).
     pub acpi_processor_id: u8,
@@ -79,6 +80,7 @@ pub struct ProcessorInfo {
 
 /// Information about an I/O APIC (MADT type 1).
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Fields used by multi-IOAPIC support and GSI routing.
 pub struct IoApicInfo {
     /// I/O APIC hardware ID.
     pub id: u8,
@@ -99,6 +101,7 @@ pub struct IoApicInfo {
 ///
 /// Common example: ISA IRQ 0 (PIT timer) → GSI 2 on many systems.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Bus field needed for non-ISA systems.
 pub struct InterruptOverride {
     /// Bus source (always 0 = ISA in practice).
     pub bus: u8,
@@ -129,6 +132,7 @@ impl InterruptOverride {
 
 /// Local APIC NMI routing (MADT type 4).
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Fields used by NMI LINT routing during AP init.
 pub struct LocalApicNmi {
     /// ACPI processor ID (0xFF = all processors).
     pub acpi_processor_id: u8,
@@ -143,6 +147,7 @@ pub struct LocalApicNmi {
 // ---------------------------------------------------------------------------
 
 /// Fully parsed MADT contents.
+#[allow(dead_code)] // Fields accessed via accessor functions in acpi::mod.
 pub struct MadtInfo {
     /// Default Local APIC physical address (may be overridden).
     pub local_apic_address: u64,

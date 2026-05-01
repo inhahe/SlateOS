@@ -444,6 +444,7 @@ pub fn io_apic_address() -> Option<u64> {
 }
 
 /// Get all I/O APIC descriptors from the MADT.
+#[allow(dead_code)] // Public API for future IOMMU and multi-IOAPIC support.
 pub fn io_apics() -> Vec<IoApicInfo> {
     MADT_DATA
         .lock()
@@ -477,6 +478,7 @@ pub fn processors() -> Vec<ProcessorInfo> {
 }
 
 /// Get Local APIC NMI routing information from the MADT.
+#[allow(dead_code)] // Public API for NMI routing setup on APs.
 pub fn local_apic_nmis() -> Vec<LocalApicNmi> {
     MADT_DATA
         .lock()
@@ -486,6 +488,7 @@ pub fn local_apic_nmis() -> Vec<LocalApicNmi> {
 }
 
 /// Check if the legacy dual-8259 PIC is present (PCAT_COMPAT flag).
+#[allow(dead_code)] // Used when PIC mode detection is needed.
 pub fn has_legacy_pic() -> bool {
     MADT_DATA
         .lock()
@@ -495,6 +498,7 @@ pub fn has_legacy_pic() -> bool {
 }
 
 /// Get the number of enabled processors discovered in the MADT.
+#[allow(dead_code)] // Public API for SMP topology queries.
 pub fn processor_count() -> usize {
     MADT_DATA
         .lock()

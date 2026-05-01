@@ -439,6 +439,7 @@ pub fn bsp_id() -> u8 {
 ///
 /// Returns 0 if calibration hasn't been done yet.
 #[must_use]
+#[allow(dead_code)] // Public API for timer frequency inspection.
 pub fn calibrated_count() -> u32 {
     CALIBRATED_TIMER_COUNT.load(core::sync::atomic::Ordering::Relaxed)
 }

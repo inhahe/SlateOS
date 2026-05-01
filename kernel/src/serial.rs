@@ -147,6 +147,7 @@ pub unsafe fn init() {
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {{
+        #[allow(unused_imports)]
         use core::fmt::Write;
         // Lock the serial port and write.  If the lock is poisoned
         // (shouldn't happen with spinlocks), we silently drop the output

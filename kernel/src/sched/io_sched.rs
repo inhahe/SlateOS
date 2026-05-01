@@ -105,6 +105,7 @@ impl IoPriority {
 
 /// Direction of the I/O operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Used when submitting I/O requests to the scheduler.
 pub enum IoDirection {
     /// Read from device to buffer.
     Read,
@@ -502,6 +503,7 @@ pub fn dispatch(device_id: u32) -> Option<IoRequest> {
 
 /// Get the number of pending I/O requests across all processes.
 #[must_use]
+#[allow(dead_code)] // Public API for I/O pressure monitoring.
 pub fn pending_count() -> usize {
     IO_SCHEDULER.lock().pending()
 }
@@ -521,6 +523,7 @@ pub fn stats() -> IoSchedStats {
 
 /// I/O scheduler statistics.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Public API for I/O scheduler dashboard.
 pub struct IoSchedStats {
     /// Number of pending requests.
     pub pending: usize,

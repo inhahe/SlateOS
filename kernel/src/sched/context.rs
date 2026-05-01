@@ -109,6 +109,7 @@ unsafe extern "C" {
     ///
     /// Not called directly — its address is placed on the new task's
     /// stack by [`Task::prepare_context`].
+    #[allow(dead_code)] // Referenced by assembly; address taken for stack setup.
     pub fn task_entry_trampoline();
 }
 

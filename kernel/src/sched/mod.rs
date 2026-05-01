@@ -60,6 +60,7 @@ use self::task::{Context, Task, TaskId, TaskState, NUM_PRIORITIES};
 /// The scheduler decides which task runs next.  It does NOT own the
 /// tasks — tasks are stored in the global [`TASKS`] table.  The
 /// scheduler only holds `TaskId` values and priority information.
+#[allow(dead_code)] // Trait interface for pluggable scheduler implementations (EEVDF, deadline).
 pub trait Scheduler {
     /// Pick the highest-priority ready task.  Removes it from the
     /// run queue.  Returns `None` if no task is ready.

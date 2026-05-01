@@ -17,6 +17,7 @@ use core::fmt;
 /// Variants are organized by subsystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
+#[allow(dead_code)] // Variants are part of the stable ABI; all will be used as subsystems mature.
 pub enum KernelError {
     // --- General (0 - 99) ---
     /// An operation that should have been valid produced an unexpected state.

@@ -225,6 +225,7 @@ impl SwapSlotAllocator {
 
     /// Check if a slot is currently allocated.
     #[must_use]
+    #[allow(dead_code)] // Diagnostic API for swap debugging.
     fn is_used(&self, slot: u32) -> bool {
         let wi = (slot / 64) as usize;
         let bit = slot % 64;
@@ -663,6 +664,7 @@ static SWAP: Mutex<SwapState> = Mutex::new(SwapState::uninit());
 /// The reclaimer maintains a circular list of these records and uses
 /// the Clock (second-chance) algorithm to select victims.
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // flags field stored for swap-in restoration.
 struct ReclaimablePage {
     /// PML4 physical address of the owning process's page table.
     pml4_phys: u64,
@@ -960,6 +962,7 @@ pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelR
 
 /// Check if the swap subsystem is initialized and has capacity.
 #[must_use]
+#[allow(dead_code)] // Public API for OOM policy decisions.
 pub fn is_available() -> bool {
     let state = SWAP.lock();
     state.initialized && state.slots.free_count() > 0
@@ -967,18 +970,21 @@ pub fn is_available() -> bool {
 
 /// Number of free swap slots.
 #[must_use]
+#[allow(dead_code)] // Public API for memory pressure monitoring.
 pub fn free_slots() -> u32 {
     SWAP.lock().slots.free_count()
 }
 
 /// Number of used swap slots.
 #[must_use]
+#[allow(dead_code)] // Public API for memory statistics reporting.
 pub fn used_slots() -> u32 {
     SWAP.lock().slots.used
 }
 
 /// Compression statistics for the zram backend.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Public API for memory statistics dashboard.
 pub struct CompressionStats {
     /// Total uncompressed bytes of all stored pages (logical size).
     pub uncompressed_bytes: u64,
@@ -995,6 +1001,7 @@ impl CompressionStats {
     /// 100% means no compression; 50% means half the size.
     /// Returns 0 if no data is stored.
     #[must_use]
+    #[allow(dead_code)] // Public API for memory statistics dashboard.
     pub fn ratio_percent(&self) -> u64 {
         if self.uncompressed_bytes == 0 {
             return 0;
@@ -1007,6 +1014,7 @@ impl CompressionStats {
 
     /// Memory saved by compression (in bytes).
     #[must_use]
+    #[allow(dead_code)] // Public API for memory statistics dashboard.
     pub fn bytes_saved(&self) -> u64 {
         self.uncompressed_bytes
             .saturating_sub(self.compressed_bytes)
@@ -1015,6 +1023,7 @@ impl CompressionStats {
 
 /// Get compression statistics from the zram backend.
 #[must_use]
+#[allow(dead_code)] // Public API for memory statistics reporting.
 pub fn compression_stats() -> CompressionStats {
     let state = SWAP.lock();
     match &state.backend {

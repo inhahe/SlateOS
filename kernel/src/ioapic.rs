@@ -553,6 +553,7 @@ pub fn irq_consume(irq: u32) -> u64 {
 
 /// Check if an IRQ has pending interrupts (without consuming).
 #[must_use]
+#[allow(dead_code)] // Public API for polling-mode IRQ status checks.
 pub fn irq_is_pending(irq: u32) -> bool {
     IRQ_PENDING
         .get(irq as usize)

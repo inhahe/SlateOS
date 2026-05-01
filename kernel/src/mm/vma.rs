@@ -41,6 +41,7 @@ use core::ptr;
 /// Determines how the page fault handler resolves faults within the
 /// VMA's address range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // All variants needed by process address space management.
 pub enum VmaKind {
     /// Demand-paged anonymous memory.  Frames are allocated and
     /// zero-filled on first access.
@@ -92,6 +93,7 @@ impl Vma {
     /// Size of this VMA in bytes.
     #[must_use]
     #[allow(clippy::arithmetic_side_effects)]
+    #[allow(dead_code)] // Public API for VMA size queries.
     pub const fn len(&self) -> u64 {
         self.end - self.start
     }
@@ -126,6 +128,7 @@ impl AddressSpace {
 
     /// The PML4 physical address for this address space.
     #[must_use]
+    #[allow(dead_code)] // Needed by fork (clone page tables) and process management.
     pub const fn pml4_phys(&self) -> u64 {
         self.pml4_phys
     }

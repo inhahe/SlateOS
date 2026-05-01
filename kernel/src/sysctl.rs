@@ -259,6 +259,7 @@ impl Registry {
 }
 
 /// Read-only snapshot of a parameter's metadata.
+#[allow(dead_code)] // Returned by sysctl::info() for parameter introspection.
 pub struct ParamInfo {
     pub id: u16,
     pub name: &'static str,
@@ -379,12 +380,14 @@ pub fn set(id: u16, value: u64) -> Option<u64> {
 
 /// Get metadata for a parameter by ID.
 #[must_use]
+#[allow(dead_code)] // Public API for sysctl info syscall.
 pub fn info(id: u16) -> Option<ParamInfo> {
     REGISTRY.lock().find(id)
 }
 
 /// Get the number of registered parameters.
 #[must_use]
+#[allow(dead_code)] // Public API for sysctl enumeration.
 pub fn count() -> usize {
     REGISTRY.lock().count
 }

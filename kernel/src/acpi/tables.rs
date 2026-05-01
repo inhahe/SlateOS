@@ -88,6 +88,7 @@ impl SdtHeader {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 
     /// Get the 4-byte signature as a string slice (for logging).
+    #[allow(dead_code)] // Useful for diagnostic logging of unknown tables.
     pub fn signature_str(&self) -> &str {
         core::str::from_utf8(&self.signature).unwrap_or("????")
     }

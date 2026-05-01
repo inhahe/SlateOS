@@ -107,6 +107,7 @@ impl PciDevice {
     /// Return BAR0 as a memory-mapped base address (if BAR0 is MMIO).
     ///
     /// Returns `None` if BAR0 is I/O space (bit 0 = 1).
+    #[allow(dead_code)] // Public API for MMIO-based PCI device drivers.
     pub fn bar0_mmio_addr(&self) -> Option<u64> {
         let bar = self.bars[0];
         if bar & 1 == 0 {

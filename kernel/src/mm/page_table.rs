@@ -75,6 +75,7 @@ const PHYS_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 ///
 /// PML4 entries 256–511 cover this range.  Kernel mappings in this
 /// region are shared across all process address spaces.
+#[allow(dead_code)] // Public API for address space layout queries.
 pub const KERNEL_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 /// End of user virtual address space (exclusive).
@@ -133,6 +134,7 @@ impl PageFlags {
     pub const USER_ACCESSIBLE: Self = Self(1 << 2);
 
     /// Write-through caching policy.
+    #[allow(dead_code)] // Used by DMA and MMIO mapping.
     pub const WRITE_THROUGH: Self = Self(1 << 3);
 
     /// Disable caching entirely.  Used for memory-mapped I/O regions
@@ -146,6 +148,7 @@ impl PageFlags {
     /// Set by the CPU on write.  Only meaningful at the leaf (PT)
     /// level.  Not cleared automatically.  Used to detect modified
     /// pages for writeback.
+    #[allow(dead_code)] // Used by swap writeback detection.
     pub const DIRTY: Self = Self(1 << 6);
 
     /// Page size bit: at PD level creates a 2 MiB page, at PDPT level
@@ -178,6 +181,7 @@ impl PageFlags {
 
     /// No flags set.
     #[must_use]
+    #[allow(dead_code)] // Constructor for page table operations.
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -381,6 +385,7 @@ impl VirtAddr {
 
     /// Is this address in kernel space (upper canonical half)?
     #[must_use]
+    #[allow(dead_code)] // Public API for address classification.
     pub const fn is_kernel(self) -> bool {
         self.0 >= KERNEL_BASE
     }
@@ -1196,6 +1201,7 @@ pub unsafe fn write_swap_entries(
 /// Calling it unnecessarily is a performance cost (the TLB will
 /// reload the entry on the next access to that page).
 #[inline]
+#[allow(dead_code)] // Low-level TLB primitive; used by tlb module.
 pub unsafe fn invlpg(addr: u64) {
     // SAFETY: invlpg is always safe in ring 0.
     unsafe {
@@ -1236,6 +1242,7 @@ pub unsafe fn flush_frame(virt: VirtAddr) {
 /// Same as [`invlpg`].  The caller must ensure no other CPU relies
 /// on the TLB entries being flushed.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(dead_code)] // Used during boot identity map teardown.
 pub unsafe fn flush_frame_local(virt: VirtAddr) {
     let base = virt.as_u64();
     for i in 0..HW_PAGES_PER_FRAME {

@@ -66,6 +66,7 @@ use spin::{Mutex, Once};
 pub const FRAME_SIZE: usize = 16 * 1024; // 16 KiB
 
 /// Number of 4 KiB hardware pages per frame.
+#[allow(dead_code)] // Public API for drivers and user-space mappings.
 pub const PAGES_PER_FRAME: usize = FRAME_SIZE / 4096;
 
 /// Maximum buddy order.  Order N = 2^N frames = `FRAME_SIZE` × 2^N bytes.
@@ -762,6 +763,7 @@ impl PerCpuFrameCache {
 
     /// Is the cache empty?
     #[inline]
+    #[allow(dead_code)] // Useful for diagnostics / future cache tuning.
     fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -915,6 +917,7 @@ fn pcpu_drain(cpu: usize) -> usize {
 
 /// Allocator statistics snapshot.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Public stats API; fields used by diagnostics/sysctl.
 pub struct FrameAllocStats {
     /// Total frames in the managed range (including non-usable holes).
     pub total_frames: usize,

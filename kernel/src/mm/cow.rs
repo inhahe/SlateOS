@@ -300,6 +300,7 @@ unsafe fn write_pte(
 /// - The caller must flush the TLB for this address after calling.
 /// - The physical frame's refcount must be incremented to reflect the
 ///   additional reference (the caller is responsible for this).
+#[allow(dead_code)] // Used by fork/duplicate_user_pages (not yet integrated).
 pub unsafe fn mark_cow(pml4_phys: u64, virt: VirtAddr) -> KernelResult<()> {
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 

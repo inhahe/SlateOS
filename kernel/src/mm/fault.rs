@@ -71,6 +71,7 @@ impl PageFaultError {
     /// Bit 2: `true` if the fault occurred in user mode (ring 3).
     /// `false` if in kernel mode (ring 0).
     #[must_use]
+    #[allow(dead_code)] // Used by exception handler for fault classification.
     pub const fn is_user(&self) -> bool {
         self.0 & (1 << 2) != 0
     }

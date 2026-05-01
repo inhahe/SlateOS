@@ -35,6 +35,9 @@
 //! - Linux `kernel/dma/` — DMA allocation and mapping framework
 //! - Fuchsia `zircon/kernel/dev/iommu/` — IOMMU-aware DMA
 
+// Most DMA functions are public API awaiting userspace driver syscall integration.
+#![allow(dead_code)]
+
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::serial_println;

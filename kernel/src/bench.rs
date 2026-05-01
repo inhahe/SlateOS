@@ -209,6 +209,7 @@ pub fn cycles_to_ns(cycles: u64) -> u64 {
 
 /// Result of a benchmark run.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields are available for external benchmark analysis.
 pub struct BenchResult {
     /// Benchmark name.
     pub name: String,
@@ -604,7 +605,7 @@ fn bench_pick_next() {
     }
 
     // Measure yield with multiple tasks in the run queue.
-    let result = run("sched_pick_next_4tasks", 500, || {
+    let _result = run("sched_pick_next_4tasks", 500, || {
         sched::yield_now();
     });
 
@@ -639,7 +640,7 @@ extern "C" fn bench_nop_task(_arg: u64) {
 /// returns the current task ID — minimal work).  This is the kernel-side
 /// dispatch overhead, excluding the user↔kernel ring transition.
 fn bench_syscall_dispatch() {
-    use crate::syscall::dispatch::{dispatch, SyscallArgs, SyscallResult};
+    use crate::syscall::dispatch::{dispatch, SyscallArgs};
     use crate::syscall::number::SYS_TASK_ID;
 
     let args = SyscallArgs {
@@ -740,7 +741,7 @@ fn bench_page_fault() {
     let bench_virt_base: u64 = 0xFFFF_CB00_0000_0000;
 
     let result = run("page_fault_anonymous", 200, || {
-        let virt = VirtAddr::new(bench_virt_base);
+        let _virt = VirtAddr::new(bench_virt_base);
 
         // Allocate a frame (simulating what the fault handler does).
         let f = frame::alloc_frame().expect("bench: alloc");

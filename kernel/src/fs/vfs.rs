@@ -243,6 +243,7 @@ impl Vfs {
 
     /// List entries in a directory.
     pub fn readdir(path: &str) -> KernelResult<Vec<DirEntry>> {
+        validate_path(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.readdir(relative)
@@ -250,6 +251,7 @@ impl Vfs {
 
     /// Read a file's contents.
     pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
+        validate_path(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.read_file(relative)
@@ -257,6 +259,7 @@ impl Vfs {
 
     /// Get metadata for a path.
     pub fn stat(path: &str) -> KernelResult<DirEntry> {
+        validate_path(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.stat(relative)
@@ -264,6 +267,7 @@ impl Vfs {
 
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
+        validate_path(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, path)?;
@@ -277,6 +281,7 @@ impl Vfs {
 
     /// Delete a file.
     pub fn remove(path: &str) -> KernelResult<()> {
+        validate_path(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, path)?;
@@ -301,6 +306,7 @@ impl Vfs {
 
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
+        validate_path(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, path)?;
@@ -313,6 +319,7 @@ impl Vfs {
 
     /// Read a range of bytes from a file.
     pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        validate_path(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.read_at(relative, offset, len)
@@ -322,6 +329,7 @@ impl Vfs {
 
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        validate_path(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, path)?;
@@ -334,6 +342,7 @@ impl Vfs {
 
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
+        validate_path(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, path)?;
@@ -348,6 +357,8 @@ impl Vfs {
     ///
     /// Both paths must be on the same mount point.
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
+        validate_path(from)?;
+        validate_path(to)?;
         {
             let mut vfs = VFS.lock();
 
@@ -380,6 +391,48 @@ impl Vfs {
         }
         Err(KernelError::NotFound)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Path validation
+// ---------------------------------------------------------------------------
+
+/// Maximum length of a single filename component (bytes, not characters).
+///
+/// The design spec (CLAUDE.md) specifies 255 bytes.  This matches the
+/// Linux ext4 limit and is generous enough for any reasonable name while
+/// preventing denial-of-service via absurdly long names.
+const MAX_COMPONENT_LEN: usize = 255;
+
+/// Validate a VFS path.
+///
+/// Rules (per design.txt lines 275-278):
+/// - No null bytes anywhere in the path.
+/// - Each component (between `/` separators) must be ≤ 255 bytes.
+/// - Empty components are allowed (they result from double slashes and
+///   are harmlessly collapsed by [`normalize_path`]).
+/// - The path must start with `/` (absolute paths only in the VFS).
+///
+/// Returns `Ok(())` if valid, `Err(InvalidArgument)` if not.
+pub fn validate_path(path: &str) -> KernelResult<()> {
+    // No null bytes.
+    if path.bytes().any(|b| b == 0) {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Must be absolute.
+    if !path.starts_with('/') {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Check each component length.
+    for component in path.split('/') {
+        if component.len() > MAX_COMPONENT_LEN {
+            return Err(KernelError::InvalidArgument);
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

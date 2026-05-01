@@ -245,13 +245,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Efficient partial I/O (FAT read_at/write_at/truncate override default read-all-rewrite-all)
   - [x] Filesystem change notification system (inotify equivalent, async watches with bounded queues)
   - [x] Recycle bin (per-filesystem /_TRASH with _INDEX metadata file, trash/list/restore/empty)
-  - [x] 15 filesystem syscalls (600-624): file handles, trash, watch/notify
-- [ ] Filesystem features:
-  - [ ] Case-sensitive paths, forward slash separator
-  - [ ] Filenames: allow everything except `/` and null byte, 255 byte max
+  - [x] 18 filesystem syscalls (600-627): file handles, trash, watch/notify, journal
+  - [x] Change journal (persistent across reboots, JSON-lines /_JOURNAL file, 1024-entry ring buffer, 3 syscalls)
+- [-] Filesystem features:
+  - [x] Case-sensitive paths, forward slash separator (VFS is case-sensitive; FAT case-insensitive by nature)
+  - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths
   - [ ] Journaling (via ext4)
   - [ ] File metadata: owner, group, capabilities, created/modified/accessed (relatime), hash, size, immutable flag, append-only flag, arbitrary extended attributes
-  - [ ] Change journal for "what changed since timestamp X" queries (for backup programs)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

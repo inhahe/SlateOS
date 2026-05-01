@@ -516,14 +516,15 @@ impl Vfs {
     /// the underlying filesystem doesn't have a physical directory there).
     pub fn readdir(path: &str) -> KernelResult<Vec<DirEntry>> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
 
         // Collect mount-point names that are direct children of `path`.
         // E.g., if path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"].
         // Nested mounts like "/mnt/usb" are NOT direct children of "/".
-        let submount_names: Vec<String> = Self::submount_children(&vfs, path);
+        let submount_names: Vec<String> = Self::submount_children(&vfs, &path);
 
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         let mut entries = mp.fs.readdir(relative)?;
 
         // Inject submount directories that the underlying FS doesn't know about.
@@ -543,76 +544,84 @@ impl Vfs {
     /// Read a file's contents.
     pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.read_file(relative)
     }
 
     /// Get metadata for a path.
     pub fn stat(path: &str) -> KernelResult<DirEntry> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.stat(relative)
     }
 
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.write_file(relative, data)?;
         }
         // Notify and journal after releasing VFS lock (avoids holding both locks).
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
     /// Delete a file.
     pub fn remove(path: &str) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.remove(relative)?;
         }
-        super::notify::emit_deleted(path);
-        super::journal::record(super::journal::JournalEventType::Deleted, path);
+        super::notify::emit_deleted(&path);
+        super::journal::record(super::journal::JournalEventType::Deleted, &path);
         Ok(())
     }
 
     /// Create a directory.
     pub fn mkdir(path: &str) -> KernelResult<()> {
+        validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.mkdir(relative)?;
         }
-        super::notify::emit_created(path);
-        super::journal::record(super::journal::JournalEventType::Created, path);
+        super::notify::emit_created(&path);
+        super::journal::record(super::journal::JournalEventType::Created, &path);
         Ok(())
     }
 
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.rmdir(relative)?;
         }
-        super::notify::emit_deleted(path);
-        super::journal::record(super::journal::JournalEventType::Deleted, path);
+        super::notify::emit_deleted(&path);
+        super::journal::record(super::journal::JournalEventType::Deleted, &path);
         Ok(())
     }
 
     /// Read a range of bytes from a file.
     pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.read_at(relative, offset, len)
         // Note: no ACCESS event emitted by default (high-frequency).
         // Callers that need it can emit manually.
@@ -621,26 +630,28 @@ impl Vfs {
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.write_at(relative, offset, data)?;
         }
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.truncate(relative, size)?;
         }
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
@@ -650,16 +661,18 @@ impl Vfs {
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
         validate_path(from)?;
         validate_path(to)?;
+        let from = normalize_path(from);
+        let to = normalize_path(to);
         {
             let mut vfs = VFS.lock();
 
             // Both paths must resolve to the same mount point.
-            let (mp_from, rel_from) = find_mount(&mut vfs, from)?;
+            let (mp_from, rel_from) = find_mount(&mut vfs, &from)?;
             let from_mount_path = mp_from.path.clone();
             let rel_from_owned = String::from(rel_from);
 
             // Find mount for `to` — must be the same filesystem.
-            let (mp_to, rel_to) = find_mount(&mut vfs, to)?;
+            let (mp_to, rel_to) = find_mount(&mut vfs, &to)?;
             if mp_to.path != from_mount_path {
                 return Err(KernelError::InvalidArgument);
             }
@@ -667,8 +680,8 @@ impl Vfs {
             // Delegate to the filesystem (using the `from` mount).
             mp_to.fs.rename(&rel_from_owned, rel_to)?;
         }
-        super::notify::emit_renamed(from, to);
-        super::journal::record_rename(from, to);
+        super::notify::emit_renamed(&from, &to);
+        super::journal::record_rename(&from, &to);
         Ok(())
     }
 
@@ -732,47 +745,51 @@ impl Vfs {
     /// Get rich metadata for a path.
     pub fn metadata(path: &str) -> KernelResult<FileMeta> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.metadata(relative)
     }
 
     /// Set file attributes (immutable, append-only, hidden, system).
     pub fn set_attributes(path: &str, attrs: FileAttr) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_attributes(relative, attrs)?;
         }
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
     /// Set ownership (uid/gid).
     pub fn set_owner(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_owner(relative, uid, gid)?;
         }
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
     /// Set Unix-style permission bits.
     pub fn set_permissions(path: &str, permissions: u16) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_permissions(relative, permissions)?;
         }
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
@@ -783,8 +800,9 @@ impl Vfs {
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.set_times(relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
     }
@@ -792,42 +810,46 @@ impl Vfs {
     /// Get an extended attribute value.
     pub fn get_xattr(path: &str, key: &str) -> KernelResult<Vec<u8>> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.get_xattr(relative, key)
     }
 
     /// Set an extended attribute.
     pub fn set_xattr(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_xattr(relative, key, value)?;
         }
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
     /// Remove an extended attribute.
     pub fn remove_xattr(path: &str, key: &str) -> KernelResult<()> {
         validate_path(path)?;
+        let path = normalize_path(path);
         {
             let mut vfs = VFS.lock();
-            let (mp, relative) = find_mount(&mut vfs, path)?;
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.remove_xattr(relative, key)?;
         }
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::notify::emit_modified(&path);
+        super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
 
     /// List all extended attribute keys.
     pub fn list_xattrs(path: &str) -> KernelResult<Vec<String>> {
         validate_path(path)?;
+        let path = normalize_path(path);
         let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.list_xattrs(relative)
     }
 

@@ -212,7 +212,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Automatic crash restart with backoff
 - [ ] Resource limits per service (cgroup-equivalent)
 - [x] JSON-lines structured logging (text-based, not binary)
-- [ ] "Service ready" notification API
+- [x] "Service ready" notification API
 - [ ] Startup app list (simple serial list, separate from service manager)
   - [ ] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout)
   - [ ] Explicit readiness notification API

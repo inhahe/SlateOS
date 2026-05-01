@@ -1,0 +1,304 @@
+//! Userspace memory validation.
+//!
+//! Syscall handlers must validate every pointer received from user
+//! space before dereferencing it.  Without validation, a malicious
+//! process could trick the kernel into reading or writing kernel
+//! memory by passing kernel-space pointers as syscall arguments.
+//!
+//! ## Validation Rules
+//!
+//! 1. The entire buffer `[ptr, ptr+len)` must be in the user half of
+//!    the address space (below [`USER_SPACE_END`]).
+//! 2. `ptr + len` must not overflow (wrapping into kernel space).
+//! 3. Every 4 KiB page in the range must be mapped in the current
+//!    process's page table.
+//! 4. For write validation, every mapped page must have the WRITABLE
+//!    flag set.
+//!
+//! ## Performance
+//!
+//! Each validation walks the page table once per 4 KiB page in the
+//! buffer.  For typical syscall buffers (< 4 KiB), this is a single
+//! page table walk — about 4 memory reads.  This cost is negligible
+//! compared to the syscall itself (console I/O, IPC, etc.).
+//!
+//! ## Future Optimizations
+//!
+//! Linux uses a `copy_from_user` / `copy_to_user` approach that
+//! catches page faults during the copy instead of pre-validating.
+//! This is faster for large buffers (no separate walk) but requires
+//! exception table infrastructure that we don't have yet.  The
+//! current approach is correct and sufficient for initial userspace.
+//!
+//! [`USER_SPACE_END`]: super::page_table::USER_SPACE_END
+
+use super::page_table::{self, PageFlags, VirtAddr, USER_SPACE_END};
+use crate::error::{KernelError, KernelResult};
+use crate::proc::thread;
+use crate::sched;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Hardware page size (4 KiB).  Page table entries map 4 KiB pages,
+/// so we validate at this granularity.
+const PAGE_SIZE: u64 = 4096;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Validate that a user-space buffer is readable.
+///
+/// Checks that the entire range `[ptr, ptr+len)` is:
+/// - Within the user half of the address space.
+/// - Mapped in the current process's page table.
+///
+/// Returns `Ok(())` if the buffer is safe to read from kernel mode.
+///
+/// **Kernel context bypass**: if the current task has no owning
+/// process (bare kernel task), validation is skipped — kernel code
+/// uses kernel pointers that are always valid.
+///
+/// # Arguments
+///
+/// - `ptr` — start of the buffer (from a userspace register).
+/// - `len` — length of the buffer in bytes.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidAddress`] if any part of the buffer is in
+///   kernel space, wraps around, or is unmapped.
+pub fn validate_user_read(ptr: u64, len: usize) -> KernelResult<()> {
+    if is_kernel_context() {
+        return Ok(());
+    }
+    validate_user_range(ptr, len, false)
+}
+
+/// Validate that a user-space buffer is writable.
+///
+/// Same as [`validate_user_read`], but additionally checks that every
+/// mapped page has the `WRITABLE` flag set.
+///
+/// **Kernel context bypass**: same as [`validate_user_read`].
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidAddress`] if any part of the buffer is in
+///   kernel space, wraps around, unmapped, or read-only.
+pub fn validate_user_write(ptr: u64, len: usize) -> KernelResult<()> {
+    if is_kernel_context() {
+        return Ok(());
+    }
+    validate_user_range(ptr, len, true)
+}
+
+/// Validate that a single user-space pointer refers to a valid, mapped
+/// byte.  Shorthand for `validate_user_read(ptr, 1)`.
+///
+/// **Kernel context bypass**: same as [`validate_user_read`].
+pub fn validate_user_ptr(ptr: u64) -> KernelResult<()> {
+    if is_kernel_context() {
+        return Ok(());
+    }
+    validate_user_range(ptr, 1, false)
+}
+
+// ---------------------------------------------------------------------------
+// Kernel context detection
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the current task is a bare kernel task with no
+/// owning user process.  Kernel tasks use kernel-space pointers that
+/// don't need user-space validation.
+fn is_kernel_context() -> bool {
+    let task_id = sched::current_task_id();
+    thread::owner_process(task_id).is_none()
+}
+
+// ---------------------------------------------------------------------------
+// Internal implementation
+// ---------------------------------------------------------------------------
+
+/// Core validation: check address range and page mappings.
+///
+/// This function contains the actual validation logic with no
+/// kernel-context bypass.  The public API (`validate_user_read`,
+/// etc.) calls `is_kernel_context()` first and skips this function
+/// for bare kernel tasks.
+///
+/// Arithmetic here is for address-range boundary checking.  Overflow
+/// is the failure condition, not a bug — it means the user passed a
+/// wrapping pointer range.
+#[allow(clippy::arithmetic_side_effects)]
+fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResult<()> {
+    // Zero-length buffers are always valid (nothing to access).
+    if len == 0 {
+        return Ok(());
+    }
+
+    // Null pointer is never valid.
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let len_u64 = len as u64;
+
+    // Check for overflow: ptr + len must not wrap around.
+    let end = ptr.checked_add(len_u64)
+        .ok_or(KernelError::InvalidAddress)?;
+
+    // The entire range must be in user space.
+    if end > USER_SPACE_END {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    // Get the current PML4 from CR3.
+    let cr3 = page_table::read_cr3();
+    let pml4 = page_table::cr3_to_pml4(cr3);
+
+    // Walk each 4 KiB page in the range and verify it's mapped.
+    let mut addr = ptr & !(PAGE_SIZE - 1); // Round down to page boundary.
+
+    while addr < end {
+        let virt = VirtAddr::new(addr);
+
+        // translate() returns None if the page is not mapped.
+        if page_table::translate(pml4, virt).is_none() {
+            return Err(KernelError::InvalidAddress);
+        }
+
+        // If write access is required, check the page flags.
+        if need_writable {
+            if let Some(flags) = page_flags(pml4, virt) {
+                if !flags.contains(PageFlags::WRITABLE) {
+                    return Err(KernelError::InvalidAddress);
+                }
+            }
+        }
+
+        // Move to the next 4 KiB page.  Use saturating_add to avoid
+        // overflow at the top of the address space (shouldn't happen
+        // since we already checked end < USER_SPACE_END).
+        addr = addr.saturating_add(PAGE_SIZE);
+    }
+
+    Ok(())
+}
+
+/// Read the page table flags for a virtual address.
+///
+/// Walks the page table and returns the PTE flags if the page is
+/// mapped.  Returns `None` if the page is not mapped at any level.
+fn page_flags(pml4_phys: u64, virt: VirtAddr) -> Option<PageFlags> {
+    let hhdm = page_table::hhdm()?;
+
+    if !virt.is_canonical() {
+        return None;
+    }
+
+    // Walk PML4 → PDPT → PD → PT, same as translate() but returns
+    // the leaf entry's flags instead of the physical address.
+    //
+    // SAFETY: pml4_phys is from CR3 (valid page table root).  The
+    // HHDM is always mapped.  Index values are masked to 0..511.
+    let pml4e = unsafe { page_table::read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return None;
+    }
+
+    let pdpte = unsafe { page_table::read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() {
+        return None;
+    }
+    if pdpte.is_huge() {
+        return Some(pdpte.flags());
+    }
+
+    let pde = unsafe { page_table::read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() {
+        return None;
+    }
+    if pde.is_huge() {
+        return Some(pde.flags());
+    }
+
+    let pte = unsafe { page_table::read_entry(pde.phys_addr(), virt.pt_index(), hhdm) };
+    if !pte.is_present() {
+        return None;
+    }
+
+    Some(pte.flags())
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Run user memory validation self-tests.
+///
+/// These tests exercise `validate_user_range` directly (bypassing
+/// the kernel-context shortcut) to verify the actual range and
+/// page-table checks work correctly.
+pub fn self_test() -> KernelResult<()> {
+    // Test 1: Zero-length buffer is always valid.
+    validate_user_range(0x1000, 0, false)?;
+
+    // Test 2: Null pointer is invalid.
+    match validate_user_range(0, 1, false) {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!("[user]   FAIL: null should be invalid, got {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Test 3: Kernel-space pointer is invalid.
+    match validate_user_range(0xFFFF_8000_0000_0000, 1, false) {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!("[user]   FAIL: kernel addr should be invalid, got {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Test 4: Wrapping pointer is invalid.
+    match validate_user_range(u64::MAX - 10, 100, false) {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!(
+                "[user]   FAIL: wrapping range should be invalid, got {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Test 5: Range crossing into kernel space is invalid.
+    match validate_user_range(USER_SPACE_END - 10, 20, false) {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!(
+                "[user]   FAIL: cross-boundary range should be invalid, got {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Test 6: Unmapped user-space address is invalid.
+    // Address 0x1000 is in user space but almost certainly not mapped
+    // for the kernel (idle) task which has no user mappings.
+    match validate_user_range(0x1000, 1, false) {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!(
+                "[user]   FAIL: unmapped user addr should be invalid, got {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[user] User memory validation self-test PASSED");
+    Ok(())
+}

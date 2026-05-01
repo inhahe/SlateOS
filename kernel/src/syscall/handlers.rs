@@ -10,9 +10,9 @@
 //! - On success, `SyscallResult::value` is the return value (>= 0).
 //! - On error, `SyscallResult::value` is the negative error code
 //!   from [`KernelError`].
-//! - Pointer arguments from userspace must be validated before
-//!   dereferencing.  For now (kernel-mode only), we trust pointers
-//!   but add TODO markers for userspace validation.
+//! - Pointer arguments from userspace are validated via
+//!   [`crate::mm::user`] before dereferencing.  Every buffer pointer
+//!   is checked for user-space range and page table mapping.
 
 // Syscall args are u64 (register-width).  On our x86_64 target,
 // usize is 64 bits, so u64→usize casts cannot truncate.
@@ -80,8 +80,6 @@ pub fn sys_debug_print(args: &SyscallArgs) -> SyscallResult {
     let ptr = args.arg0 as *const u8;
     let len = args.arg1 as usize;
 
-    // TODO: Validate pointer is in caller's address space.
-    // For now, only kernel-mode callers use this.
     if ptr.is_null() || len == 0 {
         return SyscallResult::ok(0);
     }
@@ -89,8 +87,12 @@ pub fn sys_debug_print(args: &SyscallArgs) -> SyscallResult {
     // Cap length to prevent excessive output.
     let safe_len = len.min(1024);
 
-    // SAFETY: Caller guarantees ptr is valid for safe_len bytes.
-    // In kernel mode (current stage), all memory is accessible.
+    // Validate the user buffer is in user space and mapped.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Buffer validated above — in user space and mapped.
     let bytes = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
 
     // Print as UTF-8 if valid, otherwise as hex.
@@ -565,12 +567,18 @@ pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
     let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    // TODO: Validate pointer is in caller's address space.
     if ptr.is_null() && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // SAFETY: Caller guarantees ptr is valid for len bytes.
+    // Validate user buffer.
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // SAFETY: Buffer validated above — in user space and mapped.
     let data = if len == 0 {
         &[]
     } else {
@@ -600,9 +608,15 @@ pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    // TODO: Validate pointer is in caller's address space.
     if buf_ptr.is_null() && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate user buffer is writable.
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
     }
 
     match channel::recv(handle) {
@@ -611,7 +625,7 @@ pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
             let copy_len = data.len().min(buf_cap);
 
             if copy_len > 0 {
-                // SAFETY: Caller guarantees buf_ptr is valid for buf_cap bytes.
+                // SAFETY: Buffer validated above — in user space, mapped, writable.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         data.as_ptr(),
@@ -641,9 +655,15 @@ pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    // TODO: Validate pointer is in caller's address space.
     if buf_ptr.is_null() && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate user buffer is writable.
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
     }
 
     match channel::try_recv(handle) {
@@ -652,7 +672,7 @@ pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
             let copy_len = data.len().min(buf_cap);
 
             if copy_len > 0 {
-                // SAFETY: Caller guarantees buf_ptr is valid for buf_cap bytes.
+                // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         data.as_ptr(),
@@ -693,7 +713,12 @@ pub fn sys_futex_wait(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
     let expected = args.arg1 as u32;
 
-    // TODO: Validate pointer is in caller's address space.
+    // Futex word is 4 bytes — validate the pointer is in user space
+    // and the page is mapped (futex_wait reads the value at addr).
+    if let Err(e) = crate::mm::user::validate_user_read(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
     match futex::futex_wait(addr, expected) {
         Ok(true) => SyscallResult::ok(1),
         Ok(false) => SyscallResult::ok(0),
@@ -711,6 +736,12 @@ pub fn sys_futex_wake(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
     let max_wake = args.arg1 as u32;
 
+    // The address is used as a wait queue key.  Validate it's in
+    // user space to prevent kernel address confusion.
+    if let Err(e) = crate::mm::user::validate_user_ptr(addr) {
+        return SyscallResult::err(e);
+    }
+
     let woken = futex::futex_wake(addr, max_wake);
     SyscallResult::ok(i64::from(woken))
 }
@@ -725,7 +756,11 @@ pub fn sys_futex_wake(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_futex_lock_pi(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
-    // TODO: Validate pointer is in caller's address space.
+    // PI futex reads and writes the 4-byte futex word.
+    if let Err(e) = crate::mm::user::validate_user_write(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
     match futex::futex_lock_pi(addr) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
@@ -742,6 +777,12 @@ pub fn sys_futex_lock_pi(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_futex_unlock_pi(args: &SyscallArgs) -> SyscallResult {
     let addr = args.arg0;
+
+    // PI futex reads and writes the 4-byte futex word.
+    if let Err(e) = crate::mm::user::validate_user_write(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
     match futex::futex_unlock_pi(addr) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
@@ -778,15 +819,20 @@ pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
     let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    // TODO: Validate pointer is in caller's address space.
     if ptr.is_null() && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return SyscallResult::err(e);
+        }
     }
 
     let data = if len == 0 {
         &[]
     } else {
-        // SAFETY: Caller guarantees ptr is valid for len bytes.
+        // SAFETY: Buffer validated above — in user space and mapped.
         unsafe { core::slice::from_raw_parts(ptr, len) }
     };
 
@@ -812,15 +858,20 @@ pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    // TODO: Validate pointer is in caller's address space.
     if buf_ptr.is_null() && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
     }
 
     let buf = if buf_cap == 0 {
         &mut []
     } else {
-        // SAFETY: Caller guarantees buf_ptr is valid for buf_cap bytes.
+        // SAFETY: Buffer validated above — in user space, mapped, writable.
         unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
     };
 
@@ -846,10 +897,16 @@ pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return SyscallResult::err(e);
+        }
+    }
+
     let data = if len == 0 {
         &[]
     } else {
-        // SAFETY: Caller guarantees ptr is valid for len bytes.
+        // SAFETY: Validated above — ptr is in user space and mapped.
         unsafe { core::slice::from_raw_parts(ptr, len) }
     };
 
@@ -875,10 +932,16 @@ pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
     let buf = if buf_cap == 0 {
         &mut []
     } else {
-        // SAFETY: Caller guarantees buf_ptr is valid for buf_cap bytes.
+        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
         unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
     };
 
@@ -1161,9 +1224,23 @@ pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if buf_cap > 0 {
+        // Each CpEventRaw is 24 bytes (3 × u64).
+        let byte_len = buf_cap.checked_mul(core::mem::size_of::<CpEventRaw>())
+            .ok_or(KernelError::InvalidArgument);
+        match byte_len {
+            Ok(n) => {
+                if let Err(e) = crate::mm::user::validate_user_write(args.arg1, n) {
+                    return SyscallResult::err(e);
+                }
+            }
+            Err(e) => return SyscallResult::err(e),
+        }
+    }
+
     match completion::wait(cp) {
         Ok(events) => {
-            // SAFETY: Caller guarantees buf_ptr is valid for buf_cap entries.
+            // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
             let count = unsafe { write_events_to_buffer(&events, buf_ptr, buf_cap) };
             #[allow(clippy::cast_possible_wrap)]
             let n = count as i64;
@@ -1185,9 +1262,22 @@ pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if buf_cap > 0 {
+        let byte_len = buf_cap.checked_mul(core::mem::size_of::<CpEventRaw>())
+            .ok_or(KernelError::InvalidArgument);
+        match byte_len {
+            Ok(n) => {
+                if let Err(e) = crate::mm::user::validate_user_write(args.arg1, n) {
+                    return SyscallResult::err(e);
+                }
+            }
+            Err(e) => return SyscallResult::err(e),
+        }
+    }
+
     match completion::try_wait(cp) {
         Ok(events) => {
-            // SAFETY: Caller guarantees buf_ptr is valid for buf_cap entries.
+            // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
             let count = unsafe { write_events_to_buffer(&events, buf_ptr, buf_cap) };
             #[allow(clippy::cast_possible_wrap)]
             let n = count as i64;
@@ -1248,21 +1338,30 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
     let name_ptr = args.arg2 as usize;
     let name_len = args.arg3 as usize;
 
-    // Validate pointers.
-    // TODO: proper userspace pointer validation when we have ring 3.
     if elf_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Read the ELF data.
-    // SAFETY: In kernel mode, we trust the pointer.  Userspace validation
-    // will be added when ring 3 is implemented.
+    // Validate ELF data pointer.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, elf_len) {
+        return SyscallResult::err(e);
+    }
+
+    // Validate name pointer (if provided).
+    if name_len > 0 && name_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, name_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // SAFETY: Validated above — elf_ptr is in user space and mapped.
     let elf_data = unsafe {
         core::slice::from_raw_parts(elf_ptr as *const u8, elf_len)
     };
 
     // Read the name.
     let name = if name_len > 0 && name_ptr != 0 {
+        // SAFETY: Validated above — name_ptr is in user space and mapped.
         let name_bytes = unsafe {
             core::slice::from_raw_parts(name_ptr as *const u8, name_len)
         };
@@ -1407,12 +1506,18 @@ pub fn sys_exception_return_with_frame(
 
     let ctx_ptr = frame.arg0 as *const ExceptionContext;
 
-    // TODO: validate that ctx_ptr is in the user address space.
-    // For now, trust the pointer.
+    // Validate that the exception context is in user space and mapped.
+    // The context is sizeof(ExceptionContext) = 160 bytes on the user stack.
+    if let Err(e) = crate::mm::user::validate_user_read(
+        frame.arg0,
+        core::mem::size_of::<ExceptionContext>(),
+    ) {
+        return e.code() as i64;
+    }
 
-    // SAFETY: ctx_ptr was written by the kernel's exception dispatch
-    // code onto the user stack.  The handler may have modified fields
-    // (e.g., rip to skip the faulting instruction).
+    // SAFETY: Validated above — ctx_ptr is in user space and mapped.
+    // Originally written by the kernel's exception dispatch onto the
+    // user stack; the handler may have modified fields.
     let ctx = unsafe { &*ctx_ptr };
 
     // Restore the SYSRET frame from the exception context.
@@ -1561,15 +1666,15 @@ pub fn sys_process_exec_with_frame(
         }
     };
 
+    // Validate the ELF data pointer before reading.
+    if let Err(e) = crate::mm::user::validate_user_read(frame.arg0, elf_len) {
+        return e.code() as i64;
+    }
+
     // Read the ELF data from userspace.
     //
-    // SAFETY: The pointer comes from the calling process's address
-    // space, which is still intact at this point (we haven't torn it
-    // down yet).  We copy the data into a kernel buffer before
-    // clearing the address space.
-    //
-    // TODO: proper userspace pointer validation (bounds check against
-    // the process's VMAs).
+    // SAFETY: Validated above — elf_ptr is in user space and mapped.
+    // We copy into a kernel buffer before tearing down the address space.
     let elf_data = unsafe {
         core::slice::from_raw_parts(elf_ptr as *const u8, elf_len)
     };
@@ -1741,9 +1846,12 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
     // Cap length to prevent excessive output in a single syscall.
     let safe_len = len.min(4096);
 
-    // TODO: Validate pointer is in caller's address space.
-    // For now, kernel tasks have full memory access.
-    // SAFETY: Caller guarantees ptr is valid for safe_len bytes.
+    // Validate the user buffer is in user space and mapped.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Buffer validated above — in user space and mapped.
     let bytes = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
 
     // Use write_str when possible — it writes to both framebuffer
@@ -1775,11 +1883,15 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    // Validate the output byte is in user space and writable.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 1) {
+        return SyscallResult::err(e);
+    }
+
     // Block until a key is available.
     let ch = crate::keyboard::read_char();
 
-    // TODO: Validate pointer is in caller's address space.
-    // SAFETY: Caller guarantees ptr points to a writable byte.
+    // SAFETY: Pointer validated above — in user space, mapped, writable.
     unsafe { core::ptr::write(ptr, ch); }
 
     SyscallResult::ok(1)
@@ -1800,9 +1912,16 @@ pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // TODO: Validate pointers are in caller's address space.
-    // SAFETY: Caller guarantees pointers are valid.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, buf_cap) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
@@ -1816,7 +1935,7 @@ pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
 
     // Copy to the user buffer (up to capacity).
     let copy_len = data.len().min(buf_cap);
-    // SAFETY: buf_ptr is valid for buf_cap bytes (caller guarantee).
+    // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
     unsafe {
         core::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, copy_len);
     }
@@ -1836,8 +1955,18 @@ pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // TODO: Validate pointers are in caller's address space.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // SAFETY: Validated above — pointers are in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
@@ -1860,7 +1989,13 @@ pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
@@ -1887,7 +2022,18 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
@@ -1951,7 +2097,13 @@ pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
@@ -1972,7 +2124,13 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
@@ -1999,8 +2157,17 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // TODO: Validate pointers are in caller's address space.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len.min(256)) };
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+    // FsStatResult is 16 bytes.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 16) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — path_ptr is in user space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
@@ -2012,7 +2179,7 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Write the 16-byte FsStatResult.
-    // SAFETY: Caller guarantees out_ptr points to at least 16 writable bytes.
+    // SAFETY: Validated above — out_ptr is in user space, mapped, and writable.
     unsafe {
         // Zero the buffer first.
         core::ptr::write_bytes(out_ptr, 0, 16);
@@ -2076,10 +2243,16 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return SyscallResult::err(e);
+        }
+    }
+
     let data = if len == 0 {
         &[]
     } else {
-        // SAFETY: Caller guarantees ptr valid for len bytes.
+        // SAFETY: Validated above — ptr is in user space and mapped.
         unsafe { core::slice::from_raw_parts(ptr, len) }
     };
 
@@ -2106,6 +2279,12 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
     // Use blocking read with a generous timeout (~5 seconds at 100Hz).
     match crate::net::tcp::read_blocking(handle, 500) {
         Ok(data) => {
@@ -2115,7 +2294,7 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
             }
             let copy_len = data.len().min(buf_cap);
             if copy_len > 0 {
-                // SAFETY: buf_ptr valid for buf_cap bytes.
+                // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         data.as_ptr(),
@@ -2189,10 +2368,16 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
     let data = if data_len == 0 {
         &[]
     } else {
-        // SAFETY: Caller guarantees ptr valid for data_len bytes.
+        // SAFETY: Validated above — data_ptr is in user space and mapped.
         unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
     };
 
@@ -2228,11 +2413,23 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+    // Source address output: 4 bytes IPv4 + 2 bytes port = 6 bytes.
+    if !src_ptr.is_null() {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 6) {
+            return SyscallResult::err(e);
+        }
+    }
+
     match crate::net::udp::recv(handle) {
         Some(datagram) => {
             let copy_len = datagram.data.len().min(buf_cap);
             if copy_len > 0 && !buf_ptr.is_null() {
-                // SAFETY: buf_ptr valid for buf_cap bytes.
+                // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         datagram.data.as_ptr(),
@@ -2244,7 +2441,7 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
 
             // Write source address info if pointer provided.
             if !src_ptr.is_null() {
-                // SAFETY: src_ptr valid for 6 bytes.
+                // SAFETY: Validated above — src_ptr is in user space, mapped, and writable.
                 unsafe {
                     // IPv4 address (4 bytes).
                     core::ptr::copy_nonoverlapping(
@@ -2548,8 +2745,17 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // SAFETY: Caller guarantees pointers are valid.
-    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len.min(253)) };
+    let safe_name_len = name_len.min(253);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_name_len) {
+        return SyscallResult::err(e);
+    }
+    // IPv4 address output = 4 bytes.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 4) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — name_ptr is in user space and mapped.
+    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, safe_name_len) };
     let name = match core::str::from_utf8(name_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),

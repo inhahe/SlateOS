@@ -29,4 +29,5 @@ pub mod fault;
 pub mod frame;
 pub mod heap;
 pub mod page_table;
+pub mod user;
 pub mod vma;

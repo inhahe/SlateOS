@@ -194,6 +194,14 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 8b: Verify userspace pointer validation logic.
+    // Validates that kernel rejects null, kernel-space, wrapping, and
+    // unmapped user-space pointers before any syscall handler uses them.
+    if let Err(e) = mm::user::self_test() {
+        serial_println!("FATAL: User memory validation self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 9: Initialize the scheduler.
     // Creates the idle task (the current execution context) and sets up
     // the priority round-robin scheduler.  Timer-based preemption will

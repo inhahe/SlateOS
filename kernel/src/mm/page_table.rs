@@ -500,7 +500,7 @@ fn alloc_pt_page() -> KernelResult<u64> {
 /// - `hhdm` must be the correct HHDM offset.
 #[inline]
 #[allow(clippy::arithmetic_side_effects)]
-unsafe fn read_entry(table_phys: u64, index: usize, hhdm: u64) -> PageTableEntry {
+pub unsafe fn read_entry(table_phys: u64, index: usize, hhdm: u64) -> PageTableEntry {
     let table_virt = (table_phys + hhdm) as *const PageTableEntry;
     // SAFETY: Caller guarantees table_phys is valid, index < 512,
     // and the HHDM maps this physical page.  PageTableEntry is 8 bytes

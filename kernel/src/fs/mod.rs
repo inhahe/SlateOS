@@ -31,6 +31,7 @@ pub mod handle;
 pub mod journal;
 pub mod memfs;
 pub mod notify;
+pub mod procfs;
 pub mod trash;
 pub mod vfs;
 

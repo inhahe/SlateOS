@@ -530,6 +530,12 @@ extern "C" fn kmain() -> ! {
                 serial_println!("[boot] WARNING: failed to mount memfs at /tmp: {:?}", e);
             }
 
+            // Mount procfs at /proc for system information.
+            // Read-only virtual filesystem — content generated on the fly.
+            if let Err(e) = fs::procfs::mount("/proc") {
+                serial_println!("[boot] WARNING: failed to mount procfs at /proc: {:?}", e);
+            }
+
             // Initialize the change journal (persistent change tracking).
             // Must happen before self-tests so all VFS operations are captured.
             fs::journal::init();
@@ -561,6 +567,10 @@ extern "C" fn kmain() -> ! {
             // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
             if let Err(e) = fs::memfs::self_test() {
                 serial_println!("WARNING: MemFs self-test failed: {:?}", e);
+            }
+            // Run procfs self-test (validates virtual file generation).
+            if let Err(e) = fs::procfs::self_test() {
+                serial_println!("WARNING: ProcFs self-test failed: {:?}", e);
             }
             // Flush buffer cache to disk so data survives power loss / QEMU kill.
             if let Err(e) = fs::cache::flush_all() {

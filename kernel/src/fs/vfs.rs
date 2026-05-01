@@ -172,6 +172,14 @@ pub trait FileSystem: Send {
         let _ = (from, to);
         Err(KernelError::NotSupported)
     }
+
+    /// Return optional debug/statistics information.
+    ///
+    /// Default returns an empty string.  Filesystem implementations
+    /// can override to report cache statistics, internal counters, etc.
+    fn debug_stats(&self) -> String {
+        String::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +361,17 @@ impl Vfs {
         }
         super::notify::emit_renamed(from, to);
         Ok(())
+    }
+
+    /// Return debug statistics for the filesystem mounted at `path`.
+    pub fn debug_stats(path: &str) -> KernelResult<String> {
+        let vfs = VFS.lock();
+        for mp in &vfs.mounts {
+            if path.starts_with(&mp.path) {
+                return Ok(mp.fs.debug_stats());
+            }
+        }
+        Err(KernelError::NotFound)
     }
 }
 

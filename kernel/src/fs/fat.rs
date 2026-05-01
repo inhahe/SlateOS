@@ -358,12 +358,61 @@ impl FatDirEntry {
 // FAT filesystem (FAT16 / FAT32)
 // ---------------------------------------------------------------------------
 
+/// Maximum number of cached path resolution results.
+const DCACHE_MAX_ENTRIES: usize = 64;
+
+/// A cached path resolution result.
+///
+/// Maps a full path string to its parent cluster and directory entry,
+/// avoiding repeated directory tree walks for frequently accessed paths.
+#[derive(Clone)]
+struct DcacheEntry {
+    /// Full path (e.g., "/TESTDIR/FILE.TXT").
+    path: String,
+    /// Parent directory cluster (0 = root).
+    parent_cluster: u32,
+    /// Resolved directory entry.
+    entry: FatDirEntry,
+    /// Access counter for LRU eviction.
+    last_access: u64,
+    /// Whether this slot is in use.
+    valid: bool,
+}
+
+impl DcacheEntry {
+    const fn empty() -> Self {
+        Self {
+            path: String::new(),
+            parent_cluster: 0,
+            entry: FatDirEntry {
+                name: [0; 11],
+                attr: 0,
+                first_cluster: 0,
+                file_size: 0,
+            },
+            last_access: 0,
+            valid: false,
+        }
+    }
+}
+
 /// A mounted FAT filesystem (auto-detects FAT16 or FAT32).
 pub struct FatFs {
     /// The block device name in the registry.
     device_name: String,
     /// Parsed BIOS Parameter Block.
     bpb: FatBpb,
+    /// Path resolution cache (dcache).
+    ///
+    /// Caches `resolve_path()` results so repeated lookups on the same
+    /// path avoid re-reading directory sectors.  Invalidated on any
+    /// mutating operation that could change directory structure.
+    dcache: Vec<DcacheEntry>,
+    /// Monotonic access counter for dcache LRU.
+    dcache_counter: u64,
+    /// Dcache statistics.
+    dcache_hits: u64,
+    dcache_misses: u64,
 }
 
 impl FatFs {
@@ -406,10 +455,100 @@ impl FatFs {
             );
         }
 
+        // Initialize the path resolution cache.
+        let mut dcache = Vec::with_capacity(DCACHE_MAX_ENTRIES);
+        for _ in 0..DCACHE_MAX_ENTRIES {
+            dcache.push(DcacheEntry::empty());
+        }
+
         Ok(Self {
             device_name: String::from(device_name),
             bpb,
+            dcache,
+            dcache_counter: 0,
+            dcache_hits: 0,
+            dcache_misses: 0,
         })
+    }
+
+    // -- Dcache (path resolution cache) --
+
+    /// Look up a path in the dcache.
+    ///
+    /// Returns a clone of the cached result on hit, or `None` on miss.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn dcache_lookup(&mut self, path: &str) -> Option<(u32, FatDirEntry)> {
+        for entry in self.dcache.iter_mut() {
+            if entry.valid && entry.path.eq_ignore_ascii_case(path) {
+                self.dcache_counter = self.dcache_counter.wrapping_add(1);
+                entry.last_access = self.dcache_counter;
+                self.dcache_hits = self.dcache_hits.wrapping_add(1);
+                return Some((entry.parent_cluster, entry.entry.clone()));
+            }
+        }
+        self.dcache_misses = self.dcache_misses.wrapping_add(1);
+        None
+    }
+
+    /// Insert a path resolution result into the dcache.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn dcache_insert(&mut self, path: &str, parent_cluster: u32, entry: &FatDirEntry) {
+        self.dcache_counter = self.dcache_counter.wrapping_add(1);
+
+        // Try to find an existing entry for this path (update in place).
+        for e in self.dcache.iter_mut() {
+            if e.valid && e.path.eq_ignore_ascii_case(path) {
+                e.parent_cluster = parent_cluster;
+                e.entry = entry.clone();
+                e.last_access = self.dcache_counter;
+                return;
+            }
+        }
+
+        // Find a free slot.
+        for e in self.dcache.iter_mut() {
+            if !e.valid {
+                e.path = String::from(path);
+                e.parent_cluster = parent_cluster;
+                e.entry = entry.clone();
+                e.last_access = self.dcache_counter;
+                e.valid = true;
+                return;
+            }
+        }
+
+        // Evict LRU entry.
+        let mut lru_idx = 0;
+        let mut lru_access = u64::MAX;
+        for (i, e) in self.dcache.iter().enumerate() {
+            if e.valid && e.last_access < lru_access {
+                lru_access = e.last_access;
+                lru_idx = i;
+            }
+        }
+        self.dcache[lru_idx].path = String::from(path);
+        self.dcache[lru_idx].parent_cluster = parent_cluster;
+        self.dcache[lru_idx].entry = entry.clone();
+        self.dcache[lru_idx].last_access = self.dcache_counter;
+        self.dcache[lru_idx].valid = true;
+    }
+
+    /// Invalidate dcache entries whose path starts with `prefix`.
+    ///
+    /// Used after mutating operations to ensure stale data isn't served.
+    fn dcache_invalidate_prefix(&mut self, prefix: &str) {
+        for entry in self.dcache.iter_mut() {
+            if entry.valid && entry.path.to_uppercase().starts_with(&prefix.to_uppercase()) {
+                entry.valid = false;
+            }
+        }
+    }
+
+    /// Invalidate all dcache entries.
+    fn dcache_invalidate_all(&mut self) {
+        for entry in self.dcache.iter_mut() {
+            entry.valid = false;
+        }
     }
 
     /// Check if a cluster number is valid for data access.
@@ -533,6 +672,18 @@ impl FatFs {
             return Ok((0, None));
         }
 
+        // Check the dcache first — avoids re-reading directory sectors
+        // for frequently accessed paths.
+        let full_path = {
+            let mut p = String::from("/");
+            p.push_str(path);
+            p
+        };
+        if let Some((parent, entry)) = self.dcache_lookup(&full_path) {
+            return Ok((parent, Some(entry)));
+        }
+
+        // Cache miss — walk the directory tree.
         let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         let mut current_cluster: u32 = 0; // 0 = root directory.
 
@@ -555,6 +706,8 @@ impl FatFs {
             match found {
                 Some(entry) => {
                     if is_last {
+                        // Cache the result before returning.
+                        self.dcache_insert(&full_path, current_cluster, entry);
                         return Ok((current_cluster, Some(entry.clone())));
                     }
                     // Must be a directory to traverse into.
@@ -1151,6 +1304,27 @@ impl FileSystem for FatFs {
         }
     }
 
+    fn debug_stats(&self) -> String {
+        let valid = self.dcache.iter().filter(|e| e.valid).count();
+        use core::fmt::Write;
+        let mut s = String::new();
+        let _ = write!(
+            s,
+            "dcache: {}/{} slots used, {} hits, {} misses",
+            valid,
+            DCACHE_MAX_ENTRIES,
+            self.dcache_hits,
+            self.dcache_misses,
+        );
+        let total = self.dcache_hits + self.dcache_misses;
+        if total > 0 {
+            // Integer hit-rate percentage to avoid floating point.
+            let pct = self.dcache_hits.saturating_mul(100) / total;
+            let _ = write!(s, " ({}% hit rate)", pct);
+        }
+        s
+    }
+
     fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
         let (parent_cluster, entry) = self.resolve_path(path)?;
 
@@ -1267,6 +1441,9 @@ impl FileSystem for FatFs {
             path, data.len(), first_cluster
         );
 
+        // Invalidate dcache: file metadata (size, cluster) changed.
+        self.dcache_invalidate_prefix(path);
+
         Ok(())
     }
 
@@ -1303,6 +1480,9 @@ impl FileSystem for FatFs {
 
         // Mark directory entry as deleted.
         self.delete_dir_entry(dir_lba, dir_offset)?;
+
+        // Invalidate dcache: entry no longer exists.
+        self.dcache_invalidate_prefix(path);
 
         crate::serial_println!("[fat] Deleted '{}'", path);
         Ok(())
@@ -1346,6 +1526,9 @@ impl FileSystem for FatFs {
 
         // Delete the directory entry in the parent.
         self.delete_dir_entry(dir_lba, dir_offset)?;
+
+        // Invalidate dcache: directory and all descendant paths.
+        self.dcache_invalidate_prefix(path);
 
         crate::serial_println!("[fat] Removed directory '{}'", path);
         Ok(())
@@ -1426,6 +1609,9 @@ impl FileSystem for FatFs {
             path, new_cluster
         );
 
+        // Invalidate dcache: new directory entry added.
+        self.dcache_invalidate_prefix(path);
+
         Ok(())
     }
 
@@ -1481,6 +1667,12 @@ impl FileSystem for FatFs {
 
         // 4. Delete the old entry (mark as 0xE5). Data is untouched.
         self.delete_dir_entry(from_lba, from_offset)?;
+
+        // Invalidate dcache: old path no longer valid, new path created.
+        // Use prefix invalidation on `from` to handle directory renames
+        // (all descendant paths become stale).
+        self.dcache_invalidate_prefix(from);
+        self.dcache_invalidate_prefix(to);
 
         crate::serial_println!("[fat] Renamed '{}' → '{}'", from, to);
         Ok(())
@@ -1754,6 +1946,9 @@ impl FileSystem for FatFs {
             first_cluster, new_size as u32, 0x20,
         )?;
 
+        // Invalidate dcache: file metadata (size, cluster chain) changed.
+        self.dcache_invalidate_prefix(path);
+
         Ok(())
     }
 
@@ -1892,6 +2087,9 @@ impl FileSystem for FatFs {
             dir_lba, dir_offset, &name83,
             first_cluster, new_size, attr,
         )?;
+
+        // Invalidate dcache: file metadata (size, cluster chain) changed.
+        self.dcache_invalidate_prefix(path);
 
         Ok(())
     }
@@ -2051,6 +2249,14 @@ pub fn self_test() -> KernelResult<()> {
     // Clean up: remove the empty test directory.
     crate::fs::Vfs::rmdir("/TESTDIR")?;
     crate::serial_println!("[fat]   rmdir verified: TESTDIR removed");
+
+    // Report dcache statistics.
+    match crate::fs::Vfs::debug_stats("/") {
+        Ok(stats) if !stats.is_empty() => {
+            crate::serial_println!("[fat]   {}", stats);
+        }
+        _ => {}
+    }
 
     crate::serial_println!("[fat] Self-test PASSED");
     Ok(())

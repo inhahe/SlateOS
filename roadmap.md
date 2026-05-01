@@ -44,6 +44,8 @@ _The minimum kernel that can run a single userspace process._
   - [x] Per-AP kernel stack allocation, GDT/IDT/APIC init on each AP
   - [x] LAPIC ID → sequential CPU index mapping
   - [x] Scheduler CPU count update after all APs come online
+  - [x] Per-CPU GDT and TSS (independent RSP0/IST stacks per CPU)
+  - [x] TLB shootdown via IPI (vector 251, broadcast + ack protocol)
   - [x] Tested with 1, 2, and 4 CPUs under QEMU
 
 ### 1.2 Memory manager

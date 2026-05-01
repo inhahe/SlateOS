@@ -267,6 +267,29 @@ impl PageTableEntry {
     pub const fn raw(self) -> u64 {
         self.0
     }
+
+    /// Create a page table entry from a raw 64-bit value.
+    ///
+    /// Used by the swap subsystem to construct non-present entries
+    /// that encode swap slot information.
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Check if this is a swap entry (non-present, with swap marker).
+    ///
+    /// Swap entries use the format:
+    /// - Bit 0: 0 (not present)
+    /// - Bit 1: 1 (swap marker — distinguishes from truly-unmapped pages)
+    /// - Bits 2–31: swap slot index
+    ///
+    /// A PTE of 0 is NOT a swap entry (it's an unmapped page).
+    #[must_use]
+    pub const fn is_swap(self) -> bool {
+        // Not present (bit 0 = 0) but swap marker set (bit 1 = 1).
+        (self.0 & 0b11) == 0b10
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,7 +539,7 @@ pub unsafe fn read_entry(table_phys: u64, index: usize, hhdm: u64) -> PageTableE
 /// to this entry (either via a lock or single-threaded boot context).
 #[inline]
 #[allow(clippy::arithmetic_side_effects)]
-unsafe fn write_entry(
+pub(crate) unsafe fn write_entry(
     table_phys: u64,
     index: usize,
     entry: PageTableEntry,
@@ -938,6 +961,119 @@ pub unsafe fn change_flags(
         let updated = PageTableEntry::new(pte.phys_addr(), flags);
         // SAFETY: pt valid, index < 512, exclusive access.
         unsafe { write_entry(pt, base_pt_index + i, updated, hhdm); }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Swap PTE helpers
+// ---------------------------------------------------------------------------
+
+/// Read the raw PTE for the first 4 KiB page of a 16 KiB frame.
+///
+/// Walks the page table hierarchy and returns the raw PTE value for
+/// the leaf entry at `virt`.  Unlike [`translate`], this function
+/// does NOT require the entry to be present — it returns the raw
+/// value even for non-present (swap) entries.
+///
+/// Returns `None` if:
+/// - The subsystem is not initialized.
+/// - `virt` is not frame-aligned or not canonical.
+/// - An intermediate level (PML4/PDPT/PD) is not present (the page
+///   table walk can't reach the leaf level).
+///
+/// # Safety
+///
+/// - `pml4_phys` must be a valid PML4 table.
+pub unsafe fn read_leaf_pte(
+    pml4_phys: u64,
+    virt: VirtAddr,
+) -> Option<PageTableEntry> {
+    let hhdm = hhdm()?;
+
+    if !virt.is_frame_aligned() || !virt.is_canonical() {
+        return None;
+    }
+
+    // Walk intermediate levels — these MUST be present.
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return None;
+    }
+
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() || pdpte.is_huge() {
+        return None;
+    }
+
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() || pde.is_huge() {
+        return None;
+    }
+
+    let pt = pde.phys_addr();
+    let base_pt_index = virt.pt_index();
+
+    // SAFETY: pt is a valid page table, base_pt_index < 512.
+    Some(unsafe { read_entry(pt, base_pt_index, hhdm) })
+}
+
+/// Write a swap entry into all 4 leaf PTEs for a 16 KiB frame.
+///
+/// Used by the swap subsystem to mark a frame as swapped-out.  All
+/// 4 hardware page PTEs are set to the same swap entry so that a
+/// page fault on any of the 4 KiB pages within the frame can find
+/// the swap slot index.
+///
+/// Intermediate page table levels must already exist (the frame was
+/// previously mapped, so they do).
+///
+/// # Safety
+///
+/// - `pml4_phys` must be a valid PML4 table.
+/// - The existing PTEs must be NOT present (the physical frame should
+///   have already been unmapped).
+/// - The caller must flush the TLB afterward.
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe fn write_swap_entries(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    entry: PageTableEntry,
+) -> KernelResult<()> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+
+    if !virt.is_frame_aligned() {
+        return Err(KernelError::BadAlignment);
+    }
+    if !virt.is_canonical() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    // Walk to PT (no creation — must already exist).
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() || pdpte.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() || pde.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let pt = pde.phys_addr();
+    let base_pt_index = virt.pt_index();
+
+    // Write the swap entry into all 4 PTEs.
+    for i in 0..HW_PAGES_PER_FRAME {
+        // SAFETY: pt valid, index < 512 (base_pt_index is aligned to
+        // a 4-entry group within the 512-entry table).
+        unsafe { write_entry(pt, base_pt_index + i, entry, hhdm); }
     }
 
     Ok(())

@@ -222,6 +222,14 @@ extern "C" fn kmain() -> ! {
     sysctl::init();
     sysctl::self_test();
 
+    // Step 9c: Initialize swap subsystem.
+    // The in-memory swap backend stores evicted pages in kernel heap.
+    // 256 slots = 4 MiB of swap capacity.  This is a test/development
+    // configuration; a disk-backed or compressed backend will be added
+    // later for production use.
+    mm::swap::init(256);
+    mm::swap::self_test();
+
     // Step 10: Initialize IPC subsystem.
     // Channels are the primary IPC mechanism — structured message
     // passing between tasks/processes.  No explicit init needed (the

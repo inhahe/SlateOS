@@ -876,10 +876,38 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         return;
     }
 
-    // For user-mode page faults, try demand paging, stack growth, then SEH.
+    // For user-mode page faults, try swap-in, demand paging, stack
+    // growth, then SEH.
     let is_user = error & 4 != 0;
     if is_user {
-        // First, try resolving via per-process VMAs (lazy/demand-paged
+        // First, try swap-in: if the PTE contains a swap entry, the
+        // page was previously evicted to swap storage and needs to be
+        // restored.  Only for not-present faults (bit 0 clear).
+        if error & 1 == 0 {
+            use mm::page_table::{VirtAddr, read_cr3, cr3_to_pml4};
+            let pml4 = cr3_to_pml4(read_cr3());
+            let frame_aligned = cr2 & !(mm::frame::FRAME_SIZE as u64 - 1);
+            let virt = VirtAddr::new(frame_aligned);
+
+            // SAFETY: pml4 is the current process's page table (from CR3).
+            if unsafe { mm::swap::is_swapped(pml4, virt) } {
+                // The page is swapped out — need to restore it.
+                // Determine the flags from the VMA, or use a safe default.
+                let flags = mm::page_table::PageFlags::PRESENT
+                    | mm::page_table::PageFlags::WRITABLE
+                    | mm::page_table::PageFlags::USER_ACCESSIBLE
+                    | mm::page_table::PageFlags::NO_EXECUTE;
+
+                // SAFETY: pml4 is valid, PTE contains a swap entry.
+                if unsafe { mm::swap::swap_in_page(pml4, virt, flags) }.is_ok() {
+                    return; // Swap-in successful — retry the instruction.
+                }
+                // If swap-in fails (OOM, etc.), fall through to other
+                // handlers or eventually kill the process.
+            }
+        }
+
+        // Second, try resolving via per-process VMAs (lazy/demand-paged
         // regions created by SYS_MMAP with MAP_LAZY).
         let task_id = sched::current_task_id();
         let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);

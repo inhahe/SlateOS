@@ -80,6 +80,26 @@ pub const PARAM_MM_OOM_POLICY: u16 = 2;
 /// Default: 0.
 pub const PARAM_MM_ZERO_ON_ALLOC: u16 = 3;
 
+/// Swappiness — how aggressively to evict pages to swap.
+///
+/// 0 = never swap (only under extreme memory pressure).
+/// 100 = swap eagerly.
+///
+/// From the design spec: "Swappiness (how aggressively to swap vs.
+/// drop page cache) — Linux default 60 is too aggressive for desktop,
+/// 10-20 is better for desktop with enough RAM."
+///
+/// Default: 15 (conservative desktop default).
+pub const PARAM_MM_SWAPPINESS: u16 = 4;
+
+/// Minimum free pages before the kernel starts swapping.
+///
+/// When the number of free physical frames drops below this threshold,
+/// the page reclaimer starts evicting pages to swap.
+///
+/// Default: 32 (512 KiB of free memory at 16 KiB pages).
+pub const PARAM_MM_MIN_FREE_PAGES: u16 = 5;
+
 // ---------------------------------------------------------------------------
 // Parameter IDs — scheduler subsystem
 // ---------------------------------------------------------------------------
@@ -291,6 +311,22 @@ pub fn init() {
         1,
     );
 
+    reg.register(
+        PARAM_MM_SWAPPINESS,
+        "mm.swappiness",
+        15, // Conservative desktop default (0=never, 100=eager)
+        0,
+        100,
+    );
+
+    reg.register(
+        PARAM_MM_MIN_FREE_PAGES,
+        "mm.min_free_pages",
+        32, // 512 KiB of free memory at 16 KiB/page
+        4,  // Minimum: 64 KiB
+        1024, // Maximum: 16 MiB
+    );
+
     // Scheduler parameters (informational — actual values are in the
     // task module, but exposing them here allows the sysctl interface
     // to read them).
@@ -394,6 +430,7 @@ struct MemoryProfilePreset {
     lazy_default: u64,
     oom_policy: u64,
     zero_on_alloc: u64,
+    swappiness: u64,
 }
 
 impl MemoryProfilePreset {
@@ -405,24 +442,28 @@ impl MemoryProfilePreset {
                 lazy_default: 0,       // committed (per design spec default)
                 oom_policy: 0,         // kill largest — protect desktop responsiveness
                 zero_on_alloc: 0,      // secure default
+                swappiness: 15,        // conservative — only swap under real pressure
             },
             WorkloadProfile::Server => Self {
                 max_stack_frames: 512, // 8 MiB — servers may have deep stacks (Java, etc.)
                 lazy_default: 1,       // lazy — many-process servers benefit from CoW/overcommit
                 oom_policy: 2,         // return error — servers should handle OOM gracefully
                 zero_on_alloc: 1,      // zero on free — amortise for high-throughput alloc
+                swappiness: 30,        // moderate — servers benefit from more aggressive reclaim
             },
             WorkloadProfile::Development => Self {
                 max_stack_frames: 512, // 8 MiB — compilers/debuggers use deep stacks
                 lazy_default: 0,       // committed — predictable for debugging
                 oom_policy: 0,         // kill largest — just kill the runaway build
                 zero_on_alloc: 0,      // secure default, clean state for debugging
+                swappiness: 10,        // low — keep build artifacts in memory
             },
             WorkloadProfile::Gaming => Self {
                 max_stack_frames: 512, // 8 MiB — game engines use deep stacks
                 lazy_default: 0,       // committed — avoid page fault latency during gameplay
                 oom_policy: 0,         // kill largest — protect the game process
                 zero_on_alloc: 1,      // zero on free — reduce alloc latency spikes
+                swappiness: 5,         // very low — minimize swap latency during gameplay
             },
         }
     }
@@ -452,16 +493,18 @@ pub fn apply_memory_profile(profile_id: u8) -> bool {
     let ok = set(PARAM_MM_MAX_STACK_FRAMES, preset.max_stack_frames).is_some()
         && set(PARAM_MM_LAZY_DEFAULT, preset.lazy_default).is_some()
         && set(PARAM_MM_OOM_POLICY, preset.oom_policy).is_some()
-        && set(PARAM_MM_ZERO_ON_ALLOC, preset.zero_on_alloc).is_some();
+        && set(PARAM_MM_ZERO_ON_ALLOC, preset.zero_on_alloc).is_some()
+        && set(PARAM_MM_SWAPPINESS, preset.swappiness).is_some();
 
     if ok {
         serial_println!(
-            "[sysctl] Applied memory profile: {} (stack={}, lazy={}, oom={}, zero={})",
+            "[sysctl] Applied memory profile: {} (stack={}, lazy={}, oom={}, zero={}, swap={})",
             profile.name(),
             preset.max_stack_frames,
             preset.lazy_default,
             preset.oom_policy,
-            preset.zero_on_alloc
+            preset.zero_on_alloc,
+            preset.swappiness
         );
     }
 
@@ -482,6 +525,7 @@ pub fn current_memory_profile() -> Option<WorkloadProfile> {
     let lazy = reg.get(PARAM_MM_LAZY_DEFAULT)?;
     let oom = reg.get(PARAM_MM_OOM_POLICY)?;
     let zero = reg.get(PARAM_MM_ZERO_ON_ALLOC)?;
+    let swap = reg.get(PARAM_MM_SWAPPINESS)?;
     drop(reg);
 
     // Check each profile's preset against current values.
@@ -492,6 +536,7 @@ pub fn current_memory_profile() -> Option<WorkloadProfile> {
                 && lazy == preset.lazy_default
                 && oom == preset.oom_policy
                 && zero == preset.zero_on_alloc
+                && swap == preset.swappiness
             {
                 return Some(profile);
             }
@@ -562,6 +607,7 @@ pub fn self_test() {
     assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(1));
     assert_eq!(get(PARAM_MM_OOM_POLICY), Some(2));
     assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(1));
+    assert_eq!(get(PARAM_MM_SWAPPINESS), Some(30));
     assert_eq!(current_memory_profile(), Some(WorkloadProfile::Server));
 
     // Apply Development profile.
@@ -570,6 +616,7 @@ pub fn self_test() {
     assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(0));
     assert_eq!(get(PARAM_MM_OOM_POLICY), Some(0));
     assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(0));
+    assert_eq!(get(PARAM_MM_SWAPPINESS), Some(10));
     assert_eq!(current_memory_profile(), Some(WorkloadProfile::Development));
 
     // Apply Gaming profile.

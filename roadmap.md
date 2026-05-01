@@ -39,9 +39,15 @@ _The minimum kernel that can run a single userspace process._
 - [x] Userspace virtual address space layout
 - [x] Demand paging (page fault handler, lazy allocation)
 - [x] Stack growth via page fault (guard page at bottom)
-- [ ] Swap file support (not partition)
+- [-] Swap file support (not partition)
+  - [x] Swap subsystem infrastructure: slot allocator (bitmap), swap entry PTE format, in-memory backend
+  - [x] `swap_out_page()` and `swap_in_page()` for evicting/restoring user pages
+  - [x] Page fault handler integration: detects swap PTEs and triggers swap-in
+  - [x] Sysctl parameters: mm.swappiness (default 15), mm.min_free_pages (default 32)
+  - [x] Swappiness tunable integrated into workload profiles (Desktop=15, Server=30, Dev=10, Gaming=5)
+  - [ ] Page reclamation policy (Clock algorithm, triggered by low-memory threshold)
   - [ ] zswap/zram compressed swap (recommended for desktop)
-  - [ ] Swappiness tunable (default 10-20 for desktop)
+  - [ ] Disk-backed swap via virtio-blk
 - [x] Committed vs. lazy memory allocation modes
   - [x] Default: committed (immediate frame allocation, the design spec's mandate)
   - [x] MAP_LAZY flag (bit 6) for opt-in demand-paged allocation via SYS_MMAP

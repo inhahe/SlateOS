@@ -51,7 +51,13 @@ _The minimum kernel that can run a single userspace process._
     - [x] `try_reclaim(target)` integrated into frame allocator OOM path
     - [x] `register_reclaimable()` hooked into stack growth, demand paging, and swap-in paths
     - [x] Lock ordering: SWAP → RECLAIM → page table → frame allocator (deadlock-free)
-  - [ ] zswap/zram compressed swap (recommended for desktop)
+  - [x] zswap/zram compressed swap (recommended for desktop)
+    - [x] LZ4-like fast compression algorithm (compress.rs) with hash-table match finding
+    - [x] Special 1-byte encoding for all-zero pages (BSS, stack)
+    - [x] MemBackend transparently compresses/decompresses page data
+    - [x] SlotData::Compressed vs ::Uncompressed storage per slot
+    - [x] CompressionStats API: ratio_percent(), bytes_saved()
+    - [x] Self-test: zero page (16K→1B), repeating (98% savings), sparse (>99% savings)
   - [ ] Disk-backed swap via virtio-blk
 - [x] Committed vs. lazy memory allocation modes
   - [x] Default: committed (immediate frame allocation, the design spec's mandate)

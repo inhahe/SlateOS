@@ -586,6 +586,19 @@ extern "C" fn kmain() -> ! {
     bench::self_test();
     bench::run_all();
 
+    // Print a boot-time memory summary for diagnostics.
+    if let Some(stats) = mm::frame::stats() {
+        let used = stats.total_frames.saturating_sub(stats.free_frames);
+        let total_mb = stats.total_frames.saturating_mul(mm::frame::FRAME_SIZE) / (1024 * 1024);
+        let free_mb = stats.free_frames.saturating_mul(mm::frame::FRAME_SIZE) / (1024 * 1024);
+        let used_mb = used.saturating_mul(mm::frame::FRAME_SIZE) / (1024 * 1024);
+        serial_println!("=== Memory summary ===");
+        serial_println!(
+            "  Physical: {} MiB total, {} MiB used, {} MiB free ({} frames)",
+            total_mb, used_mb, free_mb, stats.free_frames
+        );
+    }
+
     // Boot success marker — the boot test script looks for this.
     serial_println!("BOOT_OK");
     serial_println!("=== Kernel boot complete ===");

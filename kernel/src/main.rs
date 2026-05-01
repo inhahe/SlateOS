@@ -271,6 +271,12 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 16c: io_ring (io_uring-style batch I/O) self-test.
+    if let Err(e) = ipc::io_ring::self_test() {
+        serial_println!("FATAL: io_ring self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 17: Initialize capability system.
     // Capability tables store unforgeable handles to kernel objects.
     // Every resource access goes through capability checks — no

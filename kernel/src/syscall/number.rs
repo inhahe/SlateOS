@@ -424,6 +424,37 @@ pub const SYS_CP_CLOSE: u64 = 255;
 /// This allows userspace to manually wake a waiter.
 pub const SYS_CP_NOTIFY: u64 = 256;
 
+/// Create a new io_ring (io_uring-style submission queue).
+///
+/// `arg0`: number of submission queue entries (rounded up to power of 2).
+/// `arg1`: number of completion queue entries (rounded up to power of 2).
+///
+/// Returns: ring handle in `rax`, header virtual address in `rdx`.
+/// The physical frame addresses for user-space mapping can be queried
+/// separately if needed.
+pub const SYS_IO_RING_SETUP: u64 = 260;
+
+/// Submit and/or reap io_ring entries.
+///
+/// `arg0`: ring handle.
+/// `arg1`: maximum number of SQEs to process (0 = drain all pending).
+///
+/// Reads up to `to_submit` entries from the submission queue, executes
+/// each operation, and posts results to the completion queue.
+///
+/// Returns: number of SQEs processed.
+pub const SYS_IO_RING_ENTER: u64 = 261;
+
+/// Destroy an io_ring and free its resources.
+///
+/// `arg0`: ring handle.
+///
+/// Unmaps ring memory and frees physical frames.  The ring must not
+/// be in use by another thread.
+///
+/// Returns: 0 on success.
+pub const SYS_IO_RING_DESTROY: u64 = 262;
+
 // ---------------------------------------------------------------------------
 // Security syscalls (400–499)
 // ---------------------------------------------------------------------------

@@ -2435,6 +2435,72 @@ pub fn sys_thread_set_priority(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// io_ring handlers (260–269)
+// ---------------------------------------------------------------------------
+
+/// `SYS_IO_RING_SETUP` — create a new io_ring.
+///
+/// `arg0`: number of submission queue entries.
+/// `arg1`: number of completion queue entries.
+///
+/// Returns: ring handle in `value`, header virtual address in `value2`.
+pub fn sys_io_ring_setup(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::io_ring;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let sq_entries = args.arg0 as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let cq_entries = args.arg1 as u32;
+
+    match io_ring::setup(sq_entries, cq_entries) {
+        Ok((handle, header_virt, _phys_frames)) => {
+            // Return handle in rax, header vaddr in rdx.
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok2(handle as i64, header_virt as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_IO_RING_ENTER` — process io_ring submissions.
+///
+/// `arg0`: ring handle.
+/// `arg1`: maximum number of SQEs to process (0 = all pending).
+///
+/// Returns: number of SQEs processed.
+pub fn sys_io_ring_enter(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::io_ring;
+
+    let ring_handle = args.arg0;
+    #[allow(clippy::cast_possible_truncation)]
+    let to_submit = args.arg1 as u32;
+
+    match io_ring::enter(ring_handle, to_submit) {
+        Ok(processed) => {
+            #[allow(clippy::cast_lossless)]
+            SyscallResult::ok(processed as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_IO_RING_DESTROY` — destroy an io_ring and free resources.
+///
+/// `arg0`: ring handle.
+///
+/// Returns: 0 on success.
+pub fn sys_io_ring_destroy(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::io_ring;
+
+    let ring_handle = args.arg0;
+
+    match io_ring::destroy(ring_handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.
 ///
 /// `arg0`: pointer to hostname string.

@@ -40,6 +40,7 @@ use super::number::{
     SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
     SYS_THREAD_SUSPEND, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
+    SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_DNS_RESOLVE,
     SYS_YIELD,
@@ -195,6 +196,11 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CP_TRY_WAIT as usize] = Some(handlers::sys_cp_try_wait);
     handlers[SYS_CP_CLOSE as usize] = Some(handlers::sys_cp_close);
     handlers[SYS_CP_NOTIFY as usize] = Some(handlers::sys_cp_notify);
+
+    // io_ring (260–269).
+    handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
+    handlers[SYS_IO_RING_ENTER as usize] = Some(handlers::sys_io_ring_enter);
+    handlers[SYS_IO_RING_DESTROY as usize] = Some(handlers::sys_io_ring_destroy);
 
     // Time and timers (10–19).
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);

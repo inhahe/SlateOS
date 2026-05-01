@@ -959,17 +959,23 @@ unsafe fn zero_frame_nontemporal(ptr: *mut u8) {
 
 /// Maximum number of pre-zeroed frames in the pool.
 ///
-/// 64 frames × 16 KiB = 1 MiB of pre-zeroed memory.  This covers
-/// typical page fault bursts (process startup, stack growth, mmap)
-/// without hoarding too much memory in the pool.
-const ZERO_POOL_CAPACITY: usize = 64;
+/// OPT: Increased from 64→256 (1 MiB → 4 MiB) to absorb typical
+/// application launch bursts.  A medium application startup triggers
+/// 50-200 page faults; with 64 slots the pool emptied after the first
+/// 64 faults and fell back to expensive inline 16 KiB zeroing for the
+/// rest.  256 slots cover the full burst for most apps.
+///
+/// 256 frames × 16 KiB = 4 MiB.  On a 16 GB desktop, that's 0.02%
+/// of RAM.  Even on our 256 MiB QEMU test system it's only 1.5%.
+const ZERO_POOL_CAPACITY: usize = 256;
 
 /// Number of frames to zero in a single `refill_zero_pool()` call.
 ///
-/// Kept small to avoid holding resources for too long in the idle
-/// loop — each call zeros a few frames, then yields back to let
-/// real work run.
-const ZERO_POOL_REFILL_BATCH: usize = 8;
+/// OPT: Increased from 8→16 to replenish the pool faster after a
+/// burst.  Each 16 KiB zero takes ~3µs (12k cycles on the dev CPU),
+/// so a batch of 16 takes ~48µs — still well under a timer tick (10ms)
+/// and acceptable for idle-loop work.
+const ZERO_POOL_REFILL_BATCH: usize = 16;
 
 /// Pre-zeroed frame pool.
 ///

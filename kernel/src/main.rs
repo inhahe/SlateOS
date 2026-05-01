@@ -540,6 +540,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::trash::self_test() {
                 serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
             }
+            // Run change notification self-test (watch, emit, read, close).
+            if let Err(e) = fs::notify::self_test() {
+                serial_println!("WARNING: Change notification self-test failed: {:?}", e);
+            }
         }
         Err(e) => {
             serial_println!("[fs] No FAT filesystem on vda: {:?} (non-fatal)", e);

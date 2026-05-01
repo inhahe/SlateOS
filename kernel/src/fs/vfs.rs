@@ -256,30 +256,47 @@ impl Vfs {
 
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
-        mp.fs.write_file(relative, data)
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.write_file(relative, data)?;
+        }
+        // Notify after releasing VFS lock (avoids holding both locks).
+        super::notify::emit_modified(path);
+        Ok(())
     }
 
     /// Delete a file.
     pub fn remove(path: &str) -> KernelResult<()> {
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
-        mp.fs.remove(relative)
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.remove(relative)?;
+        }
+        super::notify::emit_deleted(path);
+        Ok(())
     }
 
     /// Create a directory.
     pub fn mkdir(path: &str) -> KernelResult<()> {
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
-        mp.fs.mkdir(relative)
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.mkdir(relative)?;
+        }
+        super::notify::emit_created(path);
+        Ok(())
     }
 
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
-        mp.fs.rmdir(relative)
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.rmdir(relative)?;
+        }
+        super::notify::emit_deleted(path);
+        Ok(())
     }
 
     /// Read a range of bytes from a file.
@@ -287,41 +304,55 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.read_at(relative, offset, len)
+        // Note: no ACCESS event emitted by default (high-frequency).
+        // Callers that need it can emit manually.
     }
 
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
-        mp.fs.write_at(relative, offset, data)
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.write_at(relative, offset, data)?;
+        }
+        super::notify::emit_modified(path);
+        Ok(())
     }
 
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, path)?;
-        mp.fs.truncate(relative, size)
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.truncate(relative, size)?;
+        }
+        super::notify::emit_modified(path);
+        Ok(())
     }
 
     /// Rename or move a file or directory.
     ///
     /// Both paths must be on the same mount point.
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
-        let mut vfs = VFS.lock();
+        {
+            let mut vfs = VFS.lock();
 
-        // Both paths must resolve to the same mount point.
-        let (mp_from, rel_from) = find_mount(&mut vfs, from)?;
-        let from_mount_path = mp_from.path.clone();
-        let rel_from_owned = String::from(rel_from);
+            // Both paths must resolve to the same mount point.
+            let (mp_from, rel_from) = find_mount(&mut vfs, from)?;
+            let from_mount_path = mp_from.path.clone();
+            let rel_from_owned = String::from(rel_from);
 
-        // Find mount for `to` — must be the same filesystem.
-        let (mp_to, rel_to) = find_mount(&mut vfs, to)?;
-        if mp_to.path != from_mount_path {
-            return Err(KernelError::InvalidArgument);
+            // Find mount for `to` — must be the same filesystem.
+            let (mp_to, rel_to) = find_mount(&mut vfs, to)?;
+            if mp_to.path != from_mount_path {
+                return Err(KernelError::InvalidArgument);
+            }
+
+            // Delegate to the filesystem (using the `from` mount).
+            mp_to.fs.rename(&rel_from_owned, rel_to)?;
         }
-
-        // Delegate to the filesystem (using the `from` mount).
-        mp_to.fs.rename(&rel_from_owned, rel_to)
+        super::notify::emit_renamed(from, to);
+        Ok(())
     }
 }
 

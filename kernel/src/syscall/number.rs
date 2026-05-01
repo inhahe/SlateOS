@@ -1011,6 +1011,52 @@ pub const SYS_FS_TRASH_EMPTY: u64 = 621;
 /// - `[524..528]`: padding (zeros)
 pub const FS_TRASH_ENTRY_SIZE: usize = 528;
 
+/// Create a filesystem watch for change notifications.
+///
+/// `arg0`: pointer to directory path string to watch.
+/// `arg1`: path length (bytes).
+/// `arg2`: event mask (bitmask of event types to monitor).
+/// `arg3`: flags (bit 0 = recursive).
+///
+/// Event mask bits:
+/// - bit 0: CREATE (file/dir created)
+/// - bit 1: DELETE (file/dir deleted)
+/// - bit 2: MODIFY (file contents changed)
+/// - bit 3: RENAME (file/dir renamed/moved)
+/// - bit 4: METADATA (metadata changed)
+/// - bit 5: ACCESS (file read — high frequency, usually off)
+///
+/// Returns: watch ID on success, negative error code on failure.
+pub const SYS_FS_WATCH_CREATE: u64 = 622;
+
+/// Read pending events from a filesystem watch.
+///
+/// `arg0`: watch ID.
+/// `arg1`: pointer to output buffer for events.
+/// `arg2`: maximum number of events to read.
+///
+/// Each event is 528 bytes:
+/// - `[0..256]`: affected path (null-terminated UTF-8)
+/// - `[256..512]`: new path for rename events (null-terminated UTF-8, empty otherwise)
+/// - `[512..520]`: watch ID (u64)
+/// - `[520..524]`: event type (u32: 0=created, 1=deleted, 2=modified, 3=renamed, 255=overflow)
+/// - `[524..528]`: padding
+///
+/// Returns: number of events read, or negative error code.
+pub const SYS_FS_WATCH_READ: u64 = 623;
+
+/// Close a filesystem watch.
+///
+/// `arg0`: watch ID.
+///
+/// All pending events are discarded.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_WATCH_CLOSE: u64 = 624;
+
+/// Size of a watch event as returned by `SYS_FS_WATCH_READ`.
+pub const FS_WATCH_EVENT_SIZE: usize = 528;
+
 /// Seek whence: from start of file.
 pub const SEEK_SET: u64 = 0;
 /// Seek whence: from current offset.

@@ -26,6 +26,7 @@
 pub mod cache;
 pub mod fat;
 pub mod handle;
+pub mod notify;
 pub mod trash;
 pub mod vfs;
 

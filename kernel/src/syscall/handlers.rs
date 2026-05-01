@@ -2989,6 +2989,136 @@ pub fn sys_fs_trash_empty(_args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Filesystem watch handlers (622–624)
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_WATCH_CREATE` — create a filesystem change watch.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+/// `arg2`: event mask.
+/// `arg3`: flags (bit 0 = recursive).
+pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let ptr = args.arg0 as *const u8;
+    let len = args.arg1 as usize;
+    let mask = args.arg2 as u32;
+    let flags = args.arg3;
+
+    if ptr.is_null() || len == 0 || len > 4096 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let path_bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let recursive = (flags & 1) != 0;
+    let event_mask = crate::fs::notify::FsEventMask(mask);
+
+    match crate::fs::notify::create_watch(path, event_mask, recursive) {
+        Ok(id) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(id as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_WATCH_READ` — read pending filesystem change events.
+///
+/// `arg0`: watch ID.
+/// `arg1`: pointer to output buffer.
+/// `arg2`: max number of events.
+pub fn sys_fs_watch_read(args: &SyscallArgs) -> SyscallResult {
+    let watch_id = args.arg0;
+    let out_ptr = args.arg1 as *mut u8;
+    let max_events = args.arg2 as usize;
+
+    if out_ptr.is_null() || max_events == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let buf_size = max_events.saturating_mul(crate::syscall::number::FS_WATCH_EVENT_SIZE);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_size) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::fs::notify::read_events(watch_id, max_events) {
+        Ok(events) => {
+            let count = events.len();
+
+            // SAFETY: Validated above.
+            unsafe {
+                core::ptr::write_bytes(out_ptr, 0, buf_size);
+
+                for (i, event) in events.iter().enumerate() {
+                    let base = out_ptr.add(
+                        i.wrapping_mul(crate::syscall::number::FS_WATCH_EVENT_SIZE),
+                    );
+
+                    // Write path (bytes 0..256).
+                    let path_bytes = event.path.as_bytes();
+                    let path_len = path_bytes.len().min(255);
+                    core::ptr::copy_nonoverlapping(
+                        path_bytes.as_ptr(),
+                        base,
+                        path_len,
+                    );
+
+                    // Write new_path for rename events (bytes 256..512).
+                    if let Some(ref np) = event.new_path {
+                        let np_bytes = np.as_bytes();
+                        let np_len = np_bytes.len().min(255);
+                        core::ptr::copy_nonoverlapping(
+                            np_bytes.as_ptr(),
+                            base.add(256),
+                            np_len,
+                        );
+                    }
+
+                    // Write watch ID (bytes 512..520).
+                    let id_ptr = base.add(512) as *mut u64;
+                    core::ptr::write(id_ptr, event.watch_id);
+
+                    // Write event type (bytes 520..524).
+                    let type_ptr = base.add(520) as *mut u32;
+                    core::ptr::write(type_ptr, event.event_type as u32);
+                }
+            }
+
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(count as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_WATCH_CLOSE` — close a filesystem watch.
+///
+/// `arg0`: watch ID.
+pub fn sys_fs_watch_close(args: &SyscallArgs) -> SyscallResult {
+    let watch_id = args.arg0;
+
+    match crate::fs::notify::close_watch(watch_id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 

@@ -34,6 +34,7 @@ use super::number::{
     SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
     SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
     SYS_FS_TRASH, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRASH_EMPTY,
+    SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_CLOSE,
     SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
@@ -289,6 +290,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_TRASH_LIST as usize] = Some(handlers::sys_fs_trash_list);
     handlers[SYS_FS_TRASH_RESTORE as usize] = Some(handlers::sys_fs_trash_restore);
     handlers[SYS_FS_TRASH_EMPTY as usize] = Some(handlers::sys_fs_trash_empty);
+    handlers[SYS_FS_WATCH_CREATE as usize] = Some(handlers::sys_fs_watch_create);
+    handlers[SYS_FS_WATCH_READ as usize] = Some(handlers::sys_fs_watch_read);
+    handlers[SYS_FS_WATCH_CLOSE as usize] = Some(handlers::sys_fs_watch_close);
 
     // Networking (800–999).
     handlers[SYS_TCP_CONNECT as usize] = Some(handlers::sys_tcp_connect);

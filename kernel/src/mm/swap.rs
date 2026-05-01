@@ -800,10 +800,7 @@ pub fn try_reclaim(target: usize) -> usize {
 
             // Check the ACCESSED bit in the PTE.
             let virt = VirtAddr::new(entry.vaddr);
-            // SAFETY: pml4_phys is from a registered process.
-            let pte = unsafe {
-                page_table::read_leaf_pte(entry.pml4_phys, virt)
-            };
+            let pte = page_table::read_leaf_pte(entry.pml4_phys, virt);
 
             match pte {
                 Some(pte) if pte.is_present() => {
@@ -1174,8 +1171,7 @@ pub unsafe fn swap_in_page(
     }
 
     // Step 1: Read the swap entry from the PTE.
-    // SAFETY: pml4_phys is valid.
-    let pte = unsafe { page_table::read_leaf_pte(pml4_phys, virt) }
+    let pte = page_table::read_leaf_pte(pml4_phys, virt)
         .ok_or(KernelError::InvalidAddress)?;
 
     let swap_entry = SwapEntry::from_pte_raw(pte.raw())
@@ -1256,7 +1252,7 @@ pub unsafe fn swap_in_page(
 /// - `pml4_phys` must be a valid PML4 table.
 #[must_use]
 pub unsafe fn is_swapped(pml4_phys: u64, virt: VirtAddr) -> bool {
-    unsafe { page_table::read_leaf_pte(pml4_phys, virt) }
+    page_table::read_leaf_pte(pml4_phys, virt)
         .map_or(false, |pte| pte.is_swap())
 }
 

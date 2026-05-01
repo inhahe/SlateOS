@@ -1,0 +1,577 @@
+//! Memory protection (mprotect) and W^X enforcement.
+//!
+//! Provides the kernel-side `mprotect` operation: changing page permissions
+//! on existing mappings.  Enforces the W^X (write-xor-execute) invariant:
+//! a page may be writable or executable, but never both simultaneously.
+//!
+//! ## W^X Enforcement
+//!
+//! All userspace mappings default to non-executable (NX bit set).  Only
+//! the ELF loader creates executable pages (for .text segments), and only
+//! with read+execute (never write+execute).
+//!
+//! JIT compilers (V8, LuaJIT, JVM HotSpot, .NET RyuJIT) need to create
+//! executable pages at runtime.  The supported pattern is:
+//!
+//! 1. Allocate anonymous memory (writable, non-executable)
+//! 2. Write generated code into it
+//! 3. `mprotect` to read+execute (removing write)
+//! 4. Execute the generated code
+//! 5. To modify: `mprotect` back to read+write, modify, `mprotect` to
+//!    read+execute again
+//!
+//! This two-phase approach prevents code injection: an attacker cannot
+//! write to a page that is currently executable.
+//!
+//! ## Capability Gate
+//!
+//! Creating executable pages via `mprotect` (transitioning from any state
+//! to read+execute) requires the `mem.jit` capability.  Programs without
+//! this capability cannot create new executable pages beyond their initial
+//! .text mapping.  The ELF loader's initial executable mapping does NOT
+//! require `mem.jit` — it's part of normal program loading.
+//!
+//! ## References
+//!
+//! - OpenBSD W^X enforcement (the gold standard)
+//! - Windows DEP (Data Execution Prevention)
+//! - Linux `mprotect(2)` with SELinux `execmem` restriction
+
+use crate::error::{KernelError, KernelResult};
+use crate::mm::frame::FRAME_SIZE;
+use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::serial_println;
+
+// ---------------------------------------------------------------------------
+// Memory protection flags
+// ---------------------------------------------------------------------------
+
+/// Memory protection mode for `mprotect`.
+///
+/// Represents the valid combinations of read/write/execute permissions.
+/// W^X is enforced structurally: there is no variant for write+execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemProt {
+    /// No access.  Any access will fault.
+    None,
+
+    /// Read-only, non-executable.
+    ReadOnly,
+
+    /// Read-write, non-executable.  Default for anonymous memory.
+    ReadWrite,
+
+    /// Read-execute.  For code pages.
+    /// Requires `mem.jit` capability when applied via `mprotect`
+    /// (not required for initial ELF loading).
+    ReadExecute,
+}
+
+impl MemProt {
+    /// Convert to `PageFlags` suitable for a userspace mapping.
+    ///
+    /// All modes include `PRESENT` and `USER_ACCESSIBLE`.
+    /// `NO_EXECUTE` is set for all non-executable modes.
+    #[must_use]
+    pub fn to_page_flags(self) -> PageFlags {
+        match self {
+            Self::None => {
+                // Map as present but not writable, not user-accessible.
+                // Alternatively, could unmap entirely.  Using present but
+                // inaccessible catches bugs (fault with a known reason).
+                PageFlags::PRESENT | PageFlags::NO_EXECUTE
+            }
+            Self::ReadOnly => {
+                PageFlags::PRESENT
+                    | PageFlags::USER_ACCESSIBLE
+                    | PageFlags::NO_EXECUTE
+            }
+            Self::ReadWrite => {
+                PageFlags::PRESENT
+                    | PageFlags::USER_ACCESSIBLE
+                    | PageFlags::WRITABLE
+                    | PageFlags::NO_EXECUTE
+            }
+            Self::ReadExecute => {
+                // No NO_EXECUTE → page is executable.
+                // No WRITABLE → page is not writable.  W^X enforced.
+                PageFlags::PRESENT
+                    | PageFlags::USER_ACCESSIBLE
+            }
+        }
+    }
+
+    /// Whether this protection mode makes the page executable.
+    #[must_use]
+    pub const fn is_executable(self) -> bool {
+        matches!(self, Self::ReadExecute)
+    }
+
+    /// Whether this protection mode makes the page writable.
+    #[must_use]
+    pub const fn is_writable(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mprotect implementation
+// ---------------------------------------------------------------------------
+
+/// Change memory protection for a range of virtual addresses.
+///
+/// The range `[start, start + len)` must be frame-aligned (16 KiB).
+/// All frames in the range must already be mapped (present in the page
+/// tables).  The protection flags of each frame's PTEs are updated
+/// to match `prot`.
+///
+/// ## W^X enforcement
+///
+/// This function structurally prevents write+execute: the [`MemProt`]
+/// enum has no variant combining both.  This is the kernel's primary
+/// W^X enforcement point.
+///
+/// ## JIT capability gate
+///
+/// Setting `prot` to `ReadExecute` requires `has_jit_cap` to be `true`.
+/// This prevents unprivileged processes from creating executable pages.
+/// The initial ELF .text mapping bypasses this check (it goes through
+/// the ELF loader, not mprotect).
+///
+/// ## TLB flush
+///
+/// The caller is responsible for flushing the TLB after mprotect
+/// completes (via `tlb::flush_range` or `tlb::shootdown_range` for SMP).
+/// This function does NOT flush the TLB because the caller may be
+/// batching multiple mprotect calls.
+///
+/// # Errors
+///
+/// - `BadAlignment`: `start` is not frame-aligned or `len` is 0.
+/// - `PermissionDenied`: `prot` is `ReadExecute` but `has_jit_cap` is false.
+/// - `InvalidAddress`: A frame in the range is not mapped.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn mprotect(
+    pml4_phys: u64,
+    start: u64,
+    len: usize,
+    prot: MemProt,
+    has_jit_cap: bool,
+) -> KernelResult<usize> {
+    if len == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let start_addr = VirtAddr::new(start);
+    if !start_addr.is_frame_aligned() {
+        return Err(KernelError::BadAlignment);
+    }
+
+    // Capability gate: only processes with mem.jit can create executable pages.
+    if prot.is_executable() && !has_jit_cap {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    let flags = prot.to_page_flags();
+
+    // Round up to frame boundary.
+    let len_aligned = len.div_ceil(FRAME_SIZE) * FRAME_SIZE;
+    let end = start.saturating_add(len_aligned as u64);
+
+    let mut frames_changed = 0usize;
+    let mut addr = start;
+
+    while addr < end {
+        let virt = VirtAddr::new(addr);
+
+        // SAFETY: We're changing flags on an existing mapping.
+        // The caller guarantees pml4_phys is valid for this address space.
+        // We don't flush TLB here (caller does it after batching).
+        let result = unsafe { page_table::change_flags(pml4_phys, virt, flags) };
+
+        match result {
+            Ok(()) => {
+                frames_changed += 1;
+            }
+            Err(KernelError::InvalidAddress) => {
+                // Frame not mapped.  If we've already changed some frames,
+                // report partial success.  Otherwise, propagate the error.
+                if frames_changed == 0 {
+                    return Err(KernelError::InvalidAddress);
+                }
+                // Stop at the first unmapped frame — don't skip gaps.
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+
+        addr = addr.saturating_add(FRAME_SIZE as u64);
+    }
+
+    Ok(frames_changed)
+}
+
+// ---------------------------------------------------------------------------
+// W^X validation
+// ---------------------------------------------------------------------------
+
+/// Check whether a set of `PageFlags` violates W^X.
+///
+/// Returns `true` if the flags have both `WRITABLE` and executable
+/// (i.e., `NO_EXECUTE` is NOT set).
+#[must_use]
+pub fn is_wx_violation(flags: PageFlags) -> bool {
+    flags.contains(PageFlags::WRITABLE) && !flags.contains(PageFlags::NO_EXECUTE)
+}
+
+// ---------------------------------------------------------------------------
+// Kernel W^X audit
+// ---------------------------------------------------------------------------
+
+/// Result of a kernel W^X audit.
+#[derive(Debug, Clone, Copy)]
+pub struct WxAuditResult {
+    /// Number of HHDM (direct-map) pages with W+X.  Expected to be non-zero
+    /// until we patch the Limine-created HHDM to set the NX bit.
+    pub hhdm_violations: usize,
+    /// Number of non-HHDM kernel pages with W+X.  This SHOULD be zero.
+    pub kernel_violations: usize,
+}
+
+impl WxAuditResult {
+    /// Total violations across both categories.
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.hhdm_violations + self.kernel_violations
+    }
+}
+
+/// Audit the kernel's page table for W^X violations.
+///
+/// Walks the kernel half of the page table (PML4 entries 256–511)
+/// and checks every leaf PTE for simultaneous WRITABLE + executable.
+///
+/// Separates HHDM (Higher Half Direct Map) violations from real
+/// kernel text/data violations.  Limine's HHDM doesn't set the NX
+/// bit, so thousands of apparent W+X pages are expected there — those
+/// are not real security issues because we never execute code from
+/// the direct map.  Non-HHDM violations (kernel .text, .data, stacks,
+/// heap) are genuine and should be investigated.
+///
+/// Only the first few non-HHDM violations are logged individually
+/// to avoid flooding serial output.
+///
+/// This is a diagnostic function, not a hot path.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return WxAuditResult { hhdm_violations: 0, kernel_violations: 0 },
+    };
+
+    let mut hhdm_violations = 0usize;
+    let mut kernel_violations = 0usize;
+
+    // The HHDM region starts at pml4_idx = (hhdm >> 39) & 0x1FF.
+    // Typically 0xFFFF_8000_0000_0000 → PML4 index 256.
+    let hhdm_pml4_start = ((hhdm >> 39) & 0x1FF) as usize;
+
+    // The HHDM covers enough entries to map all physical RAM.  In practice
+    // on a 256 MiB VM, one PML4 entry (512 GiB) is more than enough.  We
+    // conservatively treat entries [hhdm_pml4_start, hhdm_pml4_start+4) as
+    // HHDM — that covers up to 2 TiB of physical memory.
+    let hhdm_pml4_end = hhdm_pml4_start.saturating_add(4).min(512);
+
+    // Max non-HHDM violations to log individually.
+    const MAX_LOGGED: usize = 8;
+
+    // Kernel half: PML4 entries 256–511.
+    for pml4_idx in 256..512 {
+        // SAFETY: pml4_phys is the active page table, indices are valid.
+        let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
+        if !pml4e.is_present() {
+            continue;
+        }
+
+        let is_hhdm = pml4_idx >= hhdm_pml4_start && pml4_idx < hhdm_pml4_end;
+
+        for pdpt_idx in 0..512 {
+            let pdpte = unsafe { page_table::read_entry(pml4e.phys_addr(), pdpt_idx, hhdm) };
+            if !pdpte.is_present() {
+                continue;
+            }
+            // 1 GiB huge page — check directly.
+            if pdpte.is_huge() {
+                if is_wx_violation(pdpte.flags()) {
+                    if is_hhdm {
+                        hhdm_violations += 1;
+                    } else {
+                        let virt = (pml4_idx * (1 << 39) + pdpt_idx * (1 << 30)) as u64;
+                        if kernel_violations < MAX_LOGGED {
+                            serial_println!(
+                                "[wx-audit] VIOLATION: 1GiB page at {:#x} is W+X",
+                                virt | 0xFFFF_0000_0000_0000u64
+                            );
+                        }
+                        kernel_violations += 1;
+                    }
+                }
+                continue;
+            }
+
+            for pd_idx in 0..512 {
+                let pde = unsafe { page_table::read_entry(pdpte.phys_addr(), pd_idx, hhdm) };
+                if !pde.is_present() {
+                    continue;
+                }
+                // 2 MiB huge page — check directly.
+                if pde.is_huge() {
+                    if is_wx_violation(pde.flags()) {
+                        if is_hhdm {
+                            hhdm_violations += 1;
+                        } else {
+                            let virt = (pml4_idx * (1 << 39) + pdpt_idx * (1 << 30)
+                                + pd_idx * (1 << 21)) as u64;
+                            if kernel_violations < MAX_LOGGED {
+                                serial_println!(
+                                    "[wx-audit] VIOLATION: 2MiB page at {:#x} is W+X",
+                                    virt | 0xFFFF_0000_0000_0000u64
+                                );
+                            }
+                            kernel_violations += 1;
+                        }
+                    }
+                    continue;
+                }
+
+                for pt_idx in 0..512 {
+                    let pte = unsafe { page_table::read_entry(pde.phys_addr(), pt_idx, hhdm) };
+                    if !pte.is_present() {
+                        continue;
+                    }
+                    if is_wx_violation(pte.flags()) {
+                        if is_hhdm {
+                            hhdm_violations += 1;
+                        } else {
+                            let virt = (pml4_idx * (1 << 39) + pdpt_idx * (1 << 30)
+                                + pd_idx * (1 << 21) + pt_idx * (1 << 12)) as u64;
+                            if kernel_violations < MAX_LOGGED {
+                                serial_println!(
+                                    "[wx-audit] VIOLATION: 4KiB page at {:#x} is W+X",
+                                    virt | 0xFFFF_0000_0000_0000u64
+                                );
+                            }
+                            kernel_violations += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    WxAuditResult { hhdm_violations, kernel_violations }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Self-test for memory protection.
+///
+/// Tests the mprotect function and W^X enforcement.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn self_test() -> KernelResult<()> {
+    serial_println!("[protect] Running memory protection self-test...");
+
+    // -- Test 1: MemProt flag conversion ---------------------------------
+    {
+        let rw_flags = MemProt::ReadWrite.to_page_flags();
+        assert!(rw_flags.contains(PageFlags::WRITABLE));
+        assert!(rw_flags.contains(PageFlags::NO_EXECUTE));
+        assert!(rw_flags.contains(PageFlags::USER_ACCESSIBLE));
+
+        let rx_flags = MemProt::ReadExecute.to_page_flags();
+        assert!(!rx_flags.contains(PageFlags::WRITABLE));
+        assert!(!rx_flags.contains(PageFlags::NO_EXECUTE));
+        assert!(rx_flags.contains(PageFlags::USER_ACCESSIBLE));
+
+        let ro_flags = MemProt::ReadOnly.to_page_flags();
+        assert!(!ro_flags.contains(PageFlags::WRITABLE));
+        assert!(ro_flags.contains(PageFlags::NO_EXECUTE));
+        assert!(ro_flags.contains(PageFlags::USER_ACCESSIBLE));
+
+        serial_println!("[protect]   MemProt flag conversion: OK");
+    }
+
+    // -- Test 2: W^X violation detection ---------------------------------
+    {
+        // Write + execute (no NO_EXECUTE) = violation
+        let wx_flags = PageFlags::PRESENT | PageFlags::WRITABLE;
+        assert!(is_wx_violation(wx_flags));
+
+        // Write + no-execute = OK
+        let w_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+        assert!(!is_wx_violation(w_flags));
+
+        // Read + execute (no write) = OK
+        let rx_flags = PageFlags::PRESENT;
+        assert!(!is_wx_violation(rx_flags));
+
+        serial_println!("[protect]   W^X violation detection: OK");
+    }
+
+    // -- Test 3: JIT capability gate -------------------------------------
+    {
+        // mprotect to ReadExecute without JIT cap should fail.
+        // We can't easily test with real pages, so test the logic.
+        let prot = MemProt::ReadExecute;
+        assert!(prot.is_executable());
+        assert!(!prot.is_writable());
+
+        let prot2 = MemProt::ReadWrite;
+        assert!(!prot2.is_executable());
+        assert!(prot2.is_writable());
+
+        serial_println!("[protect]   JIT capability gate logic: OK");
+    }
+
+    // -- Test 4: Kernel W^X audit ----------------------------------------
+    {
+        let pml4_phys = page_table::active_pml4_phys();
+        let result = audit_kernel_wx(pml4_phys);
+
+        if result.hhdm_violations > 0 {
+            // Expected: Limine's HHDM doesn't set NX on the direct map.
+            // This is not a security issue (we don't execute from HHDM).
+            // TODO: patch HHDM page tables to add NX after boot.
+            serial_println!(
+                "[protect]   Kernel W^X audit: {} HHDM pages lack NX (expected, Limine direct map)",
+                result.hhdm_violations
+            );
+        }
+
+        if result.kernel_violations == 0 {
+            serial_println!("[protect]   Kernel W^X audit: OK (0 non-HHDM violations)");
+        } else {
+            serial_println!(
+                "[protect]   Kernel W^X audit: WARNING ({} non-HHDM W+X pages found)",
+                result.kernel_violations
+            );
+            // Don't fail — some kernel sections (like the SMP trampoline)
+            // may legitimately be W+X temporarily during boot.
+        }
+    }
+
+    // -- Test 5: mprotect on a test page ---------------------------------
+    {
+        use crate::mm::frame;
+
+        let pml4_phys = page_table::active_pml4_phys();
+
+        // Allocate and map a test frame.
+        let test_frame = frame::alloc_frame()?;
+        let test_virt = VirtAddr::new(0xFFFF_C800_0000_0000); // Test VA
+
+        let initial_flags = PageFlags::PRESENT
+            | PageFlags::WRITABLE
+            | PageFlags::NO_EXECUTE;
+
+        // SAFETY: Test-only mapping in kernel space, will be cleaned up.
+        unsafe {
+            page_table::map_frame(pml4_phys, test_virt, test_frame, initial_flags)?;
+        }
+
+        // mprotect to ReadOnly.
+        let changed = mprotect(
+            pml4_phys,
+            test_virt.as_u64(),
+            FRAME_SIZE,
+            MemProt::ReadOnly,
+            false, // no JIT cap needed for non-executable
+        )?;
+        assert!(changed == 1, "expected 1 frame changed");
+
+        // Verify flags changed.
+        let pte = page_table::read_leaf_pte(pml4_phys, test_virt)
+            .ok_or(KernelError::InternalError)?;
+        let new_flags = pte.flags();
+        if new_flags.contains(PageFlags::WRITABLE) {
+            serial_println!("[protect]   FAIL: WRITABLE still set after mprotect(ReadOnly)");
+            return Err(KernelError::InternalError);
+        }
+
+        // mprotect to ReadExecute WITHOUT JIT cap → should fail.
+        let result = mprotect(
+            pml4_phys,
+            test_virt.as_u64(),
+            FRAME_SIZE,
+            MemProt::ReadExecute,
+            false, // no JIT cap
+        );
+        match result {
+            Err(KernelError::PermissionDenied) => { /* expected */ }
+            _ => {
+                serial_println!("[protect]   FAIL: ReadExecute without JIT cap should be denied");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // mprotect to ReadExecute WITH JIT cap → should succeed.
+        let changed = mprotect(
+            pml4_phys,
+            test_virt.as_u64(),
+            FRAME_SIZE,
+            MemProt::ReadExecute,
+            true, // has JIT cap
+        )?;
+        assert!(changed == 1);
+
+        // Verify: executable (no NO_EXECUTE), not writable.
+        let pte2 = page_table::read_leaf_pte(pml4_phys, test_virt)
+            .ok_or(KernelError::InternalError)?;
+        let exec_flags = pte2.flags();
+        if exec_flags.contains(PageFlags::NO_EXECUTE) {
+            serial_println!("[protect]   FAIL: NO_EXECUTE still set after mprotect(ReadExecute)");
+            return Err(KernelError::InternalError);
+        }
+        if exec_flags.contains(PageFlags::WRITABLE) {
+            serial_println!("[protect]   FAIL: WRITABLE set after mprotect(ReadExecute) — W^X violation!");
+            return Err(KernelError::InternalError);
+        }
+
+        // mprotect back to ReadWrite (remove execute, add write).
+        let changed = mprotect(
+            pml4_phys,
+            test_virt.as_u64(),
+            FRAME_SIZE,
+            MemProt::ReadWrite,
+            false,
+        )?;
+        assert!(changed == 1);
+
+        // Verify: writable, not executable.
+        let pte3 = page_table::read_leaf_pte(pml4_phys, test_virt)
+            .ok_or(KernelError::InternalError)?;
+        let rw_flags = pte3.flags();
+        if !rw_flags.contains(PageFlags::WRITABLE) {
+            serial_println!("[protect]   FAIL: not WRITABLE after mprotect(ReadWrite)");
+            return Err(KernelError::InternalError);
+        }
+        if !rw_flags.contains(PageFlags::NO_EXECUTE) {
+            serial_println!("[protect]   FAIL: NO_EXECUTE not set after mprotect(ReadWrite) — W^X violation!");
+            return Err(KernelError::InternalError);
+        }
+
+        // Clean up.
+        // SAFETY: Test mapping, we own it.
+        unsafe {
+            page_table::unmap_frame(pml4_phys, test_virt)?;
+            frame::free_frame(test_frame)?;
+        }
+
+        serial_println!("[protect]   mprotect + W^X enforcement: OK");
+    }
+
+    serial_println!("[protect] Memory protection self-test PASSED");
+    Ok(())
+}

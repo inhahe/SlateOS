@@ -562,6 +562,13 @@ extern "C" fn kmain() -> ! {
     // Verifies refcount API and COW PTE flag manipulation.
     mm::cow::self_test();
 
+    // Step 22e2: Memory protection (mprotect / W^X) self-test.
+    // Verifies mprotect flag changes, W^X enforcement, JIT capability gate,
+    // and audits kernel page tables for write+execute violations.
+    if let Err(e) = mm::protect::self_test() {
+        serial_println!("[FATAL] Memory protection self-test failed: {:?}", e);
+    }
+
     // Step 22f: Enable per-CPU frame caches.
     // Now that all CPUs are online and current_cpu_index() works,
     // enable the per-CPU frame cache for lock-free order-0 allocation.

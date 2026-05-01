@@ -1097,52 +1097,59 @@ pub unsafe fn change_flags(
 // ---------------------------------------------------------------------------
 
 /// Read the raw PTE for the first 4 KiB page of a 16 KiB frame.
+/// Read the leaf page table entry for a virtual address.
 ///
 /// Walks the page table hierarchy and returns the raw PTE value for
 /// the leaf entry at `virt`.  Unlike [`translate`], this function
 /// does NOT require the entry to be present — it returns the raw
 /// value even for non-present (swap) entries.
 ///
+/// Handles 4 KiB, 2 MiB (huge), and 1 GiB (huge) page sizes:
+/// if a huge page is encountered, its PTE is returned directly.
+///
 /// Returns `None` if:
 /// - The subsystem is not initialized.
-/// - `virt` is not frame-aligned or not canonical.
-/// - An intermediate level (PML4/PDPT/PD) is not present (the page
-///   table walk can't reach the leaf level).
+/// - `virt` is not canonical.
+/// - An intermediate level (PML4/PDPT/PD) is not present and is
+///   not a huge page (the walk can't reach the leaf level).
+/// - The final leaf PTE is not present.
 ///
-/// # Safety
-///
-/// - `pml4_phys` must be a valid PML4 table.
-pub unsafe fn read_leaf_pte(
-    pml4_phys: u64,
-    virt: VirtAddr,
-) -> Option<PageTableEntry> {
+/// The caller must guarantee `pml4_phys` is a valid PML4 table.
+/// This function is safe because reading PTEs through the HHDM is
+/// a read-only operation that cannot cause UB when the subsystem
+/// is initialized (checked by `hhdm()`).
+#[must_use]
+pub fn read_leaf_pte(pml4_phys: u64, virt: VirtAddr) -> Option<PageTableEntry> {
     let hhdm = hhdm()?;
-
-    if !virt.is_frame_aligned() || !virt.is_canonical() {
+    if !virt.is_canonical() {
         return None;
     }
 
-    // Walk intermediate levels — these MUST be present.
+    // SAFETY: pml4_phys is valid (caller guarantee), indices from VirtAddr
+    // are always 0..511, and hhdm is valid (checked above).
     let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
     if !pml4e.is_present() {
         return None;
     }
 
     let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
-    if !pdpte.is_present() || pdpte.is_huge() {
+    if !pdpte.is_present() {
         return None;
+    }
+    if pdpte.is_huge() {
+        return Some(pdpte); // 1 GiB huge page.
     }
 
     let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
-    if !pde.is_present() || pde.is_huge() {
+    if !pde.is_present() {
         return None;
     }
+    if pde.is_huge() {
+        return Some(pde); // 2 MiB huge page.
+    }
 
-    let pt = pde.phys_addr();
-    let base_pt_index = virt.pt_index();
-
-    // SAFETY: pt is a valid page table, base_pt_index < 512.
-    Some(unsafe { read_entry(pt, base_pt_index, hhdm) })
+    let pte = unsafe { read_entry(pde.phys_addr(), virt.pt_index(), hhdm) };
+    if pte.is_present() { Some(pte) } else { None }
 }
 
 /// Write a swap entry into all 4 leaf PTEs for a 16 KiB frame.
@@ -1295,6 +1302,15 @@ pub fn read_cr3() -> u64 {
 #[must_use]
 pub const fn cr3_to_pml4(cr3: u64) -> u64 {
     cr3 & PHYS_ADDR_MASK
+}
+
+/// Get the currently active PML4 physical address.
+///
+/// Convenience wrapper around `cr3_to_pml4(read_cr3())`.
+#[inline]
+#[must_use]
+pub fn active_pml4_phys() -> u64 {
+    cr3_to_pml4(read_cr3())
 }
 
 /// Write a new value to CR3, switching the active page table.

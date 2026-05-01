@@ -25,7 +25,7 @@ use crate::gdt;
 use crate::mm;
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
-use crate::proc::spawn::{USER_STACK_TOP, USER_STACK_GUARD};
+use crate::proc::spawn::{USER_STACK_TOP, USER_STACK_GUARD, MAX_STACK_FRAMES};
 use crate::sched;
 use crate::serial_println;
 
@@ -1059,10 +1059,19 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
 /// Attempt to grow the user stack to cover the faulting address.
 ///
-/// The user stack occupies `[USER_STACK_GUARD, USER_STACK_TOP)` and
-/// grows downward on demand.  If `cr2` is within this region and the
-/// page is not yet mapped, we allocate a frame and map it with
-/// user read/write/no-execute permissions.
+/// The user stack occupies a virtual region below `USER_STACK_TOP` and
+/// grows downward on demand.  The maximum growth is bounded by:
+///
+/// 1. The compile-time `USER_STACK_GUARD` — absolute floor of the
+///    reserved virtual address region.  Cannot grow below this even if
+///    the sysctl value is higher.
+/// 2. The runtime `mm.max_stack_frames` sysctl — allows administrators
+///    to restrict stack growth below the compile-time maximum.  The
+///    effective guard is `max(compile_time_guard, dynamic_guard)`.
+///
+/// If `cr2` is within the growable region and the page is not yet
+/// mapped, we allocate a zeroed frame and map it with user
+/// read/write/no-execute permissions.
 ///
 /// Returns `true` if the stack was successfully grown, `false` if the
 /// address is outside the stack region or allocation failed.
@@ -1073,8 +1082,27 @@ fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
         return false;
     }
 
-    // Check if the address is in the growable stack region.
+    // Fast reject: address must be below USER_STACK_TOP and above the
+    // compile-time absolute floor.
     if cr2 < USER_STACK_GUARD || cr2 >= USER_STACK_TOP {
+        return false;
+    }
+
+    // Dynamic limit: the sysctl mm.max_stack_frames may be lower than
+    // the compile-time MAX_STACK_FRAMES, restricting growth further.
+    // We compute the dynamic guard and use the more restrictive (higher)
+    // of the two guards.
+    #[allow(clippy::arithmetic_side_effects)]
+    let dynamic_guard = {
+        let max_frames = crate::sysctl::get(
+            crate::sysctl::PARAM_MM_MAX_STACK_FRAMES,
+        ).unwrap_or(MAX_STACK_FRAMES as u64);
+        let max_bytes = max_frames.saturating_mul(FRAME_SIZE as u64);
+        USER_STACK_TOP.saturating_sub(max_bytes)
+    };
+    let effective_guard = USER_STACK_GUARD.max(dynamic_guard);
+
+    if cr2 < effective_guard {
         return false;
     }
 

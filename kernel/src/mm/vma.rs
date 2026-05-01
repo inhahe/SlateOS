@@ -229,10 +229,16 @@ impl AddressSpace {
             (vma.kind, vma.flags)
         };
 
-        // If the page IS present, this is a protection violation (e.g.,
-        // write to read-only page).  We don't handle CoW yet, so this
-        // is always fatal.
+        // If the page IS present, this is a protection violation.
+        // Check for Copy-on-Write: a write to a present COW page can
+        // be resolved by copying (or just marking writable if sole owner).
         if is_present {
+            if is_write {
+                // Try CoW resolution.  The CoW handler checks the PTE
+                // for the COW bit and handles refcount/copy.
+                return super::cow::resolve_cow_fault(self.pml4_phys, fault_addr);
+            }
+            // Present + read fault = genuine protection violation.
             return Err(KernelError::PageFault);
         }
 

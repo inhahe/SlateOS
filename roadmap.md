@@ -201,7 +201,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] MMIO mapping into driver process address space (SYS_MMAP + MAP_MMIO)
   - [x] Interrupt delivery from kernel to driver (IOAPIC + IRQ syscalls)
   - [x] Port I/O syscalls for legacy devices (SYS_PORT_READ/WRITE)
-  - [ ] DMA mapping setup syscalls
+  - [x] DMA mapping setup syscalls (mm::dma — alloc/free, user mapping, constraint support)
   - [ ] Driver crash detection and automatic restart
 - [ ] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers

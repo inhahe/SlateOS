@@ -157,6 +157,21 @@ impl PageFlags {
     /// Requires `CR4.PGE` to be set.
     pub const GLOBAL: Self = Self(1 << 8);
 
+    /// Copy-on-Write marker (software-defined, bit 9).
+    ///
+    /// When set on a present, non-writable PTE, indicates that this page
+    /// is shared via CoW.  A write fault on a COW page triggers the CoW
+    /// handler to either:
+    /// - Copy the page (if refcount > 1) and make the copy writable, or
+    /// - Just make the page writable (if refcount == 1, last reference).
+    ///
+    /// Bit 9 is one of three "available for OS use" bits (9, 10, 11) in
+    /// x86_64 PTEs.  The hardware ignores it.
+    ///
+    /// Invariant: COW is only meaningful when PRESENT is set and WRITABLE
+    /// is cleared.  Setting both COW and WRITABLE is invalid.
+    pub const COW: Self = Self(1 << 9);
+
     /// No-execute: instruction fetches cause a page fault.  Requires
     /// `IA32_EFER.NXE` to be enabled (Limine does this).
     pub const NO_EXECUTE: Self = Self(1 << 63);
@@ -165,6 +180,16 @@ impl PageFlags {
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
+    }
+
+    /// Construct flags from a raw 64-bit value.
+    ///
+    /// Used internally by the CoW handler and other subsystems that
+    /// need to manipulate flag bits directly (e.g., clearing COW while
+    /// setting WRITABLE).
+    #[must_use]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
     }
 
     /// The raw 64-bit value of the flags.
@@ -248,6 +273,15 @@ impl PageTableEntry {
     #[must_use]
     pub const fn is_huge(self) -> bool {
         self.0 & PageFlags::HUGE_PAGE.bits() != 0
+    }
+
+    /// Is this entry marked as Copy-on-Write?
+    ///
+    /// COW entries are present but non-writable, with the COW bit (bit 9)
+    /// set.  A write to a COW page triggers the CoW fault handler.
+    #[must_use]
+    pub const fn is_cow(self) -> bool {
+        self.0 & PageFlags::COW.bits() != 0
     }
 
     /// Extract the 4 KiB-aligned physical address from this entry.

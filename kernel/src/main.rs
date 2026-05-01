@@ -532,6 +532,10 @@ extern "C" fn kmain() -> ! {
     // Verifies contiguous physical allocation and free for device DMA.
     mm::dma::self_test();
 
+    // Step 22e: Copy-on-Write self-test.
+    // Verifies refcount API and COW PTE flag manipulation.
+    mm::cow::self_test();
+
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-

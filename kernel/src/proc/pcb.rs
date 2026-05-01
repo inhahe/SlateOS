@@ -487,9 +487,28 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         return false;
     }
 
+    // For present + write faults, try Copy-on-Write resolution.
+    // A present page with the COW bit set means this page is shared
+    // and needs to be copied on first write.
+    if error.is_present() && error.is_write() {
+        let Some(table) = PROCESS_TABLE.try_lock() else {
+            return false;
+        };
+        let Some(proc) = table.get(&pid) else {
+            return false;
+        };
+        let pml4_phys = proc.pml4_phys;
+        drop(table); // Release lock before CoW resolution (it allocates).
+
+        if pml4_phys != 0 {
+            if crate::mm::cow::resolve_cow_fault(pml4_phys, fault_addr).is_ok() {
+                return true; // CoW resolved — retry instruction.
+            }
+        }
+        return false;
+    }
+
     // Only handle not-present faults (demand paging).
-    // Protection violations (present page) can't be resolved by
-    // demand paging (would need CoW support).
     if error.is_present() {
         return false;
     }

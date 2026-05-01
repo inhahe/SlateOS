@@ -174,6 +174,19 @@ struct BuddyAllocator {
     /// Length of the `page_info` array (= total managed frames).
     page_info_len: usize,
 
+    /// Per-frame reference count array.  Indexed by frame number.
+    ///
+    /// - 0: frame is free (not allocated)
+    /// - 1: normal single-owner allocation
+    /// - 2+: shared via Copy-on-Write (multiple page tables reference
+    ///   the same physical frame)
+    ///
+    /// When freeing a frame, the refcount is decremented.  The frame is
+    /// only returned to the free lists when the refcount reaches 0.
+    /// This enables efficient CoW: on fork/clone, shared pages have their
+    /// refcount bumped instead of being copied immediately.
+    refcount: *mut u16,
+
     /// Total number of frames in the managed physical address range.
     /// Includes non-usable holes marked as permanently allocated.
     total_frames: usize,
@@ -187,9 +200,9 @@ struct BuddyAllocator {
 }
 
 // SAFETY: BuddyAllocator is only ever accessed through a spin::Mutex,
-// which provides exclusive access.  The raw pointer `page_info` points
-// to memory exclusively owned by this allocator (carved from usable
-// physical memory during init, never aliased).
+// which provides exclusive access.  The raw pointers `page_info` and
+// `refcount` point to memory exclusively owned by this allocator
+// (carved from usable physical memory during init, never aliased).
 unsafe impl Send for BuddyAllocator {}
 
 // ---------------------------------------------------------------------------
@@ -235,6 +248,25 @@ impl BuddyAllocator {
         debug_assert!(idx < self.page_info_len, "page_info index out of bounds");
         // SAFETY: same as get_info.
         unsafe { self.page_info.add(idx).write(value); }
+    }
+
+    // -- Reference count operations -----------------------------------------
+
+    /// Read the reference count for a frame.
+    #[inline]
+    fn get_refcount(&self, idx: usize) -> u16 {
+        debug_assert!(idx < self.page_info_len, "refcount index out of bounds");
+        // SAFETY: idx < page_info_len, refcount array is the same length
+        // as page_info, exclusively owned by this allocator.
+        unsafe { self.refcount.add(idx).read() }
+    }
+
+    /// Write the reference count for a frame.
+    #[inline]
+    fn set_refcount(&mut self, idx: usize, value: u16) {
+        debug_assert!(idx < self.page_info_len, "refcount index out of bounds");
+        // SAFETY: same as get_refcount.
+        unsafe { self.refcount.add(idx).write(value); }
     }
 
     // -- Free list operations ------------------------------------------------
@@ -452,6 +484,13 @@ impl BuddyAllocator {
         let frames_out = 1usize << order;
         self.free_frames = self.free_frames.saturating_sub(frames_out);
 
+        // Set refcount = 1 for all frames in the allocated block.
+        // A refcount of 1 means single-owner; CoW sharing bumps it to 2+.
+        let base_idx = self.frame_index(addr);
+        for i in 0..frames_out {
+            self.set_refcount(base_idx.saturating_add(i), 1);
+        }
+
         Ok(addr)
     }
 
@@ -479,6 +518,28 @@ impl BuddyAllocator {
         // it's either already free or was never allocated.
         if self.get_info(idx) != INFO_ALLOCATED {
             return Err(KernelError::InvalidAddress);
+        }
+
+        // Decrement refcount.  Only actually free the block when the
+        // refcount reaches 0 (last reference dropped).  This supports
+        // CoW: shared frames have refcount > 1, and each free just
+        // decrements until the last user frees.
+        let frames_in_block = 1usize << order;
+        let rc = self.get_refcount(idx);
+        if rc > 1 {
+            // Still shared — decrement all frames in the block and return.
+            for i in 0..frames_in_block {
+                let fi = idx.saturating_add(i);
+                let cur = self.get_refcount(fi);
+                self.set_refcount(fi, cur.saturating_sub(1));
+            }
+            return Ok(());
+        }
+
+        // refcount is 0 or 1 — actually free the block.
+        // Zero the refcount for all frames in the block.
+        for i in 0..frames_in_block {
+            self.set_refcount(idx.saturating_add(i), 0);
         }
 
         let frame_size = FRAME_SIZE as u64;
@@ -610,16 +671,20 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
         (total_frames * FRAME_SIZE) / (1024 * 1024)
     );
 
-    // We need 1 byte per frame for the page_info array.
-    let metadata_bytes = total_frames;
+    // We need 1 byte per frame for page_info + 2 bytes per frame for
+    // refcount, plus up to 1 byte of alignment padding between them.
+    let refcount_offset = (total_frames + 1) & !1; // align up to 2
+    let metadata_bytes = refcount_offset + total_frames * 2;
     let metadata_frames = (align_up(metadata_bytes as u64, frame_size) / frame_size) as usize;
     let metadata_size = (metadata_frames as u64) * frame_size;
 
     serial_println!(
-        "[mm] Metadata: {} bytes ({} frames, {} KiB)",
+        "[mm] Metadata: {} bytes ({} frames, {} KiB) [page_info: {}B, refcount: {}B]",
         metadata_bytes,
         metadata_frames,
-        metadata_size / 1024
+        metadata_size / 1024,
+        total_frames,
+        total_frames * 2
     );
 
     // Find the first USABLE region large enough for the metadata.
@@ -722,20 +787,38 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     let (total_frames, metadata_phys, metadata_size) = plan_metadata(memory_map)?;
     let metadata_end = metadata_phys + metadata_size;
 
-    // Initialize the metadata array (fill with INFO_ALLOCATED = "not free").
+    // Initialize the metadata arrays.
+    //
+    // Layout within the metadata region:
+    //   [0 .. total_frames)                → page_info (1 byte per frame)
+    //   [refcount_offset .. refcount_offset + total_frames*2) → refcount (u16)
+    //
+    // The refcount array must be 2-byte aligned (u16).  Round up the
+    // page_info region to the next even byte boundary.
+    let refcount_offset = (total_frames + 1) & !1; // align up to 2
     let metadata_virt = (metadata_phys + hhdm_offset) as *mut u8;
     // SAFETY: metadata_phys is in a USABLE memory region, the HHDM maps
     // it to metadata_virt, and we have exclusive access during early boot
     // (single CPU, interrupts disabled, no other allocators).
     unsafe {
+        // page_info: fill with INFO_ALLOCATED = "not free".
         core::ptr::write_bytes(metadata_virt, INFO_ALLOCATED, total_frames);
+        // refcount: fill with 0 = "not allocated / no references".
+        // Use byte-level zeroing to avoid alignment issues, then store
+        // the aligned pointer for later use.
+        let refcount_ptr = metadata_virt.add(refcount_offset);
+        core::ptr::write_bytes(refcount_ptr, 0, total_frames * 2);
     }
+    // SAFETY: refcount_offset is even, so metadata_virt + refcount_offset
+    // is 2-byte aligned (metadata_virt is frame-aligned = 16 KiB aligned).
+    let refcount_virt = unsafe { metadata_virt.add(refcount_offset) as *mut u16 };
 
     // Build the allocator and populate free lists.
     let mut allocator = BuddyAllocator {
         free_lists: [FreeList::new(); MAX_ORDER + 1],
         page_info: metadata_virt,
         page_info_len: total_frames,
+        refcount: refcount_virt,
         total_frames,
         hhdm_offset,
         free_frames: 0,
@@ -890,6 +973,89 @@ pub fn stats() -> Option<FrameAllocStats> {
         free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
         order_counts,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Copy-on-Write reference counting API
+// ---------------------------------------------------------------------------
+
+/// Get the reference count of a physical frame.
+///
+/// Returns 0 if the allocator is not initialized, the frame is outside
+/// the managed range, or the frame is not allocated.
+///
+/// - 1: single owner (normal allocation)
+/// - 2+: shared by multiple page tables (CoW)
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn refcount(frame: PhysFrame) -> u16 {
+    let Some(allocator) = ALLOCATOR.get() else {
+        return 0;
+    };
+    let guard = allocator.lock();
+    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+    if idx >= guard.page_info_len {
+        return 0;
+    }
+    guard.get_refcount(idx)
+}
+
+/// Increment the reference count of a physical frame.
+///
+/// Used by Copy-on-Write: when a page is shared between two address
+/// spaces (e.g., after duplicating page tables), bump the refcount
+/// so that `free_frame` won't actually release the memory until all
+/// users have dropped their reference.
+///
+/// # Safety
+///
+/// - `frame` must be an allocated frame from this allocator.
+/// - Caller must ensure the frame is not concurrently being freed.
+#[allow(clippy::cast_possible_truncation)]
+pub unsafe fn ref_inc(frame: PhysFrame) -> KernelResult<()> {
+    let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
+    let mut guard = allocator.lock();
+    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+    if idx >= guard.page_info_len {
+        return Err(KernelError::InvalidAddress);
+    }
+    let rc = guard.get_refcount(idx);
+    if rc == 0 {
+        // Frame is not allocated — can't increment.
+        return Err(KernelError::InvalidArgument);
+    }
+    guard.set_refcount(idx, rc.saturating_add(1));
+    Ok(())
+}
+
+/// Decrement the reference count of a physical frame without freeing.
+///
+/// Returns the new refcount.  If the refcount would go below 0, returns
+/// an error.  Unlike `free_frame`, this NEVER returns the frame to the
+/// free list — use this when you're replacing a CoW mapping but don't
+/// own the frame's allocation order.
+///
+/// When you need to free AND potentially return to the free list, use
+/// `free_frame` / `free_order` instead (they handle refcount internally).
+///
+/// # Safety
+///
+/// - `frame` must be an allocated frame from this allocator.
+#[allow(clippy::cast_possible_truncation)]
+pub unsafe fn ref_dec(frame: PhysFrame) -> KernelResult<u16> {
+    let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
+    let mut guard = allocator.lock();
+    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+    if idx >= guard.page_info_len {
+        return Err(KernelError::InvalidAddress);
+    }
+    let rc = guard.get_refcount(idx);
+    if rc == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let new_rc = rc.saturating_sub(1);
+    guard.set_refcount(idx, new_rc);
+    Ok(new_rc)
 }
 
 // ---------------------------------------------------------------------------

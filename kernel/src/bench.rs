@@ -322,6 +322,9 @@ pub fn run_all() {
     // --- Page allocation with zeroing (alloc_zeroed + free cycle) ---
     // This is the standard allocation pattern for page faults, stack
     // growth, and process creation.  Measures alloc + 16 KiB zero + free.
+    //
+    // The first benchmark runs without the zero pool (cold path).
+    // The second benchmark pre-fills the pool to measure the hot path.
     {
         use crate::mm::frame;
         run("page_alloc_zeroed_free", 500, || {
@@ -329,6 +332,39 @@ pub fn run_all() {
             // SAFETY: frame was just allocated, exclusively ours.
             unsafe { frame::free_frame(f).expect("bench: free"); }
         });
+    }
+
+    // --- Page allocation from pre-zeroed pool (hot path) ---
+    //
+    // OPT: When the zero pool is warm (idle CPU has pre-zeroed frames),
+    // alloc_frame_zeroed skips the 16 KiB memset entirely.  This
+    // benchmark pre-fills the pool to show the best-case latency that
+    // page faults see during normal runtime (not boot).
+    {
+        use crate::mm::frame;
+
+        // Pre-fill the pool so the benchmark hits the fast path.
+        let filled = frame::refill_zero_pool();
+        if filled > 0 {
+            let result = run("page_alloc_zeroed_pool", 200, || {
+                let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
+                // SAFETY: frame was just allocated, exclusively ours.
+                unsafe { frame::free_frame(f).expect("bench: free"); }
+                // Refill one frame to keep the pool warm for the next iteration.
+                frame::refill_zero_pool();
+            });
+
+            let (hits, misses) = frame::zero_pool_stats();
+            serial_println!(
+                "[bench]   zero_pool: {} hits, {} misses (pool filled: {})",
+                hits, misses, frame::zero_pool_count()
+            );
+            // The pool-warm path should be faster than the cold path
+            // (no 16 KiB memset inline).
+            let _ = result;
+        } else {
+            serial_println!("[bench]   page_alloc_zeroed_pool: SKIP (zero pool not enabled)");
+        }
     }
 
     // --- Heap allocation (small, 64 bytes) ---

@@ -13,10 +13,12 @@
 //!   [`PerCpuScheduler`](priority_rr::PerCpuScheduler).  Tasks are
 //!   enqueued on their `last_cpu` (cache-warm scheduling).
 //! - **Work stealing**: when a CPU's local queue is empty, it steals
-//!   half the tasks from the most-loaded CPU.
+//!   half the tasks from the most-loaded CPU.  Triggered both
+//!   reactively (on yield/block) and proactively (every 100 ms via
+//!   periodic load balance in `timer_tick`).
 //! - **Preemptive**: the APIC timer fires at 100 Hz, calling
-//!   [`timer_tick`] which decrements time slices and triggers
-//!   reschedule on expiry.
+//!   [`timer_tick`] which decrements time slices, triggers
+//!   reschedule on expiry, and checks periodic load balance.
 //!
 //! ## Performance Targets
 //!

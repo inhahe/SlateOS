@@ -484,14 +484,17 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
 
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let is_slab = HeapInner::size_class_index(&layout).is_some();
+        // OPT: Compute the size class once (O(1) via bit ops) and reuse
+        // the result for both the per-CPU fast path and the global slow
+        // path.  Previously this was called up to 3 times per allocation.
+        let class_idx = HeapInner::size_class_index(&layout);
 
         // Per-CPU slab cache fast path (lock-free).
         if PCPU_SLAB_ENABLED.load(Ordering::Relaxed) {
-            if let Some(class_idx) = HeapInner::size_class_index(&layout) {
-                // SAFETY: class_idx is valid (checked by size_class_index),
+            if let Some(idx) = class_idx {
+                // SAFETY: idx is valid (checked by size_class_index),
                 // heap is initialized (PCPU_SLAB_ENABLED is set after init).
-                let ptr = unsafe { pcpu_slab_alloc(class_idx) };
+                let ptr = unsafe { pcpu_slab_alloc(idx) };
                 if !ptr.is_null() {
                     SLAB_ALLOCS.fetch_add(1, Ordering::Relaxed);
                     return ptr;
@@ -506,14 +509,14 @@ unsafe impl GlobalAlloc for KernelHeap {
             return ptr::null_mut();
         }
 
-        let ptr = match HeapInner::size_class_index(&layout) {
-            Some(class_idx) => inner.slab_alloc(class_idx),
+        let ptr = match class_idx {
+            Some(idx) => inner.slab_alloc(idx),
             None => inner.large_alloc(&layout),
         };
 
         if ptr.is_null() {
             ALLOC_FAILURES.fetch_add(1, Ordering::Relaxed);
-        } else if is_slab {
+        } else if class_idx.is_some() {
             SLAB_ALLOCS.fetch_add(1, Ordering::Relaxed);
         } else {
             LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);

@@ -1706,5 +1706,79 @@ fn test_map_unmap(pml4_phys: u64, test_frame: PhysFrame, hhdm: u64) -> KernelRes
     // SAFETY: test_frame was allocated by us, unmapped, no references remain.
     unsafe { frame::free_frame(test_frame)?; }
 
+    // -- Test: Double-map returns AlreadyExists, rollback cleans up ------
+    test_double_map_rollback(pml4_phys)?;
+
+    Ok(())
+}
+
+/// Test that mapping a frame over an already-mapped address returns
+/// `AlreadyExists` and that the single-pass rollback logic correctly
+/// cleans up any partially-written PTEs.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_double_map_rollback(pml4_phys: u64) -> KernelResult<()> {
+    // Use a fresh virtual address for this test (offset from TEST_MAP_BASE).
+    let base1: u64 = TEST_MAP_BASE + 0x4000; // +1 frame
+    let base2: u64 = TEST_MAP_BASE + 0x8000; // +2 frames
+
+    let frame1 = frame::alloc_frame()?;
+    let frame2 = frame::alloc_frame()?;
+
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+
+    // Map frame1 at base1.
+    // SAFETY: test addresses in kernel space, valid frames.
+    unsafe {
+        map_frame(pml4_phys, VirtAddr::new(base1), frame1, flags)?;
+        flush_frame(VirtAddr::new(base1));
+    }
+
+    // Verify it's mapped.
+    assert!(
+        translate(pml4_phys, VirtAddr::new(base1)).is_some(),
+        "frame1 should be mapped at base1"
+    );
+
+    // Try to map frame2 at the same address (base1) — should fail.
+    let result = unsafe {
+        map_frame(pml4_phys, VirtAddr::new(base1), frame2, flags)
+    };
+    assert!(
+        matches!(result, Err(KernelError::AlreadyExists)),
+        "double-map should return AlreadyExists"
+    );
+
+    // The original mapping should be intact (rollback must not corrupt it).
+    let translated = translate(pml4_phys, VirtAddr::new(base1));
+    assert!(
+        translated == Some(frame1.addr()),
+        "original mapping should be intact after failed double-map"
+    );
+
+    // Map frame2 at base2 (different address) — should succeed.
+    unsafe {
+        map_frame(pml4_phys, VirtAddr::new(base2), frame2, flags)?;
+        flush_frame(VirtAddr::new(base2));
+    }
+    assert!(
+        translate(pml4_phys, VirtAddr::new(base2)) == Some(frame2.addr()),
+        "frame2 should be mapped at base2"
+    );
+
+    // Cleanup: unmap both and free.
+    let r1 = unsafe { unmap_frame(pml4_phys, VirtAddr::new(base1))? };
+    let r2 = unsafe { unmap_frame(pml4_phys, VirtAddr::new(base2))? };
+    unsafe {
+        flush_frame(VirtAddr::new(base1));
+        flush_frame(VirtAddr::new(base2));
+    }
+    assert!(r1 == frame1, "unmap base1 should return frame1");
+    assert!(r2 == frame2, "unmap base2 should return frame2");
+    unsafe {
+        frame::free_frame(frame1)?;
+        frame::free_frame(frame2)?;
+    }
+
+    serial_println!("[pt]   Double-map rollback: OK");
     Ok(())
 }

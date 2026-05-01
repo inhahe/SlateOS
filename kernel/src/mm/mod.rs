@@ -106,6 +106,37 @@ pub struct MemoryInfo {
     pub oom_kills: u64,
 }
 
+impl core::fmt::Display for MemoryInfo {
+    /// Format as a multi-line summary similar to `/proc/meminfo`.
+    ///
+    /// Output suitable for serial console and kshell `mem` command.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let total_mb = self.total_bytes / (1024 * 1024);
+        let used_mb = self.used_bytes / (1024 * 1024);
+        let free_mb = self.free_bytes / (1024 * 1024);
+        let swap_total_mb = self.swap_total_bytes / (1024 * 1024);
+        let swap_used_mb = self.swap_used_bytes / (1024 * 1024);
+
+        writeln!(f, "Physical:  {} MiB total, {} MiB used, {} MiB free ({} frames)",
+            total_mb, used_mb, free_mb, self.free_frames)?;
+        writeln!(f, "Zero pool: {} frames (hits: {}, misses: {})",
+            self.zero_pool_count, self.zero_pool_hits, self.zero_pool_misses)?;
+        writeln!(f, "Heap:      slab={}/{}  large={}  failures={}",
+            self.heap_slab_allocs, self.heap_slab_frees,
+            self.heap_large_allocs, self.heap_alloc_failures)?;
+        writeln!(f, "Swap:      {} MiB / {} MiB ({} device{})",
+            swap_used_mb, swap_total_mb,
+            self.swap_device_count,
+            if self.swap_device_count == 1 { "" } else { "s" })?;
+        writeln!(f, "kswapd:    {} (cycles: {}, reclaimed: {} pages)",
+            if self.kswapd_running { "running" } else { "stopped" },
+            self.kswapd_reclaim_cycles, self.kswapd_total_reclaimed)?;
+        write!(f, "OOM:       {} events, {} kills",
+            self.oom_events, self.oom_kills)
+    }
+}
+
 /// Collect a snapshot of the current kernel memory state.
 ///
 /// This is a lightweight operation (no heap allocation, a few lock

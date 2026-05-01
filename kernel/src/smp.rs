@@ -44,6 +44,16 @@ use crate::serial_println;
 /// Maximum CPUs supported (matches `PerCpuScheduler::MAX_CPUS`).
 pub const MAX_CPUS: usize = 16;
 
+/// IA32_TSC_AUX MSR — stores per-CPU data readable by `rdtscp`.
+///
+/// We write the CPU index here during SMP init, enabling O(1) CPU
+/// identification without APIC MMIO on the heap allocator hot path.
+/// Based on Linux's use of IA32_TSC_AUX for `__getcpu()`.
+const IA32_TSC_AUX: u32 = 0xC000_0103;
+
+/// Whether rdtscp is available on this CPU (CPUID.80000001H:EDX[27]).
+static RDTSCP_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
 /// Physical address where the AP trampoline is copied.
 /// Must be below 1 MiB, 4 KiB aligned.  0x8000 is conventionally used
 /// and avoids conflicts with BDA (0x400), EBDA, and VGA memory.
@@ -120,17 +130,43 @@ pub fn cpu_count() -> usize {
 /// Get the current CPU's sequential index.
 ///
 /// Returns 0 (BSP) if SMP has not been initialized.
-/// After SMP init, reads the LAPIC ID and maps it to a CPU index.
+///
+/// # Performance
+///
+/// OPT: When `rdtscp` is available (set at init), reads the CPU index
+/// directly from IA32_TSC_AUX (~20 cycles) instead of APIC MMIO
+/// (~100+ cycles under virtualization).  This is the hot path for the
+/// per-CPU heap slab cache, per-CPU frame cache, and timer ISR.
+/// Based on Linux's use of IA32_TSC_AUX for fast CPU identification.
 ///
 /// This function is lock-free and safe to call from ISR context
 /// (timer interrupt, IPI handlers, etc.).
 #[must_use]
+#[inline]
 pub fn current_cpu_index() -> usize {
-    // Acquire load synchronizes with the Release store in `init()`,
-    // ensuring all APIC_TO_CPU writes during bootstrap are visible.
     if !SMP_INITIALIZED.load(Ordering::Acquire) {
         return 0;
     }
+
+    // Fast path: read CPU index from IA32_TSC_AUX via rdtscp.
+    // rdtscp returns TSC in EDX:EAX (discarded) and IA32_TSC_AUX in ECX.
+    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
+        let cpu_idx: u32;
+        // SAFETY: rdtscp is available (checked above).  Reading TSC_AUX
+        // is always safe.  We wrote the CPU index there during SMP init.
+        unsafe {
+            core::arch::asm!(
+                "rdtscp",
+                out("ecx") cpu_idx,
+                out("eax") _,    // TSC low — discard
+                out("edx") _,    // TSC high — discard
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        return cpu_idx as usize;
+    }
+
+    // Fallback: APIC MMIO read (slower, always works).
     let apic_id = crate::apic::read_id();
     let idx = APIC_TO_CPU[apic_id as usize].load(Ordering::Relaxed);
     if idx == 0xFF { 0 } else { idx as usize }
@@ -629,6 +665,12 @@ extern "C" fn ap_entry() -> ! {
     #[allow(clippy::cast_possible_truncation)]
     APIC_TO_CPU[apic_id as usize].store(cpu_index as u8, Ordering::Relaxed);
 
+    // Write CPU index to IA32_TSC_AUX for fast rdtscp-based lookup.
+    if RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
+        // SAFETY: IA32_TSC_AUX exists when rdtscp is supported.
+        unsafe { crate::cpu::wrmsr(IA32_TSC_AUX, cpu_index as u64); }
+    }
+
     // Bump the online CPU count.
     NUM_CPUS_ONLINE.fetch_add(1, Ordering::Release);
 
@@ -844,10 +886,47 @@ pub fn init() {
     );
 }
 
-/// Register the BSP in the APIC→CPU index mapping.
+/// Register the BSP in the APIC→CPU index mapping, and detect/enable
+/// rdtscp-based fast CPU identification.
 fn register_bsp(bsp_apic_id: u8) {
     #[allow(clippy::cast_possible_truncation)]
     APIC_TO_CPU[bsp_apic_id as usize].store(BSP_CPU_INDEX as u8, Ordering::Relaxed);
+
+    // Detect rdtscp support: CPUID.80000001H:EDX bit 27.
+    let has_rdtscp = detect_rdtscp();
+    if has_rdtscp {
+        // Write BSP's CPU index to IA32_TSC_AUX so rdtscp returns it.
+        // SAFETY: IA32_TSC_AUX is writable when rdtscp is supported.
+        unsafe { crate::cpu::wrmsr(IA32_TSC_AUX, BSP_CPU_INDEX as u64); }
+        RDTSCP_AVAILABLE.store(true, Ordering::Release);
+        serial_println!("[smp] rdtscp available — fast CPU index via IA32_TSC_AUX");
+    } else {
+        serial_println!("[smp] rdtscp not available — using APIC MMIO for CPU index");
+    }
+}
+
+/// Detect rdtscp instruction support via CPUID.
+///
+/// Returns `true` if CPUID.80000001H:EDX bit 27 is set.
+fn detect_rdtscp() -> bool {
+    let edx: u32;
+    // SAFETY: CPUID is always safe to execute in ring 0.
+    // Note: CPUID clobbers EBX but LLVM reserves RBX, so we must
+    // save/restore it manually via xchg with a spare register.
+    unsafe {
+        core::arch::asm!(
+            "xchg rbx, {tmp}",   // save RBX
+            "mov eax, 0x80000001",
+            "cpuid",
+            "xchg rbx, {tmp}",   // restore RBX
+            tmp = out(reg) _,
+            out("edx") edx,
+            out("eax") _,
+            out("ecx") _,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    edx & (1 << 27) != 0
 }
 
 /// Busy-wait for approximately `us` microseconds using TSC.

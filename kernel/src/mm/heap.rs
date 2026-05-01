@@ -116,7 +116,13 @@ impl HeapInner {
     ///
     /// Returns `None` if the allocation is too large for the slab path
     /// (should go to the buddy allocator directly).
-    #[allow(clippy::indexing_slicing)]
+    ///
+    /// OPT: Uses bit manipulation instead of linear scan.  SIZE_CLASSES
+    /// are powers of 2 from 2^3 (8) to 2^13 (8192), so the index is
+    /// simply `ilog2(next_power_of_two(needed)) - 3`.  This replaces an
+    /// up-to-11-iteration loop with a single branch + bit op on every
+    /// alloc and dealloc call.
+    #[inline]
     fn size_class_index(layout: &Layout) -> Option<usize> {
         // The class must be large enough for both the requested size
         // and alignment.  Since classes are powers of 2 and slots are
@@ -126,12 +132,16 @@ impl HeapInner {
         if needed > MAX_SLAB_SIZE {
             return None;
         }
-        for (i, &class_size) in SIZE_CLASSES.iter().enumerate() {
-            if class_size >= needed {
-                return Some(i);
-            }
+        // Smallest class is 8 = 2^3.  Anything <= 8 goes to index 0.
+        if needed <= 8 {
+            return Some(0);
         }
-        None
+        // Round up to the next power of two, then extract the exponent.
+        // needed is 9..=8192 here, so next_power_of_two() won't overflow.
+        // trailing_zeros() gives log2 for a power-of-two value.
+        // Subtract 3 because class 0 = 2^3.
+        #[allow(clippy::arithmetic_side_effects)]
+        Some(needed.next_power_of_two().trailing_zeros() as usize - 3)
     }
 
     /// Allocate a new frame, divide it into slots for the given class,

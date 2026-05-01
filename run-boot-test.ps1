@@ -7,6 +7,7 @@ Remove-Item serial.log -ErrorAction SilentlyContinue
 $proc = Start-Process -FilePath $qemu -ArgumentList @(
     "-drive", "`"if=pflash,format=raw,readonly=on,file=$fw`"",
     "-drive", "format=raw,file=fat:rw:esp",
+    "-cpu", "qemu64,+rdtscp",
     "-m", "256M",
     "-serial", "file:serial.log",
     "-display", "none",

@@ -78,6 +78,7 @@ mod sched;
 mod security;
 mod serial;
 mod smp;
+mod softirq;
 mod syscall;
 mod sysctl;
 mod tlb;
@@ -513,6 +514,14 @@ extern "C" fn kmain() -> ! {
     // Verify the APIC timer is actually firing.
     if let Err(e) = apic::self_test() {
         serial_println!("FATAL: APIC timer self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Softirq self-test — verify raise/process/reentry-guard work.
+    // Must be after interrupts are enabled (softirq processing does
+    // STI/CLI internally).
+    if let Err(e) = softirq::self_test() {
+        serial_println!("FATAL: Softirq self-test failed: {}", e);
         cpu::halt_loop();
     }
 

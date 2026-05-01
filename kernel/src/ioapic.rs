@@ -627,13 +627,20 @@ pub fn process_deferred_wakes() {
 /// System V ABI).
 ///
 /// This handler:
-/// 1. Increments the atomic pending counter for the IRQ.
-/// 2. Tries to wake the registered task (lock-free attempt).
-/// 3. Sends End-of-Interrupt (EOI) to the Local APIC.
+/// 1. Runs device-specific ISR work (keyboard scan code read, virtio ack).
+/// 2. Increments the atomic pending counter for the IRQ.
+/// 3. Tries to wake the registered task (lock-free attempt).
+/// 4. If wake fails, raises `IRQ_POLL_SOFTIRQ` for deferred retry.
+/// 5. Sends End-of-Interrupt (EOI) to the Local APIC.
+/// 6. Processes pending softirqs with interrupts re-enabled.
 ///
-/// No locks are acquired.  If the immediate wake attempt fails (SCHED
-/// lock held by interrupted code), the timer tick's deferred-wake scan
-/// will retry within ~10 ms.
+/// ## Softirq integration
+///
+/// Previously a failed `try_wake` meant the driver task would sleep
+/// until the next timer tick (~10 ms worst case) retried the wake.
+/// Now the softirq mechanism retries immediately after EOI with
+/// interrupts enabled, reducing worst-case wake latency from ~10 ms
+/// to ~microseconds.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_device_irq(irq: u32) {
     // 0. Device-specific handlers that must run in ISR context.
@@ -656,10 +663,16 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     irq_notify(irq);
 
     // 2. Fast path: try immediate wake of the registered task.
+    //    If the wake attempt fails (scheduler lock contention), raise
+    //    a softirq so the wake is retried immediately after EOI with
+    //    interrupts re-enabled (instead of waiting up to 10 ms for the
+    //    next timer tick).
     if let Some(slot) = IRQ_WAIT_TASK.get(irq as usize) {
         let task_id = slot.load(Ordering::Acquire);
         if task_id != u64::MAX {
-            let _ = crate::sched::try_wake(task_id);
+            if !crate::sched::try_wake(task_id) {
+                crate::softirq::raise(crate::softirq::IRQ_POLL_SOFTIRQ);
+            }
         }
     }
 
@@ -672,6 +685,14 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     // SAFETY: We're in an interrupt handler, LAPIC is initialized.
     unsafe {
         crate::apic::eoi();
+    }
+
+    // 4. Process pending softirqs (if any were raised above or by
+    //    other ISRs).  This re-enables interrupts internally.
+    //
+    // SAFETY: EOI has been sent, assembly stub expects CLI on return.
+    unsafe {
+        crate::softirq::process_pending();
     }
 }
 

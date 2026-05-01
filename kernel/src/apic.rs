@@ -639,10 +639,19 @@ pub unsafe fn init_ap() {
 /// Called from the timer ISR (vector 32) assembly stub.
 ///
 /// This function:
-/// 1. Increments the global tick counter.
-/// 2. Calls the scheduler's `timer_tick()`.
-/// 3. Sends EOI to the APIC.
-/// 4. If the scheduler says "reschedule", triggers a context switch.
+/// 1. Increments the global tick counter (BSP only).
+/// 2. Calls the scheduler's `timer_tick()` (per-CPU, no global lock).
+/// 3. Sends LAPIC EOI.
+/// 4. Raises softirqs for deferred work (timer expirations, IRQ poll).
+/// 5. Processes pending softirqs with interrupts re-enabled.
+/// 6. If the scheduler says "reschedule", triggers a context switch.
+///
+/// ## Softirq integration
+///
+/// Previously this handler ran deferred wake-ups, sleep-queue scans,
+/// and timer expirations inline with interrupts disabled.  Now those
+/// are deferred to softirq handlers that run with interrupts enabled,
+/// so device IRQs are not blocked during the processing.
 ///
 /// # Safety
 ///
@@ -662,30 +671,37 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     }
 
     // Tick the scheduler and check if a reschedule is needed.
+    // This is the minimal hard-IRQ work: per-CPU lock only, no global
+    // lock, O(1) time-slice decrement.
     let needs_reschedule = crate::sched::timer_tick();
 
-    // Send EOI before potentially context-switching.
+    // Send EOI before softirq processing — this allows the LAPIC to
+    // deliver new interrupts (including on other CPUs).
+    //
     // SAFETY: We're in an interrupt handler, APIC is initialized.
     unsafe {
         eoi();
     }
 
-    // Process deferred IRQ wake-ups.
+    // Raise softirqs for deferred work.  These will be processed below
+    // with interrupts re-enabled, so device IRQs can preempt.
     //
-    // Scans IOAPIC pending counters and tries to wake blocked driver
-    // tasks.  Uses try_lock internally — safe in ISR context, and
-    // the scheduler lock was released by timer_tick() above.  If
-    // timer_tick's try_lock failed (lock held by interrupted code),
-    // this will also fail and retry on the next tick.
-    crate::ioapic::process_deferred_wakes();
+    // TIMER_SOFTIRQ: sleep-queue wakeups + IPC timer expirations.
+    // IRQ_POLL_SOFTIRQ: retry deferred IRQ wakes for userspace drivers.
+    crate::softirq::raise(
+        crate::softirq::TIMER_SOFTIRQ | crate::softirq::IRQ_POLL_SOFTIRQ,
+    );
 
-    // Process sleep queue: wake tasks whose sleep deadline has passed.
-    // Lock-free — only uses atomic loads/stores + try_wake.
-    crate::sched::process_sleep_wakeups();
-
-    // Process timer expirations: fire CP notifications for expired timers.
-    // Lock-free in the scan path; CP notify acquires its own lock.
-    crate::ipc::timer::process_timer_expirations();
+    // Process all pending softirqs (including any raised by device ISRs
+    // that fired on this CPU since the last timer tick).  This re-enables
+    // interrupts internally (STI), runs handlers, then disables them
+    // again (CLI) before returning.
+    //
+    // SAFETY: EOI has been sent, assembly stub expects CLI on return
+    // (process_pending guarantees this).
+    unsafe {
+        crate::softirq::process_pending();
+    }
 
     // If the scheduler says the time slice expired, reschedule.
     //
@@ -694,7 +710,14 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     // switching.  Calling preempt() here would nest schedule_inner calls,
     // corrupting the blocked task's saved context (the inner switch_context
     // would save the ISR + idle-loop stack as the task's resume point).
-    if needs_reschedule && !crate::sched::cpu_is_idle(crate::smp::current_cpu_index()) {
+    //
+    // Also skip if we're in softirq context (nested timer interrupt
+    // during softirq processing).  The outer timer ISR will handle
+    // preemption after softirqs complete.
+    if needs_reschedule
+        && !crate::sched::cpu_is_idle(crate::smp::current_cpu_index())
+        && !crate::softirq::is_processing()
+    {
         crate::sched::preempt();
     }
 }

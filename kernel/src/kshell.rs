@@ -255,6 +255,24 @@ fn cmd_meminfo() {
         h.slab_refills,
         h.alloc_failures
     );
+
+    // Pre-zeroed frame pool.
+    let pool_count = crate::mm::frame::zero_pool_count();
+    let (pool_hits, pool_misses) = crate::mm::frame::zero_pool_stats();
+    let pool_total = pool_hits.saturating_add(pool_misses);
+    let hit_pct = if pool_total > 0 {
+        pool_hits.saturating_mul(100) / pool_total
+    } else {
+        0
+    };
+    crate::console_println!("Zero pool:");
+    crate::console_println!(
+        "  Cached: {} frames, Hits: {}, Misses: {} ({}% hit rate)",
+        pool_count,
+        pool_hits,
+        pool_misses,
+        hit_pct
+    );
 }
 
 fn cmd_ps() {

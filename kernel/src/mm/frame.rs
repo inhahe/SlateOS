@@ -53,6 +53,7 @@
 //! Single alloc/free: < 1us (Linux buddy: 100-500ns).
 //! See `bench/baselines.toml` for measured targets.
 
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::error::{KernelError, KernelResult};
 use crate::limine::{MemmapEntry, memmap_type};
 use crate::serial_println;
@@ -97,8 +98,8 @@ const INFO_ALLOCATED: u8 = 0xFF;
 /// read sees the latest value because the freeing CPU was the owner —
 /// any fork's ref_inc must have completed before the original process
 /// unmaps the page.
-static REFCOUNT_PTR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static REFCOUNT_LEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static REFCOUNT_PTR: AtomicU64 = AtomicU64::new(0);
+static REFCOUNT_LEN: AtomicU64 = AtomicU64::new(0);
 
 /// Physical memory below this address is never added to the free lists.
 ///
@@ -779,15 +780,14 @@ static mut PCPU_CACHES: [PerCpuFrameCache; MAX_CPUS] = {
 /// Disabled during early boot (before SMP init) and during the allocator
 /// self-test.  When disabled, `alloc_frame()` falls through to the global
 /// allocator directly.
-static PCPU_ENABLED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static PCPU_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Enable per-CPU frame caches.
 ///
 /// Call after SMP initialization is complete (all CPUs are online and
 /// `current_cpu_index()` returns correct values).
 pub fn enable_pcpu_caches() {
-    PCPU_ENABLED.store(true, core::sync::atomic::Ordering::Release);
+    PCPU_ENABLED.store(true, Ordering::Release);
     serial_println!("[mm] Per-CPU frame caches enabled");
 }
 
@@ -894,6 +894,187 @@ fn pcpu_drain(cpu: usize) -> usize {
     }
 
     drained
+}
+
+// ---------------------------------------------------------------------------
+// Pre-zeroed frame pool
+// ---------------------------------------------------------------------------
+//
+// Maintains a cache of frames that have already been zeroed during idle
+// time.  `alloc_frame_zeroed()` drains this pool first, avoiding the
+// inline 16 KiB memset on the page fault hot path.
+//
+// The idle loop calls `refill_zero_pool()` to replenish frames in the
+// background, doing useful work instead of just HLT.
+//
+// Based on Linux's free page zeroing and Windows' zero page thread.
+// See `bench/baselines.toml` — page fault latency is dominated by the
+// 16 KiB zero; this optimization removes it from the critical path.
+
+/// Maximum number of pre-zeroed frames in the pool.
+///
+/// 64 frames × 16 KiB = 1 MiB of pre-zeroed memory.  This covers
+/// typical page fault bursts (process startup, stack growth, mmap)
+/// without hoarding too much memory in the pool.
+const ZERO_POOL_CAPACITY: usize = 64;
+
+/// Number of frames to zero in a single `refill_zero_pool()` call.
+///
+/// Kept small to avoid holding resources for too long in the idle
+/// loop — each call zeros a few frames, then yields back to let
+/// real work run.
+const ZERO_POOL_REFILL_BATCH: usize = 8;
+
+/// Pre-zeroed frame pool.
+///
+/// A simple stack (LIFO) of physical frame addresses that have been
+/// zeroed.  Protected by a spinlock separate from the main allocator
+/// lock to minimize contention.
+struct ZeroPool {
+    /// Frame addresses (physical, 16 KiB aligned).  Only `count`
+    /// entries are valid.
+    frames: [u64; ZERO_POOL_CAPACITY],
+    /// Number of valid entries in `frames`.
+    count: usize,
+}
+
+impl ZeroPool {
+    const fn new() -> Self {
+        Self {
+            frames: [0; ZERO_POOL_CAPACITY],
+            count: 0,
+        }
+    }
+
+    /// Pop a pre-zeroed frame from the pool.  Returns `None` if empty.
+    fn pop(&mut self) -> Option<u64> {
+        if self.count == 0 {
+            return None;
+        }
+        self.count -= 1;
+        // SAFETY: count was > 0, so frames[count] is valid.
+        Some(self.frames[self.count])
+    }
+
+    /// Push a zeroed frame into the pool.  Returns `false` if full.
+    fn push(&mut self, phys: u64) -> bool {
+        if self.count >= ZERO_POOL_CAPACITY {
+            return false;
+        }
+        self.frames[self.count] = phys;
+        self.count += 1;
+        true
+    }
+}
+
+static ZERO_POOL: Mutex<ZeroPool> = Mutex::new(ZeroPool::new());
+
+/// Whether the zero pool is active.
+///
+/// Enabled after per-CPU caches are active and HHDM is available.
+/// The idle loop checks this before calling `refill_zero_pool()`.
+static ZERO_POOL_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Total number of frames served from the zero pool (diagnostic counter).
+static ZERO_POOL_HITS: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of zeroed-frame requests that missed the pool (diagnostic).
+static ZERO_POOL_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Enable the pre-zeroed frame pool.
+///
+/// Call after per-CPU frame caches are enabled and HHDM is available.
+/// From this point, `alloc_frame_zeroed()` will check the zero pool
+/// first, and `refill_zero_pool()` will populate it during idle time.
+pub fn enable_zero_pool() {
+    ZERO_POOL_ENABLED.store(true, Ordering::Release);
+    serial_println!("[mm] Pre-zeroed frame pool enabled (capacity: {} frames)", ZERO_POOL_CAPACITY);
+}
+
+/// Refill the pre-zeroed frame pool.
+///
+/// Allocates up to `ZERO_POOL_REFILL_BATCH` frames, zeros them, and
+/// adds them to the pool.  Returns the number of frames added.
+///
+/// **Call from the idle loop** — this function does real work (frame
+/// allocation + 16 KiB memset per frame) and should not be called on
+/// latency-sensitive paths.
+///
+/// Returns 0 if:
+/// - The pool is already full
+/// - The zero pool is not enabled
+/// - Frame allocation fails (low memory)
+/// - HHDM is not available
+pub fn refill_zero_pool() -> usize {
+    if !ZERO_POOL_ENABLED.load(Ordering::Acquire) {
+        return 0;
+    }
+
+    let hhdm = match crate::mm::page_table::hhdm() {
+        Some(h) => h,
+        None => return 0,
+    };
+
+    // Check how many slots are available without holding the lock
+    // during the expensive zeroing operation.
+    let current_count = {
+        let pool = ZERO_POOL.lock();
+        pool.count
+    };
+
+    if current_count >= ZERO_POOL_CAPACITY {
+        return 0;
+    }
+
+    let space = ZERO_POOL_CAPACITY.saturating_sub(current_count);
+    let batch = space.min(ZERO_POOL_REFILL_BATCH);
+    let mut added = 0usize;
+
+    for _ in 0..batch {
+        // Allocate a raw frame (unzeroed).
+        let frame = match alloc_frame() {
+            Ok(f) => f,
+            Err(_) => break, // Low memory — stop refilling.
+        };
+
+        // Zero the frame outside any lock.
+        let virt = frame.to_virt(hhdm) as *mut u8;
+        // SAFETY: frame is freshly allocated and exclusively ours.
+        // HHDM mapping is valid for all physical memory.
+        unsafe {
+            core::ptr::write_bytes(virt, 0, FRAME_SIZE);
+        }
+
+        // Push to the pool.
+        let mut pool = ZERO_POOL.lock();
+        if !pool.push(frame.addr()) {
+            // Pool filled up while we were zeroing — free the frame.
+            // SAFETY: frame was just allocated, exclusively ours.
+            let _ = unsafe { free_frame(frame) };
+            break;
+        }
+        added += 1;
+    }
+
+    added
+}
+
+/// Get the number of frames currently in the pre-zeroed pool.
+#[must_use]
+pub fn zero_pool_count() -> usize {
+    ZERO_POOL.lock().count
+}
+
+/// Get zero pool hit/miss statistics.
+///
+/// Returns `(hits, misses)` — the number of `alloc_frame_zeroed()` calls
+/// that were served from the pool vs. fell through to alloc+zero.
+#[must_use]
+pub fn zero_pool_stats() -> (u64, u64) {
+    (
+        ZERO_POOL_HITS.load(Ordering::Relaxed),
+        ZERO_POOL_MISSES.load(Ordering::Relaxed),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,8 +1319,8 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
 
     // Cache the refcount pointer and length for lock-free reads in free_frame().
     // These never change after init.
-    REFCOUNT_PTR.store(allocator.refcount as u64, core::sync::atomic::Ordering::Release);
-    REFCOUNT_LEN.store(allocator.page_info_len as u64, core::sync::atomic::Ordering::Release);
+    REFCOUNT_PTR.store(allocator.refcount as u64, Ordering::Release);
+    REFCOUNT_LEN.store(allocator.page_info_len as u64, Ordering::Release);
 
     // Store in the global singleton.
     ALLOCATOR.call_once(|| Mutex::new(allocator));
@@ -1159,7 +1340,7 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
 #[allow(clippy::indexing_slicing)]
 pub fn alloc_frame() -> KernelResult<PhysFrame> {
     // Fast path: try per-CPU cache (no global lock needed).
-    if PCPU_ENABLED.load(core::sync::atomic::Ordering::Acquire) {
+    if PCPU_ENABLED.load(Ordering::Acquire) {
         // SAFETY: We're in ring 0; pushfq+cli is always valid here.
         // The returned flags value will be restored below.
         let flags = unsafe { disable_interrupts() };
@@ -1199,17 +1380,30 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
 
 /// Allocate a single physical frame (16 KiB) and zero it.
 ///
-/// Convenience wrapper around [`alloc_frame`] + zeroing via HHDM.
 /// This is the most common allocation pattern in the kernel (page
 /// faults, stack growth, process creation all need zeroed frames).
 ///
-/// Centralizing the zero here enables future optimizations:
-/// - Pre-zeroed frame pool (background zeroing by idle CPU)
-/// - Non-temporal stores (`movnti`) to avoid cache pollution
-/// - Batch zeroing when allocating multiple frames
+/// OPT: Checks the pre-zeroed frame pool first.  If a pre-zeroed
+/// frame is available, returns it immediately — no 16 KiB memset
+/// on the hot path.  The idle loop refills the pool in the background
+/// via `refill_zero_pool()`.  Falls back to alloc + inline zero when
+/// the pool is empty.
 ///
 /// Returns the zeroed frame on success, or `OutOfMemory`/`NotSupported`.
 pub fn alloc_frame_zeroed() -> KernelResult<PhysFrame> {
+    // Fast path: grab a pre-zeroed frame from the pool.
+    if ZERO_POOL_ENABLED.load(Ordering::Acquire) {
+        let mut pool = ZERO_POOL.lock();
+        if let Some(phys) = pool.pop() {
+            drop(pool); // Release lock before atomic increment.
+            ZERO_POOL_HITS.fetch_add(1, Ordering::Relaxed);
+            return PhysFrame::from_addr(phys).ok_or(KernelError::InternalError);
+        }
+    }
+
+    // Slow path: allocate + zero inline.
+    ZERO_POOL_MISSES.fetch_add(1, Ordering::Relaxed);
+
     let frame = alloc_frame()?;
 
     let hhdm = crate::mm::page_table::hhdm().ok_or_else(|| {
@@ -1337,7 +1531,7 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
 #[allow(clippy::indexing_slicing)]
 pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
     // Fast path: push to per-CPU cache (no global lock needed).
-    if PCPU_ENABLED.load(core::sync::atomic::Ordering::Acquire) {
+    if PCPU_ENABLED.load(Ordering::Acquire) {
         // OPT: Lock-free refcount check.  Shared (CoW) frames with
         // refcount > 1 must go through the global allocator for ref_dec.
         // Non-shared frames (refcount == 1, the common case) skip the
@@ -1346,8 +1540,8 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
         // Previously this took the global lock on EVERY free_frame call
         // just to read the refcount — defeating per-CPU caching on the
         // free path.  Now we read the immutable refcount pointer directly.
-        let rc_ptr = REFCOUNT_PTR.load(core::sync::atomic::Ordering::Acquire);
-        let rc_len = REFCOUNT_LEN.load(core::sync::atomic::Ordering::Relaxed);
+        let rc_ptr = REFCOUNT_PTR.load(Ordering::Acquire);
+        let rc_len = REFCOUNT_LEN.load(Ordering::Relaxed);
         if rc_ptr != 0 {
             #[allow(clippy::arithmetic_side_effects)]
             let idx = (frame.addr() / FRAME_SIZE as u64) as usize;

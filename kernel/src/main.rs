@@ -560,6 +560,12 @@ extern "C" fn kmain() -> ! {
     mm::frame::enable_pcpu_caches();
     mm::heap::enable_pcpu_slab_caches();
 
+    // Step 22f-2: Enable the pre-zeroed frame pool.
+    // The idle loop will refill this pool in the background so
+    // alloc_frame_zeroed() can skip the 16 KiB memset on the
+    // page fault hot path.
+    mm::frame::enable_zero_pool();
+
     // Step 22g: I/O scheduler self-test.
     // BFQ-style budget fair queueing with per-process queues,
     // priority classes, elevator ordering, and request merging.
@@ -705,6 +711,10 @@ extern "C" fn kmain() -> ! {
 /// 1. **Reap dead tasks** — free kernel stacks for tasks that have
 ///    exited.  Without this, each dead task leaks 32 KiB of stack
 ///    memory permanently.
+/// 2. **Refill the pre-zeroed frame pool** — zero a small batch of
+///    frames in the background so page faults can grab them instantly.
+///    This moves the 16 KiB memset cost from the page fault hot path
+///    to idle time.
 ///
 /// The APIC timer wakes the CPU from HLT for scheduling decisions.
 fn idle_loop() -> ! {
@@ -713,6 +723,12 @@ fn idle_loop() -> ! {
         // place reaping happens outside of self-tests, so any task
         // that exits will have its stack freed on the next idle cycle.
         sched::reap_dead_tasks();
+
+        // Refill the pre-zeroed frame pool.  Each call zeros up to
+        // ZERO_POOL_REFILL_BATCH frames (8 × 16 KiB = 128 KiB), which
+        // takes ~50-100µs on real hardware.  We do this during idle
+        // time so page faults can skip the inline zeroing.
+        mm::frame::refill_zero_pool();
 
         // Yield our time slice, then HLT until the next interrupt.
         sched::yield_now();

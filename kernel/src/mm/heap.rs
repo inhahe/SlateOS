@@ -330,7 +330,8 @@ pub fn enable_pcpu_slab_caches() {
 /// The global heap must be initialized.
 #[allow(clippy::cast_ptr_alignment)]
 unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
-    let flags = frame::disable_interrupts();
+    // SAFETY: We need to disable interrupts for exclusive per-CPU access.
+    let flags = unsafe { frame::disable_interrupts() };
     let cpu = crate::smp::current_cpu_index();
 
     // SAFETY: Interrupts are disabled, so no concurrent access from
@@ -344,7 +345,8 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // It points to HHDM-mapped frame memory owned by this allocator.
         cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
         cache.counts[class_idx] -= 1;
-        frame::restore_interrupts(flags);
+        // SAFETY: Restoring interrupt state to what it was before.
+        unsafe { frame::restore_interrupts(flags); }
         return slot_ptr.cast::<u8>();
     }
 
@@ -380,11 +382,13 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // SAFETY: same as fast path above.
         cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
         cache.counts[class_idx] -= 1;
-        frame::restore_interrupts(flags);
+        // SAFETY: Restoring interrupt state.
+        unsafe { frame::restore_interrupts(flags); }
         slot_ptr.cast::<u8>()
     } else {
         // Couldn't get any slots (OOM).
-        frame::restore_interrupts(flags);
+        // SAFETY: Restoring interrupt state.
+        unsafe { frame::restore_interrupts(flags); }
         ptr::null_mut()
     }
 }
@@ -399,7 +403,8 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
 /// `ptr` must have been allocated from the slab for `class_idx`.
 #[allow(clippy::cast_ptr_alignment)]
 unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
-    let flags = frame::disable_interrupts();
+    // SAFETY: We need to disable interrupts for exclusive per-CPU access.
+    let flags = unsafe { frame::disable_interrupts() };
     let cpu = crate::smp::current_cpu_index();
 
     // SAFETY: Interrupts disabled, exclusive access to this CPU's cache.
@@ -412,7 +417,8 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
         unsafe { (*slot).next = cache.heads[class_idx] as *mut FreeSlot; }
         cache.heads[class_idx] = slot as usize;
         cache.counts[class_idx] += 1;
-        frame::restore_interrupts(flags);
+        // SAFETY: Restoring interrupt state.
+        unsafe { frame::restore_interrupts(flags); }
         return true;
     }
 
@@ -439,7 +445,8 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
     cache.heads[class_idx] = slot as usize;
     cache.counts[class_idx] += 1;
 
-    frame::restore_interrupts(flags);
+    // SAFETY: Restoring interrupt state.
+    unsafe { frame::restore_interrupts(flags); }
     true
 }
 

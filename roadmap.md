@@ -245,7 +245,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Efficient partial I/O (FAT read_at/write_at/truncate override default read-all-rewrite-all)
   - [x] Filesystem change notification system (inotify equivalent, async watches with bounded queues)
   - [x] Recycle bin (per-filesystem /_TRASH with _INDEX metadata file, trash/list/restore/empty)
-  - [x] 27 filesystem syscalls (600-636): file handles, trash, watch/notify, journal, metadata/xattrs
+  - [x] 30 filesystem syscalls (600-639): file handles, trash, watch/notify, journal, metadata/xattrs, symlinks
   - [x] Change journal (persistent across reboots, JSON-lines /_JOURNAL file, 1024-entry ring buffer, 3 syscalls)
   - [x] In-memory filesystem (memfs/ramfs) for /tmp and pseudo-FS foundation, mounted at /tmp during boot
   - [x] Multi-mount VFS with longest-prefix path-boundary matching, mount-point synthesis in readdir
@@ -254,6 +254,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths
   - [ ] Journaling (via ext4)
   - [x] File metadata: owner, group, permissions, created/modified/accessed (relatime), immutable flag, append-only flag, extended attributes (key-value, 255-byte key / 64 KiB value)
+  - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639)
   - [ ] File metadata: capabilities per file, content hash (per-file/per-block)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 

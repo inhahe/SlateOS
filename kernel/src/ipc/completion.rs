@@ -82,6 +82,9 @@ pub enum WaitSource {
     EventFd(u64),
     /// A process — ready when the process exits (becomes zombie).
     ProcessExit(u64),
+    /// A kernel timer — ready when the deadline has passed.
+    /// The u64 is the timer handle from `timer::create()`.
+    Timer(u64),
 }
 
 impl WaitSource {
@@ -93,7 +96,8 @@ impl WaitSource {
             | Self::PipeRead(h)
             | Self::PipeWrite(h)
             | Self::EventFd(h)
-            | Self::ProcessExit(h) => h,
+            | Self::ProcessExit(h)
+            | Self::Timer(h) => h,
         }
     }
 
@@ -106,6 +110,7 @@ impl WaitSource {
             Self::PipeWrite(h) => (2, h),
             Self::EventFd(h) => (3, h),
             Self::ProcessExit(h) => (4, h),
+            Self::Timer(h) => (5, h),
         }
     }
 }
@@ -248,6 +253,7 @@ fn poll_source(source: WaitSource) -> bool {
         WaitSource::PipeWrite(h) => poll_pipe_write(h),
         WaitSource::EventFd(h) => poll_eventfd(h),
         WaitSource::ProcessExit(pid) => poll_process_exit(pid),
+        WaitSource::Timer(h) => super::timer::is_expired(h),
     }
 }
 
@@ -318,6 +324,13 @@ pub fn register(
     }
 
     port.registrations.push(Registration { source, user_data });
+
+    // For timer sources, tell the timer which CP to notify on expiry.
+    // This enables push-based notification instead of poll-only.
+    if let WaitSource::Timer(timer_handle) = source {
+        super::timer::set_cp(timer_handle, cp.raw());
+    }
+
     Ok(())
 }
 
@@ -346,6 +359,11 @@ pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
 
     // Remove any queued events for this source.
     port.event_queue.retain(|e| e.source.key() != key);
+
+    // Clear the CP association for timer sources.
+    if let WaitSource::Timer(timer_handle) = source {
+        super::timer::set_cp(timer_handle, 0);
+    }
 
     Ok(())
 }

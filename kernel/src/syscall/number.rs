@@ -149,6 +149,27 @@ pub const SYS_PORT_READ: u64 = 40;
 /// hardware resources.
 pub const SYS_PORT_WRITE: u64 = 41;
 
+/// Create a kernel timer.
+///
+/// `arg0`: duration in nanoseconds until first expiry.
+/// `arg1`: flags (bit 0 = periodic).
+///
+/// Returns: timer handle on success, 0 on failure (table full).
+///
+/// Timers can be registered with completion ports via
+/// `SYS_CP_REGISTER(cp, 5, timer_handle, user_data)`.
+pub const SYS_TIMER_CREATE: u64 = 12;
+
+/// Cancel and destroy a timer.
+///
+/// `arg0`: timer handle.
+///
+/// Returns: 0 on success, negative error if handle not found.
+pub const SYS_TIMER_CANCEL: u64 = 13;
+
+/// Timer flag: periodic (re-arms after each expiry).
+pub const TIMER_PERIODIC: u64 = 1 << 0;
+
 /// Debug print (temporary — write a byte string to serial).
 ///
 /// `arg0`: pointer to bytes.

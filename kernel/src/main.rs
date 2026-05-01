@@ -265,6 +265,12 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 16b: Timer subsystem self-test.
+    if let Err(e) = ipc::timer::self_test() {
+        serial_println!("FATAL: Timer self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 17: Initialize capability system.
     // Capability tables store unforgeable handles to kernel objects.
     // Every resource access goes through capability checks — no

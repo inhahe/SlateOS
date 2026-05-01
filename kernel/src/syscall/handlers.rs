@@ -1011,6 +1011,7 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
         2 => Some(WaitSource::PipeWrite(handle)),
         3 => Some(WaitSource::EventFd(handle)),
         4 => Some(WaitSource::ProcessExit(handle)),
+        5 => Some(WaitSource::Timer(handle)),
         _ => None,
     }
 }
@@ -1083,6 +1084,7 @@ fn encode_event(event: &completion::CompletionEvent) -> CpEventRaw {
         WaitSource::PipeWrite(h) => (2, h),
         WaitSource::EventFd(h) => (3, h),
         WaitSource::ProcessExit(h) => (4, h),
+        WaitSource::Timer(h) => (5, h),
     };
     CpEventRaw {
         source_type,
@@ -1639,6 +1641,52 @@ pub fn sys_sleep(args: &SyscallArgs) -> SyscallResult {
     sched::sleep_until_tick(wake_tick);
 
     SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Timer handlers (12–13)
+// ---------------------------------------------------------------------------
+
+/// `SYS_TIMER_CREATE` — create a kernel timer.
+///
+/// `arg0`: duration in nanoseconds.
+/// `arg1`: flags (bit 0 = periodic).
+///
+/// Returns: timer handle (> 0) on success, 0 on failure.
+pub fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
+    let duration_ns = args.arg0;
+    let flags = args.arg1;
+
+    if duration_ns == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let handle = crate::ipc::timer::create(duration_ns, flags);
+    if handle == 0 {
+        return SyscallResult::err(KernelError::OutOfMemory);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(handle as i64)
+}
+
+/// `SYS_TIMER_CANCEL` — cancel and destroy a timer.
+///
+/// `arg0`: timer handle.
+///
+/// Returns: 0 on success, negative error if not found.
+pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+
+    if handle == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if crate::ipc::timer::cancel(handle) {
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidHandle)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ pub mod eventfd;
 pub mod futex;
 pub mod pipe;
 pub mod shm;
+pub mod timer;
 
 // TODO: Synchronous (rendezvous) channel mode.
 // TODO: Splice/vmsplice for pipes.

@@ -434,6 +434,10 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     // Lock-free — only uses atomic loads/stores + try_wake.
     crate::sched::process_sleep_wakeups();
 
+    // Process timer expirations: fire CP notifications for expired timers.
+    // Lock-free in the scan path; CP notify acquires its own lock.
+    crate::ipc::timer::process_timer_expirations();
+
     // If the scheduler says the time slice expired, reschedule.
     if needs_reschedule {
         crate::sched::preempt();

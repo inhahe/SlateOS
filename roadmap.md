@@ -24,12 +24,12 @@ _No dependencies. Do this first._
 _The minimum kernel that can run a single userspace process._
 
 ### 1.1 Boot and hardware init
-- [ ] UEFI boot → enter kernel entry point
-- [ ] Parse ACPI tables (hardware discovery for x86)
-- [ ] Initialize GDT, IDT, interrupt handlers
-- [ ] Set up 16 KiB page tables (not 4 KiB — design decision)
-- [ ] Set up kernel heap allocator (geometric size class, per-CPU caches)
-- [ ] Initialize serial console for debug output
+- [x] UEFI boot → enter kernel entry point (Limine bootloader, kmain entry)
+- [ ] Parse ACPI tables (hardware discovery for x86) — IOAPIC address currently hardcoded
+- [x] Initialize GDT, IDT, interrupt handlers
+- [x] Set up 16 KiB page tables (4×4KiB hardware pages per logical frame)
+- [x] Set up kernel heap allocator (slab allocator, power-of-2 size classes)
+- [x] Initialize serial console for debug output (UART 16550, COM1)
 - [x] Initialize PCI bus enumeration
 
 ### 1.2 Memory manager
@@ -75,9 +75,12 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)
 - [x] IOCP-like completion port / unified wait:
   - [x] Register/unregister waitable objects with arbitrary user-data int
-  - [-] Wait on: I/O completion, timers, process exit, eventfd counters, semaphores, channel messages
+  - [-] Wait on: I/O completion, timers, process exit, eventfd counters, semaphores, channel messages (channels, pipes, eventfds, process exit done; timers/semaphores/IO TODO)
 - [ ] io_uring-style submission queue (optional async path for batch I/O)
 - [x] Futexes (for userspace synchronization without syscall in uncontended case)
+- [x] Console I/O syscalls (SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR — bootstrap console for early userspace)
+- [x] Filesystem I/O syscalls (SYS_FS_READ_FILE through SYS_FS_STAT — stateless whole-file operations via VFS)
+- [x] Timer syscalls (SYS_CLOCK_MONOTONIC, SYS_SLEEP — lock-free sleep queue, 10ms resolution)
 - [ ] Per-process namespace support (mount table remapping for sandboxing)
 
 ### 1.5 Capability / security model
@@ -117,8 +120,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [ ] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing
-  - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, polling)
-  - [x] virtio-net driver (legacy PCI transport, RX/TX queues, MAC read, polling)
+  - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, interrupt-driven completion with polling fallback)
+  - [x] virtio-net driver (legacy PCI transport, RX/TX queues, MAC read, interrupt acknowledgment)
+  - [x] Shared PCI IRQ handling (level-triggered, ISR reads device status to deassert)
 
 ### 2.2 Essential drivers
 - [-] Keyboard (PS/2 and USB HID)

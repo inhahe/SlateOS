@@ -125,6 +125,49 @@ target_ms   = 2.0
 source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 
 # -------------------------------------------------------------------------
+# QEMU TCG measurements (software emulation, no KVM)
+# -------------------------------------------------------------------------
+# These are measured under QEMU with TCG (no hardware virtualization)
+# on the same i7-8700K. TCG is 30-80x slower than bare metal, so
+# absolute numbers are meaningless — use only for relative comparisons
+# between kernel versions. The ratio between benchmarks IS meaningful.
+#
+# Date: 2026-05-01, QEMU 9.x, -cpu qemu64,+rdtscp, -m 256M
+# Optimizations: O(1) size_class_index, rdtscp CPU identification
+
+[qemu_tcg.page_alloc_free]
+min_ns    = 2330
+min_cycles = 8580
+
+[qemu_tcg.heap_alloc_small_64]
+min_ns    = 3276
+min_cycles = 12062
+
+[qemu_tcg.heap_alloc_medium_512]
+min_ns    = 5123
+min_cycles = 18864
+
+[qemu_tcg.heap_alloc_large_4096]
+min_ns    = 20412
+min_cycles = 75156
+
+[qemu_tcg.context_switch]
+min_ns    = 7301
+min_cycles = 53768
+
+[qemu_tcg.syscall_dispatch]
+min_ns    = 300
+min_cycles = 1108
+
+[qemu_tcg.ipc_channel_roundtrip]
+min_ns    = 6969
+min_cycles = 25660
+
+[qemu_tcg.page_fault_anonymous]
+min_ns    = 30323
+min_cycles = 111644
+
+# -------------------------------------------------------------------------
 # Measurement methodology notes
 # -------------------------------------------------------------------------
 #

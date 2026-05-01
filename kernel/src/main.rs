@@ -541,6 +541,11 @@ extern "C" fn kmain() -> ! {
     // enable the per-CPU frame cache for lock-free order-0 allocation.
     mm::frame::enable_pcpu_caches();
 
+    // Step 22g: I/O scheduler self-test.
+    // BFQ-style budget fair queueing with per-process queues,
+    // priority classes, elevator ordering, and request merging.
+    sched::io_sched::self_test();
+
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-

@@ -35,6 +35,7 @@
 //! Lock ordering: `SCHED` → frame allocator (via task stack allocation).
 
 pub mod context;
+pub mod io_sched;
 pub mod priority_rr;
 pub mod task;
 

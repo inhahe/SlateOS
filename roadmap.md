@@ -301,10 +301,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [ ] Word wrap option, find in backscroll (Ctrl+F)
 
 ### 2.8 I/O scheduler
-- [ ] BFQ-style I/O scheduler:
-  - [ ] Realtime priority (audio/video)
-  - [ ] Best-effort with priority levels
-  - [ ] Idle priority (background indexing, backup, dedup)
+- [x] BFQ-style I/O scheduler:
+  - [x] Realtime priority (audio/video)
+  - [x] Best-effort with priority levels
+  - [x] Idle priority (background indexing, backup, dedup)
+  - [x] Per-process queues with elevator (C-SCAN) sector ordering
+  - [x] Budget-based fairness with two-pass rotation
+  - [x] Adjacent request merging
   - [ ] Capability-gated realtime I/O priority
 
 ---

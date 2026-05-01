@@ -43,7 +43,12 @@ if (-not (Test-Path $OvmfVars)) {
 if (-not $NoBuild) {
     Write-Host "Building kernel..." -ForegroundColor Cyan
     Push-Location $ProjectRoot
+    # Temporarily lower ErrorActionPreference so cargo warnings (stderr)
+    # don't become terminating errors.  We check $LASTEXITCODE ourselves.
+    $savedEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     cargo build 2>&1 | ForEach-Object { Write-Host $_ }
+    $ErrorActionPreference = $savedEAP
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Build failed."
         Pop-Location

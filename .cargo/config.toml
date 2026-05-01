@@ -1,5 +1,9 @@
 # Build configuration for the OS kernel.
 # Target: bare-metal x86_64 (no OS, no std).
+#
+# Userspace binaries (init, hello) are excluded from the workspace and
+# built with RUSTFLAGS env override to avoid inheriting these kernel-
+# specific flags.  See scripts/build-userspace.ps1.
 
 [build]
 target = "x86_64-unknown-none"

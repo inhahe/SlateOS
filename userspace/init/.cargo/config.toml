@@ -10,7 +10,13 @@ target = "x86_64-unknown-none"
 
 [target.x86_64-unknown-none]
 linker = "rust-lld"
+# Static relocation + large code model: uses 64-bit absolute addresses
+# throughout, avoiding the GOT entirely.  PIC mode generates GOT entries
+# that require R_X86_64_RELATIVE relocations at load time, but our
+# linker script discards .rela.* and the kernel doesn't process them.
+# Large model is slightly less efficient but correct for any address.
 rustflags = [
     "-C", "link-arg=-Tlinker.ld",
-    "-C", "relocation-model=pic",
+    "-C", "relocation-model=static",
+    "-C", "code-model=large",
 ]

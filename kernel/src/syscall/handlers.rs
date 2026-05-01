@@ -2537,6 +2537,265 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Handle-based filesystem handlers (610–699)
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_OPEN` — open a file, return a handle.
+pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
+    // Capability: require READ for read-only, WRITE for write.
+    // We check the broader File capability — specific rights are
+    // enforced by the handle flags.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_raw = args.arg2 as u32;
+
+    if path_ptr.is_null() || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+
+    match crate::fs::handle::open(path, flags) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_CLOSE` — close a file handle.
+pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    match crate::fs::handle::close(handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_READ` — read from a file handle at the current offset.
+pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+
+    if buf_ptr.is_null() || buf_cap == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+        return SyscallResult::err(e);
+    }
+
+    // Allocate a kernel-side buffer, read into it, then copy to user.
+    // This avoids passing raw user pointers into the VFS.
+    let mut kbuf = alloc::vec![0u8; buf_cap];
+
+    match crate::fs::handle::read(handle, &mut kbuf) {
+        Ok(n) => {
+            // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
+            unsafe {
+                core::ptr::copy_nonoverlapping(kbuf.as_ptr(), buf_ptr, n);
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(n as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_WRITE` — write to a file handle at the current offset.
+pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let data_ptr = args.arg1 as *const u8;
+    let data_len = args.arg2 as usize;
+
+    if data_ptr.is_null() && data_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // SAFETY: Validated above.
+    let data = if data_len > 0 {
+        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    } else {
+        &[]
+    };
+
+    match crate::fs::handle::write(handle, data) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(n as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SEEK` — seek to a new position in a file.
+pub fn sys_fs_seek(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    #[allow(clippy::cast_possible_wrap)]
+    let offset_raw = args.arg1 as i64;
+    let whence = args.arg2;
+
+    let seek_from = match whence {
+        super::number::SEEK_SET => {
+            #[allow(clippy::cast_sign_loss)]
+            let pos = if offset_raw < 0 {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            } else {
+                offset_raw as u64
+            };
+            crate::fs::handle::SeekFrom::Start(pos)
+        }
+        super::number::SEEK_CUR => crate::fs::handle::SeekFrom::Current(offset_raw),
+        super::number::SEEK_END => crate::fs::handle::SeekFrom::End(offset_raw),
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::handle::seek(handle, seek_from) {
+        Ok(new_pos) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(new_pos as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_TRUNCATE` — truncate a file to a given size.
+pub fn sys_fs_truncate(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let path_ptr = args.arg0 as *const u8;
+    let path_len = args.arg1 as usize;
+    let new_size = args.arg2;
+
+    if path_ptr.is_null() || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_path_len = path_len.min(256);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::truncate(path, new_size) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_RENAME` — rename or move a file or directory.
+pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let from_ptr = args.arg0 as *const u8;
+    let from_len = args.arg1 as usize;
+    let to_ptr = args.arg2 as *const u8;
+    let to_len = args.arg3 as usize;
+
+    if from_ptr.is_null() || from_len == 0 || to_ptr.is_null() || to_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_from_len = from_len.min(256);
+    let safe_to_len = to_len.min(256);
+
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_from_len) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, safe_to_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let from_bytes = unsafe { core::slice::from_raw_parts(from_ptr, safe_from_len) };
+    let from_path = match core::str::from_utf8(from_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let to_bytes = unsafe { core::slice::from_raw_parts(to_ptr, safe_to_len) };
+    let to_path = match core::str::from_utf8(to_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::rename(from_path, to_path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_FSTAT` — stat a file by handle.
+pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let out_ptr = args.arg1 as *mut u8;
+
+    if out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 16) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::fs::handle::fstat(handle) {
+        Ok((size, entry_type)) => {
+            // Write 16-byte FsStatResult (same format as SYS_FS_STAT).
+            // SAFETY: Validated above.
+            unsafe {
+                core::ptr::write_bytes(out_ptr, 0, 16);
+                let size_ptr = out_ptr as *mut u64;
+                core::ptr::write(size_ptr, size);
+                core::ptr::write(out_ptr.add(8), entry_type);
+            }
+            SyscallResult::ok(0)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 

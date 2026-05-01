@@ -107,6 +107,71 @@ pub trait FileSystem: Send {
         let _ = path;
         Err(KernelError::NotSupported)
     }
+
+    /// Read a range of bytes from a file.
+    ///
+    /// Default implementation reads the whole file and slices.
+    /// Filesystem implementations should override this for efficiency
+    /// (e.g., walking the FAT cluster chain to the right offset).
+    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let data = self.read_file(path)?;
+        let start = (offset as usize).min(data.len());
+        let end = (start.saturating_add(len)).min(data.len());
+        Ok(data.get(start..end).map_or_else(Vec::new, |s| s.to_vec()))
+    }
+
+    /// Write bytes at a specific offset within a file.
+    ///
+    /// Default implementation reads the whole file, patches the range,
+    /// and rewrites.  Filesystem implementations should override for
+    /// efficiency.
+    fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let mut contents = match self.read_file(path) {
+            Ok(c) => c,
+            Err(KernelError::NotFound) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+
+        let start = offset as usize;
+        let end = start.saturating_add(data.len());
+
+        // Extend the file if writing past current end.
+        if end > contents.len() {
+            contents.resize(end, 0);
+        }
+
+        if let Some(dest) = contents.get_mut(start..end) {
+            dest.copy_from_slice(data);
+        }
+
+        self.write_file(path, &contents)
+    }
+
+    /// Truncate a file to the given size.
+    ///
+    /// If `size` is less than the current file size, data beyond
+    /// `size` is discarded.  If `size` is greater, the file is
+    /// extended with zero bytes.
+    ///
+    /// Default implementation reads, resizes, and rewrites.
+    fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        let mut contents = match self.read_file(path) {
+            Ok(c) => c,
+            Err(KernelError::NotFound) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        contents.resize(size as usize, 0);
+        self.write_file(path, &contents)
+    }
+
+    /// Rename or move a file or directory.
+    ///
+    /// Both `from` and `to` are paths relative to the filesystem root.
+    /// Returns `NotSupported` if the filesystem is read-only.
+    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+        let _ = (from, to);
+        Err(KernelError::NotSupported)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +281,94 @@ impl Vfs {
         let (mp, relative) = find_mount(&mut vfs, path)?;
         mp.fs.rmdir(relative)
     }
+
+    /// Read a range of bytes from a file.
+    pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.read_at(relative, offset, len)
+    }
+
+    /// Write bytes at a specific offset within a file.
+    pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.write_at(relative, offset, data)
+    }
+
+    /// Truncate a file to the given size.
+    pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.truncate(relative, size)
+    }
+
+    /// Rename or move a file or directory.
+    ///
+    /// Both paths must be on the same mount point.
+    pub fn rename(from: &str, to: &str) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+
+        // Both paths must resolve to the same mount point.
+        let (mp_from, rel_from) = find_mount(&mut vfs, from)?;
+        let from_mount_path = mp_from.path.clone();
+        let rel_from_owned = String::from(rel_from);
+
+        // Find mount for `to` — must be the same filesystem.
+        let (mp_to, rel_to) = find_mount(&mut vfs, to)?;
+        if mp_to.path != from_mount_path {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Delegate to the filesystem (using the `from` mount).
+        mp_to.fs.rename(&rel_from_owned, rel_to)
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Path normalization
+// ---------------------------------------------------------------------------
+
+/// Normalize a VFS path: resolve `.`, `..`, collapse double slashes.
+///
+/// Returns an owned `String`.  The result always starts with `/` and
+/// never ends with `/` (except for the root `/` itself).
+///
+/// # Examples
+///
+/// - `"/foo/./bar"` → `"/foo/bar"`
+/// - `"/foo/bar/../baz"` → `"/foo/baz"`
+/// - `"/foo//bar"` → `"/foo/bar"`
+/// - `"/"` → `"/"`
+/// - `"/foo/bar/.."` → `"/foo"`
+pub fn normalize_path(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            _ => components.push(part),
+        }
+    }
+
+    if components.is_empty() {
+        return String::from("/");
+    }
+
+    let mut result = String::new();
+    for c in &components {
+        result.push('/');
+        result.push_str(c);
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Mount point lookup
+// ---------------------------------------------------------------------------
 
 /// Find the mount point that best matches `path`.
 ///

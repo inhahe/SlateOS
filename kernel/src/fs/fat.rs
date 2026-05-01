@@ -23,7 +23,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::blkdev::{self, SECTOR_SIZE};
+use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileSystem};
 
@@ -372,17 +372,9 @@ impl FatFs {
     /// Reads the boot sector, validates the BPB, auto-detects FAT16 or
     /// FAT32, and returns the filesystem instance.
     pub fn mount(device_name: &str) -> KernelResult<Self> {
-        // Read the boot sector.
+        // Read the boot sector through the buffer cache.
         let mut boot_sector = [0u8; SECTOR_SIZE];
-        let found = blkdev::with_device(device_name, |dev| {
-            dev.read_sector(0, &mut boot_sector)
-        });
-
-        match found {
-            Some(Ok(())) => {}
-            Some(Err(e)) => return Err(e),
-            None => return Err(KernelError::NoSuchDevice),
-        }
+        super::cache::read_sector(device_name, 0, &mut boot_sector)?;
 
         let bpb = FatBpb::parse(&boot_sector)?;
 
@@ -448,14 +440,7 @@ impl FatFs {
             let lba = u64::from(root_lba.checked_add(sec)
                 .ok_or(KernelError::InvalidArgument)?);
 
-            let result = blkdev::with_device(&self.device_name, |dev| {
-                dev.read_sector(lba, &mut sector_buf)
-            });
-            match result {
-                Some(Ok(())) => {}
-                Some(Err(e)) => return Err(e),
-                None => return Err(KernelError::NoSuchDevice),
-            }
+            self.read_sector(lba, &mut sector_buf)?;
 
             // Each sector holds 16 directory entries (512 / 32).
             let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
@@ -672,14 +657,7 @@ impl FatFs {
                     break;
                 }
 
-                let result = blkdev::with_device(&self.device_name, |dev| {
-                    dev.read_sector(lba + u64::from(s), &mut sector_buf)
-                });
-                match result {
-                    Some(Ok(())) => {}
-                    Some(Err(e)) => return Err(e),
-                    None => return Err(KernelError::NoSuchDevice),
-                }
+                self.read_sector(lba + u64::from(s), &mut sector_buf)?;
 
                 let to_copy = (file_size - bytes_read).min(SECTOR_SIZE);
                 if let Some(dest) = data.get_mut(bytes_read..bytes_read + to_copy) {
@@ -705,28 +683,20 @@ impl FatFs {
 
     // -- Write support --
 
-    /// Helper: write a sector to the block device.
+    /// Helper: write a sector through the buffer cache.
+    ///
+    /// All FAT sector writes go through the cache for write-back
+    /// coalescing (particularly important for FAT table updates).
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
-        let result = blkdev::with_device(&self.device_name, |dev| {
-            dev.write_sector(lba, buf)
-        });
-        match result {
-            Some(Ok(())) => Ok(()),
-            Some(Err(e)) => Err(e),
-            None => Err(KernelError::NoSuchDevice),
-        }
+        super::cache::write_sector(&self.device_name, lba, buf)
     }
 
-    /// Helper: read a sector from the block device.
+    /// Helper: read a sector through the buffer cache.
+    ///
+    /// Cache hits avoid device I/O entirely.  Misses read from the
+    /// device and populate the cache for subsequent accesses.
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
-        let result = blkdev::with_device(&self.device_name, |dev| {
-            dev.read_sector(lba, buf)
-        });
-        match result {
-            Some(Ok(())) => Ok(()),
-            Some(Err(e)) => Err(e),
-            None => Err(KernelError::NoSuchDevice),
-        }
+        super::cache::read_sector(&self.device_name, lba, buf)
     }
 
     /// Write a FAT entry (update both FAT copies).
@@ -1456,6 +1426,63 @@ impl FileSystem for FatFs {
             path, new_cluster
         );
 
+        Ok(())
+    }
+
+    /// Rename or move a file or directory within the FAT filesystem.
+    ///
+    /// Strategy: read the old directory entry's metadata (cluster, size,
+    /// attr), create the new entry in the destination directory, then
+    /// delete the old entry.  The file data (cluster chain) is not moved
+    /// — only the directory entries change.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+        // 1. Resolve the source entry.
+        let (from_parent_path, from_filename) = split_path(from);
+        let from_name83 = Self::to_83_name(from_filename)
+            .ok_or(KernelError::InvalidArgument)?;
+        let from_parent_cluster = self.resolve_dir_cluster(from_parent_path)?;
+
+        let (from_lba, from_offset, from_exists) =
+            self.find_or_create_slot_in(from_parent_cluster, &from_name83)?;
+        if !from_exists {
+            return Err(KernelError::NotFound);
+        }
+
+        // Read the old entry's metadata.
+        let mut from_sector = [0u8; SECTOR_SIZE];
+        self.read_sector(from_lba, &mut from_sector)?;
+
+        let old_attr = from_sector.get(from_offset + 11).copied().unwrap_or(0);
+        let cluster_lo = u32::from(read_u16(&from_sector, from_offset + 26));
+        let cluster_hi = u32::from(read_u16(&from_sector, from_offset + 20));
+        let old_cluster = (cluster_hi << 16) | cluster_lo;
+        let old_size = read_u32(&from_sector, from_offset + 28);
+
+        // 2. Resolve the destination.
+        let (to_parent_path, to_filename) = split_path(to);
+        let to_name83 = Self::to_83_name(to_filename)
+            .ok_or(KernelError::InvalidArgument)?;
+        let to_parent_cluster = self.resolve_dir_cluster(to_parent_path)?;
+
+        let (to_lba, to_offset, to_exists) =
+            self.find_or_create_slot_in(to_parent_cluster, &to_name83)?;
+
+        // If destination exists, fail (no silent overwrite on rename).
+        if to_exists {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        // 3. Create the new directory entry pointing to the same clusters.
+        self.write_dir_entry(
+            to_lba, to_offset, &to_name83,
+            old_cluster, old_size, old_attr,
+        )?;
+
+        // 4. Delete the old entry (mark as 0xE5). Data is untouched.
+        self.delete_dir_entry(from_lba, from_offset)?;
+
+        crate::serial_println!("[fat] Renamed '{}' → '{}'", from, to);
         Ok(())
     }
 }

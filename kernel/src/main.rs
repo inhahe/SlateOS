@@ -528,6 +528,14 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::fat::self_test() {
                 serial_println!("WARNING: FAT self-test failed: {:?}", e);
             }
+            // Run file handle self-test (requires mounted filesystem).
+            if let Err(e) = fs::handle::self_test() {
+                serial_println!("WARNING: File handle self-test failed: {:?}", e);
+            }
+            // Run buffer cache self-test (validates caching, write-back, LRU).
+            if let Err(e) = fs::cache::self_test() {
+                serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
+            }
         }
         Err(e) => {
             serial_println!("[fs] No FAT filesystem on vda: {:?} (non-fatal)", e);

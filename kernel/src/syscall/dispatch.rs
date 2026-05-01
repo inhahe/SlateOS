@@ -31,6 +31,8 @@ use super::number::{
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
     SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_WRITE_FILE,
+    SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
+    SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
     SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
@@ -264,7 +266,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_THREAD_RESUME as usize] = Some(handlers::sys_thread_resume);
     handlers[SYS_THREAD_SET_PRIORITY as usize] = Some(handlers::sys_thread_set_priority);
 
-    // Filesystem (600–799).
+    // Filesystem — path-based (600–609).
     handlers[SYS_FS_READ_FILE as usize] = Some(handlers::sys_fs_read_file);
     handlers[SYS_FS_WRITE_FILE as usize] = Some(handlers::sys_fs_write_file);
     handlers[SYS_FS_DELETE as usize] = Some(handlers::sys_fs_delete);
@@ -272,6 +274,16 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_MKDIR as usize] = Some(handlers::sys_fs_mkdir);
     handlers[SYS_FS_RMDIR as usize] = Some(handlers::sys_fs_rmdir);
     handlers[SYS_FS_STAT as usize] = Some(handlers::sys_fs_stat);
+
+    // Filesystem — handle-based (610–699).
+    handlers[SYS_FS_OPEN as usize] = Some(handlers::sys_fs_open);
+    handlers[SYS_FS_CLOSE as usize] = Some(handlers::sys_fs_close);
+    handlers[SYS_FS_READ as usize] = Some(handlers::sys_fs_read);
+    handlers[SYS_FS_WRITE as usize] = Some(handlers::sys_fs_write);
+    handlers[SYS_FS_SEEK as usize] = Some(handlers::sys_fs_seek);
+    handlers[SYS_FS_TRUNCATE as usize] = Some(handlers::sys_fs_truncate);
+    handlers[SYS_FS_RENAME as usize] = Some(handlers::sys_fs_rename);
+    handlers[SYS_FS_FSTAT as usize] = Some(handlers::sys_fs_fstat);
 
     // Networking (800–999).
     handlers[SYS_TCP_CONNECT as usize] = Some(handlers::sys_tcp_connect);

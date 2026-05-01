@@ -23,7 +23,9 @@
 //! - No caching / buffer cache (each read goes to the device)
 //! - Single mount point (will become a mount table)
 
+pub mod cache;
 pub mod fat;
+pub mod handle;
 pub mod vfs;
 
 pub use vfs::{DirEntry, EntryType, FileSystem, Vfs};

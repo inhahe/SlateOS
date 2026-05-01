@@ -866,6 +866,111 @@ pub const SYS_FS_RMDIR: u64 = 605;
 /// Returns: 0 on success, or negative error code.
 pub const SYS_FS_STAT: u64 = 606;
 
+/// Open a file and return a handle.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: open flags bitfield (see `OpenFlags`).
+///
+/// ## Flags
+///
+/// | Flag       | Bit | Meaning                              |
+/// |------------|-----|--------------------------------------|
+/// | `O_READ`   | 0   | Open for reading                     |
+/// | `O_WRITE`  | 1   | Open for writing                     |
+/// | `O_CREATE` | 2   | Create file if it doesn't exist      |
+/// | `O_TRUNC`  | 3   | Truncate to zero length on open      |
+/// | `O_APPEND` | 4   | All writes go to end of file         |
+///
+/// Returns: file handle on success, negative error code on failure.
+pub const SYS_FS_OPEN: u64 = 610;
+
+/// Close an open file handle.
+///
+/// `arg0`: file handle.
+///
+/// Returns: 0 on success, negative error code on failure.
+pub const SYS_FS_CLOSE: u64 = 611;
+
+/// Read from an open file handle at the current offset.
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to destination buffer.
+/// `arg2`: buffer capacity (max bytes to read).
+///
+/// Advances the file offset by the number of bytes read.
+///
+/// Returns: number of bytes read (0 = EOF), negative error code.
+pub const SYS_FS_READ: u64 = 612;
+
+/// Write to an open file handle at the current offset.
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to source data.
+/// `arg2`: data length.
+///
+/// Advances the file offset by the number of bytes written.
+/// Extends the file if writing past the end.
+///
+/// Returns: number of bytes written, negative error code.
+pub const SYS_FS_WRITE: u64 = 613;
+
+/// Seek to a new position in an open file.
+///
+/// `arg0`: file handle.
+/// `arg1`: offset (interpreted according to `whence`).
+/// `arg2`: whence (0 = from start, 1 = from current, 2 = from end).
+///
+/// Returns: new absolute offset, negative error code.
+pub const SYS_FS_SEEK: u64 = 614;
+
+/// Truncate a file to a given size.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: new size in bytes.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_TRUNCATE: u64 = 615;
+
+/// Rename or move a file or directory.
+///
+/// `arg0`: pointer to source path string.
+/// `arg1`: source path length (bytes).
+/// `arg2`: pointer to destination path string.
+/// `arg3`: destination path length (bytes).
+///
+/// Both paths must be on the same mount point.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_RENAME: u64 = 616;
+
+/// Stat a file by handle (avoid redundant path lookup).
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to 16-byte output buffer (same format as `SYS_FS_STAT`).
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_FSTAT: u64 = 617;
+
+/// Open-flag constant: open for reading.
+pub const O_READ: u64 = 1 << 0;
+/// Open-flag constant: open for writing.
+pub const O_WRITE: u64 = 1 << 1;
+/// Open-flag constant: create file if it doesn't exist.
+pub const O_CREATE: u64 = 1 << 2;
+/// Open-flag constant: truncate file to zero on open.
+pub const O_TRUNC: u64 = 1 << 3;
+/// Open-flag constant: all writes go to end of file.
+pub const O_APPEND: u64 = 1 << 4;
+
+/// Seek whence: from start of file.
+pub const SEEK_SET: u64 = 0;
+/// Seek whence: from current offset.
+pub const SEEK_CUR: u64 = 1;
+/// Seek whence: from end of file.
+pub const SEEK_END: u64 = 2;
+
 /// Size of `FsDirEntry` as returned by `SYS_FS_LIST_DIR`.
 ///
 /// Layout (264 bytes):

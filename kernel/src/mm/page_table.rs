@@ -909,6 +909,74 @@ pub unsafe fn unmap_frame(
     PhysFrame::from_addr(first_pte.phys_addr()).ok_or(KernelError::InternalError)
 }
 
+/// Unmap a single 4 KiB hardware page.
+///
+/// Clears the page table entry at the given virtual address and returns
+/// the physical address that was mapped.  Unlike [`unmap_frame`], this
+/// operates on individual 4 KiB pages and does NOT require 16 KiB frame
+/// alignment.
+///
+/// Primarily used by the DMA subsystem, which maps individual 4 KiB
+/// hardware pages via [`map_4k_if_absent`] rather than full 16 KiB frames.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidAddress`] — `virt` is non-canonical, not
+///   mapped, or passes through a huge page entry.
+/// - [`KernelError::NotSupported`] — subsystem not initialized.
+///
+/// # Safety
+///
+/// - `pml4_phys` must be a valid PML4 table.
+/// - The caller must flush the TLB afterward.
+/// - In SMP, the caller must ensure TLB shootdown is performed.
+pub unsafe fn unmap_4k(
+    pml4_phys: u64,
+    virt: VirtAddr,
+) -> KernelResult<u64> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+
+    if !virt.is_canonical() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    // Walk PML4 → PT (no creation — the mapping must already exist).
+    // SAFETY: pml4_phys is valid (caller guarantee).
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() || pdpte.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() || pde.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let pt = pde.phys_addr();
+    let pt_idx = virt.pt_index();
+
+    // SAFETY: pt is a valid page table, pt_idx < 512.
+    let pte = unsafe { read_entry(pt, pt_idx, hhdm) };
+    if !pte.is_present() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    let phys = pte.phys_addr();
+
+    // Clear the PTE.
+    // SAFETY: pt valid, pt_idx < 512.
+    unsafe {
+        write_entry(pt, pt_idx, PageTableEntry::EMPTY, hhdm);
+    }
+
+    Ok(phys)
+}
+
 /// Change the protection flags on an existing 16 KiB frame mapping.
 ///
 /// All 4 page table entries are updated with the new `flags`.  The

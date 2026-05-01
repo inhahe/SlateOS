@@ -528,6 +528,10 @@ extern "C" fn kmain() -> ! {
     // Now that all CPUs are online, verify the TLB shootdown IPI works.
     tlb::self_test();
 
+    // Step 22d: DMA buffer management self-test.
+    // Verifies contiguous physical allocation and free for device DMA.
+    mm::dma::self_test();
+
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-

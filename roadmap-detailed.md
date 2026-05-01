@@ -122,7 +122,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Set up kernel heap allocator (geometric size class, per-CPU caches)
 - [x] Initialize serial console for debug output (COM1, 115200 baud, 8N1)
 - [x] Initialize PCI bus enumeration
-- [ ] Boot task list display (optional, show what the OS is doing during boot)
+- [x] Boot task list display (optional, show what the OS is doing during boot)
 - [ ] Optimize boot time — minimize kernel to get to usable state fast
 - [ ] Low-priority HD access for background service/library loading during boot
 
@@ -1683,7 +1683,7 @@ _Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colema
 ### 5.11 Boot
 
 - [ ] GRUB integration for dual-boot
-- [ ] Optional boot task list display
+- [x] Optional boot task list display
 
 ### 5.12 OS Maintenance
 

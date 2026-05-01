@@ -131,12 +131,14 @@ extern "C" fn kmain() -> ! {
             console::init(fb.address, fb.width, fb.height, fb.pitch, fb.bpp);
         }
         console_println!("=== Framebuffer console active ===");
+        console_println!(); // blank line before boot steps
     }
 
     // Step 3: Set up our own GDT (replacing the one Limine set up).
     //
     // SAFETY: We are in ring 0, interrupts are disabled, and this is
     // the only CPU running.
+    console::boot_step(console::BootStatus::Running, "CPU tables (GDT/IDT)");
     unsafe {
         gdt::init();
     }
@@ -150,12 +152,14 @@ extern "C" fn kmain() -> ! {
         idt::init();
     }
     serial_println!("[idt] IDT initialized");
+    console::boot_step_update(console::BootStatus::Ok, "CPU tables (GDT/IDT)");
 
     // Step 5: Initialize the physical frame allocator.
     //
     // SAFETY: Boot info contains a valid memory map and HHDM offset from
     // Limine.  This is the first and only call to frame::init.  We are
     // single-threaded with interrupts disabled.
+    console::boot_step(console::BootStatus::Running, "Memory manager");
     if let Err(e) = unsafe {
         mm::frame::init(boot_info.hhdm_offset, boot_info.memory_map)
     } {
@@ -178,11 +182,14 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Heap allocator self-test failed: {}", e);
         cpu::halt_loop();
     }
+    console::boot_step_update(console::BootStatus::Ok, "Memory manager");
 
     // Step 6b: Calibrate TSC frequency using PIT for benchmark timing.
     // Must be after serial (for output) and before subsystem benchmarks.
     // PIT channel 2 is always available on x86_64 hardware.
     bench::calibrate_tsc();
+
+    console::boot_step(console::BootStatus::Running, "Virtual memory");
 
     // Step 7: Initialize the page table subsystem.
     // This provides map/unmap/translate operations for managing virtual
@@ -214,10 +221,13 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Virtual memory");
+
     // Step 9: Initialize the scheduler.
     // Creates the idle task (the current execution context) and sets up
     // the priority round-robin scheduler.  Timer-based preemption will
     // be added when the APIC timer is wired up (§2.2).
+    console::boot_step(console::BootStatus::Running, "Scheduler");
     sched::init();
 
     // Verify cooperative scheduling works (spawn tasks, yield, verify).
@@ -240,11 +250,14 @@ extern "C" fn kmain() -> ! {
     mm::swap::self_test();
     mm::compress::self_test();
 
+    console::boot_step_update(console::BootStatus::Ok, "Scheduler");
+
     // Step 10: Initialize IPC subsystem.
     // Channels are the primary IPC mechanism — structured message
     // passing between tasks/processes.  No explicit init needed (the
     // global channel table is lazily populated).  Run self-tests to
     // verify send, recv, blocking, close detection, and backpressure.
+    console::boot_step(console::BootStatus::Running, "IPC subsystem");
     if let Err(e) = ipc::channel::self_test() {
         serial_println!("FATAL: IPC channel self-test failed: {}", e);
         cpu::halt_loop();
@@ -314,10 +327,13 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "IPC subsystem");
+
     // Step 17: Initialize capability system.
     // Capability tables store unforgeable handles to kernel objects.
     // Every resource access goes through capability checks — no
     // ambient authority.
+    console::boot_step(console::BootStatus::Running, "Capabilities & logging");
     if let Err(e) = cap::self_test() {
         serial_println!("FATAL: Capability system self-test failed: {}", e);
         cpu::halt_loop();
@@ -331,6 +347,8 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Capabilities & logging");
+
     // Step 18: Set up SYSCALL/SYSRET MSRs.
     // IA32_STAR (segment selectors) was already configured in gdt::init().
     // This sets up IA32_LSTAR (entry point RIP), IA32_FMASK (RFLAGS mask),
@@ -341,6 +359,7 @@ extern "C" fn kmain() -> ! {
     //
     // SAFETY: GDT is loaded (IA32_STAR is set), IDT is initialized.
     // Called exactly once.
+    console::boot_step(console::BootStatus::Running, "Process management");
     unsafe {
         syscall::entry::init();
     }
@@ -355,10 +374,13 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Process management");
+
     // Step 19b: Parse ACPI tables for hardware discovery.
     // Locates the MADT to discover I/O APIC addresses, processor Local
     // APICs, and interrupt source overrides.  Must run after heap init
     // (allocates Vecs) and before APIC/IOAPIC init (which uses the data).
+    console::boot_step(console::BootStatus::Running, "Hardware tables (ACPI/HPET)");
     if let Some(rsdp) = boot_info.rsdp_address {
         // SAFETY: rsdp is a valid RSDP address from Limine, HHDM maps
         // all physical memory.  Heap is initialized for Vec allocation.
@@ -397,12 +419,15 @@ extern "C" fn kmain() -> ! {
         serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Hardware tables (ACPI/HPET)");
+
     // Step 20: Initialize Local APIC and start the timer.
     // The APIC timer provides periodic interrupts for preemptive
     // scheduling.  Before this point, scheduling is purely cooperative.
     //
     // SAFETY: GDT, IDT, and heap are initialized.  We are single-threaded
     // with interrupts disabled.  Called exactly once.
+    console::boot_step(console::BootStatus::Running, "Interrupt controllers (APIC)");
     if let Err(e) = unsafe { apic::init() } {
         serial_println!("FATAL: APIC init failed: {:?}", e);
         cpu::halt_loop();
@@ -428,8 +453,11 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Interrupt controllers (APIC)");
+
     // Step 20c: Scan PCI bus for device discovery.
     // This finds virtio, USB, NVMe, and other PCI devices.
+    console::boot_step(console::BootStatus::Running, "PCI & device drivers");
     if let Err(e) = pci::self_test() {
         serial_println!("WARNING: PCI scan failed: {}", e);
     }
@@ -444,9 +472,12 @@ extern "C" fn kmain() -> ! {
     // Non-fatal if no NIC is present.
     virtio::net::init(boot_info.hhdm_offset);
 
+    console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
+
     // Step 20d-3: Initialize networking stack.
     // Sets up the network interface from the virtio-net device
     // and attempts DHCP to obtain an IP address.
+    console::boot_step(console::BootStatus::Running, "Network stack");
     net::init();
 
     // Step 20d-4: Attempt DHCP to obtain an IP address.
@@ -463,9 +494,12 @@ extern "C" fn kmain() -> ! {
 
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Network stack");
+
     // Step 20e: Initialize block device abstraction layer.
     // Moves driver instances from their module globals into the
     // unified block device registry.
+    console::boot_step(console::BootStatus::Running, "Storage & filesystems");
     blkdev::init();
 
     // Step 20e-2: Try to upgrade swap from zram to disk-backed.
@@ -499,6 +533,8 @@ extern "C" fn kmain() -> ! {
         }
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Storage & filesystems");
+
     // Step 21: Enable hardware interrupts.
     // From this point forward, the APIC timer fires periodically and
     // the scheduler enforces time slices preemptively.
@@ -506,6 +542,7 @@ extern "C" fn kmain() -> ! {
     // SAFETY: The IDT is fully set up with handlers for exceptions,
     // the timer (vector 32), and spurious interrupts (vector 255).
     // The APIC is configured and the scheduler is ready.
+    console::boot_step(console::BootStatus::Running, "Preemptive scheduling");
     unsafe {
         cpu::sti();
     }
@@ -525,12 +562,15 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
+
     // Step 22: Initialize PS/2 keyboard.
     // Unmasks IRQ 1, enables scan code translation.  Keypresses now
     // appear in the keyboard ring buffer and echo to the console.
     //
     // SAFETY: IOAPIC and IDT are initialized, interrupts are enabled.
     // Called exactly once.
+    console::boot_step(console::BootStatus::Running, "Keyboard & multi-core");
     unsafe {
         keyboard::init();
     }
@@ -571,8 +611,11 @@ extern "C" fn kmain() -> ! {
     // Verifies refcount API and COW PTE flag manipulation.
     mm::cow::self_test();
 
+    console::boot_step_update(console::BootStatus::Ok, "Keyboard & multi-core");
+
     // Step 22e2: Harden page permissions — set NX on HHDM and fix kernel
     // section permissions (W^X enforcement for kernel's own pages).
+    console::boot_step(console::BootStatus::Running, "Security hardening");
     {
         let pml4 = mm::page_table::active_pml4_phys();
 
@@ -598,9 +641,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("[FATAL] Memory protection self-test failed: {:?}", e);
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Security hardening");
+
     // Step 22f: Enable per-CPU frame caches.
     // Now that all CPUs are online and current_cpu_index() works,
     // enable the per-CPU frame cache for lock-free order-0 allocation.
+    console::boot_step(console::BootStatus::Running, "Performance tuning");
     mm::frame::enable_pcpu_caches();
     mm::heap::enable_pcpu_slab_caches();
 
@@ -651,11 +697,14 @@ extern "C" fn kmain() -> ! {
         );
     }
 
+    console::boot_step_update(console::BootStatus::Ok, "Performance tuning");
+
     // Boot success marker — the boot test script looks for this.
     serial_println!("BOOT_OK");
     serial_println!("=== Kernel boot complete ===");
 
     // Show boot-complete on the framebuffer console too.
+    console_println!();
     console_println!("=== Kernel boot complete ===");
 
     // Step 24: Spawn the userspace init process (PID 1).

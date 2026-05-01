@@ -302,6 +302,122 @@ macro_rules! console_println {
 }
 
 // ---------------------------------------------------------------------------
+// Boot progress display
+// ---------------------------------------------------------------------------
+
+/// Boot step status for the framebuffer display.
+#[derive(Debug, Clone, Copy)]
+pub enum BootStatus {
+    /// Step is in progress (yellow dot).
+    Running,
+    /// Step completed successfully (green checkmark).
+    Ok,
+    /// Step failed but is non-fatal (red X, boot continues).
+    #[allow(dead_code)] // Used by boot_step_fail in main.rs.
+    Warn,
+}
+
+/// Accent color: green for success indicators (BGRA: 0x00_66CC66).
+const COLOR_GREEN: u32 = 0x0066_CC66;
+
+/// Accent color: yellow for in-progress indicators (BGRA: 0x00_CCCC33).
+const COLOR_YELLOW: u32 = 0x00CC_CC33;
+
+/// Accent color: red-ish for warnings (BGRA: 0x00_CC6666).
+const COLOR_RED: u32 = 0x00CC_6666;
+
+/// Dim color for boot step descriptions.
+const COLOR_DIM: u32 = 0x0099_9999;
+
+/// Show a boot progress step on the framebuffer console.
+///
+/// Prints a colored status indicator followed by the step description.
+/// Call with `BootStatus::Running` when starting a step, then call
+/// `boot_step_update` with `BootStatus::Ok` when it completes.
+///
+/// Format:  `  [*] Description...`  (Running)
+///          `  [✓] Description...`  (Ok)
+///          `  [!] Description...`  (Warn)
+pub fn boot_step(status: BootStatus, description: &str) {
+    let mut con = CONSOLE.lock();
+    if !con.initialized {
+        return;
+    }
+
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let row = con.cursor_row;
+
+    // Clear the current line (overwrite any previous content for updates).
+    let cols = con.cols;
+    for c in 0..cols {
+        draw_glyph(fb, pitch, c, row, b' ');
+    }
+
+    // Draw status indicator with color.
+    let (indicator, color) = match status {
+        BootStatus::Running => (b'*', COLOR_YELLOW),
+        BootStatus::Ok      => (b'+', COLOR_GREEN),
+        BootStatus::Warn    => (b'!', COLOR_RED),
+    };
+
+    // "  [" prefix
+    draw_glyph(fb, pitch, 0, row, b' ');
+    draw_glyph(fb, pitch, 1, row, b' ');
+    draw_glyph(fb, pitch, 2, row, b'[');
+
+    // Colored indicator character
+    draw_glyph_colored(fb, pitch, 3, row, indicator, color);
+
+    // "] " suffix
+    draw_glyph(fb, pitch, 4, row, b']');
+    draw_glyph(fb, pitch, 5, row, b' ');
+
+    // Description in dim text
+    let max_desc = (cols as usize).saturating_sub(6);
+    for (i, &byte) in description.as_bytes().iter().take(max_desc).enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let col = 6u32.wrapping_add(i as u32);
+        draw_glyph_colored(fb, pitch, col, row, byte, COLOR_DIM);
+    }
+
+    // Only advance to next line on Running (Ok/Warn overwrites current line).
+    if matches!(status, BootStatus::Running) {
+        con.cursor_col = 0;
+        con.cursor_row = row.wrapping_add(1);
+        if con.cursor_row >= con.rows {
+            scroll_up_locked(&mut con);
+        }
+    }
+}
+
+/// Update the most recent boot step's status (overwrites the previous line).
+///
+/// Moves the cursor back to the previous line, redraws with the new status,
+/// and advances again.  Use after `boot_step(Running, ...)` to show success.
+pub fn boot_step_update(status: BootStatus, description: &str) {
+    let mut con = CONSOLE.lock();
+    if !con.initialized {
+        return;
+    }
+    // Move cursor back to the previous line.
+    if con.cursor_row > 0 {
+        con.cursor_row = con.cursor_row.wrapping_sub(1);
+    }
+    drop(con);
+
+    boot_step(status, description);
+
+    // Advance cursor past the updated line.
+    let mut con = CONSOLE.lock();
+    con.cursor_col = 0;
+    con.cursor_row = con.cursor_row.wrapping_add(1);
+    if con.cursor_row >= con.rows {
+        scroll_up_locked(&mut con);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -328,8 +444,14 @@ fn put_pixel(fb: u64, pitch: u32, x: u32, y: u32, color: u32) {
     }
 }
 
-/// Draw a single glyph at text position (col, row).
+/// Draw a single glyph at text position (col, row) using default colors.
 fn draw_glyph(fb: u64, pitch: u32, col: u32, row: u32, ch: u8) {
+    draw_glyph_colored(fb, pitch, col, row, ch, FG_COLOR);
+}
+
+/// Draw a single glyph at text position (col, row) with a custom
+/// foreground color.  Background is always [`BG_COLOR`].
+fn draw_glyph_colored(fb: u64, pitch: u32, col: u32, row: u32, ch: u8, fg: u32) {
     let glyph = font::glyph(ch);
     let px_x = col.wrapping_mul(GLYPH_WIDTH);
     let px_y = row.wrapping_mul(GLYPH_HEIGHT);
@@ -346,7 +468,7 @@ fn draw_glyph(fb: u64, pitch: u32, col: u32, row: u32, ch: u8) {
             // shift is always 0..7, safe for u8.
             #[allow(clippy::cast_possible_truncation)]
             let bit = (glyph_row >> (shift as u8)) & 1;
-            let color = if bit != 0 { FG_COLOR } else { BG_COLOR };
+            let color = if bit != 0 { fg } else { BG_COLOR };
             put_pixel(fb, pitch, x, y, color);
         }
     }

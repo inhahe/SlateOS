@@ -594,6 +594,134 @@ pub fn reap_dead_tasks() -> usize {
     reaped
 }
 
+// ---------------------------------------------------------------------------
+// Priority Inheritance support
+// ---------------------------------------------------------------------------
+
+/// Get a task's current effective scheduling priority.
+///
+/// Returns `None` if the task is not found.
+#[must_use]
+pub fn get_effective_priority(task_id: TaskId) -> Option<u8> {
+    let state = SCHED.lock();
+    state.tasks.get(&task_id).map(Task::effective_priority)
+}
+
+/// Boost a task's scheduling priority via priority inheritance.
+///
+/// Sets the task's `inherited_priority` to `donor_priority`, or
+/// lowers it further if already set to a higher priority level.
+/// (Lower number = higher priority.)
+///
+/// If the task is in the Ready queue, it is moved to the new
+/// effective priority level.
+///
+/// Returns the task's new effective priority, or `None` if the task
+/// was not found.
+///
+/// Called by the PI futex subsystem when a high-priority task blocks
+/// on a lock held by a lower-priority task.
+pub fn boost_priority(task_id: TaskId, donor_priority: u8) -> Option<u8> {
+    let mut state = SCHED.lock();
+
+    // Read current state (immutable borrow).
+    let t = state.tasks.get(&task_id)?;
+    let old_effective = t.effective_priority();
+    let task_state = t.state;
+    let current_inherited = t.inherited_priority;
+    let base_prio = t.priority;
+    let is_interactive = t.interactive;
+
+    // Compute new inherited priority (keep the most aggressive boost).
+    let new_inh = match current_inherited {
+        Some(current) => current.min(donor_priority),
+        None => donor_priority,
+    };
+
+    // No change — return early.
+    if Some(new_inh) == current_inherited {
+        return Some(old_effective);
+    }
+
+    // Compute new effective priority.
+    let base_eff = if is_interactive {
+        base_prio.saturating_sub(task::INTERACTIVE_BOOST)
+    } else {
+        base_prio
+    };
+    let new_effective = base_eff.min(new_inh);
+
+    // Re-queue if Ready and effective priority changed.
+    if task_state == TaskState::Ready && new_effective != old_effective {
+        state.scheduler.dequeue(task_id, old_effective);
+        state.scheduler.enqueue(task_id, new_effective);
+    }
+
+    // Write the new inherited priority.
+    if let Some(task) = state.tasks.get_mut(&task_id) {
+        task.inherited_priority = Some(new_inh);
+    }
+
+    serial_println!(
+        "[sched] PI boost: task {} priority {} → {} (donor prio {})",
+        task_id, old_effective, new_effective, donor_priority
+    );
+    Some(new_effective)
+}
+
+/// Set or clear a task's inherited priority.
+///
+/// Used by the PI futex subsystem when a task releases a lock and
+/// needs its inherited priority recalculated (or cleared entirely).
+///
+/// If `new_inherited` is `None`, the inherited priority is cleared
+/// and the task returns to its base effective priority.
+///
+/// Returns the task's new effective priority, or `None` if the task
+/// was not found.
+pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Option<u8> {
+    let mut state = SCHED.lock();
+
+    let t = state.tasks.get(&task_id)?;
+    let old_effective = t.effective_priority();
+    let task_state = t.state;
+    let base_prio = t.priority;
+    let is_interactive = t.interactive;
+
+    let base_eff = if is_interactive {
+        base_prio.saturating_sub(task::INTERACTIVE_BOOST)
+    } else {
+        base_prio
+    };
+    let new_effective = match new_inherited {
+        Some(inh) => base_eff.min(inh),
+        None => base_eff,
+    };
+
+    if task_state == TaskState::Ready && new_effective != old_effective {
+        state.scheduler.dequeue(task_id, old_effective);
+        state.scheduler.enqueue(task_id, new_effective);
+    }
+
+    if let Some(task) = state.tasks.get_mut(&task_id) {
+        task.inherited_priority = new_inherited;
+    }
+
+    if old_effective != new_effective {
+        serial_println!(
+            "[sched] PI {}: task {} effective priority {} → {}",
+            if new_inherited.is_some() { "update" } else { "clear" },
+            task_id, old_effective, new_effective
+        );
+    }
+
+    Some(new_effective)
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
 /// Snapshot of a task's key fields for diagnostic display.
 pub struct TaskInfo {
     /// Task ID.

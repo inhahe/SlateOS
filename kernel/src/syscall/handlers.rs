@@ -715,6 +715,39 @@ pub fn sys_futex_wake(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(i64::from(woken))
 }
 
+/// `SYS_FUTEX_LOCK_PI` — lock a PI (Priority Inheritance) futex.
+///
+/// `arg0`: pointer to 32-bit futex word (4-byte aligned).
+///
+/// If uncontended, acquires immediately.  If contended, blocks and
+/// boosts the lock holder's priority to the caller's level.
+///
+/// Returns: 0 on success.
+pub fn sys_futex_lock_pi(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    // TODO: Validate pointer is in caller's address space.
+    match futex::futex_lock_pi(addr) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FUTEX_UNLOCK_PI` — unlock a PI (Priority Inheritance) futex.
+///
+/// `arg0`: pointer to 32-bit futex word (4-byte aligned).
+///
+/// Releases the lock and transfers ownership to the highest-priority
+/// waiter.  Restores the caller's inherited priority.
+///
+/// Returns: 0 on success.
+pub fn sys_futex_unlock_pi(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    match futex::futex_unlock_pi(addr) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pipe handlers (220–229)
 // ---------------------------------------------------------------------------

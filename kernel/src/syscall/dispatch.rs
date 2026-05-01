@@ -29,6 +29,7 @@ use super::number::{
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
     SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_WRITE_FILE,
+    SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
@@ -175,6 +176,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CHANNEL_CLOSE as usize] = Some(handlers::sys_channel_close);
     handlers[SYS_FUTEX_WAIT as usize] = Some(handlers::sys_futex_wait);
     handlers[SYS_FUTEX_WAKE as usize] = Some(handlers::sys_futex_wake);
+    handlers[SYS_FUTEX_LOCK_PI as usize] = Some(handlers::sys_futex_lock_pi);
+    handlers[SYS_FUTEX_UNLOCK_PI as usize] = Some(handlers::sys_futex_unlock_pi);
     handlers[SYS_PIPE_CREATE as usize] = Some(handlers::sys_pipe_create);
     handlers[SYS_PIPE_WRITE as usize] = Some(handlers::sys_pipe_write);
     handlers[SYS_PIPE_READ as usize] = Some(handlers::sys_pipe_read);

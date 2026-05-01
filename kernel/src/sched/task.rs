@@ -226,19 +226,38 @@ pub struct Task {
     /// When true, the task is enqueued at `effective_priority()` which
     /// is `priority - INTERACTIVE_BOOST` (clamped to 0).
     pub interactive: bool,
+
+    /// Priority inherited from higher-priority tasks blocked on a
+    /// PI (Priority Inheritance) mutex held by this task.
+    ///
+    /// When set, [`effective_priority`](Self::effective_priority)
+    /// returns the minimum (highest priority, i.e., lowest number) of
+    /// the base effective priority and this inherited value.
+    ///
+    /// Managed by the futex PI subsystem: set when a high-priority
+    /// task blocks on our lock, cleared when we release the lock.
+    pub inherited_priority: Option<u8>,
 }
 
 impl Task {
-    /// Get the effective scheduling priority, accounting for interactive boost.
+    /// Get the effective scheduling priority, accounting for both
+    /// interactive boost and priority inheritance.
     ///
-    /// If the task is interactive, the effective priority is
-    /// `priority - INTERACTIVE_BOOST` (clamped to 0).
+    /// Returns the minimum (highest priority) of:
+    /// - Base priority with interactive boost (if applicable)
+    /// - Inherited priority from PI futex (if any)
+    ///
+    /// Lower number = higher priority.
     #[must_use]
     pub fn effective_priority(&self) -> u8 {
-        if self.interactive {
+        let base = if self.interactive {
             self.priority.saturating_sub(INTERACTIVE_BOOST)
         } else {
             self.priority
+        };
+        match self.inherited_priority {
+            Some(inh) => base.min(inh),
+            None => base,
         }
     }
 
@@ -297,6 +316,7 @@ impl Task {
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,
+            inherited_priority: None,
         }
     }
 
@@ -362,6 +382,7 @@ impl Task {
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,
+            inherited_priority: None,
         })
     }
 

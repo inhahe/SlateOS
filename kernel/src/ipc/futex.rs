@@ -238,6 +238,352 @@ pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Priority Inheritance (PI) Futex
+// ---------------------------------------------------------------------------
+//
+// PI futexes solve the priority inversion problem.  When a high-priority
+// task blocks on a lock held by a low-priority task, the holder is
+// temporarily boosted to the blocked task's priority level.
+//
+// ## Futex Word Format (PI variant)
+//
+// ```text
+// Bits 0-29:  Owner task ID (0 = unlocked)
+// Bit 30:     FUTEX_WAITERS — set by kernel when PI waiters exist
+// Bit 31:     Reserved (must be 0)
+// ```
+//
+// ## Userspace Fast Path
+//
+// ```text
+// lock:   CAS(addr, 0 → my_tid)  →  success?  →  hold lock (no syscall)
+//                                      │
+//                                      └─ fail  →  SYS_FUTEX_LOCK_PI(addr)
+//
+// unlock: If no waiters bit:  CAS(addr, my_tid → 0)  →  done
+//         If waiters bit:     SYS_FUTEX_UNLOCK_PI(addr)
+// ```
+
+/// Mask for the owner task ID in a PI futex word (bits 0–29).
+const FUTEX_TID_MASK: u32 = 0x3FFF_FFFF;
+
+/// Bit flag indicating PI waiters exist (bit 30 of the futex word).
+const FUTEX_WAITERS_BIT: u32 = 1 << 30;
+
+/// A task waiting on a PI futex address.
+struct PiWaiter {
+    /// The virtual address being waited on.
+    addr: u64,
+    /// The blocked task's ID.
+    task_id: TaskId,
+    /// The task's effective priority at the time of blocking.
+    priority: u8,
+}
+
+/// An ownership record for a PI futex.
+struct PiOwner {
+    /// The futex address this task holds.
+    addr: u64,
+    /// The owning task's ID.
+    owner_id: TaskId,
+}
+
+/// State for PI futex operations.
+///
+/// Separate from the non-PI [`FutexTable`] to avoid adding overhead
+/// to the common non-PI fast path.
+///
+/// Lock ordering: `PI_FUTEX_TABLE` → `SCHED`.
+struct PiFutexTable {
+    /// PI waiters, bucketed by address hash.
+    waiters: [VecDeque<PiWaiter>; NUM_BUCKETS],
+    /// Ownership records, bucketed by address hash.
+    owners: [VecDeque<PiOwner>; NUM_BUCKETS],
+}
+
+impl PiFutexTable {
+    const fn new() -> Self {
+        const EMPTY_W: VecDeque<PiWaiter> = VecDeque::new();
+        const EMPTY_O: VecDeque<PiOwner> = VecDeque::new();
+        Self {
+            waiters: [EMPTY_W; NUM_BUCKETS],
+            owners: [EMPTY_O; NUM_BUCKETS],
+        }
+    }
+}
+
+/// Global PI futex state.
+///
+/// Lock ordering: `PI_FUTEX_TABLE` → `SCHED` (collect data under PI
+/// table lock, then call sched functions outside the lock).
+static PI_FUTEX_TABLE: Mutex<PiFutexTable> = Mutex::new(PiFutexTable::new());
+
+/// Register a task as the PI futex owner for an address.
+fn register_pi_owner(addr: u64, owner_id: TaskId) {
+    let mut table = PI_FUTEX_TABLE.lock();
+    let idx = FutexTable::bucket_index(addr);
+    // SAFETY: idx is masked to NUM_BUCKETS - 1.
+    #[allow(clippy::indexing_slicing)]
+    table.owners[idx].push_back(PiOwner { addr, owner_id });
+}
+
+/// Remove a task's PI ownership record for an address.
+fn unregister_pi_owner(table: &mut PiFutexTable, addr: u64, owner_id: TaskId) {
+    let idx = FutexTable::bucket_index(addr);
+    // SAFETY: idx is masked to NUM_BUCKETS - 1.
+    #[allow(clippy::indexing_slicing)]
+    table.owners[idx].retain(|o| !(o.addr == addr && o.owner_id == owner_id));
+}
+
+/// Recalculate the inherited priority for a task based on all PI
+/// futexes it still owns.
+///
+/// Scans all PI waiter queues for addresses owned by `owner_id` and
+/// returns the highest priority (lowest number) among all waiters,
+/// or `None` if no PI waiters exist for any of this task's locks.
+///
+/// O(owned_locks × waiters_per_lock) — both are typically very small
+/// (1–3 owned locks, 1–10 waiters each).
+fn recalculate_inherited_for_owner(
+    table: &PiFutexTable,
+    owner_id: TaskId,
+) -> Option<u8> {
+    let mut best: Option<u8> = None;
+
+    // Find all addresses still owned by this task.
+    for bucket in &table.owners {
+        for ownership in bucket {
+            if ownership.owner_id != owner_id {
+                continue;
+            }
+            // Check for PI waiters on this address.
+            let widx = FutexTable::bucket_index(ownership.addr);
+            // SAFETY: widx is masked to NUM_BUCKETS - 1.
+            #[allow(clippy::indexing_slicing)]
+            for waiter in &table.waiters[widx] {
+                if waiter.addr == ownership.addr {
+                    best = Some(match best {
+                        Some(p) => p.min(waiter.priority),
+                        None => waiter.priority,
+                    });
+                }
+            }
+        }
+    }
+
+    best
+}
+
+/// Lock a PI futex.
+///
+/// Attempts to acquire the lock at `addr`.  If the lock is free (futex
+/// word is 0), atomically sets the owner.  If contended, blocks the
+/// caller and applies priority inheritance to the current lock holder.
+///
+/// The futex word uses bits 0–29 for the owner task ID and bit 30 as
+/// a waiters flag.
+///
+/// # Returns
+///
+/// - `Ok(())` — lock acquired (either uncontended or after waiting).
+/// - `Err(InvalidAddress)` — `addr` is null.
+/// - `Err(BadAlignment)` — `addr` is not 4-byte aligned.
+/// - `Err(WouldBlock)` — deadlock detected (caller already owns the lock).
+///
+/// # Safety contract
+///
+/// `addr` must point to a valid, aligned `AtomicU32`.
+pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
+    if addr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    if addr & 3 != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+
+    let current_id = sched::current_task_id();
+    #[allow(clippy::cast_possible_truncation)]
+    let current_tid = (current_id as u32) & FUTEX_TID_MASK;
+
+    // SAFETY: Caller guarantees addr is valid and aligned.
+    let atomic = unsafe { &*(addr as *const AtomicU32) };
+
+    // Fast path: CAS 0 → our tid (uncontended acquisition).
+    if atomic
+        .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        register_pi_owner(addr, current_id);
+        return Ok(());
+    }
+
+    // Slow (contended) path.
+    //
+    // Read the owner from the futex word.  Retry the CAS once if the
+    // lock appears to have been released between our first CAS and this
+    // read (race window on SMP; harmless retry on single-CPU).
+    let owner_id = {
+        let word = atomic.load(Ordering::Acquire);
+        let oid = u64::from(word & FUTEX_TID_MASK);
+
+        if oid == current_id {
+            return Err(KernelError::WouldBlock); // Deadlock
+        }
+        if oid == 0 {
+            // Lock was released between CAS and load — retry.
+            if atomic
+                .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                register_pi_owner(addr, current_id);
+                return Ok(());
+            }
+            let w2 = atomic.load(Ordering::Acquire);
+            let o2 = u64::from(w2 & FUTEX_TID_MASK);
+            if o2 == current_id {
+                return Err(KernelError::WouldBlock);
+            }
+            o2
+        } else {
+            oid
+        }
+    };
+
+    // Get our effective priority for the PI donation.
+    let our_priority = sched::get_effective_priority(current_id)
+        .unwrap_or(sched::task::IDLE_PRIORITY);
+
+    // Register as a PI waiter under the PI table lock.
+    {
+        let mut table = PI_FUTEX_TABLE.lock();
+        let idx = FutexTable::bucket_index(addr);
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        table.waiters[idx].push_back(PiWaiter {
+            addr,
+            task_id: current_id,
+            priority: our_priority,
+        });
+    }
+
+    // Set the WAITERS bit so the unlocker knows to enter the kernel.
+    atomic.fetch_or(FUTEX_WAITERS_BIT, Ordering::Release);
+
+    // Boost the lock holder's priority if ours is higher (lower number).
+    if owner_id != 0 {
+        sched::boost_priority(owner_id, our_priority);
+    }
+
+    // Block until unlock_pi transfers the lock to us.
+    sched::block_current();
+
+    Ok(())
+}
+
+/// Unlock a PI futex.
+///
+/// Releases the lock at `addr` and transfers ownership to the highest-
+/// priority waiting task (if any).  Restores the caller's priority to
+/// its base level (or recalculates based on other held PI locks).
+///
+/// # Returns
+///
+/// - `Ok(())` — lock released successfully.
+/// - `Err(InvalidAddress)` — `addr` is null.
+/// - `Err(BadAlignment)` — `addr` is not 4-byte aligned.
+/// - `Err(InvalidArgument)` — caller is not the lock owner.
+pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
+    if addr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    if addr & 3 != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+
+    let current_id = sched::current_task_id();
+
+    // SAFETY: Caller guarantees addr is valid and aligned.
+    let atomic = unsafe { &*(addr as *const AtomicU32) };
+
+    // Verify we're the owner.
+    let word = atomic.load(Ordering::Acquire);
+    let word_owner = u64::from(word & FUTEX_TID_MASK);
+    if word_owner != current_id {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Find the highest-priority waiter and prepare ownership transfer.
+    let waiter_to_wake: Option<TaskId>;
+    let has_more_waiters: bool;
+    let recalc_priority: Option<u8>;
+
+    {
+        let mut table = PI_FUTEX_TABLE.lock();
+
+        // Remove our ownership record.
+        unregister_pi_owner(&mut table, addr, current_id);
+
+        // Find the highest-priority (lowest number) waiter for this addr.
+        let idx = FutexTable::bucket_index(addr);
+        let mut best_idx: Option<usize> = None;
+        let mut best_prio: u8 = u8::MAX;
+
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        for (i, w) in table.waiters[idx].iter().enumerate() {
+            if w.addr == addr && w.priority < best_prio {
+                best_prio = w.priority;
+                best_idx = Some(i);
+            }
+        }
+
+        // Remove the selected waiter.
+        #[allow(clippy::indexing_slicing)]
+        {
+            waiter_to_wake = best_idx
+                .and_then(|bi| table.waiters[idx].remove(bi))
+                .map(|w| w.task_id);
+        }
+
+        // Check if more waiters remain for this address.
+        #[allow(clippy::indexing_slicing)]
+        {
+            has_more_waiters = table.waiters[idx]
+                .iter()
+                .any(|w| w.addr == addr);
+        }
+
+        // Recalculate our inherited priority based on remaining locks.
+        recalc_priority = recalculate_inherited_for_owner(&table, current_id);
+    }
+
+    // Transfer ownership or clear the futex word.
+    if let Some(new_owner_id) = waiter_to_wake {
+        #[allow(clippy::cast_possible_truncation)]
+        let new_tid = (new_owner_id as u32) & FUTEX_TID_MASK;
+        let new_word = new_tid
+            | if has_more_waiters { FUTEX_WAITERS_BIT } else { 0 };
+        atomic.store(new_word, Ordering::Release);
+
+        // Register the new owner.
+        register_pi_owner(addr, new_owner_id);
+
+        // Wake the new owner.
+        sched::wake(new_owner_id);
+    } else {
+        // No waiters — clear the word entirely.
+        atomic.store(0, Ordering::Release);
+    }
+
+    // Restore our priority (clear or recalculate inherited).
+    sched::set_inherited_priority(current_id, recalc_priority);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -247,12 +593,14 @@ pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
 /// 1. `futex_wait` with non-matching value (returns immediately).
 /// 2. `futex_wake` with no waiters (returns 0).
 /// 3. Blocking wait + wake via spawned task.
+/// 4. Priority inheritance: high-prio task boosts low-prio lock holder.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[futex] Running futex self-test...");
 
     test_wait_value_mismatch()?;
     test_wake_no_waiters()?;
     test_blocking_wait_wake()?;
+    test_priority_inheritance()?;
 
     serial_println!("[futex] Futex self-test PASSED");
     Ok(())
@@ -337,5 +685,159 @@ fn test_blocking_wait_wake() -> KernelResult<()> {
     }
 
     serial_println!("[futex]   Blocking wait + wake: OK");
+    Ok(())
+}
+
+// -- PI self-test helpers ---------------------------------------------------
+
+/// Stage counter for the PI test.
+static PI_TEST_STAGE: AtomicU32 = AtomicU32::new(0);
+/// Control word: L waits on this until the test driver wakes it.
+static PI_CONTROL: AtomicU32 = AtomicU32::new(1);
+
+/// Low-priority task for the PI test.
+///
+/// Locks the PI futex, signals stage 1, then blocks on the control
+/// word.  When woken by the test driver, unlocks the PI futex
+/// (transferring ownership to the high-priority waiter).
+extern "C" fn pi_low_task(addr: u64) {
+    let _ = futex_lock_pi(addr);
+    PI_TEST_STAGE.store(1, Ordering::SeqCst);
+
+    // Block on the control word until the test driver wakes us.
+    // This lets the test driver spawn H and verify the PI boost
+    // before we proceed.
+    let ctrl_addr = (&raw const PI_CONTROL) as u64;
+    let _ = futex_wait(ctrl_addr, 1);
+
+    // Unlock the PI futex — transfers ownership to H.
+    let _ = futex_unlock_pi(addr);
+}
+
+/// High-priority task for the PI test.
+///
+/// Signals stage 2, then tries to lock the PI futex (blocks because
+/// L holds it, triggering priority inheritance).  When woken via
+/// ownership transfer, signals stage 4 and unlocks.
+extern "C" fn pi_high_task(addr: u64) {
+    PI_TEST_STAGE.store(2, Ordering::SeqCst);
+    // This will block because L holds the lock — PI boost applied to L.
+    let _ = futex_lock_pi(addr);
+
+    // Lock acquired via ownership transfer from L.
+    PI_TEST_STAGE.store(4, Ordering::SeqCst);
+    let _ = futex_unlock_pi(addr);
+}
+
+/// Test 4: Priority inheritance via PI futex.
+///
+/// Verifies that when a high-priority task (H, prio 8) blocks on a
+/// lock held by a low-priority task (L, prio 24), L's effective
+/// priority is boosted to 8 for the duration of the lock hold.
+///
+/// Sequence:
+/// 1. Spawn L (prio 24) → L locks the PI futex, blocks on control word.
+/// 2. Spawn H (prio 8)  → H tries to lock, blocks, boosts L.
+/// 3. Verify L's effective priority is 8.
+/// 4. Wake L → L unlocks, transfers lock to H, L's priority restored.
+/// 5. H acquires, signals, unlocks.
+/// 6. Verify everything completed and L's priority is back to 24.
+fn test_priority_inheritance() -> KernelResult<()> {
+    PI_TEST_STAGE.store(0, Ordering::SeqCst);
+    PI_CONTROL.store(1, Ordering::SeqCst);
+
+    // Create the PI futex word (initially unlocked).
+    let futex_word = AtomicU32::new(0);
+    let addr = (&raw const futex_word) as u64;
+
+    // Spawn L at low priority (24).
+    let l_id = sched::spawn(b"pi-low", 24, pi_low_task, addr, 0)?;
+
+    // Yield to let L run: L locks the futex and blocks on PI_CONTROL.
+    sched::yield_now();
+
+    let stage = PI_TEST_STAGE.load(Ordering::SeqCst);
+    if stage != 1 {
+        serial_println!(
+            "[futex]   PI FAIL: after L runs, expected stage 1, got {}",
+            stage
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Spawn H at high priority (8).
+    let h_id = sched::spawn(b"pi-high", 8, pi_high_task, addr, 0)?;
+
+    // Yield → H runs, sets stage 2, tries to lock → blocks with PI
+    // boost on L.  Then idle/main resumes.
+    sched::yield_now();
+
+    let stage = PI_TEST_STAGE.load(Ordering::SeqCst);
+    if stage != 2 {
+        serial_println!(
+            "[futex]   PI FAIL: after H blocks, expected stage 2, got {}",
+            stage
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify L's effective priority was boosted to 8.
+    let l_eff = sched::get_effective_priority(l_id);
+    if l_eff != Some(8) {
+        serial_println!(
+            "[futex]   PI FAIL: L effective priority should be 8, got {:?}",
+            l_eff
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[futex]   PI boost verified: L prio 24 → effective 8");
+
+    // Wake L from its control-word wait so it can unlock the PI futex.
+    PI_CONTROL.store(0, Ordering::SeqCst);
+    let ctrl_addr = (&raw const PI_CONTROL) as u64;
+    futex_wake(ctrl_addr, 1);
+
+    // Yield to let L run (boosted to 8), unlock, transfer to H.
+    // Then H runs (prio 8), acquires, signals stage 4, unlocks, exits.
+    // Then L's function returns and it exits too.
+    for _ in 0..6 {
+        sched::yield_now();
+    }
+
+    // Verify H completed.
+    let stage = PI_TEST_STAGE.load(Ordering::SeqCst);
+    if stage != 4 {
+        serial_println!(
+            "[futex]   PI FAIL: expected stage 4 (H done), got {}",
+            stage
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify L's priority was restored.  L may be Dead (returns None,
+    // which is fine).  L's base priority is 24, but it may have been
+    // detected as interactive (short burst before blocking → effective
+    // priority = 24 - INTERACTIVE_BOOST = 22).  Either way, it must
+    // NOT be the PI-boosted 8.
+    if let Some(l_eff) = sched::get_effective_priority(l_id) {
+        let base_min = 24u8.saturating_sub(sched::task::INTERACTIVE_BOOST);
+        if l_eff < base_min || l_eff > 24 {
+            serial_println!(
+                "[futex]   PI FAIL: L priority not restored, got {} (expected {}-{})",
+                l_eff, base_min, 24
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Clean up dead tasks.
+    sched::reap_dead_tasks();
+
+    serial_println!("[futex]   Priority inheritance: OK");
+
+    // Suppress "unused variable" since we use h_id for spawning only.
+    let _ = h_id;
+
     Ok(())
 }

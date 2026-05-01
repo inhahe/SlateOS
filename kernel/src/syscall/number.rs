@@ -266,6 +266,28 @@ pub const SYS_FUTEX_WAIT: u64 = 210;
 /// Returns: number of tasks actually woken.
 pub const SYS_FUTEX_WAKE: u64 = 211;
 
+/// Lock a PI (Priority Inheritance) futex.
+///
+/// `arg0`: virtual address of the futex word (must be 4-byte aligned).
+///
+/// The futex word format: bits 0–29 = owner task ID, bit 30 = waiters
+/// flag.  If the lock is free (word == 0), acquires it atomically.
+/// If contended, blocks the caller and boosts the lock holder's
+/// priority to prevent priority inversion.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_FUTEX_LOCK_PI: u64 = 212;
+
+/// Unlock a PI (Priority Inheritance) futex.
+///
+/// `arg0`: virtual address of the futex word (must be 4-byte aligned).
+///
+/// Releases the lock and transfers ownership to the highest-priority
+/// waiter (if any).  Restores the caller's inherited priority.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_FUTEX_UNLOCK_PI: u64 = 213;
+
 /// Create a one-way pipe.
 ///
 /// Returns two handles packed into `rax` (read end) and `rdx` (write end).

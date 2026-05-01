@@ -445,7 +445,7 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 
 - [x] Interrupt dispatch
 - [x] Deferred work mechanism (softirq/tasklet equivalent)
-- [ ] Interrupt delivery from kernel to userspace drivers via IPC
+- [x] Interrupt delivery from kernel to userspace drivers via IPC — SYS_IRQ_REGISTER/WAIT/RELEASE + lock-free IRQ_PENDING counters + softirq deferred wake
 - [x] Benchmark: total ISR latency < 10us (ISR hard-IRQ measurement via TSC; QEMU min=56k cycles/15µs — native target met by design)
 
 ---
@@ -456,25 +456,25 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 
 - [ ] Userspace driver framework:
   - [ ] MMIO mapping into driver process address space
-  - [ ] Interrupt delivery via IPC
+  - [x] Interrupt delivery via IPC — SYS_IRQ_REGISTER/WAIT/RELEASE
   - [ ] DMA mapping setup syscalls
   - [ ] Driver crash detection and automatic restart
 - [ ] Ada/SPARK FFI bridge for kernel-space safety-critical drivers
-- [ ] virtio drivers (disk, network, GPU) for VM development/testing
+- [-] virtio drivers (disk, network, GPU) for VM development/testing — virtio-blk and virtio-net done (in-kernel, legacy PCI transport); GPU pending
 - [ ] VMware tools equivalent for VM-friendliness
 
 ### 2.2 Essential Drivers
 
-- [ ] Keyboard (PS/2 and USB HID)
-- [ ] Framebuffer / basic display (UEFI GOP initially)
+- [-] Keyboard (PS/2 and USB HID) — PS/2 done (IRQ-driven, scan code set 1, ring buffer); USB HID pending
+- [x] Framebuffer / basic display (UEFI GOP initially)
 - [ ] Storage: NVMe driver
 - [ ] Storage: AHCI/SATA driver
 - [ ] USB host controller (xHCI)
 - [ ] Network: Intel e1000/e1000e (for VMs)
 - [ ] Network: basic Realtek (for real hardware)
-- [ ] Timer: HPET
-- [ ] Timer: APIC timer
-- [ ] RTC (real-time clock)
+- [x] Timer: HPET — initialized, high-res monotonic clock, sub-µs precision
+- [x] Timer: APIC timer — 100 Hz periodic, per-CPU, PIT-calibrated
+- [x] RTC (real-time clock) — MC146818-compatible CMOS driver, BCD/binary auto-detect
 - [ ] Bluetooth: HCI driver (USB Bluetooth adapters via xHCI)
   - [ ] Bluetooth pairing, discovery, connection management
   - [ ] Bluetooth audio (A2DP sink/source, HFP for headsets)

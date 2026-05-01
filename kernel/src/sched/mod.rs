@@ -379,6 +379,27 @@ pub fn cpu_is_idle(cpu: usize) -> bool {
         .map_or(false, |f| f.load(Ordering::Acquire))
 }
 
+/// Pick the best CPU for a task, respecting its affinity mask.
+///
+/// Prefers `last_cpu` if it's in the mask (cache-warm scheduling).
+/// Otherwise, falls back to the first allowed CPU.  Returns
+/// `last_cpu` unchanged if the mask is empty or all-ones (common case
+/// fast-path).
+#[inline]
+fn choose_cpu_for_task(task: &Task) -> usize {
+    if task.cpu_affinity == task::CPU_AFFINITY_ALL {
+        return task.last_cpu; // Fast path: no affinity restriction.
+    }
+    if task.can_run_on(task.last_cpu) {
+        return task.last_cpu; // Preferred CPU is allowed.
+    }
+    // last_cpu is not in the affinity mask — pick the lowest allowed CPU.
+    // This is the cold path; we could also pick the lightest-loaded
+    // allowed CPU, but that requires locking per-CPU queues.
+    let first = task.cpu_affinity.trailing_zeros();
+    if first < 64 { first as usize } else { task.last_cpu }
+}
+
 /// Signal a CPU that new work has been enqueued on its run queue.
 ///
 /// Sets the `RESCHEDULE_PENDING` flag and, if the target is a remote
@@ -438,10 +459,38 @@ pub fn spawn(
     arg: u64,
     pml4_phys: u64,
 ) -> KernelResult<TaskId> {
-    let new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
+    spawn_with_affinity(name, priority, entry, arg, pml4_phys, task::CPU_AFFINITY_ALL)
+}
+
+/// Spawn a new kernel task with explicit CPU affinity.
+///
+/// Like [`spawn`], but the task is restricted to CPUs set in
+/// `affinity_mask` (bit N = CPU N allowed).  Use
+/// [`task::CPU_AFFINITY_ALL`] to allow all CPUs.
+///
+/// # Errors
+///
+/// - [`KernelError::OutOfMemory`] if stack allocation fails.
+/// - [`KernelError::NotSupported`] if the scheduler isn't initialized.
+/// - [`KernelError::InvalidArgument`] if `affinity_mask` is zero.
+pub fn spawn_with_affinity(
+    name: &[u8],
+    priority: u8,
+    entry: extern "C" fn(u64),
+    arg: u64,
+    pml4_phys: u64,
+    affinity_mask: u64,
+) -> KernelResult<TaskId> {
+    if affinity_mask == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
+    new_task.cpu_affinity = affinity_mask;
     let id = new_task.id;
     let prio = new_task.priority;
-    let target_cpu = new_task.last_cpu;
+    let target_cpu = choose_cpu_for_task(&new_task);
+    new_task.last_cpu = target_cpu;
 
     let mut state = SCHED.lock();
     if !state.initialized {
@@ -541,10 +590,11 @@ pub fn wake(task_id: TaskId) -> bool {
         {
             task.state = TaskState::Ready;
             // Reset burst counter for the new wake cycle.
-            // Enqueue on the CPU the task last ran on (cache warmth).
             task.burst_ticks = 0;
             let prio = task.effective_priority();
-            target_cpu = task.last_cpu;
+            // Respect CPU affinity when choosing the target CPU.
+            target_cpu = choose_cpu_for_task(task);
+            task.last_cpu = target_cpu;
             PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
         } else {
             return false;
@@ -564,7 +614,6 @@ pub fn wake(task_id: TaskId) -> bool {
 /// The caller (typically the timer ISR's deferred-wake path) should
 /// retry on the next tick if this fails.
 pub fn try_wake(task_id: TaskId) -> bool {
-    let target_cpu;
     if let Some(mut state) = SCHED.try_lock() {
         if let Some(task) = state.tasks.get_mut(&task_id)
             && task.state == TaskState::Blocked
@@ -572,7 +621,8 @@ pub fn try_wake(task_id: TaskId) -> bool {
             task.state = TaskState::Ready;
             task.burst_ticks = 0;
             let prio = task.effective_priority();
-            target_cpu = task.last_cpu;
+            let target_cpu = choose_cpu_for_task(task);
+            task.last_cpu = target_cpu;
             PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
             drop(state);
             signal_cpu(target_cpu);
@@ -716,13 +766,21 @@ pub fn push_balance() {
         return;
     }
 
-    // Update `last_cpu` on migrated tasks so they get enqueued on
-    // the correct CPU on their next wake.  Uses try_lock to avoid
-    // blocking in softirq context.
+    // Update `last_cpu` on migrated tasks.  If a task's affinity
+    // forbids the target CPU (rare), move it to an allowed CPU.
     if let Some(mut state) = SCHED.try_lock() {
         for &(task_id, target_cpu) in &migrations {
             if let Some(task) = state.tasks.get_mut(&task_id) {
-                task.last_cpu = target_cpu;
+                if task.can_run_on(target_cpu) {
+                    task.last_cpu = target_cpu;
+                } else {
+                    // Affinity doesn't allow target — move to allowed CPU.
+                    let correct_cpu = choose_cpu_for_task(task);
+                    task.last_cpu = correct_cpu;
+                    let prio = task.effective_priority();
+                    PER_CPU_SCHED.dequeue(task_id, prio, target_cpu);
+                    PER_CPU_SCHED.enqueue(task_id, prio, correct_cpu);
+                }
             }
         }
     }
@@ -813,7 +871,8 @@ pub fn resume(task_id: TaskId) -> bool {
 
         task.state = TaskState::Ready;
         let prio = task.effective_priority();
-        target_cpu = task.last_cpu;
+        target_cpu = choose_cpu_for_task(task);
+        task.last_cpu = target_cpu;
         PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
     }
     signal_cpu(target_cpu);
@@ -878,6 +937,62 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
         if is_interactive { " (interactive)" } else { "" }
     );
     Some(old_priority)
+}
+
+/// Set a task's CPU affinity mask.
+///
+/// Bit N set means the task is allowed to run on CPU N.  If the task
+/// is currently in the run queue on a CPU that's no longer allowed,
+/// it is moved to the first allowed CPU.
+///
+/// Returns the old affinity mask, or `None` if the task was not found.
+///
+/// # Errors
+///
+/// Returns `None` if `mask` is zero (would make the task unrunnable).
+pub fn set_cpu_affinity(task_id: TaskId, mask: u64) -> Option<u64> {
+    if mask == 0 {
+        return None;
+    }
+
+    let mut state = SCHED.lock();
+    let task = state.tasks.get(&task_id)?;
+    let old_mask = task.cpu_affinity;
+    let task_state = task.state;
+    let prio = task.effective_priority();
+    let old_cpu = task.last_cpu;
+
+    if old_mask == mask {
+        return Some(old_mask);
+    }
+
+    // Check if the task's current CPU is still allowed.
+    let needs_migrate = task_state == TaskState::Ready
+        && (mask >> old_cpu) & 1 == 0;
+
+    // Update the stored mask.
+    if let Some(task) = state.tasks.get_mut(&task_id) {
+        task.cpu_affinity = mask;
+
+        if needs_migrate {
+            // Move from old CPU's queue to the first allowed CPU.
+            let new_cpu = choose_cpu_for_task(task);
+            task.last_cpu = new_cpu;
+            PER_CPU_SCHED.dequeue(task_id, prio, old_cpu);
+            PER_CPU_SCHED.enqueue(task_id, prio, new_cpu);
+        }
+    }
+
+    Some(old_mask)
+}
+
+/// Get a task's CPU affinity mask.
+///
+/// Returns the affinity mask, or `None` if the task was not found.
+#[must_use]
+pub fn get_cpu_affinity(task_id: TaskId) -> Option<u64> {
+    let state = SCHED.lock();
+    state.tasks.get(&task_id).map(|t| t.cpu_affinity)
 }
 
 /// Kill a task remotely (force-terminate without running task code).
@@ -1629,9 +1744,21 @@ fn schedule_inner(requeue: bool) {
             Some(id) => Some(id),
             None => PER_CPU_SCHED.try_steal(cpu, &mut migrated),
         };
+        // Update last_cpu for stolen tasks.  If a stolen task's affinity
+        // forbids this CPU, put it back on its original (or first allowed)
+        // CPU.  This is rare — most tasks have CPU_AFFINITY_ALL.
         for &id in &migrated {
             if let Some(task) = state.tasks.get_mut(&id) {
-                task.last_cpu = cpu;
+                if task.can_run_on(cpu) {
+                    task.last_cpu = cpu;
+                } else {
+                    // Can't run here — move it to the first allowed CPU.
+                    let target = choose_cpu_for_task(task);
+                    task.last_cpu = target;
+                    let prio = task.effective_priority();
+                    PER_CPU_SCHED.dequeue(id, prio, cpu);
+                    PER_CPU_SCHED.enqueue(id, prio, target);
+                }
             }
         }
 
@@ -1676,11 +1803,19 @@ fn schedule_inner(requeue: bool) {
                             None => { drop(s); continue; }
                         },
                     };
-                    // Update last_cpu for all stolen tasks so future
-                    // wake()/kill_task() target the correct CPU queue.
+                    // Update last_cpu for stolen tasks (same affinity
+                    // check as the main path above).
                     for &id in &idle_migrated {
                         if let Some(task) = s.tasks.get_mut(&id) {
-                            task.last_cpu = cpu;
+                            if task.can_run_on(cpu) {
+                                task.last_cpu = cpu;
+                            } else {
+                                let target = choose_cpu_for_task(task);
+                                task.last_cpu = target;
+                                let prio = task.effective_priority();
+                                PER_CPU_SCHED.dequeue(id, prio, cpu);
+                                PER_CPU_SCHED.enqueue(id, prio, target);
+                            }
                         }
                     }
 
@@ -2016,6 +2151,7 @@ pub fn self_test() -> KernelResult<()> {
     test_per_cpu_work_stealing()?;
     test_smp_idle_task_safety()?;
     test_transitive_pi_infrastructure()?;
+    test_cpu_affinity()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -2962,6 +3098,102 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     reap_dead_tasks();
 
     serial_println!("[sched]   Transitive PI infrastructure: PASSED");
+    Ok(())
+}
+
+/// Test: CPU affinity mask.
+///
+/// Verifies that:
+/// 1. Default affinity is all-CPUs.
+/// 2. `set_cpu_affinity` changes the mask and returns the old one.
+/// 3. `spawn_with_affinity` sets the mask at creation.
+/// 4. Zero mask is rejected.
+/// 5. `can_run_on` helper works correctly.
+fn test_cpu_affinity() -> KernelResult<()> {
+    // 1. Spawn a task with default affinity.
+    let id = spawn(b"test-aff", task::DEFAULT_PRIORITY, test_task_incr, 0, 0)?;
+    let aff = get_cpu_affinity(id).ok_or(KernelError::InternalError)?;
+    if aff != task::CPU_AFFINITY_ALL {
+        serial_println!("[sched]   FAIL: default affinity should be all-CPUs, got {:#x}", aff);
+        kill_task(id);
+        reap_dead_tasks();
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. Set affinity to CPU 0 only.
+    let old = set_cpu_affinity(id, 1).ok_or(KernelError::InternalError)?;
+    if old != task::CPU_AFFINITY_ALL {
+        serial_println!("[sched]   FAIL: old affinity should be all-CPUs");
+        kill_task(id);
+        reap_dead_tasks();
+        return Err(KernelError::InternalError);
+    }
+    let new = get_cpu_affinity(id).ok_or(KernelError::InternalError)?;
+    if new != 1 {
+        serial_println!("[sched]   FAIL: affinity should be 1 (CPU 0), got {}", new);
+        kill_task(id);
+        reap_dead_tasks();
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. Zero mask is rejected.
+    if set_cpu_affinity(id, 0).is_some() {
+        serial_println!("[sched]   FAIL: zero affinity mask should be rejected");
+        kill_task(id);
+        reap_dead_tasks();
+        return Err(KernelError::InternalError);
+    }
+
+    kill_task(id);
+    reap_dead_tasks();
+
+    // 4. spawn_with_affinity.
+    let pml4 = crate::mm::page_table::active_pml4_phys();
+    let id2 = spawn_with_affinity(
+        b"test-aff2", task::DEFAULT_PRIORITY, test_task_incr, 0, pml4, 0b10,
+    )?;
+    let aff2 = get_cpu_affinity(id2).ok_or(KernelError::InternalError)?;
+    if aff2 != 0b10 {
+        serial_println!("[sched]   FAIL: spawn_with_affinity mask should be 0b10, got {:#x}", aff2);
+        kill_task(id2);
+        reap_dead_tasks();
+        return Err(KernelError::InternalError);
+    }
+
+    // 5. spawn_with_affinity rejects zero mask.
+    let err = spawn_with_affinity(b"bad", task::DEFAULT_PRIORITY, test_task_incr, 0, pml4, 0);
+    if err.is_ok() {
+        serial_println!("[sched]   FAIL: spawn_with_affinity(mask=0) should fail");
+        if let Ok(bad_id) = err { kill_task(bad_id); }
+        kill_task(id2);
+        reap_dead_tasks();
+        return Err(KernelError::InternalError);
+    }
+
+    // 6. can_run_on helper.
+    {
+        let state = SCHED.lock();
+        let t = state.tasks.get(&id2).ok_or(KernelError::InternalError)?;
+        if t.can_run_on(0) {
+            serial_println!("[sched]   FAIL: task with mask 0b10 should not run on CPU 0");
+            drop(state);
+            kill_task(id2);
+            reap_dead_tasks();
+            return Err(KernelError::InternalError);
+        }
+        if !t.can_run_on(1) {
+            serial_println!("[sched]   FAIL: task with mask 0b10 should run on CPU 1");
+            drop(state);
+            kill_task(id2);
+            reap_dead_tasks();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    kill_task(id2);
+    reap_dead_tasks();
+
+    serial_println!("[sched]   CPU affinity: PASSED");
     Ok(())
 }
 

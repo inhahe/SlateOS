@@ -202,6 +202,12 @@ pub const PI_CHAIN_DEPTH_LIMIT: usize = 10;
 /// clamped so it never goes above priority 0 (highest).
 pub const INTERACTIVE_BOOST: u8 = 2;
 
+/// Default CPU affinity mask: all 64 CPUs allowed.
+///
+/// For systems with fewer CPUs, extra bits are harmless — the
+/// scheduler only considers online CPUs.
+pub const CPU_AFFINITY_ALL: u64 = u64::MAX;
+
 /// A kernel task (thread).
 pub struct Task {
     /// Unique identifier (never reused).
@@ -296,6 +302,17 @@ pub struct Task {
     /// tasks, defaults to the spawning CPU.
     pub last_cpu: usize,
 
+    /// CPU affinity mask.
+    ///
+    /// Bit N set means the task is allowed to run on CPU N.  The
+    /// default (`CPU_AFFINITY_ALL`) allows all CPUs.  When enqueuing
+    /// or stealing, the scheduler only places this task on CPUs that
+    /// are set in the mask.
+    ///
+    /// If `last_cpu` is in the mask, it is preferred (cache locality).
+    /// Otherwise the lightest-loaded allowed CPU is chosen.
+    pub cpu_affinity: u64,
+
     // --- CPU time accounting ---
 
     /// Total CPU time consumed by this task, in timer ticks.
@@ -333,6 +350,13 @@ impl Task {
             Some(inh) => base.min(inh),
             None => base,
         }
+    }
+
+    /// Check whether this task is allowed to run on `cpu`.
+    #[must_use]
+    pub fn can_run_on(&self, cpu: usize) -> bool {
+        if cpu >= 64 { return false; }
+        (self.cpu_affinity >> cpu) & 1 != 0
     }
 
     /// Update the burst EWMA when the task is about to block.
@@ -394,6 +418,7 @@ impl Task {
             inherited_priority: None,
             blocked_on_pi_addr: None,
             last_cpu: 0,
+            cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
         }
@@ -451,6 +476,7 @@ impl Task {
             inherited_priority: None,
             blocked_on_pi_addr: None,
             last_cpu: cpu_index,
+            cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
         }
@@ -529,6 +555,7 @@ impl Task {
             inherited_priority: None,
             blocked_on_pi_addr: None,
             last_cpu: 0,
+            cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
         })

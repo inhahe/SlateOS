@@ -218,12 +218,10 @@ min_cycles = 142
 # This is the interval during which device interrupts are blocked on
 # the CPU.  Measured via TSC inside handle_timer_irq, gated by
 # ISR_MEASURE_ACTIVE.  Release build, ~100 timer ticks (~1s window).
-min_ns     = 3237
-min_cycles = 12004
-mean_ns    = 9253
-mean_cycles = 34306
-# Deferred-bench run (concurrent with init): min=20404, mean=40895.
-# Higher mean due to contention from benchmark task, but min is stable.
+min_ns     = 2707
+min_cycles = 10046
+mean_ns    = 7449
+mean_cycles = 27637
 # Note: QEMU/TCG adds significant overhead to atomic operations and
 # MMIO access (APIC EOI write).  On bare metal, expect 3-10x improvement.
 # Meets the 37000-cycle native target.

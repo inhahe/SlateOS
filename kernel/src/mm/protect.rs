@@ -668,8 +668,9 @@ pub fn self_test() -> KernelResult<()> {
 
         if result.hhdm_violations > 0 {
             // Expected: Limine's HHDM doesn't set NX on the direct map.
-            // This is not a security issue (we don't execute from HHDM).
-            // TODO: patch HHDM page tables to add NX after boot.
+            // harden_hhdm_nx() sets NX at the PML4 level, but the audit
+            // checks at the 4 KiB level where NX is inherited.  If
+            // violations persist, the audit runs before hardening.
             serial_println!(
                 "[protect]   Kernel W^X audit: {} HHDM pages lack NX (expected, Limine direct map)",
                 result.hhdm_violations

@@ -1136,6 +1136,22 @@ pub fn device_count() -> usize {
     SWAP.lock().devices.len()
 }
 
+/// Summary of swap usage for the unified `MemoryInfo` API.
+///
+/// Returns `(total_bytes, used_bytes, device_count)`.
+///
+/// This acquires the SWAP lock once and extracts all three values in a
+/// single critical section, avoiding inconsistencies from three separate
+/// calls.
+#[must_use]
+pub fn summary() -> (usize, usize, usize) {
+    let state = SWAP.lock();
+    let total_bytes = (state.total_capacity as usize).saturating_mul(FRAME_SIZE);
+    let used_bytes = (state.total_used() as usize).saturating_mul(FRAME_SIZE);
+    let devices = state.devices.len();
+    (total_bytes, used_bytes, devices)
+}
+
 /// Compression statistics for the zram backend.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Public API for memory statistics dashboard.

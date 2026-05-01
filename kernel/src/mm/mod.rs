@@ -36,3 +36,101 @@ pub mod protect;
 pub mod swap;
 pub mod user;
 pub mod vma;
+
+// ---------------------------------------------------------------------------
+// Unified memory information (kernel equivalent of /proc/meminfo)
+// ---------------------------------------------------------------------------
+
+/// Comprehensive snapshot of kernel memory state.
+///
+/// Aggregates information from the physical frame allocator, kernel
+/// heap, swap subsystem, and zero-page pool into a single struct.
+/// Used by the `mem` kshell command, future sysinfo syscall, and
+/// process explorer.
+///
+/// All sizes are in bytes unless noted otherwise.
+#[derive(Debug, Clone)]
+pub struct MemoryInfo {
+    // --- Physical memory ---
+    /// Total managed physical memory (frames × 16 KiB).
+    pub total_bytes: usize,
+    /// Free physical memory (unallocated frames × 16 KiB).
+    pub free_bytes: usize,
+    /// Used physical memory (total − free).
+    pub used_bytes: usize,
+    /// Total managed frames.
+    pub total_frames: usize,
+    /// Free frames.
+    pub free_frames: usize,
+
+    // --- Zero-page pool ---
+    /// Pre-zeroed frames currently in the pool.
+    pub zero_pool_count: usize,
+    /// Total pool hits since boot.
+    pub zero_pool_hits: u64,
+    /// Total pool misses since boot.
+    pub zero_pool_misses: u64,
+
+    // --- Kernel heap ---
+    /// Total slab (small) allocations since boot.
+    pub heap_slab_allocs: u64,
+    /// Total slab (small) deallocations since boot.
+    pub heap_slab_frees: u64,
+    /// Total large allocations since boot.
+    pub heap_large_allocs: u64,
+    /// Total failed allocations since boot.
+    pub heap_alloc_failures: u64,
+
+    // --- Swap ---
+    /// Total swap capacity (bytes).
+    pub swap_total_bytes: usize,
+    /// Used swap (bytes).
+    pub swap_used_bytes: usize,
+    /// Number of swap devices.
+    pub swap_device_count: usize,
+}
+
+/// Collect a snapshot of the current kernel memory state.
+///
+/// This is a lightweight operation (no heap allocation, a few lock
+/// acquisitions for counters).  Safe to call from any context that
+/// can take spinlocks (not ISR context).
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn memory_info() -> MemoryInfo {
+    // Physical frame allocator.
+    let (total_frames, free_frames, free_bytes) =
+        frame::stats().map_or((0, 0, 0), |s| {
+            (s.total_frames, s.free_frames, s.free_bytes)
+        });
+    let total_bytes = total_frames * frame::FRAME_SIZE;
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+    // Zero-page pool.
+    let zero_pool_count = frame::zero_pool_count();
+    let (zero_pool_hits, zero_pool_misses) = frame::zero_pool_stats();
+
+    // Kernel heap.
+    let hs = heap::stats();
+
+    // Swap.
+    let (swap_total, swap_used, swap_devices) = swap::summary();
+
+    MemoryInfo {
+        total_bytes,
+        free_bytes,
+        used_bytes,
+        total_frames,
+        free_frames,
+        zero_pool_count,
+        zero_pool_hits,
+        zero_pool_misses,
+        heap_slab_allocs: hs.slab_allocs,
+        heap_slab_frees: hs.slab_frees,
+        heap_large_allocs: hs.large_allocs,
+        heap_alloc_failures: hs.alloc_failures,
+        swap_total_bytes: swap_total,
+        swap_used_bytes: swap_used,
+        swap_device_count: swap_devices,
+    }
+}

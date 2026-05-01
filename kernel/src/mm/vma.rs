@@ -30,7 +30,6 @@ use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::serial_println;
-use core::ptr;
 
 // ---------------------------------------------------------------------------
 // VMA types
@@ -284,26 +283,14 @@ impl AddressSpace {
     /// This is the core demand-paging operation.
     #[allow(clippy::arithmetic_side_effects)]
     fn demand_page(&self, fault_addr: u64, flags: PageFlags) -> KernelResult<()> {
-        let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-
         // Round fault address down to the 16 KiB frame boundary.
+        #[allow(clippy::arithmetic_side_effects)]
         let frame_base = fault_addr & !(FRAME_SIZE as u64 - 1);
         let virt = VirtAddr::new(frame_base);
 
-        // Allocate a physical frame.
-        let phys_frame = frame::alloc_frame()?;
-
-        // Zero the frame via HHDM before making it accessible at the
-        // faulting address.  This prevents information leaks — the
-        // frame may contain data from a previous user.
-        //
-        // SAFETY: phys_frame.to_virt(hhdm) is a valid HHDM virtual
-        // address pointing to the frame's 16 KiB of physical memory.
-        // We have exclusive ownership of this freshly-allocated frame.
-        unsafe {
-            let hhdm_ptr = phys_frame.to_virt(hhdm) as *mut u8;
-            ptr::write_bytes(hhdm_ptr, 0, FRAME_SIZE);
-        }
+        // Allocate a zeroed physical frame.  Zeroing prevents information
+        // leaks — the frame may contain data from a previous user.
+        let phys_frame = frame::alloc_frame_zeroed()?;
 
         // Map the frame at the faulting address.
         //

@@ -91,19 +91,42 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
     let rc = frame::refcount(frame);
 
     if rc <= 1 {
-        // We're the sole owner — just make the page writable.
-        // Remove COW, add WRITABLE.
-        let mut new_flags = pte.flags();
-        new_flags = new_flags | PageFlags::WRITABLE;
-        // Clear COW bit: construct flags without it.
-        new_flags = PageFlags::from_bits(new_flags.bits() & !PageFlags::COW.bits());
-        let new_pte = PageTableEntry::new(old_phys, new_flags);
+        // We're the sole owner — just make pages writable (no copy).
+        //
+        // OPT: Eagerly resolve all 4 sibling 4 KiB pages within the
+        // same 16 KiB frame, not just the faulting page.  This prevents
+        // up to 3 additional CoW faults for pages that share the same
+        // frame.  Each frame is mapped as 4 consecutive PTEs, so the
+        // sibling pages are at predictable virtual addresses.
+        //
+        // Based on Linux mm/memory.c do_wp_page() which also batches
+        // nearby pages to amortize TLB flushes and fault overhead.
+        let page_index = ((old_phys - frame_base) as usize) / HW_PAGE_SIZE;
+        let group_virt_base = hw_page_base - (page_index as u64 * HW_PAGE_SIZE as u64);
+        let mut pages_resolved = 0u32;
 
-        // SAFETY: pml4_phys is valid, virt is the same page we just read.
-        unsafe { write_pte(pml4_phys, virt, new_pte, hhdm)?; }
+        for i in 0..HW_PAGES_PER_FRAME {
+            let sibling_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
 
-        // Flush TLB so the CPU sees the updated permissions.
-        crate::tlb::flush_range(hw_page_base, 1);
+            // SAFETY: pml4_phys is valid (same address space).
+            if let Ok(sibling_pte) = unsafe { read_pte(pml4_phys, sibling_virt, hhdm) } {
+                if sibling_pte.is_present() && sibling_pte.is_cow() {
+                    // Verify it's part of the same physical frame.
+                    let sib_frame_base = sibling_pte.phys_addr() & !(FRAME_SIZE as u64 - 1);
+                    if sib_frame_base == frame_base {
+                        let mut new_flags = sibling_pte.flags() | PageFlags::WRITABLE;
+                        new_flags = PageFlags::from_bits(new_flags.bits() & !PageFlags::COW.bits());
+                        let new_pte = PageTableEntry::new(sibling_pte.phys_addr(), new_flags);
+                        // SAFETY: pml4_phys is valid, sibling_virt is in the same frame group.
+                        unsafe { write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok(); }
+                        pages_resolved += 1;
+                    }
+                }
+            }
+        }
+
+        // Flush TLB for the entire frame group (4 pages).
+        crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 
         return Ok(());
     }

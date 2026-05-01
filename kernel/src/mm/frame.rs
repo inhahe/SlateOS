@@ -1519,6 +1519,11 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
     // Allocator lock released before reclamation (lock ordering:
     // SWAP → RECLAIM → page table → frame allocator).
 
+    // Wake kswapd to continue background reclamation while we do
+    // inline reclamation for this specific allocation.  kswapd will
+    // keep reclaiming until the high watermark is satisfied.
+    super::kswapd::wake_kswapd();
+
     // Try to reclaim pages via swap to free physical memory.
     // Request enough frames for the order, plus a small buffer so the
     // allocator can potentially coalesce buddies.
@@ -1559,6 +1564,9 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
             Err(e) => return Err(e),
         }
     }
+
+    // Wake kswapd for background reclamation.
+    super::kswapd::wake_kswapd();
 
     // Try reclamation, then retry.
     let needed = 1usize << order;

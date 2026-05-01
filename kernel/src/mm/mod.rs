@@ -31,6 +31,7 @@ pub mod dma;
 pub mod fault;
 pub mod frame;
 pub mod heap;
+pub mod kswapd;
 pub mod page_table;
 pub mod protect;
 pub mod swap;
@@ -88,6 +89,14 @@ pub struct MemoryInfo {
     pub swap_used_bytes: usize,
     /// Number of swap devices.
     pub swap_device_count: usize,
+
+    // --- kswapd (background reclaimer) ---
+    /// Whether the background reclaimer is running.
+    pub kswapd_running: bool,
+    /// Number of reclaim cycles completed since boot.
+    pub kswapd_reclaim_cycles: u64,
+    /// Total pages reclaimed by kswapd since boot.
+    pub kswapd_total_reclaimed: u64,
 }
 
 /// Collect a snapshot of the current kernel memory state.
@@ -116,6 +125,11 @@ pub fn memory_info() -> MemoryInfo {
     // Swap.
     let (swap_total, swap_used, swap_devices) = swap::summary();
 
+    // kswapd (background reclaimer).
+    let kswapd_running = kswapd::is_running();
+    let kswapd_reclaim_cycles = kswapd::reclaim_cycles();
+    let kswapd_total_reclaimed = kswapd::total_reclaimed();
+
     MemoryInfo {
         total_bytes,
         free_bytes,
@@ -132,5 +146,8 @@ pub fn memory_info() -> MemoryInfo {
         swap_total_bytes: swap_total,
         swap_used_bytes: swap_used,
         swap_device_count: swap_devices,
+        kswapd_running,
+        kswapd_reclaim_cycles,
+        kswapd_total_reclaimed,
     }
 }

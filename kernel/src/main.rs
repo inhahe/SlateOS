@@ -701,6 +701,21 @@ extern "C" fn kmain() -> ! {
 
     console::boot_step_update(console::BootStatus::Ok, "Performance tuning");
 
+    // Step 22b: Spawn kswapd (background page reclaimer).
+    // Must be after swap init (Step 9c/20e) and scheduler (Step 10).
+    // kswapd proactively reclaims pages when free memory drops below
+    // the low watermark, preventing allocation stalls under memory
+    // pressure.
+    match mm::kswapd::spawn() {
+        Ok(()) => {}
+        Err(e) => {
+            serial_println!("[boot] WARNING: failed to spawn kswapd: {:?}", e);
+            // Non-fatal — the system will fall back to synchronous
+            // reclamation in alloc_order().
+        }
+    }
+    mm::kswapd::self_test();
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.

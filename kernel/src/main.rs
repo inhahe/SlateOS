@@ -542,6 +542,14 @@ extern "C" fn kmain() -> ! {
     smp::init();
     smp::self_test();
 
+    // Step 22b½: Validate SMP scheduler invariants.
+    // Now that all APs are online with their idle tasks, verify
+    // per-CPU current tasks are distinct and reap is SMP-safe.
+    if let Err(e) = sched::smp_self_test() {
+        serial_println!("FATAL: Scheduler SMP self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 22c: TLB shootdown self-test.
     // Now that all CPUs are online, verify the TLB shootdown IPI works.
     tlb::self_test();

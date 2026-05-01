@@ -1577,6 +1577,116 @@ fn schedule_inner(requeue: bool) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+/// SMP-specific scheduler validation.
+///
+/// Must be called AFTER `smp::init()` so all APs are online with their
+/// idle tasks registered.  Tests that per-CPU invariants hold across
+/// multiple real CPUs — things that `self_test()` can't check because
+/// it runs before SMP bootstrap.
+pub fn smp_self_test() -> KernelResult<()> {
+    let num_cpus = crate::smp::cpu_count().max(1);
+    serial_println!(
+        "[sched] Running SMP scheduler validation ({} CPUs)...",
+        num_cpus
+    );
+
+    // 1. Each CPU must have a distinct current task.
+    {
+        let mut seen = alloc::collections::BTreeSet::new();
+        for i in 0..num_cpus {
+            let id = CURRENT_TASK_IDS
+                .get(i)
+                .map_or(0, |a| a.load(Ordering::Acquire));
+            if !seen.insert(id) {
+                serial_println!(
+                    "[sched]   FAIL: CPU {} shares current_task {} with another CPU",
+                    i, id
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+    serial_println!(
+        "[sched]   Distinct current tasks: OK ({} CPUs)",
+        num_cpus
+    );
+
+    // 2. Each AP's idle task must exist in the task table at IDLE_PRIORITY.
+    if num_cpus > 1 {
+        let state = SCHED.lock();
+        for i in 1..num_cpus {
+            let ap_current = CURRENT_TASK_IDS
+                .get(i)
+                .map_or(0, |a| a.load(Ordering::Acquire));
+            match state.tasks.get(&ap_current) {
+                Some(t) if t.priority == task::IDLE_PRIORITY => {}
+                Some(t) => {
+                    serial_println!(
+                        "[sched]   FAIL: AP {}'s task {} has priority {} (expected {})",
+                        i, ap_current, t.priority, task::IDLE_PRIORITY
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                None => {
+                    serial_println!(
+                        "[sched]   FAIL: AP {}'s current task {} not in table",
+                        i, ap_current
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+        drop(state);
+        serial_println!(
+            "[sched]   AP idle tasks valid: OK ({} APs)",
+            num_cpus - 1
+        );
+    }
+
+    // 3. No CPU should be in idle fallback state during normal operation.
+    for i in 0..num_cpus {
+        if IDLE_FLAGS
+            .get(i)
+            .map_or(false, |f| f.load(Ordering::Acquire))
+        {
+            serial_println!(
+                "[sched]   FAIL: CPU {} has idle flag set during normal operation",
+                i
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[sched]   Idle flags clear: OK");
+
+    // 4. Reap doesn't touch any CPU's current task.
+    let current_ids: alloc::vec::Vec<TaskId> = (0..num_cpus)
+        .map(|i| {
+            CURRENT_TASK_IDS
+                .get(i)
+                .map_or(0, |a| a.load(Ordering::Acquire))
+        })
+        .collect();
+
+    reap_dead_tasks();
+
+    {
+        let state = SCHED.lock();
+        for (i, &id) in current_ids.iter().enumerate() {
+            if !state.tasks.contains_key(&id) {
+                serial_println!(
+                    "[sched]   FAIL: CPU {}'s task {} was reaped!",
+                    i, id
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+    serial_println!("[sched]   Reap SMP safety: OK");
+
+    serial_println!("[sched] SMP scheduler validation PASSED");
+    Ok(())
+}
+
 /// Counter for self-test verification.
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1593,6 +1703,7 @@ pub fn self_test() -> KernelResult<()> {
     test_time_slice_config()?;
     test_workload_profiles()?;
     test_per_cpu_work_stealing()?;
+    test_smp_idle_task_safety()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -2308,6 +2419,48 @@ fn test_per_cpu_work_stealing() -> KernelResult<()> {
         "[sched]   Per-CPU work stealing: OK (stolen={}, remaining={}, total=8)",
         picked.len(), remaining
     );
+    Ok(())
+}
+
+/// Test: spawn-exit-reap cycle doesn't leak tasks or stacks.
+///
+/// This runs before SMP bootstrap (single CPU).  The SMP-specific
+/// validation (per-CPU idle tasks, reap SMP safety) is in
+/// [`smp_self_test`], called after `smp::init()`.
+fn test_smp_idle_task_safety() -> KernelResult<()> {
+    // Rapid spawn-exit-reap cycle: verify no task or stack leaks.
+    let initial_task_count = {
+        let state = SCHED.lock();
+        state.tasks.len()
+    };
+
+    for i in 0..10u64 {
+        let _ = spawn(b"test-spawn-exit", 16, test_task_incr, i, 0)?;
+    }
+
+    // Yield enough times for all tasks to run and exit.
+    for _ in 0..20 {
+        yield_now();
+    }
+
+    let reaped = reap_dead_tasks();
+    let final_task_count = {
+        let state = SCHED.lock();
+        state.tasks.len()
+    };
+
+    if final_task_count != initial_task_count {
+        serial_println!(
+            "[sched]   FAIL: task leak: {} before, {} after (reaped {})",
+            initial_task_count, final_task_count, reaped
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[sched]   Spawn-exit-reap cycle: OK (reaped {}, no leaks)",
+        reaped
+    );
+
     Ok(())
 }
 

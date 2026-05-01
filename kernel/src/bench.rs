@@ -343,15 +343,22 @@ pub fn run_all() {
     {
         use crate::mm::frame;
 
-        // Pre-fill the pool so the benchmark hits the fast path.
-        let filled = frame::refill_zero_pool();
+        // Pre-fill the pool to capacity so every benchmark iteration
+        // hits the fast path.  refill_zero_pool() fills at most 16
+        // frames per call (batch size), so we loop until it returns 0
+        // (pool full or no more free frames).  Pool capacity is 256;
+        // the benchmark uses ~220 (20 warmup + 200 measured).
+        let mut filled = 0usize;
+        loop {
+            let n = frame::refill_zero_pool();
+            if n == 0 { break; }
+            filled = filled.saturating_add(n);
+        }
         if filled > 0 {
             let result = run("page_alloc_zeroed_pool", 200, || {
                 let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
                 // SAFETY: frame was just allocated, exclusively ours.
                 unsafe { frame::free_frame(f).expect("bench: free"); }
-                // Refill one frame to keep the pool warm for the next iteration.
-                frame::refill_zero_pool();
             });
 
             let (hits, misses) = frame::zero_pool_stats();

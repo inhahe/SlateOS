@@ -140,14 +140,20 @@ source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 
 [qemu.page_alloc_free]
 min_ns    = 229
-min_cycles = 856
+min_cycles = 852
 
 [qemu.page_alloc_zeroed_free]
-# OPT: 12468→1386 cycles after increasing zero-pool capacity 64→256.
-# Single-alloc hot path now almost always hits the pool (no 16 KiB
-# zero).  The old number (12468 cycles) reflected inline zeroing.
-min_ns    = 371
-min_cycles = 1386
+# Cold path (no pool): alloc + 16 KiB zero + free.
+min_ns    = 3426
+min_cycles = 12704
+
+[qemu.page_alloc_zeroed_pool]
+# Hot path with pre-zeroed pool: alloc from pool + free (no memset).
+# OPT: Fixed benchmark to fully pre-fill pool (loop refill to capacity)
+# and removed refill from measured closure.  Previous measurement
+# (303196 cycles) included 16 KiB zeroing inside the measured loop.
+min_ns    = 200
+min_cycles = 744
 
 [qemu.heap_raw_alloc_free_64]
 # Raw alloc + dealloc cycle (no Vec overhead, no zero-fill).
@@ -216,6 +222,8 @@ min_ns     = 3237
 min_cycles = 12004
 mean_ns    = 9253
 mean_cycles = 34306
+# Deferred-bench run (concurrent with init): min=20404, mean=40895.
+# Higher mean due to contention from benchmark task, but min is stable.
 # Note: QEMU/TCG adds significant overhead to atomic operations and
 # MMIO access (APIC EOI write).  On bare metal, expect 3-10x improvement.
 # Meets the 37000-cycle native target.

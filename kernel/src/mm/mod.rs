@@ -32,6 +32,7 @@ pub mod fault;
 pub mod frame;
 pub mod heap;
 pub mod kswapd;
+pub mod oom;
 pub mod page_table;
 pub mod protect;
 pub mod swap;
@@ -97,6 +98,12 @@ pub struct MemoryInfo {
     pub kswapd_reclaim_cycles: u64,
     /// Total pages reclaimed by kswapd since boot.
     pub kswapd_total_reclaimed: u64,
+
+    // --- OOM handler ---
+    /// Number of OOM events since boot.
+    pub oom_events: u64,
+    /// Number of processes killed by OOM since boot.
+    pub oom_kills: u64,
 }
 
 /// Collect a snapshot of the current kernel memory state.
@@ -149,5 +156,7 @@ pub fn memory_info() -> MemoryInfo {
         kswapd_running,
         kswapd_reclaim_cycles,
         kswapd_total_reclaimed,
+        oom_events: oom::oom_event_count(),
+        oom_kills: oom::oom_kill_count(),
     }
 }

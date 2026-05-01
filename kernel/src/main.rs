@@ -715,6 +715,7 @@ extern "C" fn kmain() -> ! {
         }
     }
     mm::kswapd::self_test();
+    mm::oom::self_test();
 
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,

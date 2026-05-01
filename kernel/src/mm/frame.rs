@@ -1530,11 +1530,27 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
     let needed = 1usize << order;
     let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
 
-    if reclaimed == 0 {
+    if reclaimed > 0 {
+        // Retry allocation after reclamation.
+        let mut guard = allocator.lock();
+        match guard.alloc_inner(order) {
+            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
+            Err(KernelError::OutOfMemory) => {
+                // Reclaimed pages weren't enough or couldn't be coalesced.
+                // Fall through to OOM handler.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Last resort: invoke the OOM handler.
+    // The handler may kill a process (policy 0/1) or return 0 (policy 2).
+    let oom_freed = super::oom::handle_oom(needed);
+    if oom_freed == 0 {
         return Err(KernelError::OutOfMemory);
     }
 
-    // Retry allocation after reclamation.
+    // OOM handler freed memory — retry one more time.
     let mut guard = allocator.lock();
     let addr = guard.alloc_inner(order)?;
     PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)
@@ -1572,7 +1588,20 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
     let needed = 1usize << order;
     let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
 
-    if reclaimed == 0 {
+    if reclaimed > 0 {
+        let mut guard = allocator.lock();
+        match guard.alloc_inner_constrained(order, max_addr) {
+            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
+            Err(KernelError::OutOfMemory) => {
+                // Fall through to OOM handler.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Last resort: OOM handler.
+    let oom_freed = super::oom::handle_oom(needed);
+    if oom_freed == 0 {
         return Err(KernelError::OutOfMemory);
     }
 

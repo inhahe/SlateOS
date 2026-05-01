@@ -536,14 +536,21 @@ impl PerCpuScheduler {
     /// Try to steal work from another CPU.
     ///
     /// Scans all other CPUs, finds the most loaded one, and steals
-    /// half its tasks.  Stolen tasks are enqueued on the requesting
-    /// CPU's local queue.
+    /// half its tasks.  The first stolen task is returned directly
+    /// (ready to run); remaining tasks are enqueued on the thief's
+    /// local queue.
     ///
-    /// Returns the first stolen task's ID (ready to run immediately),
-    /// or `None` if no work was available.
+    /// Also returns the IDs of ALL stolen tasks (via `migrated_out`)
+    /// so the caller can update their `last_cpu` in the task table.
+    /// Without this update, operations like `wake()` and `kill_task()`
+    /// would target the victim's queue instead of the thief's,
+    /// causing the dequeue to silently miss.
+    ///
+    /// Returns the first stolen task's ID, or `None` if nothing stolen.
     pub fn try_steal(
         &mut self,
         cpu: usize,
+        migrated_out: &mut alloc::vec::Vec<super::task::TaskId>,
     ) -> Option<super::task::TaskId> {
         if self.num_cpus <= 1 {
             return None;
@@ -581,8 +588,10 @@ impl PerCpuScheduler {
 
         // The first stolen task is returned directly (will be the
         // pick_next result).  Remaining stolen tasks go into our queue.
+        // Record ALL stolen IDs so the caller can update last_cpu.
         let mut first = None;
         for (i, (id, priority)) in stolen.into_iter().enumerate() {
+            migrated_out.push(id);
             if i == 0 {
                 first = Some(id);
             } else if let Some(q) = self.queues.get_mut(cpu) {

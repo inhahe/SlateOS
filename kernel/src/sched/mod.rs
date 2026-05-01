@@ -1332,9 +1332,19 @@ fn schedule_inner(requeue: bool) {
         }
 
         // Pick the next task from the local CPU's queue.
-        let picked = state.scheduler.pick_next_local(cpu)
-            // If local queue is empty, try work stealing from other CPUs.
-            .or_else(|| state.scheduler.try_steal(cpu));
+        // If local queue is empty, try work stealing from other CPUs.
+        // Stolen tasks need their last_cpu updated so wake()/kill_task()
+        // dequeue from the correct (new) CPU queue, not the stale one.
+        let mut migrated = alloc::vec::Vec::new();
+        let picked = match state.scheduler.pick_next_local(cpu) {
+            Some(id) => Some(id),
+            None => state.scheduler.try_steal(cpu, &mut migrated),
+        };
+        for &id in &migrated {
+            if let Some(task) = state.tasks.get_mut(&id) {
+                task.last_cpu = cpu;
+            }
+        }
 
         let Some(picked_id) = picked else {
             if !requeue {
@@ -1369,12 +1379,21 @@ fn schedule_inner(requeue: bool) {
                         continue;
                     };
 
-                    let ready_id = match s.scheduler.pick_next_local(cpu)
-                        .or_else(|| s.scheduler.try_steal(cpu))
-                    {
+                    let mut idle_migrated = alloc::vec::Vec::new();
+                    let ready_id = match s.scheduler.pick_next_local(cpu) {
                         Some(id) => id,
-                        None => { drop(s); continue; }
+                        None => match s.scheduler.try_steal(cpu, &mut idle_migrated) {
+                            Some(id) => id,
+                            None => { drop(s); continue; }
+                        },
                     };
+                    // Update last_cpu for all stolen tasks so future
+                    // wake()/kill_task() target the correct CPU queue.
+                    for &id in &idle_migrated {
+                        if let Some(task) = s.tasks.get_mut(&id) {
+                            task.last_cpu = cpu;
+                        }
+                    }
 
                     // Found a ready task — set it up for switching.
                     if let Some(task) = s.tasks.get_mut(&ready_id) {
@@ -2372,9 +2391,21 @@ fn test_per_cpu_work_stealing() -> KernelResult<()> {
     }
 
     // CPU 0 steals from the most-loaded CPU (CPU 1 has 8 tasks).
-    let stolen = sched.try_steal(0);
+    let mut migrated = alloc::vec::Vec::new();
+    let stolen = sched.try_steal(0, &mut migrated);
     if stolen.is_none() {
         serial_println!("[sched]   FAIL: work stealing returned None");
+        return Err(KernelError::InternalError);
+    }
+
+    // The migrated vec should contain all stolen task IDs.
+    // The first one is also in `stolen`; the rest were enqueued on CPU 0.
+    if migrated.is_empty() {
+        serial_println!("[sched]   FAIL: migrated vec empty after steal");
+        return Err(KernelError::InternalError);
+    }
+    if migrated.first().copied() != stolen {
+        serial_println!("[sched]   FAIL: migrated[0] should match stolen return value");
         return Err(KernelError::InternalError);
     }
 

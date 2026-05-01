@@ -2245,6 +2245,91 @@ pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+// ---------------------------------------------------------------------------
+// Thread management handlers (510–519)
+// ---------------------------------------------------------------------------
+
+/// `SYS_THREAD_CREATE` — create a new userspace thread in the calling process.
+///
+/// `arg0`: entry point address (ring 3 RIP).
+/// `arg1`: stack pointer (ring 3 RSP).
+/// `arg2`: priority (0–31, or `u64::MAX` for default).
+///
+/// Returns: new thread's task ID.
+pub fn sys_thread_create(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+    use crate::sched::task::DEFAULT_PRIORITY;
+
+    let entry_rip = args.arg0;
+    let user_rsp = args.arg1;
+    let raw_priority = args.arg2;
+
+    // Resolve priority: u64::MAX means default.
+    let priority = if raw_priority == u64::MAX {
+        DEFAULT_PRIORITY
+    } else if raw_priority > 31 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    } else {
+        #[allow(clippy::cast_possible_truncation)]
+        { raw_priority as u8 }
+    };
+
+    // Get the calling process's PID.
+    let task_id = sched::current_task_id();
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => {
+            serial_println!(
+                "[thread] SYS_THREAD_CREATE: task {} has no owning process",
+                task_id
+            );
+            return SyscallResult::err(KernelError::NoSuchProcess);
+        }
+    };
+
+    match thread::spawn_user(pid, b"user-thread", priority, entry_rip, user_rsp) {
+        Ok(new_task_id) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(new_task_id as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_THREAD_EXIT` — exit the current thread with an exit value.
+///
+/// `arg0`: exit value (i64).
+///
+/// Does not return.
+pub fn sys_thread_exit(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    #[allow(clippy::cast_possible_wrap)]
+    let exit_value = args.arg0 as i64;
+
+    // This function never returns — it terminates the calling thread.
+    thread::thread_exit_with_value(exit_value);
+
+    // Unreachable.
+    // SyscallResult::ok(0)
+}
+
+/// `SYS_THREAD_JOIN` — wait for a thread to exit and get its exit value.
+///
+/// `arg0`: task ID of the thread to wait for.
+///
+/// Returns: exit value of the target thread.
+pub fn sys_thread_join(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let target_task = args.arg0;
+
+    match thread::join(target_task) {
+        Ok(exit_value) => SyscallResult::ok(exit_value),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.
 ///
 /// `arg0`: pointer to hostname string.

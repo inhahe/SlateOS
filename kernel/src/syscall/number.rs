@@ -501,6 +501,41 @@ pub const SYS_EXCEPTION_RETURN: u64 = 505;
 /// Returns: number of threads killed on success.
 pub const SYS_PROCESS_KILL: u64 = 506;
 
+/// Create a new thread in the calling process.
+///
+/// `arg0`: entry point address (ring 3 RIP).
+/// `arg1`: stack pointer (ring 3 RSP, must already be mapped).
+/// `arg2`: priority (0–31, or `u64::MAX` for default priority).
+///
+/// Creates a new thread that shares the calling process's address
+/// space.  The thread begins executing at `entry_rip` with stack
+/// pointer `user_rsp` in ring 3.  The thread gets its own kernel
+/// stack for syscall/interrupt handling.
+///
+/// Returns: new thread's task ID on success, negative error on failure.
+pub const SYS_THREAD_CREATE: u64 = 510;
+
+/// Exit the current thread with an exit value.
+///
+/// `arg0`: exit value (i64).
+///
+/// Terminates the calling thread.  If this is the last thread in
+/// the process, the process becomes a zombie.  The exit value can
+/// be retrieved by another thread via `SYS_THREAD_JOIN`.
+///
+/// This syscall does NOT return.
+pub const SYS_THREAD_EXIT: u64 = 511;
+
+/// Wait for a specific thread to exit and retrieve its exit value.
+///
+/// `arg0`: task ID of the thread to wait for.
+///
+/// Blocks the calling thread until the target thread exits.  The
+/// target must belong to the same process as the caller.
+///
+/// Returns: the target thread's exit value on success.
+pub const SYS_THREAD_JOIN: u64 = 512;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

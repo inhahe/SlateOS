@@ -38,6 +38,7 @@ use super::number::{
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
     SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_DNS_RESOLVE,
     SYS_YIELD,
@@ -207,12 +208,17 @@ const fn build_v1_table() -> SyscallTable {
     // Security (400–499).
     handlers[SYS_CAP_QUERY as usize] = Some(handlers::sys_cap_query);
 
-    // Process management (500–599).
+    // Process management (500–509).
     handlers[SYS_PROCESS_SPAWN as usize] = Some(handlers::sys_process_spawn);
     handlers[SYS_PROCESS_WAIT as usize] = Some(handlers::sys_process_wait);
     handlers[SYS_PROCESS_ID as usize] = Some(handlers::sys_process_id);
     handlers[SYS_SET_EXCEPTION_HANDLER as usize] = Some(handlers::sys_set_exception_handler);
     handlers[SYS_PROCESS_KILL as usize] = Some(handlers::sys_process_kill);
+
+    // Thread management (510–519).
+    handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
+    handlers[SYS_THREAD_EXIT as usize] = Some(handlers::sys_thread_exit);
+    handlers[SYS_THREAD_JOIN as usize] = Some(handlers::sys_thread_join);
 
     // Filesystem (600–799).
     handlers[SYS_FS_READ_FILE as usize] = Some(handlers::sys_fs_read_file);

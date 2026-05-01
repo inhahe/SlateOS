@@ -156,14 +156,14 @@ impl<'a> SpawnOptions<'a> {
 
 /// Information passed to the userspace entry trampoline.
 ///
-/// Heap-allocated by `spawn_process()` and freed by the trampoline
-/// when the thread first runs.  Contains everything needed to build
-/// the IRETQ frame for ring 3 entry.
-struct UserEntryInfo {
+/// Heap-allocated by `spawn_process()` (or `thread::spawn_user()`)
+/// and freed by the trampoline when the thread first runs.  Contains
+/// everything needed to build the IRETQ frame for ring 3 entry.
+pub(crate) struct UserEntryInfo {
     /// The ELF entry point (ring 3 RIP).
-    entry_rip: u64,
+    pub(crate) entry_rip: u64,
     /// The top of the user stack (ring 3 RSP).
-    user_rsp: u64,
+    pub(crate) user_rsp: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -510,18 +510,19 @@ fn setup_user_stack(pml4_phys: u64) -> KernelResult<u64> {
 
 /// Kernel-mode trampoline that transitions to ring 3 via IRETQ.
 ///
-/// Called by the scheduler when the initial thread of a process is
-/// first dispatched.  Runs in ring 0 on the thread's kernel stack.
+/// Called by the scheduler when a thread is first dispatched.  Runs
+/// in ring 0 on the thread's kernel stack.
 ///
 /// The `info_raw` argument is a pointer to a heap-allocated
-/// [`UserEntryInfo`] struct (created by `spawn_process`).  The
-/// trampoline reads the entry point and user stack pointer, frees
-/// the struct, then builds an IRETQ frame and transitions to ring 3.
+/// [`UserEntryInfo`] struct (created by `spawn_process` or
+/// `thread::spawn_user`).  The trampoline reads the entry point and
+/// user stack pointer, frees the struct, then builds an IRETQ frame
+/// and transitions to ring 3.
 ///
 /// ## IRETQ Frame Layout
 ///
 /// ```text
-/// RSP → [RIP]      ← ELF entry point
+/// RSP → [RIP]      ← ELF entry point / thread entry function
 ///       [CS]       ← USER_CS (0x23, DPL=3)
 ///       [RFLAGS]   ← 0x202 (IF=1, reserved bit 1)
 ///       [RSP]      ← user stack pointer
@@ -534,10 +535,10 @@ fn setup_user_stack(pml4_phys: u64) -> KernelResult<u64> {
 /// # Safety
 ///
 /// `info_raw` must be a valid pointer to a `UserEntryInfo` created
-/// by `Box::into_raw`.  The user address space (ELF segments and
+/// by `Box::into_raw`.  The user address space (code segments and
 /// stack) must be mapped in the current PML4 (the scheduler switches
 /// CR3 before running this thread).
-extern "C" fn userspace_entry_trampoline(info_raw: u64) {
+pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
     // Recover the entry info from the heap.
     //
     // SAFETY: info_raw was created by Box::into_raw in spawn_process.

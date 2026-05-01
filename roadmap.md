@@ -213,9 +213,9 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Resource limits per service (cgroup-equivalent)
 - [x] JSON-lines structured logging (text-based, not binary)
 - [x] "Service ready" notification API
-- [ ] Startup app list (simple serial list, separate from service manager)
+- [x] Startup app list (simple serial list, separate from service manager)
   - [ ] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout)
-  - [ ] Explicit readiness notification API
+  - [x] Explicit readiness notification API
 
 ### 2.7 Shell and basic userspace tools
 - [ ] Port bash (POSIX compatibility)

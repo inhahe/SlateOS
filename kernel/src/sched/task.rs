@@ -156,6 +156,15 @@ pub const TASK_STACK_SIZE: usize = 2 * FRAME_SIZE;
 #[allow(clippy::arithmetic_side_effects)]
 const TASK_STACK_FRAMES: usize = TASK_STACK_SIZE / FRAME_SIZE;
 
+/// Magic value written to the bottom of every kernel stack.
+///
+/// Checked on every context switch.  If the value is corrupted, the
+/// task has overflowed its stack and we panic immediately instead of
+/// silently corrupting adjacent memory.
+///
+/// Based on Linux's `CONFIG_SCHED_STACK_END_CHECK` mechanism.
+pub const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
 /// Maximum number of ticks a CPU burst can be to still count as
 /// "interactive."  At 100 Hz, 5 ticks = 50 ms.  Tasks that use
 /// less than this before blocking are considered I/O-bound / interactive.
@@ -372,6 +381,14 @@ impl Task {
         let stack_bottom = stack_phys + hhdm;
         let stack_top = stack_bottom + TASK_STACK_SIZE as u64;
 
+        // Plant the stack canary at the very bottom of the stack.
+        // This is the first 8 bytes — furthest from the stack top,
+        // so it will be the last thing overwritten on overflow.
+        // SAFETY: stack_bottom is a valid, freshly-allocated HHDM address.
+        unsafe {
+            ptr::write_volatile(stack_bottom as *mut u64, STACK_CANARY);
+        }
+
         // Set up the initial stack and context so that when
         // switch_context switches to this task, it "returns" into
         // the task_entry_trampoline which calls entry(arg).
@@ -482,6 +499,49 @@ impl Task {
     pub fn name_str(&self) -> &str {
         let bytes = self.name.get(..self.name_len).unwrap_or(&[]);
         core::str::from_utf8(bytes).unwrap_or("<invalid>")
+    }
+
+    /// Verify the stack canary is intact.
+    ///
+    /// Called on every context switch (for the task that just ran).
+    /// If the canary is corrupted, the task has overflowed its kernel
+    /// stack.  We panic immediately because the alternative — silent
+    /// memory corruption — is far worse.
+    ///
+    /// The idle task (stack_bottom == 0) uses the bootloader stack
+    /// and has no canary — skip the check.
+    #[inline]
+    pub fn check_stack_canary(&self) {
+        if self.stack_bottom == 0 {
+            return; // Idle task, no canary.
+        }
+        // SAFETY: stack_bottom is a valid HHDM address for this task's
+        // allocated stack.  The canary was written during new_kernel().
+        let canary = unsafe {
+            ptr::read_volatile(self.stack_bottom as *const u64)
+        };
+        if canary != STACK_CANARY {
+            // Stack overflow detected.  Print as much info as possible
+            // before halting — the stack is corrupted so we might crash
+            // trying to print, but it's better than silent corruption.
+            serial_println!(
+                "FATAL: Stack canary corrupted for task {} ({})!",
+                self.id, self.name_str()
+            );
+            serial_println!(
+                "  Expected: {:#018x}, Found: {:#018x}",
+                STACK_CANARY, canary
+            );
+            serial_println!(
+                "  stack_bottom={:#x}, stack_top={:#x}",
+                self.stack_bottom,
+                self.stack_bottom.wrapping_add(TASK_STACK_SIZE as u64)
+            );
+            serial_println!(
+                "FATAL: Kernel stack overflow is unrecoverable. Halting."
+            );
+            crate::cpu::halt_loop();
+        }
     }
 }
 

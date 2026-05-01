@@ -626,6 +626,11 @@ pub fn reap_dead_tasks() -> usize {
             // SCHED).
             drop(state);
 
+            // Final canary check — if the task overflowed before dying,
+            // log a warning (the task is already dead so we can't halt,
+            // but the corruption may have affected other memory).
+            task.check_stack_canary();
+
             // SAFETY: The task is Dead, was removed from the table,
             // and is not the current task, so no CPU is using its stack.
             if let Err(e) = unsafe { task.free_stack() } {
@@ -1099,7 +1104,13 @@ fn do_switch(old_id: TaskId, new_id: TaskId) {
         // this CPU until switch_context returns — interrupts are
         // disabled).
         let old_data = state.tasks.get_mut(&old_id)
-            .map(|t| (&raw mut t.context, t.pml4_phys));
+            .map(|t| {
+                // Check stack canary before switching away from this task.
+                // If the task overflowed its stack during execution,
+                // detect it now rather than silently corrupting memory.
+                t.check_stack_canary();
+                (&raw mut t.context, t.pml4_phys)
+            });
         let new_data = state.tasks.get(&new_id)
             .map(|t| (&raw const t.context, t.pml4_phys, t.stack_bottom));
 
@@ -1192,6 +1203,7 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[sched] Running scheduler self-test...");
 
+    test_stack_canary()?;
     test_cooperative_scheduling()?;
     test_suspend_resume()?;
     test_set_priority()?;
@@ -1201,6 +1213,55 @@ pub fn self_test() -> KernelResult<()> {
     test_per_cpu_work_stealing()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// Test 0: Stack canary — verify canary is planted and survives execution.
+fn test_stack_canary() -> KernelResult<()> {
+    use crate::mm::page_table;
+
+    // Spawn a task, let it run (just increments a counter and exits),
+    // then verify the canary is still intact.
+    TEST_COUNTER.store(0, Ordering::SeqCst);
+    let id = spawn(b"test-canary", 16, test_task_incr, 1, 0)?;
+
+    // Let the task run and exit.
+    yield_now();
+    yield_now();
+
+    // The task should be dead now.  Check its canary.
+    {
+        let state = SCHED.lock();
+        if let Some(t) = state.tasks.get(&id) {
+            if t.stack_bottom != 0 {
+                // SAFETY: stack_bottom is valid HHDM address.
+                let canary = unsafe {
+                    core::ptr::read_volatile(t.stack_bottom as *const u64)
+                };
+                if canary != task::STACK_CANARY {
+                    serial_println!(
+                        "[sched]   FAIL: stack canary corrupted for task {}",
+                        id
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+    }
+
+    // Clean up.
+    {
+        let mut state = SCHED.lock();
+        if let Some(mut t) = state.tasks.remove(&id) {
+            if t.stack_phys != 0 {
+                // SAFETY: Task is dead and removed.
+                unsafe { let _ = t.free_stack(); }
+                t.stack_phys = 0;
+            }
+        }
+    }
+
+    serial_println!("[sched]   Stack canary: OK");
     Ok(())
 }
 

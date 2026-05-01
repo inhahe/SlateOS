@@ -29,6 +29,17 @@ add to roadmap-detailed.md to support a number of programming languages. rust, p
 - kernel-ipc: Wire SYS_SLEEP (syscall/handlers.rs) to use HPET-based
   timing for sub-10ms sleep accuracy.  Currently rounds up to 10 ms ticks.
 
+- kernel-ipc: Store exit code from SYS_EXIT (handlers.rs:131) in PCB
+  state so SYS_PROCESS_WAIT can retrieve it.  Currently the exit code
+  argument is accepted but discarded.
+
+- kernel-ipc: Fix mmap partial failure recovery (handlers.rs:500, 548).
+  If mmap region partially maps then alloc_frame fails, already-mapped
+  frames leak.  Need to track and unmap on error.
+
+- kernel-ipc: Verify SYS_PROCESS_ID (handlers.rs:1549) returns the
+  owning process PID, not just the task ID.  Has a TODO comment.
+
 ## Judgment Calls
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from

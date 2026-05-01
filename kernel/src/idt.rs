@@ -876,9 +876,20 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         return;
     }
 
-    // For user-mode page faults, try stack growth before killing.
+    // For user-mode page faults, try demand paging, stack growth, then SEH.
     let is_user = error & 4 != 0;
     if is_user {
+        // First, try resolving via per-process VMAs (lazy/demand-paged
+        // regions created by SYS_MMAP with MAP_LAZY).
+        let task_id = sched::current_task_id();
+        let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+        if pid != 0 && crate::proc::pcb::try_resolve_fault(pid, cr2, error) {
+            return; // Demand-paged successfully — retry the instruction.
+        }
+
+        // Second, try stack growth (stack VMAs are handled separately
+        // because they pre-date the per-process VMA system and have
+        // their own growth logic with guard page detection).
         if try_grow_user_stack(cr2, error) {
             return; // Stack grew successfully — retry the instruction.
         }

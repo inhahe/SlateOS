@@ -42,7 +42,12 @@ _The minimum kernel that can run a single userspace process._
 - [ ] Swap file support (not partition)
   - [ ] zswap/zram compressed swap (recommended for desktop)
   - [ ] Swappiness tunable (default 10-20 for desktop)
-- [ ] Committed vs. lazy memory allocation modes
+- [x] Committed vs. lazy memory allocation modes
+  - [x] Default: committed (immediate frame allocation, the design spec's mandate)
+  - [x] MAP_LAZY flag (bit 6) for opt-in demand-paged allocation via SYS_MMAP
+  - [x] Per-process VMA list in PCB for tracking lazy regions
+  - [x] Page fault handler resolves user-space lazy faults: VMA lookup → frame alloc → zero → map → TLB flush
+  - [x] SYS_MUNMAP cleans up VMA entries for lazy regions
 - [ ] Runtime-tunable memory parameters via sysctl-like interface
 - [ ] Workload profiles (Desktop, Database, Development, Gaming) as presets
 

@@ -395,7 +395,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
-    use super::number::{MAP_EXEC, MAP_MMIO, MAP_NOCACHE, MAP_WRITE};
+    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_WRITE};
 
     let vaddr_hint = args.arg0;
     let size = args.arg1;
@@ -496,8 +496,40 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
             "[mmap] MMIO mapped {:#x}..{:#x} → phys {:#x} ({} frames)",
             base_vaddr, base_vaddr + size_aligned, phys_addr, num_frames
         );
+    } else if flags & MAP_LAZY != 0 {
+        // Lazy (demand-paged) anonymous mapping: register a VMA but
+        // don't allocate physical frames.  Frames are allocated on
+        // first access via the page fault handler.
+        //
+        // This is the opt-in lazy path.  The default (without MAP_LAZY)
+        // is committed allocation per the design spec.
+        use crate::mm::vma::{Vma, VmaKind};
+
+        // MAP_LAZY + MAP_MMIO makes no sense — MMIO regions must be
+        // backed by specific physical addresses, not demand-paged.
+        // (MAP_MMIO was already handled above, but defensive check.)
+        let vma = Vma {
+            start: base_vaddr,
+            end: base_vaddr.saturating_add(size_aligned),
+            kind: VmaKind::Anonymous,
+            flags: page_flags,
+        };
+
+        if let Err(e) = pcb::add_vma(pid, vma) {
+            serial_println!(
+                "[mmap] Lazy VMA registration failed at {:#x}: {:?}",
+                base_vaddr, e
+            );
+            return SyscallResult::err(e);
+        }
+
+        serial_println!(
+            "[mmap] Lazy mapped {:#x}..{:#x} ({} frames, demand-paged)",
+            base_vaddr, base_vaddr + size_aligned, num_frames
+        );
     } else {
-        // Anonymous mapping: allocate and map fresh zeroed frames.
+        // Committed anonymous mapping (default): allocate and map
+        // fresh zeroed frames immediately.
         for i in 0..num_frames {
             let phys = match frame::alloc_frame() {
                 Ok(f) => f,
@@ -532,7 +564,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         }
 
         serial_println!(
-            "[mmap] Anonymous mapped {:#x}..{:#x} ({} frames)",
+            "[mmap] Committed mapped {:#x}..{:#x} ({} frames)",
             base_vaddr, base_vaddr + size_aligned, num_frames
         );
     }
@@ -610,6 +642,11 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
             }
         }
     }
+
+    // Also remove any per-process VMA that starts at this address.
+    // This handles lazy-mapped regions created with MAP_LAZY.
+    // If no VMA matches, this is a no-op (committed regions don't have VMAs).
+    pcb::remove_vma(pid, vaddr);
 
     serial_println!(
         "[mmap] Unmapped {} frames at {:#x}..{:#x}",

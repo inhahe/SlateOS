@@ -80,6 +80,14 @@ pub const MAP_NOCACHE: u64 = 1 << 3;
 pub const MAP_MMIO: u64    = 1 << 4;
 /// Mmap flag: use exact virtual address from `arg0`.
 pub const MAP_FIXED: u64   = 1 << 5;
+/// Mmap flag: lazy (demand-paged) allocation.
+///
+/// Instead of allocating and mapping physical frames immediately,
+/// registers a VMA for the region.  Physical frames are allocated
+/// on first access (page fault).  Without this flag, mmap performs
+/// committed allocation (the default per design spec: "committed
+/// memory by default, lazy allocation opt-in").
+pub const MAP_LAZY: u64    = 1 << 6;
 
 /// Unmap a previously mapped region.
 ///

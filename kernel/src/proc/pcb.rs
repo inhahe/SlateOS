@@ -22,6 +22,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use crate::cap::{self, CapTable, Rights, ResourceType};
 use crate::error::{KernelError, KernelResult};
+use crate::mm::vma::Vma;
 use crate::sched::task::TaskId;
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -150,6 +151,16 @@ pub struct Process {
     /// uses this to know when a service has finished startup and is
     /// ready to accept requests.
     pub ready: bool,
+    /// Per-process VMAs for lazy/demand-paged memory regions.
+    ///
+    /// Sorted by start address, no overlaps.  Used by the page fault
+    /// handler to resolve user-space faults on lazy-allocated memory
+    /// (regions mapped with `MAP_LAZY`).
+    ///
+    /// VMAs are added by `SYS_MMAP` with `MAP_LAZY` and removed by
+    /// `SYS_MUNMAP`.  Stack growth is handled separately by the IDT
+    /// handler — it doesn't use this VMA list.
+    pub vmas: Vec<Vma>,
 }
 
 impl Process {
@@ -167,6 +178,7 @@ impl Process {
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
             ready: false,
+            vmas: Vec::new(),
         }
     }
 }
@@ -380,6 +392,205 @@ pub fn is_ready(pid: ProcessId) -> KernelResult<bool> {
         .ok_or(KernelError::NoSuchProcess)?;
 
     Ok(proc.ready)
+}
+
+// ---------------------------------------------------------------------------
+// Per-process VMA management (for lazy/demand-paged allocations)
+// ---------------------------------------------------------------------------
+
+/// Add a VMA to a process's per-process VMA list.
+///
+/// Used by `SYS_MMAP` with `MAP_LAZY` to register a demand-paged
+/// memory region.  The VMA must not overlap any existing VMA in the
+/// process.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if the PID doesn't exist.
+/// - [`KernelError::BadAlignment`] if start/end are not frame-aligned.
+/// - [`KernelError::AlreadyExists`] if the range overlaps an existing VMA.
+pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::VirtAddr;
+
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    // Validate alignment.
+    if !VirtAddr::new(vma.start).is_frame_aligned()
+        || !VirtAddr::new(vma.end).is_frame_aligned()
+    {
+        return Err(KernelError::BadAlignment);
+    }
+    if vma.end <= vma.start {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Check for overlaps.
+    for existing in &proc.vmas {
+        if vma.start < existing.end && vma.end > existing.start {
+            return Err(KernelError::AlreadyExists);
+        }
+    }
+
+    // Insert sorted by start address.
+    let pos = proc.vmas
+        .binary_search_by_key(&vma.start, |v| v.start)
+        .unwrap_or_else(|p| p);
+    proc.vmas.insert(pos, vma);
+
+    Ok(())
+}
+
+/// Remove a VMA from a process's VMA list by start address.
+///
+/// Returns `true` if a VMA was found and removed, `false` otherwise.
+pub fn remove_vma(pid: ProcessId, start: u64) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+
+    if let Ok(idx) = proc.vmas.binary_search_by_key(&start, |v| v.start) {
+        proc.vmas.remove(idx);
+        true
+    } else {
+        false
+    }
+}
+
+/// Resolve a user-space page fault against a process's VMA list.
+///
+/// Called from the page fault handler (IDT vector 14) when a user-mode
+/// fault occurs on a lazy-allocated region.  This function:
+///
+/// 1. Looks up the faulting address in the process's VMA list.
+/// 2. Checks permissions against the error code.
+/// 3. For Anonymous VMAs: allocates a frame, zeroes it, maps it.
+///
+/// Uses `try_lock()` to avoid deadlock if the process table is already
+/// held (e.g., from a syscall that triggered a fault).
+///
+/// Returns `true` if the fault was resolved, `false` if not.
+pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bool {
+    use crate::mm::fault::PageFaultError;
+    use crate::mm::frame::{self, FRAME_SIZE};
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::VmaKind;
+
+    let error = PageFaultError::new(error_code);
+
+    // Reserved-bit violations are never resolvable.
+    if error.is_reserved() {
+        return false;
+    }
+
+    // Only handle not-present faults (demand paging).
+    // Protection violations (present page) can't be resolved by
+    // demand paging (would need CoW support).
+    if error.is_present() {
+        return false;
+    }
+
+    // Try to acquire the process table lock.  If it's already held,
+    // we can't resolve (avoid deadlock).
+    let Some(table) = PROCESS_TABLE.try_lock() else {
+        return false;
+    };
+    let Some(proc) = table.get(&pid) else {
+        return false;
+    };
+
+    // Look up the VMA containing the fault address.
+    let idx = match proc.vmas.binary_search_by_key(&fault_addr, |v| v.start) {
+        Ok(i) => i,
+        Err(0) => return false,
+        #[allow(clippy::arithmetic_side_effects)]
+        Err(i) => i - 1,
+    };
+    let Some(vma) = proc.vmas.get(idx) else {
+        return false;
+    };
+    if !vma.contains(fault_addr) {
+        return false;
+    }
+
+    // Only demand-page Anonymous and Stack VMAs.
+    match vma.kind {
+        VmaKind::Anonymous | VmaKind::Stack => {}
+        VmaKind::Guard | VmaKind::Fixed => return false,
+    }
+
+    let flags = vma.flags;
+    let pml4_phys = proc.pml4_phys;
+
+    // Permission checks.
+    if error.is_write() && !flags.contains(PageFlags::WRITABLE) {
+        return false;
+    }
+    if error.is_instruction_fetch() && flags.contains(PageFlags::NO_EXECUTE) {
+        return false;
+    }
+
+    // Drop the process table lock before doing allocation + mapping
+    // (those acquire the frame allocator and page table locks).
+    drop(table);
+
+    if pml4_phys == 0 {
+        // No user address space — can't resolve.
+        return false;
+    }
+
+    // Allocate, zero, and map a frame.
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return false,
+    };
+
+    #[allow(clippy::arithmetic_side_effects)]
+    let frame_base = fault_addr & !(FRAME_SIZE as u64 - 1);
+    let virt = VirtAddr::new(frame_base);
+
+    let phys_frame = match frame::alloc_frame() {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    // Zero the frame via HHDM.
+    // SAFETY: phys_frame.to_virt(hhdm) is valid HHDM mapping.
+    // We have exclusive ownership of this freshly-allocated frame.
+    unsafe {
+        let hhdm_ptr = phys_frame.to_virt(hhdm) as *mut u8;
+        core::ptr::write_bytes(hhdm_ptr, 0, FRAME_SIZE);
+    }
+
+    // Map the frame.
+    // SAFETY: pml4_phys is the process's valid PML4, phys_frame is
+    // freshly allocated, virt is within a VMA that permits this mapping.
+    let map_result = unsafe {
+        page_table::map_frame(pml4_phys, virt, phys_frame, flags)
+    };
+
+    if map_result.is_err() {
+        // Map failed — free the frame.
+        // SAFETY: phys_frame was just allocated and not exposed.
+        let _ = unsafe { frame::free_frame(phys_frame) };
+        return false;
+    }
+
+    // Flush TLB so the CPU sees the new mapping.
+    // SAFETY: invlpg is always safe in ring 0.
+    unsafe {
+        page_table::flush_frame(virt);
+    }
+
+    serial_println!(
+        "[fault] Demand-paged user frame for pid {} at {:#x}",
+        pid, frame_base
+    );
+    true
 }
 
 /// Register a task to be woken when a process exits.

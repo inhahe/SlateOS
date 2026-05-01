@@ -1106,15 +1106,22 @@ pub fn process_sleep_wakeups() {
 ///
 /// Uses per-CPU queues: first tries the local queue, then work-steals
 /// from other CPUs if the local queue is empty.
+///
+/// OPT: The entire schedule+switch path uses a single lock acquisition.
+/// Previous implementation took the lock twice (once for scheduling,
+/// once for context pointer extraction), wasting ~100 cycles per switch
+/// on redundant lock + BTreeMap lookups.
 fn schedule_inner(requeue: bool) {
-    // We need two contexts: the old one (current task) and the new
-    // one (next task).  We extract raw pointers to avoid holding the
-    // lock across the context switch.
     let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
     let cpu = current_cpu_id();
 
-    let mut next_id: TaskId = current_id;
-    let mut should_switch = false;
+    // Data extracted under the single lock acquisition for the switch.
+    let old_ctx_ptr: *mut Context;
+    let new_ctx_ptr: *const Context;
+    let old_pml4: u64;
+    let new_pml4: u64;
+    let new_stack_top: u64;
+    let next_id: TaskId;
 
     {
         let mut state = SCHED.lock();
@@ -1124,10 +1131,12 @@ fn schedule_inner(requeue: bool) {
         }
 
         // Re-enqueue the current task if requested (on its current CPU).
-        if requeue && let Some(task) = state.tasks.get_mut(&current_id) {
-            task.state = TaskState::Ready;
-            let prio = task.effective_priority();
-            state.scheduler.enqueue(current_id, prio, cpu);
+        if requeue {
+            if let Some(task) = state.tasks.get_mut(&current_id) {
+                task.state = TaskState::Ready;
+                let prio = task.effective_priority();
+                state.scheduler.enqueue(current_id, prio, cpu);
+            }
         }
 
         // Pick the next task from the local CPU's queue.
@@ -1135,74 +1144,54 @@ fn schedule_inner(requeue: bool) {
             // If local queue is empty, try work stealing from other CPUs.
             .or_else(|| state.scheduler.try_steal(cpu));
 
-        if let Some(picked_id) = picked {
-            if picked_id != current_id || !requeue {
-                // Switching to a different task (or the current task
-                // exited and we must switch regardless).
-                next_id = picked_id;
-
-                if let Some(next_task) = state.tasks.get_mut(&next_id) {
-                    next_task.state = TaskState::Running;
-                    next_task.last_cpu = cpu;
-                    next_task.schedule_count = next_task.schedule_count.saturating_add(1);
-                }
-
-                should_switch = true;
-            } else {
-                // Same task picked — no switch needed.
-                if let Some(task) = state.tasks.get_mut(&current_id) {
-                    task.state = TaskState::Running;
-                }
+        let Some(picked_id) = picked else {
+            if !requeue {
+                // No task ready and we can't run the current one (it's
+                // exiting/blocking).  This shouldn't happen if the idle
+                // task is always ready, but handle it defensively.
+                serial_println!("[sched] No runnable tasks — halting");
+                cpu::halt_loop();
             }
-        } else if !requeue {
-            // No task ready and we can't run the current one (it's
-            // exiting/blocking).  This shouldn't happen if the idle
-            // task is always ready, but handle it defensively.
-            serial_println!("[sched] No runnable tasks — halting");
-            cpu::halt_loop();
+            return;
+        };
+
+        if picked_id == current_id && requeue {
+            // Same task picked — no switch needed.
+            if let Some(task) = state.tasks.get_mut(&current_id) {
+                task.state = TaskState::Running;
+            }
+            return;
         }
-        // Lock is dropped here before the context switch.
-    }
 
-    if should_switch {
-        CURRENT_TASK_ID.store(next_id, Ordering::Release);
-        do_switch(current_id, next_id);
-    }
-}
+        next_id = picked_id;
 
-/// Perform the actual context switch between two tasks.
-///
-/// Gets raw pointers into the task table's Context fields and calls
-/// the assembly `switch_context`.
-fn do_switch(old_id: TaskId, new_id: TaskId) {
-    // We need simultaneous mutable access to two different tasks'
-    // contexts.  Since BTreeMap doesn't allow two &mut borrows, we
-    // extract raw pointers under the lock, then call switch_context
-    // outside the lock.
-    let (old_ctx_ptr, new_ctx_ptr): (*mut Context, *const Context);
-    let old_pml4: u64;
-    let new_pml4: u64;
-    let new_stack_top: u64;
+        // Mark the next task as Running and extract its metadata.
+        // We do this before extracting the old task's pointer because
+        // the mutable borrow ends when we're done with the task.
+        if let Some(next_task) = state.tasks.get_mut(&next_id) {
+            next_task.state = TaskState::Running;
+            next_task.last_cpu = cpu;
+            next_task.schedule_count = next_task.schedule_count.saturating_add(1);
+        }
 
-    {
-        let mut state = SCHED.lock();
-
-        // Get pointers to both contexts.
+        // Extract raw pointers and metadata for both tasks under this
+        // single lock acquisition.  We get the old task's mutable pointer
+        // first, then release that borrow, then get the new task's
+        // read-only pointer.  Raw pointers are stable because no entries
+        // are added or removed while we hold the lock.
         //
-        // SAFETY: We're getting raw pointers to fields within the
-        // BTreeMap.  The BTreeMap won't be modified during the
-        // switch (the lock is dropped, but no other code runs on
-        // this CPU until switch_context returns — interrupts are
-        // disabled).
-        let old_data = state.tasks.get_mut(&old_id)
+        // SAFETY: The raw pointers point into BTreeMap node allocations.
+        // No structural modification (insert/remove) occurs between
+        // pointer extraction and use, so the pointers remain valid.
+        // The lock is dropped before switch_context, but no other code
+        // on this CPU runs until the switch completes.
+        let old_data = state.tasks.get_mut(&current_id)
             .map(|t| {
                 // Check stack canary before switching away from this task.
-                // If the task overflowed its stack during execution,
-                // detect it now rather than silently corrupting memory.
                 t.check_stack_canary();
                 (&raw mut t.context, t.pml4_phys)
             });
-        let new_data = state.tasks.get(&new_id)
+        let new_data = state.tasks.get(&next_id)
             .map(|t| (&raw const t.context, t.pml4_phys, t.stack_bottom));
 
         if let (Some((old, o_pml4)), Some((new, n_pml4, n_stack_bottom))) =
@@ -1212,8 +1201,6 @@ fn do_switch(old_id: TaskId, new_id: TaskId) {
             new_ctx_ptr = new;
             old_pml4 = o_pml4;
             new_pml4 = n_pml4;
-            // Kernel stack top = bottom + stack size.
-            // Zero means idle task (no kernel stack switch needed).
             #[allow(clippy::arithmetic_side_effects)]
             {
                 new_stack_top = if n_stack_bottom != 0 {
@@ -1225,12 +1212,16 @@ fn do_switch(old_id: TaskId, new_id: TaskId) {
         } else {
             serial_println!(
                 "[sched] BUG: context switch failed — task {} or {} not in table",
-                old_id, new_id
+                current_id, next_id
             );
             return;
         }
-        // Lock dropped here.
+        // Lock is dropped here before the context switch.
     }
+
+    // --- Context switch (outside the lock) ---
+
+    CURRENT_TASK_ID.store(next_id, Ordering::Release);
 
     // Switch CR3 if the new task uses a different address space.
     // pml4_phys == 0 means "kernel address space" → use KERNEL_PML4.
@@ -1261,8 +1252,8 @@ fn do_switch(old_id: TaskId, new_id: TaskId) {
     //
     // Both must point to this task's kernel stack top.
     if new_stack_top != 0 {
-        // SAFETY: Single-CPU, interrupts are disabled (we're in
-        // the context switch path).  No concurrent access.
+        // SAFETY: Interrupts are disabled (we're in the context
+        // switch path).  No concurrent access on this CPU.
         unsafe {
             crate::syscall::entry::set_kernel_stack(new_stack_top);
             crate::gdt::set_kernel_stack(new_stack_top);
@@ -1270,17 +1261,17 @@ fn do_switch(old_id: TaskId, new_id: TaskId) {
     }
 
     // SAFETY:
-    // - Both pointers are valid (we just got them from the task table).
-    // - The task table won't move or reallocate during the switch
-    //   because interrupts are disabled and no other CPU is running.
-    // - old_ctx_ptr is &mut (exclusive) and new_ctx_ptr is & (shared),
-    //   and they point to different tasks' contexts.
+    // - Both pointers are valid (extracted from the task table under lock).
+    // - The BTreeMap nodes won't be freed during the switch because no
+    //   other code runs on this CPU until switch_context returns.
+    // - old_ctx_ptr is &mut (exclusive write) and new_ctx_ptr is &
+    //   (shared read), pointing to different tasks' contexts.
     unsafe {
         switch_context(&mut *old_ctx_ptr, &*new_ctx_ptr);
     }
 
-    // When we return here, it means some other task has switched back
-    // to us.  We're now running as old_id again.
+    // When we return here, some other task has switched back to us.
+    // We're now running as current_id again.
 }
 
 // ---------------------------------------------------------------------------

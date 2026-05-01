@@ -45,7 +45,7 @@ use alloc::collections::BTreeMap;
 use crate::cpu;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use self::context::switch_context;
@@ -151,6 +151,22 @@ static CURRENT_TASK_IDS: [AtomicU64; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per-CPU idle flags.
+///
+/// Set when a CPU enters the schedule_inner idle fallback (no runnable
+/// tasks).  While set, the timer ISR on that CPU skips `preempt()` to
+/// avoid nested `schedule_inner` calls — the idle fallback handles its
+/// own task picking and context switching.
+///
+/// The idle fallback is a defense-in-depth path: with per-CPU idle tasks,
+/// it should only be reached transiently (e.g., during the window
+/// between the idle task blocking for reap and being immediately
+/// re-enqueued by the BSP's idle loop).
+static IDLE_FLAGS: [AtomicBool; priority_rr::MAX_CPUS] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; priority_rr::MAX_CPUS]
+};
+
 /// Get the current CPU ID (sequential index).
 ///
 /// Returns 0 for the BSP.  After SMP bootstrap, reads the LAPIC ID
@@ -235,6 +251,58 @@ pub fn init() {
         num_cpus,
         if num_cpus > 1 { "s" } else { "" }
     );
+}
+
+/// Register an idle task for an Application Processor.
+///
+/// Called by each AP during SMP bootstrap, after the AP's GDT/IDT/APIC
+/// are set up but before enabling interrupts.  Creates a task that
+/// represents the AP's current execution context (its trampoline stack)
+/// and sets it as the AP's current task.
+///
+/// Returns the new idle task's ID.
+///
+/// # Why per-CPU idle tasks?
+///
+/// Without a dedicated idle task, an AP that has no runnable tasks would
+/// need an ad-hoc idle loop inside `schedule_inner`.  This is hard to get
+/// right on SMP because:
+/// - The timer ISR can fire during the idle loop and call `preempt()`,
+///   nesting `schedule_inner` calls and corrupting the blocked task's
+///   saved context.
+/// - The blocked/dead task's stack might be freed by `reap_dead_tasks`
+///   on another CPU while the AP is still using it.
+///
+/// With a per-CPU idle task, the scheduler always has a valid fallback:
+/// when the AP's only real task blocks, `schedule_inner` switches to the
+/// idle task, which safely does `yield_now(); hlt();` in a loop.
+pub fn register_ap_idle(cpu_index: usize) -> TaskId {
+    let idle = Task::new_ap_idle(cpu_index);
+    let id = idle.id;
+
+    let mut state = SCHED.lock();
+    state.tasks.insert(id, idle);
+    set_current_task(cpu_index, id);
+
+    serial_println!(
+        "[sched] Registered AP idle task {} for CPU {}",
+        id, cpu_index
+    );
+    id
+}
+
+/// Check whether a CPU is in the schedule_inner idle fallback.
+///
+/// Used by the timer ISR to avoid calling `preempt()` on a CPU that
+/// is handling its own scheduling in the idle fallback loop.  The idle
+/// fallback is a defense-in-depth path — with per-CPU idle tasks it
+/// should rarely be reached.
+#[inline]
+#[must_use]
+pub fn cpu_is_idle(cpu: usize) -> bool {
+    IDLE_FLAGS
+        .get(cpu)
+        .map_or(false, |f| f.load(Ordering::Acquire))
 }
 
 /// Spawn a new kernel task.
@@ -692,8 +760,24 @@ pub fn kill_task(task_id: TaskId) -> bool {
 ///
 /// Returns the number of tasks reaped.
 pub fn reap_dead_tasks() -> usize {
-    let current_id = load_current_task();
     let mut reaped = 0;
+
+    // Collect current task IDs from ALL online CPUs.  We must not
+    // reap any task that ANY CPU is currently running on, because
+    // freeing the stack while a CPU is using it is use-after-free.
+    //
+    // The previous code only checked the local CPU's current task,
+    // which is an SMP correctness bug: CPU 0 could reap a dead task
+    // whose stack CPU 1 is still using (e.g., in the idle fallback
+    // after task_exit).
+    let num_cpus = crate::smp::cpu_count().max(1);
+    let active_ids: alloc::vec::Vec<TaskId> = (0..num_cpus)
+        .map(|i| {
+            CURRENT_TASK_IDS
+                .get(i)
+                .map_or(0, |a| a.load(Ordering::Acquire))
+        })
+        .collect();
 
     // Collect IDs of dead tasks first, then remove them one by one.
     // We do this in two passes because we need the lock to inspect
@@ -703,7 +787,8 @@ pub fn reap_dead_tasks() -> usize {
         let state = SCHED.lock();
         state.tasks.iter()
             .filter(|(id, task)| {
-                task.state == TaskState::Dead && **id != current_id
+                task.state == TaskState::Dead
+                    && !active_ids.contains(id)
             })
             .map(|(id, _)| *id)
             .collect()
@@ -724,7 +809,7 @@ pub fn reap_dead_tasks() -> usize {
             task.check_stack_canary();
 
             // SAFETY: The task is Dead, was removed from the table,
-            // and is not the current task, so no CPU is using its stack.
+            // and no CPU has it as current (checked all CPUs above).
             if let Err(e) = unsafe { task.free_stack() } {
                 serial_println!(
                     "[sched] WARNING: failed to free stack for task {}: {:?}",
@@ -1250,11 +1335,121 @@ fn schedule_inner(requeue: bool) {
 
         let Some(picked_id) = picked else {
             if !requeue {
-                // No task ready and we can't run the current one (it's
-                // exiting/blocking).  This shouldn't happen if the idle
-                // task is always ready, but handle it defensively.
-                serial_println!("[sched] No runnable tasks — halting");
-                cpu::halt_loop();
+                // No task ready and we can't re-enqueue the current one
+                // (it's exiting or blocking).
+                //
+                // This path should be rare with per-CPU idle tasks: the
+                // idle task is always in the queue at IDLE_PRIORITY, so
+                // pick_next should always find it.  We reach here only
+                // in edge cases (e.g., the idle task itself blocked
+                // transiently, or during early boot before idle tasks
+                // are fully set up).
+                //
+                // Set the idle flag so the timer ISR skips preempt() on
+                // this CPU.  Without this guard, the ISR would call
+                // schedule_inner(true) while we're inside this idle
+                // fallback — nesting would save the wrong resume point
+                // into the blocked task's context.
+                if let Some(flag) = IDLE_FLAGS.get(cpu) {
+                    flag.store(true, Ordering::Release);
+                }
+                drop(state);
+
+                // Idle loop: HLT until a task becomes ready, then do a
+                // full context switch.  The blocked/dead task's context
+                // save area is still in the task table — we save our
+                // current registers there and load the new task's.
+                loop {
+                    cpu::hlt();
+
+                    let Some(mut s) = SCHED.try_lock() else {
+                        continue;
+                    };
+
+                    let ready_id = match s.scheduler.pick_next_local(cpu)
+                        .or_else(|| s.scheduler.try_steal(cpu))
+                    {
+                        Some(id) => id,
+                        None => { drop(s); continue; }
+                    };
+
+                    // Found a ready task — set it up for switching.
+                    if let Some(task) = s.tasks.get_mut(&ready_id) {
+                        task.state = TaskState::Running;
+                        task.last_cpu = cpu;
+                        task.schedule_count = task.schedule_count.saturating_add(1);
+                    }
+
+                    // Extract context pointers for old (blocked/dead)
+                    // and new tasks.  The old task's entry still exists
+                    // in the BTreeMap — it's Blocked or Dead, not removed.
+                    let old_data = s.tasks.get_mut(&current_id)
+                        .map(|t| {
+                            t.check_stack_canary();
+                            (&raw mut t.context, t.pml4_phys)
+                        });
+                    let new_data = s.tasks.get(&ready_id)
+                        .map(|t| (&raw const t.context, t.pml4_phys, t.stack_bottom));
+
+                    if let (Some((old_p, o_pml4)), Some((new_p, n_pml4, n_sb))) =
+                        (old_data, new_data)
+                    {
+                        drop(s);
+
+                        // Clear idle flag BEFORE the switch so the new
+                        // task's timer ticks see normal (non-idle) state.
+                        if let Some(flag) = IDLE_FLAGS.get(cpu) {
+                            flag.store(false, Ordering::Release);
+                        }
+
+                        set_current_task(cpu, ready_id);
+
+                        // Switch address space if needed.
+                        if o_pml4 != n_pml4 {
+                            let target = if n_pml4 == 0 {
+                                KERNEL_PML4.load(Ordering::Acquire)
+                            } else {
+                                n_pml4
+                            };
+                            // SAFETY: target is a valid PML4 with kernel
+                            // entries mapped.
+                            unsafe {
+                                crate::mm::page_table::write_cr3(target);
+                            }
+                        }
+
+                        // Update kernel stack for ring transitions.
+                        #[allow(clippy::arithmetic_side_effects)]
+                        let stack_top = if n_sb != 0 {
+                            n_sb + task::TASK_STACK_SIZE as u64
+                        } else {
+                            0
+                        };
+                        if stack_top != 0 {
+                            // SAFETY: Interrupts are effectively disabled
+                            // (idle flag prevents preempt).
+                            unsafe {
+                                crate::syscall::entry::set_kernel_stack(stack_top);
+                                crate::gdt::set_kernel_stack(stack_top);
+                            }
+                        }
+
+                        // SAFETY: Both pointers valid (from task table
+                        // under lock).  old is &mut (exclusive), new is
+                        // & (shared), pointing to different tasks.
+                        unsafe { switch_context(&mut *old_p, &*new_p); }
+
+                        // Resumed: this task was unblocked and switched
+                        // back to.  (For Dead tasks, this line is
+                        // unreachable — no one switches to a Dead task.)
+                        return;
+                    }
+
+                    // Context extraction failed (task reaped while we
+                    // were idling — shouldn't happen since reap checks
+                    // all CPUs, but handle gracefully).
+                    drop(s);
+                }
             }
             return;
         };

@@ -325,7 +325,7 @@ impl Task {
         self.total_ticks = self.total_ticks.saturating_add(1);
     }
 
-    /// Create the idle task (task 0).
+    /// Create the idle task (task 0) for the BSP.
     ///
     /// The idle task uses the bootloader-provided stack; no allocation
     /// is needed.  Its context starts empty and is populated when it
@@ -351,6 +351,62 @@ impl Task {
             interactive: false,
             inherited_priority: None,
             last_cpu: 0,
+            total_ticks: 0,
+            schedule_count: 0,
+        }
+    }
+
+    /// Create an idle task for an Application Processor.
+    ///
+    /// Like the BSP's idle task (task 0), the AP idle task uses an
+    /// externally-allocated stack (the AP trampoline stack) and has no
+    /// canary.  Its context starts empty and is populated when the AP
+    /// first yields to a real task.
+    ///
+    /// Each AP gets its own idle task so there's always a fallback task
+    /// for every CPU.  Without this, an AP whose only task blocks has
+    /// no valid task to switch to — it would need an ad-hoc idle loop
+    /// inside schedule_inner which is error-prone on SMP.
+    #[must_use]
+    pub fn new_ap_idle(cpu_index: usize) -> Self {
+        let id = alloc_task_id();
+        let mut name = [0u8; 32];
+        // Format: "idle/N" where N is the CPU index.
+        let tag = b"idle/";
+        let tag_len = tag.len();
+        name[..tag_len].copy_from_slice(tag);
+        // Write CPU index digit(s).  Support up to 3-digit CPU indices.
+        let idx_str = if cpu_index < 10 {
+            name[tag_len] = b'0' + cpu_index as u8;
+            tag_len + 1
+        } else if cpu_index < 100 {
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                name[tag_len] = b'0' + (cpu_index / 10) as u8;
+                name[tag_len + 1] = b'0' + (cpu_index % 10) as u8;
+            }
+            tag_len + 2
+        } else {
+            // Fallback: just "idle/X" for huge indices.
+            name[tag_len] = b'X';
+            tag_len + 1
+        };
+
+        Self {
+            id,
+            name,
+            name_len: idx_str,
+            state: TaskState::Running,
+            priority: IDLE_PRIORITY,
+            context: Context::empty(),
+            stack_phys: 0,
+            stack_bottom: 0,   // Externally allocated (AP trampoline stack).
+            pml4_phys: 0,      // Kernel address space.
+            burst_ticks: 0,
+            avg_burst_x8: 0,
+            interactive: false,
+            inherited_priority: None,
+            last_cpu: cpu_index,
             total_ticks: 0,
             schedule_count: 0,
         }

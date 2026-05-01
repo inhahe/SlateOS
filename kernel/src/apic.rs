@@ -613,7 +613,16 @@ pub unsafe fn init_ap() {
 /// not acquire locks that could be held by the interrupted code.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
-    TICK_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Only the BSP (CPU 0) increments the global tick counter.
+    // Without this guard, each online CPU increments independently,
+    // causing tick_count() to advance at N× rate (e.g., 200 Hz with
+    // 2 CPUs instead of the expected 100 Hz).  All timing code
+    // (sleep, timers, uptime) depends on tick_count() being wall-clock
+    // rate.  APs still get preemption from their timer ISR — they just
+    // don't double-count the global tick.
+    if crate::smp::current_cpu_index() == 0 {
+        TICK_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
 
     // Tick the scheduler and check if a reschedule is needed.
     let needs_reschedule = crate::sched::timer_tick();
@@ -642,7 +651,13 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     crate::ipc::timer::process_timer_expirations();
 
     // If the scheduler says the time slice expired, reschedule.
-    if needs_reschedule {
+    //
+    // Skip if this CPU is in the schedule_inner idle fallback (IDLE_FLAG
+    // set).  The idle fallback handles its own task picking and context
+    // switching.  Calling preempt() here would nest schedule_inner calls,
+    // corrupting the blocked task's saved context (the inner switch_context
+    // would save the ISR + idle-loop stack as the task's resume point).
+    if needs_reschedule && !crate::sched::cpu_is_idle(crate::smp::current_cpu_index()) {
         crate::sched::preempt();
     }
 }

@@ -679,15 +679,33 @@ extern "C" fn ap_entry() -> ! {
         cpu_index, apic_id, NUM_CPUS_ONLINE.load(Ordering::Relaxed)
     );
 
+    // Register this AP's idle task with the scheduler.
+    //
+    // Each CPU needs its own idle task — a fallback task that runs when
+    // nothing else is ready.  Without this, CURRENT_TASK_IDS[cpu] would
+    // default to 0 (the BSP's idle task), causing both CPUs to think
+    // they're running the same task: schedule_inner would corrupt task 0's
+    // saved context, and reap_dead_tasks could free task 0's stack while
+    // the BSP is using it.
+    //
+    // Must be before sti() so the timer ISR sees a valid current task.
+    let _idle_id = crate::sched::register_ap_idle(cpu_index);
+
     // Enable interrupts.  The APIC timer will start firing.
-    // SAFETY: IDT is loaded, APIC is configured.
+    // SAFETY: IDT is loaded, APIC is configured, idle task registered.
     unsafe {
         crate::cpu::sti();
     }
 
     // Enter the AP idle loop.
-    // The scheduler will assign tasks to this CPU via work stealing.
+    //
+    // Identical to the BSP's idle_loop in main.rs: reap dead tasks,
+    // refill the zeroed frame pool, yield, then HLT.  The scheduler
+    // treats this task like any other — it gets enqueued at IDLE_PRIORITY
+    // and picked only when no higher-priority task is ready.
     loop {
+        crate::sched::reap_dead_tasks();
+        crate::mm::frame::refill_zero_pool();
         crate::sched::yield_now();
         crate::cpu::hlt();
     }

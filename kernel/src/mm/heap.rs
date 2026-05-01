@@ -286,9 +286,12 @@ impl HeapInner {
 
 /// Maximum free slots per size class per CPU.
 ///
-/// 16 is enough to absorb short alloc/free bursts without contending
-/// on the global lock.  Batch refill/drain transfers half at a time.
-const PCPU_SLAB_MAX: usize = 16;
+/// OPT: 32 slots per class absorbs allocation bursts without hitting
+/// the global lock.  At 16 slots, steady alloc/free sequences hit the
+/// slow-path refill every ~16 iterations; doubling to 32 halves that
+/// frequency.  Memory cost: 32 × 11 classes × 8 bytes × 16 CPUs = 44 KiB
+/// total — negligible.
+const PCPU_SLAB_MAX: usize = 32;
 
 /// Batch size for refilling/draining per-CPU caches (half of max).
 const PCPU_SLAB_BATCH: usize = PCPU_SLAB_MAX / 2;
@@ -549,12 +552,17 @@ unsafe impl GlobalAlloc for KernelHeap {
             return;
         }
 
+        // OPT: Compute size class once and reuse for both per-CPU and
+        // global paths.  Previously this was computed twice when falling
+        // through from the per-CPU fast path to the global slow path.
+        let class_idx = HeapInner::size_class_index(&layout);
+
         // Per-CPU slab cache fast path.
         // Stats counted per-CPU inside pcpu_slab_dealloc.
         if PCPU_SLAB_ENABLED.load(Ordering::Relaxed) {
-            if let Some(class_idx) = HeapInner::size_class_index(&layout) {
+            if let Some(idx) = class_idx {
                 // SAFETY: ptr was allocated from slab for this class.
-                if unsafe { pcpu_slab_dealloc(ptr, class_idx) } {
+                if unsafe { pcpu_slab_dealloc(ptr, idx) } {
                     return;
                 }
             }
@@ -566,9 +574,9 @@ unsafe impl GlobalAlloc for KernelHeap {
             return;
         }
 
-        match HeapInner::size_class_index(&layout) {
-            Some(class_idx) => {
-                inner.slab_dealloc(ptr, class_idx);
+        match class_idx {
+            Some(idx) => {
+                inner.slab_dealloc(ptr, idx);
                 SLAB_FREES.fetch_add(1, Ordering::Relaxed);
             }
             // SAFETY: Caller guarantees ptr was allocated with this layout.

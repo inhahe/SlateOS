@@ -1,9 +1,25 @@
-make a docker for the project to make it easy for people to test
-have the agents read "Bugs Rust Won't Catch _ corrode Rust Consulting.html", at least when they're working on the relevant task(s).
+can programs utilize the cpu function to separate code from data and not execute stuff in data space? and can programs get around this or not use it or something for JIT?
 
 ## Known Bugs / Limitations
 
-(none currently — pcb::destroy frame leak fixed in page_table::destroy_user_address_space)
+- Exception self-test infinite loop: The exception handler dispatch test
+  (process 18, task 24) creates a page fault at address 0x0 that triggers
+  the registered exception handler, which page faults again, creating an
+  infinite dispatch loop.  This prevents BOOT_OK from being reached.  The
+  exception handler test needs a loop-break counter or the handler stub
+  needs to actually resolve the fault (e.g., skip the faulting instruction).
+  File: kernel/src/proc/ (exception handling area).
+
+- Debug kernel binary too large for Limine: The debug build (~9MB) causes
+  Limine to panic "High memory allocator: Out of memory" with 128M QEMU.
+  Workaround: use release builds for boot testing, or increase QEMU memory
+  to 256M+.  Long-term: strip debug sections or use split-debuginfo.
+
+- PI futex: transitive priority inheritance (chain boosting) is not
+  implemented.  If A blocks on B's lock and B blocks on C's lock, C does
+  NOT get boosted to A's priority.  Only single-level PI is supported.
+  This is fine for most workloads but should be added when multi-level
+  lock nesting becomes common.
 
 ## Judgment Calls
 

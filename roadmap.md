@@ -60,7 +60,15 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Configurable time slices per level (shorter = higher priority)
   - [ ] Per-CPU run queues
   - [ ] Work stealing from longest queue when idle (prefer same NUMA node)
-  - [ ] Priority inheritance on mutex contention
+  - [x] Priority inheritance on mutex contention
+    - [x] `inherited_priority: Option<u8>` on Task struct, `effective_priority()` considers it
+    - [x] `sched::boost_priority()` / `sched::set_inherited_priority()` for PI donation/clear
+    - [x] PI futex: `futex_lock_pi()` / `futex_unlock_pi()` with owner tracking + waiter queues
+    - [x] Futex word format: bits 0-29 = owner TID, bit 30 = WAITERS flag
+    - [x] Highest-priority waiter gets ownership on unlock
+    - [x] Multi-lock priority recalculation on unlock (handles multiple PI locks per task)
+    - [x] `SYS_FUTEX_LOCK_PI` (212), `SYS_FUTEX_UNLOCK_PI` (213) syscalls
+    - [x] Self-test: high-prio task boosts low-prio lock holder, priority restored on unlock
   - [x] Interactive task detection (I/O-blocking tasks get small priority boost)
     - [x] Per-task EWMA burst tracking (fixed-point x8, α=1/8)
     - [x] Tasks with avg burst < 5 ticks (50ms) get +2 priority boost

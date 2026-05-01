@@ -512,6 +512,9 @@ extern "C" fn kmain() -> ! {
     static HELLO_ELF: &[u8] = include_bytes!(
         "../../userspace/hello/target/x86_64-unknown-none/release/hello"
     );
+    static TICKER_ELF: &[u8] = include_bytes!(
+        "../../userspace/ticker/target/x86_64-unknown-none/release/ticker"
+    );
 
     // Write embedded binaries to the VFS so init can spawn them.
     if let Err(e) = fs::Vfs::mkdir("/bin") {
@@ -522,6 +525,11 @@ extern "C" fn kmain() -> ! {
     } else {
         serial_println!("[init] Installed /bin/hello ({} bytes)", HELLO_ELF.len());
     }
+    if let Err(e) = fs::Vfs::write_file("/bin/ticker", TICKER_ELF) {
+        serial_println!("[init] WARNING: failed to write /bin/ticker: {:?}", e);
+    } else {
+        serial_println!("[init] Installed /bin/ticker ({} bytes)", TICKER_ELF.len());
+    }
 
     // Create /etc directory and write a default service list.
     // Init reads this at startup to auto-register services.
@@ -530,7 +538,7 @@ extern "C" fn kmain() -> ! {
     }
     if let Err(e) = fs::Vfs::write_file(
         "/etc/services",
-        b"# Startup services (one per line)\n# Format: /path/to/elf [depends:dep1,dep2]\n/bin/hello\n",
+        b"# Startup services (one per line)\n# Format: /path/to/elf [depends:dep1,dep2]\n/bin/ticker\n",
     ) {
         serial_println!("[init] Note: /etc/services write: {:?}", e);
     } else {

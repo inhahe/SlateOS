@@ -9,6 +9,7 @@ members = [
 exclude = [
     "userspace/init",
     "userspace/hello",
+    "userspace/ticker",
 ]
 
 [workspace.lints.clippy]

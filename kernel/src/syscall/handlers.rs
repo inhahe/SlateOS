@@ -1999,3 +1999,281 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 
     SyscallResult::ok(0)
 }
+
+// ---------------------------------------------------------------------------
+// Networking handlers (800–999)
+// ---------------------------------------------------------------------------
+
+/// `SYS_TCP_CONNECT` — open a TCP connection.
+///
+/// `arg0`: IPv4 address as u32 (network byte order).
+/// `arg1`: remote port.
+pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
+    use crate::net::interface::Ipv4Addr;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let ip = Ipv4Addr::from_u32(args.arg0 as u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let port = args.arg1 as u16;
+
+    if port == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    match crate::net::tcp::connect(ip, port) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TCP_SEND` — send data on a TCP socket.
+///
+/// `arg0`: socket handle.
+/// `arg1`: pointer to data.
+/// `arg2`: data length.
+pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let ptr = args.arg1 as *const u8;
+    let len = args.arg2 as usize;
+
+    if ptr.is_null() && len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let data = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: Caller guarantees ptr valid for len bytes.
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    };
+
+    match crate::net::tcp::send(handle, data) {
+        Ok(()) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(len as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TCP_RECV` — receive data from a TCP socket (blocking).
+///
+/// `arg0`: socket handle.
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Use blocking read with a generous timeout (~5 seconds at 100Hz).
+    match crate::net::tcp::read_blocking(handle, 500) {
+        Ok(data) => {
+            if data.is_empty() {
+                // Connection closed — EOF.
+                return SyscallResult::ok(0);
+            }
+            let copy_len = data.len().min(buf_cap);
+            if copy_len > 0 {
+                // SAFETY: buf_ptr valid for buf_cap bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        buf_ptr,
+                        copy_len,
+                    );
+                }
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(copy_len as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TCP_CLOSE` — close a TCP socket.
+///
+/// `arg0`: socket handle.
+pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+
+    match crate::net::tcp::close(handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_BIND` — bind a UDP socket to a local port.
+///
+/// `arg0`: local port.
+pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_truncation)]
+    let port = args.arg0 as u16;
+
+    if port == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    match crate::net::udp::bind(port) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_SEND` — send a UDP datagram.
+///
+/// `arg0`: socket handle (for source port) or 0 for ephemeral.
+/// `arg1`: destination IPv4 address (u32, network byte order).
+/// `arg2`: destination port.
+/// `arg3`: pointer to data.
+/// `arg4`: data length.
+pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
+    use crate::net::interface::Ipv4Addr;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let _handle = args.arg0 as usize;
+    #[allow(clippy::cast_possible_truncation)]
+    let dst_ip = Ipv4Addr::from_u32(args.arg1 as u32);
+    #[allow(clippy::cast_possible_truncation)]
+    let dst_port = args.arg2 as u16;
+    let data_ptr = args.arg3 as *const u8;
+    let data_len = args.arg4 as usize;
+
+    if dst_port == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if data_ptr.is_null() && data_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: Caller guarantees ptr valid for data_len bytes.
+        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    };
+
+    // Use an ephemeral source port based on the handle, or a default.
+    // The UDP send function takes a source port directly.
+    let src_port: u16 = if _handle == 0 { 49152 } else {
+        // Look up the bound port from the socket handle.
+        // For simplicity, use 49152 + handle as ephemeral.
+        #[allow(clippy::cast_possible_truncation)]
+        let p = 49152u16.saturating_add(_handle as u16);
+        p
+    };
+
+    match crate::net::udp::send(src_port, dst_ip, dst_port, data) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_RECV` — receive a UDP datagram (non-blocking).
+///
+/// `arg0`: socket handle.
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+/// `arg3`: pointer to 6-byte source address output.
+pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+    let src_ptr = args.arg3 as *mut u8;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    match crate::net::udp::recv(handle) {
+        Some(datagram) => {
+            let copy_len = datagram.data.len().min(buf_cap);
+            if copy_len > 0 && !buf_ptr.is_null() {
+                // SAFETY: buf_ptr valid for buf_cap bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        datagram.data.as_ptr(),
+                        buf_ptr,
+                        copy_len,
+                    );
+                }
+            }
+
+            // Write source address info if pointer provided.
+            if !src_ptr.is_null() {
+                // SAFETY: src_ptr valid for 6 bytes.
+                unsafe {
+                    // IPv4 address (4 bytes).
+                    core::ptr::copy_nonoverlapping(
+                        datagram.src_ip.0.as_ptr(),
+                        src_ptr,
+                        4,
+                    );
+                    // Source port (u16 LE, 2 bytes).
+                    let port_bytes = datagram.src_port.to_le_bytes();
+                    core::ptr::copy_nonoverlapping(
+                        port_bytes.as_ptr(),
+                        src_ptr.add(4),
+                        2,
+                    );
+                }
+            }
+
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(copy_len as i64)
+        }
+        None => SyscallResult::err(KernelError::WouldBlock),
+    }
+}
+
+/// `SYS_UDP_CLOSE` — close a UDP socket.
+///
+/// `arg0`: socket handle.
+pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    crate::net::udp::close(handle);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.
+///
+/// `arg0`: pointer to hostname string.
+/// `arg1`: hostname length.
+/// `arg2`: pointer to 4-byte output buffer for IPv4 address.
+pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
+    let name_ptr = args.arg0 as *const u8;
+    let name_len = args.arg1 as usize;
+    let out_ptr = args.arg2 as *mut u8;
+
+    if name_ptr.is_null() || name_len == 0 || out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // SAFETY: Caller guarantees pointers are valid.
+    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len.min(253)) };
+    let name = match core::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::net::dns::resolve(name) {
+        Ok(ip) => {
+            // SAFETY: out_ptr is valid for 4 bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(ip.0.as_ptr(), out_ptr, 4);
+            }
+            SyscallResult::ok(0)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}

@@ -9,11 +9,11 @@ Status key: `[ ]` not started, `[-]` in progress, `[x]` done, `[~]` deferred
 _No dependencies. Do this first._
 
 - [ ] Choose a project name
-- [ ] Set up git repo, CI, build system (cargo workspace for kernel)
-- [ ] Set up QEMU/VirtualBox dev loop (edit on Windows, cross-compile, boot in VM)
-- [ ] Set up Rust cross-compilation (`x86_64-unknown-none` target)
-- [ ] Choose and configure bootloader (Limine or UEFI via `uefi` crate)
-- [ ] Write CLAUDE.md / coding standards for AI-assisted development
+- [x] Set up git repo, CI, build system (cargo workspace for kernel)
+- [x] Set up QEMU/VirtualBox dev loop (edit on Windows, cross-compile, boot in VM)
+- [x] Set up Rust cross-compilation (`x86_64-unknown-none` target)
+- [x] Choose and configure bootloader (Limine or UEFI via `uefi` crate)
+- [x] Write CLAUDE.md / coding standards for AI-assisted development
 - [ ] Set up benchmark infrastructure (for measuring performance as the OS grows)
 - [ ] Integrate fastpy compiler into build system (Python AOT → native executables for OS components)
 

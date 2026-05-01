@@ -587,6 +587,98 @@ pub const SYS_FS_STAT: u64 = 606;
 pub const FS_DIR_ENTRY_SIZE: usize = 264;
 
 // ---------------------------------------------------------------------------
+// Networking syscalls (800–999)
+// ---------------------------------------------------------------------------
+
+/// Open a TCP connection to a remote host.
+///
+/// `arg0`: IPv4 address as u32 (network byte order: `a.b.c.d` →
+///         `(a << 24) | (b << 16) | (c << 8) | d`).
+/// `arg1`: remote port (0–65535).
+///
+/// Performs a blocking TCP 3-way handshake.
+///
+/// Returns: socket handle on success, negative error on failure.
+pub const SYS_TCP_CONNECT: u64 = 800;
+
+/// Send data on a TCP socket.
+///
+/// `arg0`: socket handle.
+/// `arg1`: pointer to data buffer.
+/// `arg2`: data length.
+///
+/// Returns: number of bytes sent, or negative error.
+pub const SYS_TCP_SEND: u64 = 801;
+
+/// Receive data from a TCP socket (blocking).
+///
+/// `arg0`: socket handle.
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+///
+/// Blocks until data is available or the connection closes.
+///
+/// Returns: number of bytes received (0 = EOF), or negative error.
+pub const SYS_TCP_RECV: u64 = 802;
+
+/// Close a TCP socket.
+///
+/// `arg0`: socket handle.
+///
+/// Sends FIN and releases resources.
+///
+/// Returns: 0 on success.
+pub const SYS_TCP_CLOSE: u64 = 803;
+
+/// Bind a UDP socket to a local port.
+///
+/// `arg0`: local port (0–65535).
+///
+/// Returns: socket handle on success, negative error on failure.
+pub const SYS_UDP_BIND: u64 = 810;
+
+/// Send a UDP datagram.
+///
+/// `arg0`: socket handle (for source port) OR 0 (use ephemeral port).
+/// `arg1`: destination IPv4 address (u32, network byte order).
+/// `arg2`: destination port.
+/// `arg3`: pointer to data buffer.
+/// `arg4`: data length.
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_UDP_SEND: u64 = 811;
+
+/// Receive a UDP datagram (non-blocking).
+///
+/// `arg0`: socket handle.
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+/// `arg3`: pointer to 6-byte source address output:
+///         `[0..4]` = source IPv4 (network byte order),
+///         `[4..6]` = source port (little-endian u16).
+///
+/// Returns: number of bytes received, or `WouldBlock` if no datagrams.
+pub const SYS_UDP_RECV: u64 = 812;
+
+/// Close a UDP socket.
+///
+/// `arg0`: socket handle.
+///
+/// Returns: 0 on success.
+pub const SYS_UDP_CLOSE: u64 = 813;
+
+/// Resolve a hostname to an IPv4 address via DNS.
+///
+/// `arg0`: pointer to hostname string.
+/// `arg1`: hostname length.
+/// `arg2`: pointer to 4-byte output buffer for the IPv4 address.
+///
+/// Performs a blocking DNS query (UDP, ~2s timeout).
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_DNS_RESOLVE: u64 = 820;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

@@ -37,6 +37,9 @@ use super::number::{
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
+    SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
+    SYS_DNS_RESOLVE,
     SYS_YIELD,
 };
 use super::handlers;
@@ -219,6 +222,17 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_MKDIR as usize] = Some(handlers::sys_fs_mkdir);
     handlers[SYS_FS_RMDIR as usize] = Some(handlers::sys_fs_rmdir);
     handlers[SYS_FS_STAT as usize] = Some(handlers::sys_fs_stat);
+
+    // Networking (800–999).
+    handlers[SYS_TCP_CONNECT as usize] = Some(handlers::sys_tcp_connect);
+    handlers[SYS_TCP_SEND as usize] = Some(handlers::sys_tcp_send);
+    handlers[SYS_TCP_RECV as usize] = Some(handlers::sys_tcp_recv);
+    handlers[SYS_TCP_CLOSE as usize] = Some(handlers::sys_tcp_close);
+    handlers[SYS_UDP_BIND as usize] = Some(handlers::sys_udp_bind);
+    handlers[SYS_UDP_SEND as usize] = Some(handlers::sys_udp_send);
+    handlers[SYS_UDP_RECV as usize] = Some(handlers::sys_udp_recv);
+    handlers[SYS_UDP_CLOSE as usize] = Some(handlers::sys_udp_close);
+    handlers[SYS_DNS_RESOLVE as usize] = Some(handlers::sys_dns_resolve);
 
     SyscallTable {
         handlers,

@@ -61,7 +61,10 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [ ] Per-CPU run queues
   - [ ] Work stealing from longest queue when idle (prefer same NUMA node)
   - [ ] Priority inheritance on mutex contention
-  - [ ] Interactive task detection (I/O-blocking tasks get small priority boost)
+  - [x] Interactive task detection (I/O-blocking tasks get small priority boost)
+    - [x] Per-task EWMA burst tracking (fixed-point x8, α=1/8)
+    - [x] Tasks with avg burst < 5 ticks (50ms) get +2 priority boost
+    - [x] Boost applied on wake/yield/resume, decays with long bursts
   - [ ] Runtime-tunable time slice durations
 - [x] Process/thread pause, resume, priority change while running
   - [x] sched::suspend/resume for task pause/unpause

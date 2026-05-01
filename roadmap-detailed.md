@@ -439,7 +439,7 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 - [ ] User can set per-app I/O priority (in settings and while running)
 - [ ] Apps can request I/O priority (with capability)
 - [ ] User can override app-set priorities
-- [ ] Prevent heavy I/O from making system unusable (small ops pass through)
+- [x] Prevent heavy I/O from making system unusable (small ops pass through) — budget_cost: ≤16 sectors costs 1 unit, small-I/O gets 128 ops/round vs bulk's 2
 
 ### 1.8 Interrupt Handling
 

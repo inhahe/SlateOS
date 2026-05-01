@@ -156,7 +156,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
   - Programs without `mem.jit` cannot create executable pages outside their initial .text mapping
   - Programs with `mem.jit` can use SYS_MPROTECT to toggle writable↔executable on anonymous mappings
   - Required by: language runtimes (V8/JavaScript, LuaJIT, JVM HotSpot, .NET RyuJIT, CPython JIT), browser engines, game engines with shader JIT
-- [ ] Audit: no kernel mappings with both write and execute permissions
+- [x] Audit: no kernel mappings with both write and execute permissions
 
 #### Swap
 - [x] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD)

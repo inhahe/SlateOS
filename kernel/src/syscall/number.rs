@@ -230,6 +230,25 @@ pub const SYS_SCHED_SET_PROFILE: u64 = 53;
 /// manually tuned.
 pub const SYS_SCHED_GET_PROFILE: u64 = 54;
 
+/// Read a kernel tunable parameter (sysctl-like interface).
+///
+/// `arg0`: parameter ID (e.g., 0 = mm.max_stack_frames).
+///
+/// Returns: parameter value on success, `InvalidArgument` if the ID
+/// is unknown.
+pub const SYS_SYSCTL_GET: u64 = 60;
+
+/// Write a kernel tunable parameter.
+///
+/// `arg0`: parameter ID.
+/// `arg1`: new value.
+///
+/// The value must be within the parameter's valid range.
+///
+/// Returns: the old value on success, `InvalidArgument` if the ID is
+/// unknown or the value is out of range.
+pub const SYS_SYSCTL_SET: u64 = 61;
+
 /// Debug print (temporary — write a byte string to serial).
 ///
 /// `arg0`: pointer to bytes.

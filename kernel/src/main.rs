@@ -76,6 +76,7 @@ mod sched;
 mod security;
 mod serial;
 mod syscall;
+mod sysctl;
 mod virtio;
 
 // ---------------------------------------------------------------------------
@@ -214,6 +215,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Scheduler self-test failed: {}", e);
         cpu::halt_loop();
     }
+
+    // Step 9b: Initialize sysctl parameter registry.
+    // Registers tunable kernel parameters for memory management,
+    // scheduling, and other subsystems.
+    sysctl::init();
+    sysctl::self_test();
 
     // Step 10: Initialize IPC subsystem.
     // Channels are the primary IPC mechanism — structured message

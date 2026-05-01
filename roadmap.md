@@ -48,8 +48,13 @@ _The minimum kernel that can run a single userspace process._
   - [x] Per-process VMA list in PCB for tracking lazy regions
   - [x] Page fault handler resolves user-space lazy faults: VMA lookup → frame alloc → zero → map → TLB flush
   - [x] SYS_MUNMAP cleans up VMA entries for lazy regions
-- [ ] Runtime-tunable memory parameters via sysctl-like interface
-- [ ] Workload profiles (Desktop, Database, Development, Gaming) as presets
+- [x] Runtime-tunable memory parameters via sysctl-like interface
+  - [x] `sysctl` module: flat registry of named parameters with ID, value, range, default
+  - [x] 6 initial parameters: mm.max_stack_frames, mm.lazy_default, mm.oom_policy, mm.zero_on_alloc, sched.interactive_threshold, sched.interactive_boost
+  - [x] SYS_SYSCTL_GET (60), SYS_SYSCTL_SET (61) syscalls
+  - [x] mm.lazy_default wired to SYS_MMAP (system-wide lazy allocation default)
+  - [x] Self-test: read/write/range-check/unknown-ID
+- [ ] Workload profiles (Desktop, Database, Development, Gaming) as presets for memory
 
 ### 1.3 Scheduler
 _Define scheduler trait interface first, implement one scheduler behind it._

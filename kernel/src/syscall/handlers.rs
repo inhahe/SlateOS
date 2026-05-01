@@ -399,8 +399,18 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
     let vaddr_hint = args.arg0;
     let size = args.arg1;
-    let flags = args.arg2;
+    let mut flags = args.arg2;
     let phys_addr = args.arg3;
+
+    // If the system-wide default is lazy allocation and the caller
+    // didn't explicitly specify MAP_LAZY or MAP_MMIO, apply lazy as
+    // the default.  MMIO mappings are always committed (they must map
+    // specific physical addresses).
+    if flags & (MAP_LAZY | MAP_MMIO) == 0 {
+        if crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1) {
+            flags |= MAP_LAZY;
+        }
+    }
 
     // Validate size.
     if size == 0 {
@@ -3253,6 +3263,46 @@ pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
             #[allow(clippy::cast_possible_wrap)]
             {
                 SyscallResult::ok(profile as u8 as i64)
+            }
+        }
+        None => SyscallResult::err(KernelError::InvalidArgument),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sysctl — kernel parameter registry (60–69)
+// ---------------------------------------------------------------------------
+
+/// `SYS_SYSCTL_GET` — read a kernel tunable parameter.
+///
+/// `arg0`: parameter ID.
+pub fn sys_sysctl_get(args: &SyscallArgs) -> SyscallResult {
+    let id = args.arg0 as u16;
+
+    match crate::sysctl::get(id) {
+        Some(value) => {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                SyscallResult::ok(value as i64)
+            }
+        }
+        None => SyscallResult::err(KernelError::InvalidArgument),
+    }
+}
+
+/// `SYS_SYSCTL_SET` — write a kernel tunable parameter.
+///
+/// `arg0`: parameter ID.
+/// `arg1`: new value.
+pub fn sys_sysctl_set(args: &SyscallArgs) -> SyscallResult {
+    let id = args.arg0 as u16;
+    let value = args.arg1;
+
+    match crate::sysctl::set(id, value) {
+        Some(old_value) => {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                SyscallResult::ok(old_value as i64)
             }
         }
         None => SyscallResult::err(KernelError::InvalidArgument),

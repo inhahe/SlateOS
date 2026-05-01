@@ -24,7 +24,8 @@ use super::number::{
     SYS_CONSOLE_WRITE, SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY,
     SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
     SYS_CLOCK_MONOTONIC,
-    SYS_DEBUG_PRINT, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
+    SYS_DEBUG_PRINT, SYS_LOG_READ,
+    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
     SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
@@ -214,6 +215,7 @@ const fn build_v1_table() -> SyscallTable {
     // Console I/O (100–109).
     handlers[SYS_CONSOLE_WRITE as usize] = Some(handlers::sys_console_write);
     handlers[SYS_CONSOLE_READ_CHAR as usize] = Some(handlers::sys_console_read_char);
+    handlers[SYS_LOG_READ as usize] = Some(handlers::sys_log_read);
 
     // Security (400–499).
     handlers[SYS_CAP_QUERY as usize] = Some(handlers::sys_cap_query);

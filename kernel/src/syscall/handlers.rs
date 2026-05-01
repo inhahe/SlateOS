@@ -2003,6 +2003,44 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Logging handlers (102)
+// ---------------------------------------------------------------------------
+
+/// `SYS_LOG_READ` — read kernel log entries from the ring buffer.
+///
+/// Returns JSON-lines in the output buffer.  Each entry is a single
+/// JSON object followed by `\n`.
+///
+/// `arg0`: after_seq — read entries newer than this sequence number.
+///         Pass `u64::MAX` to start from the oldest available.
+/// `arg1`: pointer to output buffer.
+/// `arg2`: buffer capacity in bytes.
+///
+/// Returns: entry count in `value`, newest sequence in `value2`.
+pub fn sys_log_read(args: &SyscallArgs) -> SyscallResult {
+    let after_seq = args.arg0;
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+
+    if buf_ptr.is_null() || buf_cap == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate the output buffer.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) };
+
+    let (count, newest_seq) = crate::klog::read_logs(after_seq, buf);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok2(count as i64, newest_seq as i64)
+}
+
+// ---------------------------------------------------------------------------
 // Filesystem handlers (600–799)
 // ---------------------------------------------------------------------------
 

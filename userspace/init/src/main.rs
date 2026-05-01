@@ -49,6 +49,7 @@ const SYS_FS_LIST_DIR: u64 = 603;
 const SYS_FS_MKDIR: u64 = 604;
 const SYS_FS_RMDIR: u64 = 605;
 const SYS_FS_STAT: u64 = 606;
+const SYS_LOG_READ: u64 = 102;
 
 /// Directory entry size from kernel (name[256] + size[4] + type[1] + pad[3]).
 const FS_DIR_ENTRY_SIZE: usize = 264;
@@ -105,6 +106,26 @@ fn syscall2(nr: u64, arg0: u64, arg1: u64) -> i64 {
             in("rax") nr,
             in("rdi") arg0,
             in("rsi") arg1,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Issue a syscall with 3 arguments.
+#[inline(always)]
+fn syscall3(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") nr,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,
@@ -694,6 +715,39 @@ fn cmd_spawn(args: &[u8]) {
     print("\n");
 }
 
+/// Show recent kernel log entries (JSON-lines).
+fn cmd_logs() {
+    // Read log entries from the kernel ring buffer.
+    // Use u64::MAX as after_seq to read from the oldest available.
+    let mut buf = [0u8; 4096];
+    let ret = syscall3(
+        SYS_LOG_READ,
+        u64::MAX, // Read from beginning.
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    );
+
+    if ret < 0 {
+        print("logs: error ");
+        print_i64(ret);
+        print("\n");
+        return;
+    }
+
+    let count = ret as u64;
+    print("Kernel log (");
+    print_u64(count);
+    print(" entries):\n");
+
+    // Find the actual data length (scan for last non-zero byte).
+    let data_len = buf.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
+    if data_len > 0 {
+        if let Some(data) = buf.get(..data_len) {
+            console_write(data);
+        }
+    }
+}
+
 /// Execute a command.
 fn execute(line: &[u8]) {
     let trimmed = trim(line);
@@ -717,6 +771,7 @@ fn execute(line: &[u8]) {
         print("  spawn <path> - run an ELF program\n");
         print("  pid         - show task ID\n");
         print("  uptime      - show time since boot\n");
+        print("  logs        - show kernel log entries\n");
         print("  exit        - shut down\n");
     } else if bytes_eq(cmd, b"exit") {
         print("Goodbye.\n");
@@ -763,6 +818,8 @@ fn execute(line: &[u8]) {
             print_u64(ms);
             print("s\n");
         }
+    } else if bytes_eq(cmd, b"logs") {
+        cmd_logs();
     } else {
         print("Unknown command: ");
         console_write(cmd);

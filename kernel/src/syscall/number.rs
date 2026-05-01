@@ -179,6 +179,24 @@ pub const TIMER_PERIODIC: u64 = 1 << 0;
 /// removed or capability-gated once a proper logging service exists.
 pub const SYS_DEBUG_PRINT: u64 = 99;
 
+/// Read kernel log entries (JSON-lines) from the ring buffer.
+///
+/// `arg0`: sequence number — read entries newer than this value.
+///         Pass `u64::MAX` (0xFFFF_FFFF_FFFF_FFFF) to start from
+///         the oldest available entry.
+/// `arg1`: pointer to output buffer.
+/// `arg2`: buffer capacity in bytes.
+///
+/// Returns: number of entries read (in `value`).  The newest
+/// sequence number is returned in `value2` — pass it as `arg0`
+/// on the next call to read only new entries.
+///
+/// Each entry is a single JSON object followed by `\n`:
+/// ```json
+/// {"t":1234,"l":"info","m":"sched","msg":"Task 5 spawned"}
+/// ```
+pub const SYS_LOG_READ: u64 = 102;
+
 /// Write bytes to the framebuffer console.
 ///
 /// `arg0`: pointer to byte buffer.

@@ -63,6 +63,7 @@ mod idt;
 mod ioapic;
 mod ipc;
 mod keyboard;
+mod klog;
 mod kshell;
 mod limine;
 mod mm;
@@ -294,6 +295,14 @@ extern "C" fn kmain() -> ! {
     // ambient authority.
     if let Err(e) = cap::self_test() {
         serial_println!("FATAL: Capability system self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // Step 17b: Initialize structured logging subsystem.
+    // JSON-lines log entries go to serial and a kernel ring buffer.
+    // Must be after APIC init (uses tick_count for timestamps).
+    if let Err(e) = klog::self_test() {
+        serial_println!("FATAL: Structured logging self-test failed: {}", e);
         cpu::halt_loop();
     }
 

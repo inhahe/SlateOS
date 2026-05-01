@@ -2387,6 +2387,7 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
             let type_byte = match entry.entry_type {
                 crate::fs::EntryType::File => 0u8,
                 crate::fs::EntryType::Directory => 1u8,
+                crate::fs::EntryType::Symlink => 3u8,
                 // Skip volume labels — they're metadata, not real entries.
                 crate::fs::EntryType::VolumeLabel => continue,
             };
@@ -2529,6 +2530,7 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::File => 0u8,
             crate::fs::EntryType::Directory => 1u8,
             crate::fs::EntryType::VolumeLabel => 2u8,
+            crate::fs::EntryType::Symlink => 3u8,
         };
         core::ptr::write(out_ptr.add(8), type_byte);
     }

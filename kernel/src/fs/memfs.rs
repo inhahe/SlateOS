@@ -24,7 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, Timestamp};
 
 // ---------------------------------------------------------------------------
 // Node types
@@ -41,18 +41,52 @@ enum MemFsNodeKind {
 /// A single node in the memory filesystem tree.
 struct MemFsNode {
     kind: MemFsNodeKind,
+    /// Timestamps (nanoseconds since boot).
+    created_ns: Timestamp,
+    modified_ns: Timestamp,
+    accessed_ns: Timestamp,
+    changed_ns: Timestamp,
+    /// Ownership.
+    uid: u32,
+    gid: u32,
+    /// Unix permission bits (rwxrwxrwx).
+    permissions: u16,
+    /// File attribute flags.
+    attributes: FileAttr,
+    /// Extended attributes (key-value pairs).
+    xattrs: Vec<(String, Vec<u8>)>,
 }
 
 impl MemFsNode {
     fn new_file(data: Vec<u8>) -> Self {
+        let now = crate::hpet::elapsed_ns();
         Self {
             kind: MemFsNodeKind::File(data),
+            created_ns: now,
+            modified_ns: now,
+            accessed_ns: now,
+            changed_ns: now,
+            uid: 0,
+            gid: 0,
+            permissions: 0o644,
+            attributes: FileAttr::NONE,
+            xattrs: Vec::new(),
         }
     }
 
     fn new_dir() -> Self {
+        let now = crate::hpet::elapsed_ns();
         Self {
             kind: MemFsNodeKind::Dir(BTreeMap::new()),
+            created_ns: now,
+            modified_ns: now,
+            accessed_ns: now,
+            changed_ns: now,
+            uid: 0,
+            gid: 0,
+            permissions: 0o755,
+            attributes: FileAttr::NONE,
+            xattrs: Vec::new(),
         }
     }
 
@@ -110,6 +144,49 @@ impl MemFsNode {
                 EntryType::File
             },
             size: self.size(),
+        }
+    }
+
+    /// Convert to rich FileMeta.
+    fn to_file_meta(&self) -> FileMeta {
+        FileMeta {
+            size: self.size(),
+            entry_type: if self.is_dir() {
+                EntryType::Directory
+            } else {
+                EntryType::File
+            },
+            created_ns: self.created_ns,
+            modified_ns: self.modified_ns,
+            accessed_ns: self.accessed_ns,
+            changed_ns: self.changed_ns,
+            uid: self.uid,
+            gid: self.gid,
+            permissions: self.permissions,
+            attributes: self.attributes,
+            xattrs: self.xattrs.clone(),
+            hash: Vec::new(),
+        }
+    }
+
+    /// Update modification and change timestamps to now.
+    fn touch_modified(&mut self) {
+        let now = crate::hpet::elapsed_ns();
+        self.modified_ns = now;
+        self.changed_ns = now;
+    }
+
+    /// Update access timestamp with relatime semantics.
+    ///
+    /// Only updates if accessed_ns < modified_ns or if more than
+    /// one day has elapsed since last access.
+    fn touch_accessed_relatime(&mut self) {
+        let now = crate::hpet::elapsed_ns();
+        // Relatime: only update if atime < mtime or older than 1 day.
+        if self.accessed_ns < self.modified_ns
+            || now.saturating_sub(self.accessed_ns) > 86_400_000_000_000
+        {
+            self.accessed_ns = now;
         }
     }
 }
@@ -218,9 +295,17 @@ impl FileSystem for MemFs {
     }
 
     fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
-        let node = self.resolve(path)?;
-        let data = node.file_data().ok_or(KernelError::IsADirectory)?;
-        Ok(data.clone())
+        // Two-phase: resolve immutably to get data, then update atime.
+        let data = {
+            let node = self.resolve(path)?;
+            let d = node.file_data().ok_or(KernelError::IsADirectory)?;
+            d.clone()
+        };
+        // Relatime: update access timestamp if stale.
+        if let Ok(node) = self.resolve_mut(path) {
+            node.touch_accessed_relatime();
+        }
+        Ok(data)
     }
 
     fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
@@ -245,23 +330,35 @@ impl FileSystem for MemFs {
 
         match children.get_mut(filename) {
             Some(existing) => {
-                // Overwrite existing file.
+                // Enforce attribute restrictions.
+                if existing.attributes.contains(FileAttr::IMMUTABLE) {
+                    return Err(KernelError::PermissionDenied);
+                }
                 if existing.is_dir() {
                     return Err(KernelError::IsADirectory);
+                }
+                // Append-only: reject full overwrites (use write_at for appends).
+                if existing.attributes.contains(FileAttr::APPEND_ONLY) {
+                    return Err(KernelError::PermissionDenied);
                 }
                 let file_data = existing.file_data_mut()
                     .ok_or(KernelError::IsADirectory)?;
                 file_data.clear();
                 file_data.extend_from_slice(data);
+                // NLL: file_data's last use is above; existing is free here.
+                drop(file_data);
+                existing.touch_modified();
             }
             None => {
-                // Create new file.
+                // Create new file (constructor sets timestamps to now).
                 children.insert(
                     String::from(filename),
                     MemFsNode::new_file(data.to_vec()),
                 );
             }
         }
+        // NLL: children's last use is inside the match; parent is free here.
+        parent.touch_modified();
         Ok(())
     }
 
@@ -273,12 +370,19 @@ impl FileSystem for MemFs {
         if node.is_dir() {
             return Err(KernelError::IsADirectory);
         }
+        if node.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
         children.remove(filename);
+        parent.touch_modified();
         Ok(())
     }
 
     fn mkdir(&mut self, path: &str) -> KernelResult<()> {
         let (parent, dirname) = self.resolve_parent_mut(path)?;
+        if parent.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
         let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
 
         if children.contains_key(dirname) {
@@ -286,6 +390,7 @@ impl FileSystem for MemFs {
         }
 
         children.insert(String::from(dirname), MemFsNode::new_dir());
+        parent.touch_modified();
         Ok(())
     }
 
@@ -297,6 +402,9 @@ impl FileSystem for MemFs {
         if !node.is_dir() {
             return Err(KernelError::NotADirectory);
         }
+        if node.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
 
         // Must be empty.
         if let Some(grandchildren) = node.children() {
@@ -306,16 +414,23 @@ impl FileSystem for MemFs {
         }
 
         children.remove(dirname);
+        parent.touch_modified();
         Ok(())
     }
 
     fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
-        let node = self.resolve(path)?;
-        let data = node.file_data().ok_or(KernelError::IsADirectory)?;
-
-        let start = (offset as usize).min(data.len());
-        let end = (start.saturating_add(len)).min(data.len());
-        Ok(data.get(start..end).map_or_else(Vec::new, |s| s.to_vec()))
+        let result = {
+            let node = self.resolve(path)?;
+            let data = node.file_data().ok_or(KernelError::IsADirectory)?;
+            let start = (offset as usize).min(data.len());
+            let end = (start.saturating_add(len)).min(data.len());
+            data.get(start..end).map_or_else(Vec::new, |s| s.to_vec())
+        };
+        // Relatime: update access timestamp if stale.
+        if let Ok(node) = self.resolve_mut(path) {
+            node.touch_accessed_relatime();
+        }
+        Ok(result)
     }
 
     fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
@@ -329,6 +444,21 @@ impl FileSystem for MemFs {
             Err(e) => return Err(e),
         };
 
+        // Enforce attribute restrictions before borrowing file_data.
+        let attrs = node.attributes;
+        if attrs.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+        if !node.is_file() {
+            return Err(KernelError::IsADirectory);
+        }
+        // Check append-only: get current length before mutable borrow.
+        let current_len = node.size() as usize;
+        if attrs.contains(FileAttr::APPEND_ONLY) && (offset as usize) != current_len {
+            return Err(KernelError::PermissionDenied);
+        }
+
+        // Now perform the write.
         let file_data = node.file_data_mut().ok_or(KernelError::IsADirectory)?;
 
         let start = offset as usize;
@@ -343,13 +473,23 @@ impl FileSystem for MemFs {
             dest.copy_from_slice(data);
         }
 
+        // Update timestamps (file_data borrow released by NLL here).
+        drop(file_data);
+        node.touch_modified();
         Ok(())
     }
 
     fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
+        // Check attributes before getting mutable data reference.
+        if node.attributes.contains(FileAttr::IMMUTABLE) || node.attributes.contains(FileAttr::APPEND_ONLY) {
+            return Err(KernelError::PermissionDenied);
+        }
         let file_data = node.file_data_mut().ok_or(KernelError::IsADirectory)?;
         file_data.resize(size as usize, 0);
+        // Update timestamps (file_data borrow released by NLL here).
+        drop(file_data);
+        node.touch_modified();
         Ok(())
     }
 
@@ -427,6 +567,103 @@ impl FileSystem for MemFs {
         let mut s = String::new();
         let _ = write!(s, "memfs: {} files, {} dirs, {} bytes", files, dirs, bytes);
         s
+    }
+
+    // --- Extended metadata operations ---
+
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        let node = self.resolve(path)?;
+        Ok(node.to_file_meta())
+    }
+
+    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+        let node = self.resolve_mut(path)?;
+        node.attributes = attrs;
+        node.changed_ns = crate::hpet::elapsed_ns();
+        Ok(())
+    }
+
+    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        let node = self.resolve_mut(path)?;
+        node.uid = uid;
+        node.gid = gid;
+        node.changed_ns = crate::hpet::elapsed_ns();
+        Ok(())
+    }
+
+    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+        let node = self.resolve_mut(path)?;
+        node.permissions = permissions;
+        node.changed_ns = crate::hpet::elapsed_ns();
+        Ok(())
+    }
+
+    fn set_times(
+        &mut self,
+        path: &str,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        let node = self.resolve_mut(path)?;
+        if accessed_ns != 0 {
+            node.accessed_ns = accessed_ns;
+        }
+        if modified_ns != 0 {
+            node.modified_ns = modified_ns;
+        }
+        Ok(())
+    }
+
+    fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        let node = self.resolve(path)?;
+        for (k, v) in &node.xattrs {
+            if k == key {
+                return Ok(v.clone());
+            }
+        }
+        Err(KernelError::NotFound)
+    }
+
+    fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        // Enforce max key length (255 bytes) and max value size (64 KiB).
+        if key.len() > 255 {
+            return Err(KernelError::InvalidArgument);
+        }
+        if value.len() > 65536 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let node = self.resolve_mut(path)?;
+        // Update existing or insert new.
+        let mut found = false;
+        for (k, v) in &mut node.xattrs {
+            if k == key {
+                *v = value.to_vec();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            node.xattrs.push((String::from(key), value.to_vec()));
+        }
+        node.changed_ns = crate::hpet::elapsed_ns();
+        Ok(())
+    }
+
+    fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
+        let node = self.resolve_mut(path)?;
+        let orig_len = node.xattrs.len();
+        node.xattrs.retain(|(k, _)| k != key);
+        if node.xattrs.len() == orig_len {
+            return Err(KernelError::NotFound);
+        }
+        node.changed_ns = crate::hpet::elapsed_ns();
+        Ok(())
+    }
+
+    fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
+        let node = self.resolve(path)?;
+        Ok(node.xattrs.iter().map(|(k, _)| k.clone()).collect())
     }
 }
 
@@ -578,6 +815,102 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   {}", stats);
     fs.remove("/a.txt")?;
     fs.remove("/b.txt")?;
+
+    // --- Metadata tests ---
+
+    // Test metadata timestamps are set.
+    fs.write_file("/meta.txt", b"metadata test")?;
+    let meta = fs.metadata("/meta.txt")?;
+    if meta.created_ns == 0 || meta.modified_ns == 0 || meta.accessed_ns == 0 {
+        crate::serial_println!("[memfs]   FAILED: timestamps not set");
+        return Err(KernelError::IoError);
+    }
+    if meta.entry_type != EntryType::File || meta.size != 13 {
+        crate::serial_println!("[memfs]   FAILED: metadata type/size mismatch");
+        return Err(KernelError::IoError);
+    }
+    if meta.permissions != 0o644 {
+        crate::serial_println!("[memfs]   FAILED: file permissions not 0644");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   metadata (timestamps, permissions): OK");
+
+    // Test set_permissions.
+    fs.set_permissions("/meta.txt", 0o755)?;
+    let meta2 = fs.metadata("/meta.txt")?;
+    if meta2.permissions != 0o755 {
+        crate::serial_println!("[memfs]   FAILED: permissions not updated");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   set_permissions: OK");
+
+    // Test set_owner.
+    fs.set_owner("/meta.txt", 1000, 1000)?;
+    let meta3 = fs.metadata("/meta.txt")?;
+    if meta3.uid != 1000 || meta3.gid != 1000 {
+        crate::serial_println!("[memfs]   FAILED: owner not updated");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   set_owner: OK");
+
+    // Test immutable attribute.
+    fs.set_attributes("/meta.txt", FileAttr::IMMUTABLE)?;
+    match fs.write_file("/meta.txt", b"should fail") {
+        Err(KernelError::PermissionDenied) => {
+            crate::serial_println!("[memfs]   immutable write rejected: OK");
+        }
+        _ => {
+            crate::serial_println!("[memfs]   FAILED: immutable write should fail");
+            return Err(KernelError::IoError);
+        }
+    }
+    match fs.remove("/meta.txt") {
+        Err(KernelError::PermissionDenied) => {
+            crate::serial_println!("[memfs]   immutable remove rejected: OK");
+        }
+        _ => {
+            crate::serial_println!("[memfs]   FAILED: immutable remove should fail");
+            return Err(KernelError::IoError);
+        }
+    }
+    // Clear immutable to clean up.
+    fs.set_attributes("/meta.txt", FileAttr::NONE)?;
+
+    // Test append-only attribute.
+    fs.set_attributes("/meta.txt", FileAttr::APPEND_ONLY)?;
+    match fs.truncate("/meta.txt", 0) {
+        Err(KernelError::PermissionDenied) => {
+            crate::serial_println!("[memfs]   append-only truncate rejected: OK");
+        }
+        _ => {
+            crate::serial_println!("[memfs]   FAILED: append-only truncate should fail");
+            return Err(KernelError::IoError);
+        }
+    }
+    fs.set_attributes("/meta.txt", FileAttr::NONE)?;
+
+    // Test extended attributes.
+    fs.set_xattr("/meta.txt", "user.tag", b"important")?;
+    let xval = fs.get_xattr("/meta.txt", "user.tag")?;
+    if xval.as_slice() != b"important" {
+        crate::serial_println!("[memfs]   FAILED: xattr value mismatch");
+        return Err(KernelError::IoError);
+    }
+    let xkeys = fs.list_xattrs("/meta.txt")?;
+    if xkeys.len() != 1 || xkeys[0] != "user.tag" {
+        crate::serial_println!("[memfs]   FAILED: xattr list mismatch");
+        return Err(KernelError::IoError);
+    }
+    fs.remove_xattr("/meta.txt", "user.tag")?;
+    let xkeys2 = fs.list_xattrs("/meta.txt")?;
+    if !xkeys2.is_empty() {
+        crate::serial_println!("[memfs]   FAILED: xattr not removed");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   extended attributes: OK");
+
+    // Clean up.
+    fs.remove("/meta.txt")?;
 
     crate::serial_println!("[memfs] Self-test PASSED");
     Ok(())

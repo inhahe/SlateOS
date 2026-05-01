@@ -22,6 +22,8 @@ pub enum EntryType {
     File,
     /// Directory.
     Directory,
+    /// Symbolic link.
+    Symlink,
     /// Volume label (FAT-specific, usually hidden).
     VolumeLabel,
 }
@@ -35,6 +37,190 @@ pub struct DirEntry {
     pub entry_type: EntryType,
     /// File size in bytes (0 for directories).
     pub size: u64,
+}
+
+// ---------------------------------------------------------------------------
+// File metadata
+// ---------------------------------------------------------------------------
+
+/// Bitflags for file attributes.
+///
+/// These are orthogonal to permissions — they control immutability
+/// and other special behaviors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileAttr(u32);
+
+#[allow(dead_code)]
+impl FileAttr {
+    /// No special attributes.
+    pub const NONE: Self = Self(0);
+    /// File cannot be modified, renamed, or deleted until cleared.
+    /// Only a privileged user (capability holder) can set or clear this.
+    pub const IMMUTABLE: Self = Self(1 << 0);
+    /// File can only be appended to, never overwritten or truncated.
+    /// Useful for log files.
+    pub const APPEND_ONLY: Self = Self(1 << 1);
+    /// File is hidden from normal directory listings.
+    pub const HIDDEN: Self = Self(1 << 2);
+    /// File is a system file (OS-managed, not user data).
+    pub const SYSTEM: Self = Self(1 << 3);
+
+    /// Combine two attribute sets (bitwise OR).
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Check if a specific attribute is set.
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    /// Raw bits for serialization.
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Construct from raw bits.
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+}
+
+/// Nanosecond timestamp (monotonic or wall-clock, depending on source).
+///
+/// 0 means "not set" or "unknown".
+pub type Timestamp = u64;
+
+/// One day in nanoseconds (for relatime threshold).
+const ONE_DAY_NS: u64 = 86_400_000_000_000;
+
+/// Rich file metadata beyond what [`DirEntry`] carries.
+///
+/// Filesystem implementations fill in what they can; unsupported
+/// fields stay at their defaults (0 / None / empty).
+///
+/// ## Timestamps
+///
+/// All timestamps are nanoseconds since boot (from HPET).  A value
+/// of 0 means "not available".  The VFS updates `accessed_ns` using
+/// **relatime** semantics: only if the current value is older than
+/// `modified_ns` or more than one day old.  This avoids the I/O
+/// cost of updating atime on every read.
+///
+/// ## Ownership
+///
+/// `uid` / `gid` follow standard Unix conventions (0 = root).
+/// Filesystems that don't support ownership (e.g., FAT) report 0/0.
+///
+/// ## Capabilities
+///
+/// `required_caps` lists capability types needed to access this file.
+/// This is checked by the VFS before allowing operations.
+///
+/// ## Extended attributes
+///
+/// Arbitrary key-value pairs stored alongside the file.  Maximum
+/// key length is 255 bytes, maximum value is 64 KiB (per design spec).
+#[derive(Debug, Clone)]
+pub struct FileMeta {
+    /// File size in bytes.
+    pub size: u64,
+    /// Entry type (file, directory, symlink, etc.).
+    pub entry_type: EntryType,
+
+    // --- Timestamps (nanoseconds since boot, 0 = not available) ---
+    /// Time the file was created.
+    pub created_ns: Timestamp,
+    /// Time the file was last modified (content change).
+    pub modified_ns: Timestamp,
+    /// Time the file was last accessed (read).
+    /// Updated with relatime semantics.
+    pub accessed_ns: Timestamp,
+    /// Time metadata was last changed (permissions, owner, etc.).
+    pub changed_ns: Timestamp,
+
+    // --- Ownership ---
+    /// Owner user ID (0 = root/system).
+    pub uid: u32,
+    /// Owner group ID (0 = root/system).
+    pub gid: u32,
+
+    // --- Permissions / attributes ---
+    /// Unix-style permission bits (rwxrwxrwx, 9 bits).
+    /// 0o755 = rwxr-xr-x.  0 = not applicable (e.g., FAT).
+    pub permissions: u16,
+    /// File attribute flags (immutable, append-only, etc.).
+    pub attributes: FileAttr,
+
+    // --- Extended attributes ---
+    /// Arbitrary key-value metadata pairs.
+    /// Keys are UTF-8 strings, values are byte vectors.
+    pub xattrs: Vec<(String, Vec<u8>)>,
+
+    // --- Content hash ---
+    /// Optional content hash (e.g., SHA-256).
+    /// Empty if not computed or not supported.
+    pub hash: Vec<u8>,
+}
+
+impl FileMeta {
+    /// Create a minimal metadata struct with only size and type set.
+    ///
+    /// All other fields are zeroed / empty.  Useful for filesystems
+    /// that don't track rich metadata (e.g., FAT, memfs).
+    pub fn minimal(entry_type: EntryType, size: u64) -> Self {
+        Self {
+            size,
+            entry_type,
+            created_ns: 0,
+            modified_ns: 0,
+            accessed_ns: 0,
+            changed_ns: 0,
+            uid: 0,
+            gid: 0,
+            permissions: 0,
+            attributes: FileAttr::NONE,
+            xattrs: Vec::new(),
+            hash: Vec::new(),
+        }
+    }
+
+    /// Create metadata with timestamps set to "now".
+    pub fn with_timestamps(entry_type: EntryType, size: u64) -> Self {
+        let now = crate::hpet::elapsed_ns();
+        Self {
+            size,
+            entry_type,
+            created_ns: now,
+            modified_ns: now,
+            accessed_ns: now,
+            changed_ns: now,
+            uid: 0,
+            gid: 0,
+            permissions: if entry_type == EntryType::Directory {
+                0o755
+            } else {
+                0o644
+            },
+            attributes: FileAttr::NONE,
+            xattrs: Vec::new(),
+            hash: Vec::new(),
+        }
+    }
+
+    /// Check if the access timestamp should be updated (relatime policy).
+    ///
+    /// Returns `true` if `accessed_ns` is older than `modified_ns`
+    /// or more than one day old.
+    pub fn should_update_atime(&self) -> bool {
+        let now = crate::hpet::elapsed_ns();
+        // Update if atime is older than mtime.
+        if self.accessed_ns < self.modified_ns {
+            return true;
+        }
+        // Update if atime is more than one day old.
+        now.saturating_sub(self.accessed_ns) > ONE_DAY_NS
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +365,88 @@ pub trait FileSystem: Send {
     /// can override to report cache statistics, internal counters, etc.
     fn debug_stats(&self) -> String {
         String::new()
+    }
+
+    // --- Extended metadata operations ---
+
+    /// Return rich metadata for a path.
+    ///
+    /// Default implementation builds a minimal [`FileMeta`] from `stat()`.
+    /// Filesystems that track timestamps, ownership, or xattrs should
+    /// override this.
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        let entry = self.stat(path)?;
+        Ok(FileMeta::minimal(entry.entry_type, entry.size))
+    }
+
+    /// Set file attributes (immutable, append-only, etc.).
+    ///
+    /// Default: not supported.
+    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+        let _ = (path, attrs);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Set ownership (uid/gid).
+    ///
+    /// Default: not supported.
+    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        let _ = (path, uid, gid);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Set Unix-style permission bits (rwxrwxrwx).
+    ///
+    /// Default: not supported.
+    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+        let _ = (path, permissions);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Update timestamps.
+    ///
+    /// Pass 0 for any timestamp to leave it unchanged.
+    /// Default: not supported.
+    fn set_times(
+        &mut self,
+        path: &str,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        let _ = (path, accessed_ns, modified_ns);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Get an extended attribute value by key.
+    ///
+    /// Default: not supported.
+    fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        let _ = (path, key);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Set an extended attribute.
+    ///
+    /// Default: not supported.
+    fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        let _ = (path, key, value);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Remove an extended attribute.
+    ///
+    /// Default: not supported.
+    fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
+        let _ = (path, key);
+        Err(KernelError::NotSupported)
+    }
+
+    /// List all extended attribute keys for a path.
+    ///
+    /// Default: empty list.
+    fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
+        let _ = path;
+        Ok(Vec::new())
     }
 }
 
@@ -457,6 +725,110 @@ impl Vfs {
         }
 
         names
+    }
+
+    // --- Extended metadata VFS methods ---
+
+    /// Get rich metadata for a path.
+    pub fn metadata(path: &str) -> KernelResult<FileMeta> {
+        validate_path(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.metadata(relative)
+    }
+
+    /// Set file attributes (immutable, append-only, hidden, system).
+    pub fn set_attributes(path: &str, attrs: FileAttr) -> KernelResult<()> {
+        validate_path(path)?;
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.set_attributes(relative, attrs)?;
+        }
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// Set ownership (uid/gid).
+    pub fn set_owner(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        validate_path(path)?;
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.set_owner(relative, uid, gid)?;
+        }
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// Set Unix-style permission bits.
+    pub fn set_permissions(path: &str, permissions: u16) -> KernelResult<()> {
+        validate_path(path)?;
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.set_permissions(relative, permissions)?;
+        }
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// Update timestamps (pass 0 to leave unchanged).
+    pub fn set_times(
+        path: &str,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        validate_path(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.set_times(relative, accessed_ns, modified_ns)
+        // No notify/journal — timestamp changes are metadata-only.
+    }
+
+    /// Get an extended attribute value.
+    pub fn get_xattr(path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        validate_path(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.get_xattr(relative, key)
+    }
+
+    /// Set an extended attribute.
+    pub fn set_xattr(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        validate_path(path)?;
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.set_xattr(relative, key, value)?;
+        }
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// Remove an extended attribute.
+    pub fn remove_xattr(path: &str, key: &str) -> KernelResult<()> {
+        validate_path(path)?;
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, path)?;
+            mp.fs.remove_xattr(relative, key)?;
+        }
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// List all extended attribute keys.
+    pub fn list_xattrs(path: &str) -> KernelResult<Vec<String>> {
+        validate_path(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, path)?;
+        mp.fs.list_xattrs(relative)
     }
 
     /// Return debug statistics for the filesystem mounted at `path`.

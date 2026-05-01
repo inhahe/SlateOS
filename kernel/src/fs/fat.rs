@@ -2120,6 +2120,7 @@ pub fn self_test() -> KernelResult<()> {
         let type_str = match entry.entry_type {
             EntryType::File => "FILE",
             EntryType::Directory => "DIR ",
+            EntryType::Symlink => "LINK",
             EntryType::VolumeLabel => "VOL ",
         };
         crate::serial_println!(

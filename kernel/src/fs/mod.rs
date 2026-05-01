@@ -34,4 +34,6 @@ pub mod notify;
 pub mod trash;
 pub mod vfs;
 
-pub use vfs::{DirEntry, EntryType, FileSystem, Vfs, validate_path};
+pub use vfs::{
+    DirEntry, EntryType, FileAttr, FileMeta, FileSystem, Timestamp, Vfs, validate_path,
+};

@@ -470,6 +470,7 @@ fn cmd_ls(args: &str) {
                 let type_indicator = match entry.entry_type {
                     crate::fs::EntryType::Directory => "<DIR>    ",
                     crate::fs::EntryType::File => "         ",
+                    crate::fs::EntryType::Symlink => "<LINK>   ",
                     crate::fs::EntryType::VolumeLabel => "<VOL>    ",
                 };
                 crate::console_println!(

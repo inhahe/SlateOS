@@ -14,7 +14,13 @@ _No dependencies. Do this first._
 - [x] Set up Rust cross-compilation (`x86_64-unknown-none` target)
 - [x] Choose and configure bootloader (Limine or UEFI via `uefi` crate)
 - [x] Write CLAUDE.md / coding standards for AI-assisted development
-- [ ] Set up benchmark infrastructure (for measuring performance as the OS grows)
+- [x] Set up benchmark infrastructure (for measuring performance as the OS grows)
+  - [x] TSC calibration via PIT channel 2 (~10ms reference)
+  - [x] rdtsc / rdtsc_serialized cycle-accurate timing
+  - [x] Benchmark runner with warmup, min/mean/max reporting
+  - [x] Standard kernel benchmarks: page alloc, heap alloc, compression
+  - [x] Baselines in bench/baselines.toml with Linux/Fuchsia references
+  - [x] Self-test verifying TSC frequency and conversion accuracy
 - [ ] Integrate fastpy compiler into build system (Python AOT → native executables for OS components)
 
 ---

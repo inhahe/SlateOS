@@ -107,6 +107,42 @@ impl Scheduler for PriorityRoundRobin {
 }
 
 // ---------------------------------------------------------------------------
+// Cache-line padding
+// ---------------------------------------------------------------------------
+
+/// Cache-line-padded wrapper to prevent false sharing on per-CPU data.
+///
+/// On x86_64, cache lines are 64 bytes.  When multiple CPUs each have
+/// their own slot in an array, without padding all slots that share a
+/// cache line will bounce between CPU caches on every write — a
+/// significant source of cross-CPU latency.
+///
+/// `CachePadded<T>` ensures each element occupies its own cache line.
+/// Implements `Deref` so `.store()`, `.load()`, `.swap()`, etc. work
+/// transparently through auto-deref.
+///
+/// Cost: 64 bytes per element instead of `size_of::<T>()`.  For 16 CPUs
+/// the overhead per array is about 1 KiB — trivially small.
+#[repr(C, align(64))]
+struct CachePadded<T> {
+    value: T,
+}
+
+impl<T> CachePadded<T> {
+    const fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+impl<T> core::ops::Deref for CachePadded<T> {
+    type Target = T;
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
 
@@ -143,11 +179,12 @@ static SCHED: Mutex<SchedState> = Mutex::new(SchedState {
 /// other CPUs may read a different CPU's slot (e.g., kill_task reads
 /// the target task's state, which was set by the running CPU).
 ///
-/// OPT: Each AtomicU64 should ideally be on its own cache line to
-/// avoid false sharing.  For now, the 16-element array (128 bytes)
-/// fits in 2 cache lines, which is acceptable for ≤16 CPUs.
-static CURRENT_TASK_IDS: [AtomicU64; priority_rr::MAX_CPUS] = {
-    const INIT: AtomicU64 = AtomicU64::new(0);
+/// OPT: Cache-line padded — each CPU's slot is on its own 64-byte
+/// cache line to prevent false sharing.  Without this, CPU 0 writing
+/// its task ID invalidates the cache line for CPUs 1-7 (they share
+/// the same 64-byte line in an unpadded 128-byte array).
+static CURRENT_TASK_IDS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
     [INIT; priority_rr::MAX_CPUS]
 };
 
@@ -162,8 +199,8 @@ static CURRENT_TASK_IDS: [AtomicU64; priority_rr::MAX_CPUS] = {
 /// it should only be reached transiently (e.g., during the window
 /// between the idle task blocking for reap and being immediately
 /// re-enqueued by the BSP's idle loop).
-static IDLE_FLAGS: [AtomicBool; priority_rr::MAX_CPUS] = {
-    const INIT: AtomicBool = AtomicBool::new(false);
+static IDLE_FLAGS: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicBool> = CachePadded::new(AtomicBool::new(false));
     [INIT; priority_rr::MAX_CPUS]
 };
 
@@ -177,8 +214,8 @@ static IDLE_FLAGS: [AtomicBool; priority_rr::MAX_CPUS] = {
 /// Without this mechanism, an idle CPU would only discover new work on
 /// the next timer tick (up to 10ms delay).  With it, work is picked up
 /// within a few microseconds of the enqueue.
-static RESCHEDULE_PENDING: [AtomicBool; priority_rr::MAX_CPUS] = {
-    const INIT: AtomicBool = AtomicBool::new(false);
+static RESCHEDULE_PENDING: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicBool> = CachePadded::new(AtomicBool::new(false));
     [INIT; priority_rr::MAX_CPUS]
 };
 
@@ -541,8 +578,8 @@ const BALANCE_INTERVAL: u64 = 10;
 /// Using atomics (not behind the scheduler lock) because the timer
 /// ISR increments this BEFORE acquiring the scheduler lock.  Each
 /// CPU only writes its own slot, so no contention.
-static BALANCE_TICKS: [AtomicU64; priority_rr::MAX_CPUS] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
+static BALANCE_TICKS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const ZERO: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
     [ZERO; priority_rr::MAX_CPUS]
 };
 

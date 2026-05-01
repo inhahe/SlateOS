@@ -86,9 +86,12 @@ if ($Test) {
     # Delete stale serial file to prevent false positives if QEMU fails to start.
     if (Test-Path $serialFile) { Remove-Item $serialFile -Force }
 
+    # -cpu max: enables all emulated CPU features (rdtscp, fsgsbase, etc.)
+    # Without this, QEMU defaults to 'qemu64' which lacks rdtscp,
+    # forcing a ~500ns APIC MMIO fallback per current_cpu_index() call.
     $argString = "$pflashArgs " +
                  "-drive `"format=raw,file=fat:rw:$EspDir`" " +
-                 "-m ${Memory}M -machine q35 -no-reboot -smp $Smp " +
+                 "-cpu max -m ${Memory}M -machine q35 -no-reboot -smp $Smp " +
                  "-serial `"file:$serialFile`" -display none"
 
     # Add virtio-blk disk if the disk image exists.
@@ -140,10 +143,12 @@ if ($Test) {
     # Interactive mode: serial to console.
     # Use call operator (&) with splatting — each array element becomes a
     # separate argument, and PowerShell handles quoting correctly.
+    # -cpu max: enables all emulated CPU features (rdtscp, fsgsbase, etc.)
     $qemuArgs = @(
         "-drive", "if=pflash,format=raw,readonly=on,file=$OvmfCode",
         "-drive", "if=pflash,format=raw,file=$OvmfVars",
         "-drive", "format=raw,file=fat:rw:$EspDir",
+        "-cpu", "max",
         "-m", "${Memory}M",
         "-machine", "q35",
         "-no-reboot",

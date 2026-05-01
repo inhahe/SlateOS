@@ -472,6 +472,9 @@ const MAX_SVC_NAME: usize = 32;
 /// Maximum length of a service path (filesystem path to ELF binary).
 const MAX_SVC_PATH: usize = 128;
 
+/// Maximum number of dependencies per service.
+const MAX_DEPS: usize = 4;
+
 /// Initial restart delay in nanoseconds (1 second).
 const BACKOFF_INITIAL_NS: u64 = 1_000_000_000;
 
@@ -518,6 +521,16 @@ struct Service {
 
     /// Whether the service has signaled it is fully initialized.
     ready: bool,
+
+    /// Dependency names.  This service won't start until all named
+    /// dependencies have signaled ready.  Each entry is a name stored
+    /// as `[u8; MAX_SVC_NAME]` with a length.
+    dep_names: [[u8; MAX_SVC_NAME]; MAX_DEPS],
+    dep_name_lens: [usize; MAX_DEPS],
+    dep_count: usize,
+
+    /// Whether this service is waiting on dependencies before first start.
+    waiting_on_deps: bool,
 }
 
 impl Service {
@@ -535,6 +548,10 @@ impl Service {
             restart_after_ns: 0,
             crash_count: 0,
             ready: false,
+            dep_names: [[0u8; MAX_SVC_NAME]; MAX_DEPS],
+            dep_name_lens: [0; MAX_DEPS],
+            dep_count: 0,
+            waiting_on_deps: false,
         }
     }
 }
@@ -606,9 +623,98 @@ impl ServiceRegistry {
         svc.restart_after_ns = 0;
         svc.crash_count = 0;
         svc.ready = false;
+        svc.dep_count = 0;
+        svc.waiting_on_deps = false;
 
         self.count += 1;
         Some(idx)
+    }
+
+    /// Set dependencies for a registered service.
+    ///
+    /// `deps_str` is a comma-separated list of service names, e.g.
+    /// `b"logger,network"`.  Returns the number of dependencies set.
+    fn set_dependencies(&mut self, idx: usize, deps_str: &[u8]) -> usize {
+        if idx >= MAX_SERVICES || !self.services[idx].active {
+            return 0;
+        }
+
+        let svc = &mut self.services[idx];
+        svc.dep_count = 0;
+
+        if deps_str.is_empty() {
+            return 0;
+        }
+
+        // Parse comma-separated names.
+        let mut start = 0;
+        while start < deps_str.len() && svc.dep_count < MAX_DEPS {
+            let mut end = start;
+            while end < deps_str.len() && deps_str[end] != b',' {
+                end += 1;
+            }
+
+            let name = trim(&deps_str[start..end]);
+            if !name.is_empty() {
+                let nlen = if name.len() > MAX_SVC_NAME {
+                    MAX_SVC_NAME
+                } else {
+                    name.len()
+                };
+                svc.dep_names[svc.dep_count][..nlen].copy_from_slice(&name[..nlen]);
+                svc.dep_name_lens[svc.dep_count] = nlen;
+                svc.dep_count += 1;
+            }
+
+            start = end + 1;
+        }
+
+        svc.dep_count
+    }
+
+    /// Check if all dependencies of a service are satisfied (ready).
+    fn deps_satisfied(&self, idx: usize) -> bool {
+        if idx >= MAX_SERVICES || !self.services[idx].active {
+            return false;
+        }
+
+        let svc = &self.services[idx];
+        if svc.dep_count == 0 {
+            return true; // No dependencies.
+        }
+
+        let mut d = 0;
+        while d < svc.dep_count {
+            let dep_name = &svc.dep_names[d][..svc.dep_name_lens[d]];
+
+            // Find the dependency service.
+            let mut found_ready = false;
+            let mut j = 0;
+            while j < MAX_SERVICES {
+                if j != idx
+                    && self.services[j].active
+                    && self.services[j].name_len == dep_name.len()
+                    && bytes_eq(
+                        &self.services[j].name[..self.services[j].name_len],
+                        dep_name,
+                    )
+                {
+                    if self.services[j].ready {
+                        found_ready = true;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+
+            if !found_ready {
+                return false; // This dependency not satisfied.
+            }
+
+            d += 1;
+        }
+
+        true // All deps ready.
     }
 
     /// Find a service by name.  Returns the slot index or `None`.
@@ -734,13 +840,33 @@ impl ServiceRegistry {
     }
 
     /// Poll all registered services.  For any that have exited,
-    /// handle crash detection and restart scheduling.
+    /// handle crash detection and restart scheduling.  Also starts
+    /// services waiting on dependencies once all deps are ready.
     fn poll(&mut self) {
         let now_ns = clock_monotonic() as u64;
 
         let mut i = 0;
         while i < MAX_SERVICES {
             if !self.services[i].active || self.services[i].pid == 0 {
+                // Check if this service is waiting on dependencies.
+                if self.services[i].active
+                    && self.services[i].waiting_on_deps
+                    && self.deps_satisfied(i)
+                {
+                    let name_len = self.services[i].name_len;
+                    let mut name = [0u8; MAX_SVC_NAME];
+                    name[..name_len].copy_from_slice(
+                        &self.services[i].name[..name_len],
+                    );
+                    print("[svc] Dependencies satisfied for ");
+                    console_write(&name[..name_len]);
+                    print(" — starting\n");
+                    self.services[i].waiting_on_deps = false;
+                    self.start_service(i);
+                    i += 1;
+                    continue;
+                }
+
                 // Not active or not currently running — check if pending restart.
                 if self.services[i].active
                     && self.services[i].auto_restart
@@ -1224,6 +1350,8 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                     }
                     print_u64(svc.pid);
                     print("]");
+                } else if svc.waiting_on_deps {
+                    print("  [waiting on deps]");
                 } else if svc.restart_after_ns > 0 {
                     print("  [pending restart]");
                 } else {
@@ -1260,6 +1388,20 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                 }
                 print("\n  Ready:    ");
                 if svc.ready { print("yes"); } else { print("no"); }
+                print("\n  Deps:     ");
+                if svc.dep_count == 0 {
+                    print("(none)");
+                } else {
+                    let mut d = 0;
+                    while d < svc.dep_count {
+                        if d > 0 { print(", "); }
+                        console_write(&svc.dep_names[d][..svc.dep_name_lens[d]]);
+                        d += 1;
+                    }
+                }
+                if svc.waiting_on_deps {
+                    print(" [waiting]");
+                }
                 print("\n  Restart:  ");
                 if svc.auto_restart { print("yes"); } else { print("no"); }
                 print("\n  Crashes:  ");
@@ -1393,10 +1535,20 @@ const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 
 /// Load the startup service list from `/etc/services`.
 ///
-/// Each non-empty line is a filesystem path to an ELF binary.
-/// Lines starting with `#` are comments.  Each service is registered
-/// and started immediately.  If the file doesn't exist, this is a
-/// no-op (the system just boots without auto-started services).
+/// Format (one service per line):
+/// ```text
+/// # Comment lines start with '#'
+/// /bin/logger
+/// /bin/network depends:logger
+/// /bin/webserver depends:network,logger
+/// ```
+///
+/// Each non-empty, non-comment line is a path optionally followed by
+/// `depends:name1,name2,...`.  Services with no dependencies are
+/// started immediately.  Services with dependencies are queued and
+/// started automatically once all deps have signaled ready.
+///
+/// If the file doesn't exist, this is a no-op.
 fn load_startup_services(registry: &mut ServiceRegistry) {
     let mut buf = [0u8; 2048];
     let result = fs_read_file(b"/etc/services", &mut buf);
@@ -1421,13 +1573,29 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
 
         // Skip empty lines and comments.
         if !line.is_empty() && line[0] != b'#' {
-            match registry.register(line) {
+            // Check for "depends:..." suffix.
+            let (path, deps_str) = parse_service_line(line);
+
+            match registry.register(path) {
                 Some(idx) => {
-                    registry.start_service(idx);
+                    if !deps_str.is_empty() {
+                        registry.set_dependencies(idx, deps_str);
+                    }
+
+                    if registry.services[idx].dep_count > 0 {
+                        // Has dependencies — don't start yet, mark as waiting.
+                        registry.services[idx].waiting_on_deps = true;
+                        print("[init] ");
+                        console_write(path);
+                        print(" waiting on dependencies\n");
+                    } else {
+                        // No dependencies — start immediately.
+                        registry.start_service(idx);
+                    }
                 }
                 None => {
                     print("[init] Warning: could not register ");
-                    console_write(line);
+                    console_write(path);
                     print(" (registry full?)\n");
                 }
             }
@@ -1435,6 +1603,45 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
 
         start = end + 1;
     }
+}
+
+/// Parse a service line into (path, deps_str).
+///
+/// Input: `b"/bin/foo depends:bar,baz"`
+/// Output: `(b"/bin/foo", b"bar,baz")`
+///
+/// If no `depends:` keyword, returns `(line, b"")`.
+fn parse_service_line(line: &[u8]) -> (&[u8], &[u8]) {
+    // Find "depends:" keyword.
+    let depends_kw = b"depends:";
+    let kw_len = depends_kw.len();
+
+    let mut i = 0;
+    while i + kw_len <= line.len() {
+        // Check if this position matches "depends:".
+        let mut matches = true;
+        let mut k = 0;
+        while k < kw_len {
+            if line[i + k] != depends_kw[k] {
+                matches = false;
+                break;
+            }
+            k += 1;
+        }
+
+        if matches {
+            // Everything before the keyword (trimmed) is the path.
+            let path = trim(&line[..i]);
+            // Everything after is the dependency list.
+            let deps = trim(&line[i + kw_len..]);
+            return (path, deps);
+        }
+
+        i += 1;
+    }
+
+    // No depends: keyword.
+    (line, &[])
 }
 
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.

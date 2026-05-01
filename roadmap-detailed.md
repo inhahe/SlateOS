@@ -146,16 +146,18 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Configurable maximum stack size (default 8-64 MiB, programs can request more or unlimited)
 
 #### Memory Protection (W^X / NX bit)
-- [ ] Enforce W^X (write-xor-execute) on all userspace mappings via the NX bit
+- [x] Enforce W^X (write-xor-execute) on all userspace mappings via the NX bit
   - Stack and heap pages are non-executable by default
   - Code pages (.text) are read+execute, never writable
-- [ ] SYS_MPROTECT syscall to change page permissions (read, write, execute)
+- [-] SYS_MPROTECT syscall to change page permissions (read, write, execute)
   - Cannot set write+execute simultaneously (W^X violation)
   - Transition path for JIT: allocate writable → write code → mprotect to read+execute → run
-- [ ] Capability-gated JIT memory (`mem.jit` capability)
+  - Kernel-side mprotect() function done (mm/protect.rs); syscall handler pending (kernel-ipc zone)
+- [-] Capability-gated JIT memory (`mem.jit` capability)
   - Programs without `mem.jit` cannot create executable pages outside their initial .text mapping
   - Programs with `mem.jit` can use SYS_MPROTECT to toggle writable↔executable on anonymous mappings
   - Required by: language runtimes (V8/JavaScript, LuaJIT, JVM HotSpot, .NET RyuJIT, CPython JIT), browser engines, game engines with shader JIT
+  - Kernel-side enforcement done in mprotect(); syscall plumbing pending (kernel-ipc zone)
 - [x] Audit: no kernel mappings with both write and execute permissions
 
 #### Swap
@@ -428,10 +430,10 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 
 ### 1.7 I/O Scheduler
 
-- [ ] BFQ-style I/O scheduler:
-  - [ ] Realtime priority (audio/video playback)
-  - [ ] Best-effort with priority levels (normal applications)
-  - [ ] Idle priority (background indexing, backup, dedup)
+- [x] BFQ-style I/O scheduler:
+  - [x] Realtime priority (audio/video playback)
+  - [x] Best-effort with priority levels (normal applications)
+  - [x] Idle priority (background indexing, backup, dedup)
 - [ ] Capability-gated realtime I/O priority
 - [ ] User can set per-app I/O priority (in settings and while running)
 - [ ] Apps can request I/O priority (with capability)

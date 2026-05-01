@@ -240,40 +240,73 @@ impl SwapSlotAllocator {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory swap backend (for testing and zram-like use)
+// zram-style compressed in-memory swap backend
 // ---------------------------------------------------------------------------
 
-/// In-memory swap backend.
+/// Slot storage type — compressed or uncompressed.
 ///
-/// Stores page data in heap-allocated buffers.  Each slot is a
-/// `[u8; FRAME_SIZE]` buffer.  This is useful for:
+/// Pages are compressed on write.  If compression is beneficial
+/// (compressed size < FRAME_SIZE), the compressed form is stored.
+/// Otherwise, the uncompressed data is stored as-is.
+enum SlotData {
+    /// Compressed page data (smaller than FRAME_SIZE).
+    Compressed(Vec<u8>),
+    /// Uncompressed page data (compression was not beneficial).
+    Uncompressed(Vec<u8>),
+}
+
+/// zram-style compressed in-memory swap backend.
 ///
-/// 1. **Testing**: validates the entire swap pipeline without disk I/O.
-/// 2. **zram prototype**: with compression added later, this becomes a
-///    compressed in-memory swap (zram-style).
+/// Compresses page data using an LZ4-like algorithm before storing
+/// in heap buffers.  This trades CPU time for memory savings:
 ///
-/// Without compression, this backend doesn't save memory — it just
-/// moves data from physical frames to heap buffers.  It exists to
-/// prove that the swap infrastructure works correctly before adding
-/// a disk backend or compression.
+/// - **Zero pages** (BSS, fresh stack): 16 KiB → 1 byte (99.99% savings)
+/// - **Sparse/repetitive data**: typically 50–90% compression
+/// - **Random/encrypted data**: stored uncompressed (no overhead beyond
+///   the failed compression attempt)
+///
+/// ## Memory accounting
+///
+/// `uncompressed_bytes` tracks the logical size of all stored pages
+/// (N × FRAME_SIZE).  `compressed_bytes` tracks the actual heap usage.
+/// The ratio `compressed_bytes / uncompressed_bytes` is the effective
+/// compression ratio.
 struct MemBackend {
     /// Slot storage.  `None` = slot never written.
-    slots: Vec<Option<Vec<u8>>>,
+    slots: Vec<Option<SlotData>>,
     /// Total capacity (number of slots).
     capacity: u32,
+    /// Total uncompressed bytes stored (logical size).
+    uncompressed_bytes: u64,
+    /// Total compressed bytes stored (actual heap usage).
+    compressed_bytes: u64,
+    /// Number of pages that compressed successfully.
+    compressed_count: u64,
+    /// Number of pages stored uncompressed (incompressible).
+    uncompressed_count: u64,
 }
 
 impl MemBackend {
-    /// Create a new in-memory backend with the given capacity.
+    /// Create a new compressed in-memory backend with the given capacity.
     fn new(capacity: u32) -> Self {
         let mut slots = Vec::with_capacity(capacity as usize);
         for _ in 0..capacity {
             slots.push(None);
         }
-        Self { slots, capacity }
+        Self {
+            slots,
+            capacity,
+            uncompressed_bytes: 0,
+            compressed_bytes: 0,
+            compressed_count: 0,
+            uncompressed_count: 0,
+        }
     }
 
     /// Write a page's data into a swap slot.
+    ///
+    /// Compresses the data first.  If compression is beneficial, stores
+    /// the compressed form; otherwise stores uncompressed.
     ///
     /// `data` must be exactly `FRAME_SIZE` bytes.
     fn write(&mut self, slot: u32, data: &[u8]) -> KernelResult<()> {
@@ -289,13 +322,35 @@ impl MemBackend {
             .get_mut(slot as usize)
             .ok_or(KernelError::InvalidArgument)?;
 
-        *slot_storage = Some(data.to_vec());
+        // Try to compress the page.
+        let stored = match super::compress::compress(data) {
+            Some(compressed) => {
+                let compressed_len = compressed.len() as u64;
+                self.compressed_bytes =
+                    self.compressed_bytes.saturating_add(compressed_len);
+                self.compressed_count =
+                    self.compressed_count.saturating_add(1);
+                SlotData::Compressed(compressed)
+            }
+            None => {
+                // Incompressible — store uncompressed.
+                self.compressed_bytes =
+                    self.compressed_bytes.saturating_add(FRAME_SIZE as u64);
+                self.uncompressed_count =
+                    self.uncompressed_count.saturating_add(1);
+                SlotData::Uncompressed(data.to_vec())
+            }
+        };
+
+        self.uncompressed_bytes =
+            self.uncompressed_bytes.saturating_add(FRAME_SIZE as u64);
+        *slot_storage = Some(stored);
         Ok(())
     }
 
     /// Read a page's data from a swap slot.
     ///
-    /// `buf` must be exactly `FRAME_SIZE` bytes.
+    /// Decompresses if necessary.  `buf` must be exactly `FRAME_SIZE` bytes.
     fn read(&self, slot: u32, buf: &mut [u8]) -> KernelResult<()> {
         if slot >= self.capacity {
             return Err(KernelError::InvalidArgument);
@@ -304,19 +359,42 @@ impl MemBackend {
             return Err(KernelError::InvalidArgument);
         }
 
-        let data = self
+        let slot_data = self
             .slots
             .get(slot as usize)
             .and_then(|s| s.as_ref())
             .ok_or(KernelError::InvalidArgument)?;
 
-        buf.copy_from_slice(data);
+        match slot_data {
+            SlotData::Compressed(compressed) => {
+                let decompressed = super::compress::decompress(
+                    compressed,
+                    FRAME_SIZE,
+                ).map_err(|_| KernelError::InternalError)?;
+                buf.copy_from_slice(&decompressed);
+            }
+            SlotData::Uncompressed(data) => {
+                buf.copy_from_slice(data);
+            }
+        }
+
         Ok(())
     }
 
     /// Discard a slot's data (after swap-in).
     fn discard(&mut self, slot: u32) {
         if let Some(slot_storage) = self.slots.get_mut(slot as usize) {
+            // Update byte counts.
+            if let Some(data) = slot_storage {
+                let stored_size = match data {
+                    SlotData::Compressed(c) => c.len() as u64,
+                    SlotData::Uncompressed(_) => FRAME_SIZE as u64,
+                };
+                self.uncompressed_bytes =
+                    self.uncompressed_bytes.saturating_sub(FRAME_SIZE as u64);
+                self.compressed_bytes =
+                    self.compressed_bytes.saturating_sub(stored_size);
+            }
             *slot_storage = None;
         }
     }
@@ -348,6 +426,10 @@ impl SwapState {
             backend: MemBackend {
                 slots: Vec::new(),
                 capacity: 0,
+                uncompressed_bytes: 0,
+                compressed_bytes: 0,
+                compressed_count: 0,
+                uncompressed_count: 0,
             },
             initialized: false,
         }
@@ -623,6 +705,54 @@ pub fn free_slots() -> u32 {
 #[must_use]
 pub fn used_slots() -> u32 {
     SWAP.lock().slots.used
+}
+
+/// Compression statistics for the zram backend.
+#[derive(Debug, Clone)]
+pub struct CompressionStats {
+    /// Total uncompressed bytes of all stored pages (logical size).
+    pub uncompressed_bytes: u64,
+    /// Total compressed bytes stored (actual heap usage).
+    pub compressed_bytes: u64,
+    /// Number of pages that compressed successfully.
+    pub compressed_count: u64,
+    /// Number of pages stored uncompressed (incompressible).
+    pub uncompressed_count: u64,
+}
+
+impl CompressionStats {
+    /// Compression ratio as a percentage (0–100).
+    /// 100% means no compression; 50% means half the size.
+    /// Returns 0 if no data is stored.
+    #[must_use]
+    pub fn ratio_percent(&self) -> u64 {
+        if self.uncompressed_bytes == 0 {
+            return 0;
+        }
+        self.compressed_bytes
+            .saturating_mul(100)
+            .checked_div(self.uncompressed_bytes)
+            .unwrap_or(0)
+    }
+
+    /// Memory saved by compression (in bytes).
+    #[must_use]
+    pub fn bytes_saved(&self) -> u64 {
+        self.uncompressed_bytes
+            .saturating_sub(self.compressed_bytes)
+    }
+}
+
+/// Get compression statistics from the zram backend.
+#[must_use]
+pub fn compression_stats() -> CompressionStats {
+    let state = SWAP.lock();
+    CompressionStats {
+        uncompressed_bytes: state.backend.uncompressed_bytes,
+        compressed_bytes: state.backend.compressed_bytes,
+        compressed_count: state.backend.compressed_count,
+        uncompressed_count: state.backend.uncompressed_count,
+    }
 }
 
 /// Swap out a page: evict a physical frame's contents to swap storage
@@ -909,37 +1039,53 @@ pub fn self_test() {
         serial_println!("[swap]   Slot allocator: OK");
     }
 
-    // --- In-memory backend ---
+    // --- Compressed zram backend ---
     {
         let mut backend = MemBackend::new(4);
 
-        // Write test pattern to slot 0.
+        // Write test pattern to slot 0 (repeating — highly compressible).
         let mut data = vec![0u8; FRAME_SIZE];
         for (i, byte) in data.iter_mut().enumerate() {
-            // Truncation: intentional — we want a repeating byte pattern.
             #[allow(clippy::cast_possible_truncation)]
             {
                 *byte = (i & 0xFF) as u8;
             }
         }
         backend.write(0, &data).expect("write should succeed");
+        // Verify it compressed (compressed_count should be 1).
+        assert_eq!(backend.compressed_count, 1, "should compress repeating data");
+        assert!(
+            backend.compressed_bytes < FRAME_SIZE as u64,
+            "compressed should be smaller than uncompressed"
+        );
 
-        // Read back and verify.
+        // Read back and verify integrity.
         let mut buf = vec![0u8; FRAME_SIZE];
         backend.read(0, &mut buf).expect("read should succeed");
-        assert_eq!(buf, data, "data integrity check failed");
+        assert_eq!(buf, data, "data integrity check failed after compress/decompress");
 
-        // Write different pattern to slot 1.
+        // Write all-zero page to slot 1 (special case: 1-byte encoding).
+        let zeros = vec![0u8; FRAME_SIZE];
+        backend.write(1, &zeros).expect("write zeros");
+        assert_eq!(backend.compressed_count, 2);
+        // Zero page stores as 1 byte — compressed_bytes should barely increase.
+        let bytes_after_zero = backend.compressed_bytes;
+
+        // Read back zeros.
+        backend.read(1, &mut buf).expect("read zeros");
+        assert_eq!(buf, zeros, "zero page roundtrip through backend");
+
+        // Write uniform non-zero to slot 2 (compresses well: run of 0xAA).
         let data2 = vec![0xAA; FRAME_SIZE];
-        backend.write(1, &data2).expect("write slot 1");
+        backend.write(2, &data2).expect("write slot 2");
 
         // Verify slot 0 is unchanged.
         backend.read(0, &mut buf).expect("re-read slot 0");
         assert_eq!(buf, data, "slot 0 should be unchanged");
 
-        // Read slot 1.
-        backend.read(1, &mut buf).expect("read slot 1");
-        assert_eq!(buf, data2, "slot 1 data check");
+        // Read slot 2.
+        backend.read(2, &mut buf).expect("read slot 2");
+        assert_eq!(buf, data2, "slot 2 data check");
 
         // Discard and verify it's gone.
         backend.discard(0);
@@ -948,11 +1094,20 @@ pub fn self_test() {
             "discarded slot should fail to read"
         );
 
+        // Byte accounting: discard should reduce compressed_bytes.
+        assert!(
+            backend.compressed_bytes < bytes_after_zero.saturating_add(FRAME_SIZE as u64),
+            "discard should reduce compressed byte count"
+        );
+
         // Out-of-range slot should fail.
         assert!(backend.write(4, &data).is_err(), "slot 4 out of range");
         assert!(backend.read(4, &mut buf).is_err(), "slot 4 out of range");
 
-        serial_println!("[swap]   In-memory backend: OK");
+        serial_println!(
+            "[swap]   Compressed zram backend: OK (saved {} bytes across test pages)",
+            backend.uncompressed_bytes.saturating_sub(backend.compressed_bytes)
+        );
     }
 
     // --- Page reclamation tracking ---

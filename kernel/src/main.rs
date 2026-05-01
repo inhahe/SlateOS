@@ -229,6 +229,7 @@ extern "C" fn kmain() -> ! {
     // later for production use.
     mm::swap::init(256);
     mm::swap::self_test();
+    mm::compress::self_test();
 
     // Step 10: Initialize IPC subsystem.
     // Channels are the primary IPC mechanism — structured message

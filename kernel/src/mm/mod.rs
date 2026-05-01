@@ -25,6 +25,7 @@
 //! (internal fragmentation within a 16 KiB page).  The slab allocator
 //! for kernel heap objects mitigates this for small objects.
 
+pub mod compress;
 pub mod fault;
 pub mod frame;
 pub mod heap;

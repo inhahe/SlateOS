@@ -598,6 +598,23 @@ pub const SYS_EXCEPTION_RETURN: u64 = 505;
 /// Returns: number of threads killed on success.
 pub const SYS_PROCESS_KILL: u64 = 506;
 
+/// Signal that the calling process is fully initialized ("ready").
+///
+/// Services call this after completing startup to inform the service
+/// manager (init) that they are ready to accept requests.  This is
+/// the foundation for dependency-based startup ordering.
+///
+/// Returns: 0 on success.
+pub const SYS_NOTIFY_READY: u64 = 508;
+
+/// Query whether a process has signaled readiness.
+///
+/// `arg0`: process ID to query.
+///
+/// Returns: 1 if the process has called `SYS_NOTIFY_READY`, 0 if it
+/// exists but hasn't, negative error if the PID doesn't exist.
+pub const SYS_PROCESS_IS_READY: u64 = 509;
+
 /// Create a new thread in the calling process.
 ///
 /// `arg0`: entry point address (ring 3 RIP).

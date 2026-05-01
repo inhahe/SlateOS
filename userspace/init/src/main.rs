@@ -50,6 +50,9 @@ const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
 const SYS_PROCESS_SPAWN: u64 = 500;
 const SYS_PROCESS_WAIT: u64 = 501;
 const SYS_PROCESS_TRY_WAIT: u64 = 507;
+#[allow(dead_code)] // Services call this, not init itself.
+const SYS_NOTIFY_READY: u64 = 508;
+const SYS_PROCESS_IS_READY: u64 = 509;
 const SYS_FS_READ_FILE: u64 = 600;
 const SYS_FS_WRITE_FILE: u64 = 601;
 const SYS_FS_DELETE: u64 = 602;
@@ -307,6 +310,12 @@ fn process_try_wait(pid: u64) -> i64 {
     syscall1(SYS_PROCESS_TRY_WAIT, pid)
 }
 
+/// Query whether a process has signaled readiness.
+/// Returns 1 (ready), 0 (not yet), or negative error.
+fn process_is_ready(pid: u64) -> i64 {
+    syscall1(SYS_PROCESS_IS_READY, pid)
+}
+
 /// Kernel error code for "still running".
 const ERR_WOULD_BLOCK: i64 = -4;
 
@@ -506,6 +515,9 @@ struct Service {
 
     /// Total number of times this service has crashed.
     crash_count: u64,
+
+    /// Whether the service has signaled it is fully initialized.
+    ready: bool,
 }
 
 impl Service {
@@ -522,6 +534,7 @@ impl Service {
             started_at_ns: 0,
             restart_after_ns: 0,
             crash_count: 0,
+            ready: false,
         }
     }
 }
@@ -592,6 +605,7 @@ impl ServiceRegistry {
         svc.started_at_ns = 0;
         svc.restart_after_ns = 0;
         svc.crash_count = 0;
+        svc.ready = false;
 
         self.count += 1;
         Some(idx)
@@ -670,6 +684,7 @@ impl ServiceRegistry {
         }
         svc.started_at_ns = clock_monotonic() as u64;
         svc.restart_after_ns = 0;
+        svc.ready = false;
 
         print("[svc] Started ");
         console_write(name);
@@ -751,7 +766,14 @@ impl ServiceRegistry {
             let ret = process_try_wait(pid);
 
             if ret == ERR_WOULD_BLOCK {
-                // Still running — good.
+                // Still running — check for readiness transition.
+                if !self.services[i].ready && process_is_ready(pid) == 1 {
+                    self.services[i].ready = true;
+                    let name = &self.services[i].name[..self.services[i].name_len];
+                    print("[svc] ");
+                    console_write(name);
+                    print(" signaled ready\n");
+                }
                 i += 1;
                 continue;
             }
@@ -1195,7 +1217,11 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                 print("  ");
                 console_write(&svc.name[..svc.name_len]);
                 if svc.pid != 0 {
-                    print("  [running, PID ");
+                    if svc.ready {
+                        print("  [ready, PID ");
+                    } else {
+                        print("  [running, PID ");
+                    }
                     print_u64(svc.pid);
                     print("]");
                 } else if svc.restart_after_ns > 0 {
@@ -1232,6 +1258,8 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                 } else {
                     print("(not running)");
                 }
+                print("\n  Ready:    ");
+                if svc.ready { print("yes"); } else { print("no"); }
                 print("\n  Restart:  ");
                 if svc.auto_restart { print("yes"); } else { print("no"); }
                 print("\n  Crashes:  ");

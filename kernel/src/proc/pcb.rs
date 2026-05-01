@@ -144,6 +144,12 @@ pub struct Process {
     pub pml4_phys: u64,
     /// Task waiting to reap this process (if any).
     pub wait_task: Option<TaskId>,
+    /// Whether the process has signaled it is fully initialized.
+    ///
+    /// Set via `SYS_NOTIFY_READY` (508).  The init service manager
+    /// uses this to know when a service has finished startup and is
+    /// ready to accept requests.
+    pub ready: bool,
 }
 
 impl Process {
@@ -160,6 +166,7 @@ impl Process {
             credentials: ProcessCredentials::root(),
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
+            ready: false,
         }
     }
 }
@@ -344,6 +351,35 @@ pub fn try_reap(
     } else {
         Ok(None) // Still running.
     }
+}
+
+/// Mark a process as "ready" (fully initialized and accepting requests).
+///
+/// Called by the process itself via `SYS_NOTIFY_READY`.  The parent
+/// (typically init's service manager) can query this flag to know
+/// when a service has completed startup.
+pub fn set_ready(pid: ProcessId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    proc.ready = true;
+    Ok(())
+}
+
+/// Check whether a process has signaled readiness.
+///
+/// Returns `Ok(true)` if the process exists and has called
+/// `SYS_NOTIFY_READY`, `Ok(false)` if it exists but hasn't, or
+/// `Err(NoSuchProcess)` if the PID is not found.
+pub fn is_ready(pid: ProcessId) -> KernelResult<bool> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table
+        .get(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    Ok(proc.ready)
 }
 
 /// Register a task to be woken when a process exits.

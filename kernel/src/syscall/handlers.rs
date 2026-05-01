@@ -1559,6 +1559,46 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_NOTIFY_READY` — signal that the calling process is initialized.
+///
+/// Services call this after completing startup.  The init service
+/// manager can query this flag to implement dependency ordering.
+///
+/// Returns: 0 on success.
+pub fn sys_notify_ready(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    use crate::proc::{pcb, thread};
+
+    let task_id = sched::current_task_id();
+    let pid = thread::owner_process(task_id).unwrap_or(0);
+
+    if pid == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    match pcb::set_ready(pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_IS_READY` — query whether a process is ready.
+///
+/// `arg0`: process ID to query.
+///
+/// Returns: 1 if ready, 0 if not yet, negative error on failure.
+pub fn sys_process_is_ready(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let pid = args.arg0;
+
+    match pcb::is_ready(pid) {
+        Ok(true) => SyscallResult::ok(1),
+        Ok(false) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_PROCESS_ID` — get the current process ID.
 ///
 /// Returns: the calling process's PID, or 0 if the task isn't

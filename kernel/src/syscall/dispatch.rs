@@ -37,6 +37,7 @@ use super::number::{
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
     SYS_PORT_READ, SYS_PORT_WRITE,
     SYS_CAP_QUERY, SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
+    SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
@@ -229,6 +230,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_ID as usize] = Some(handlers::sys_process_id);
     handlers[SYS_SET_EXCEPTION_HANDLER as usize] = Some(handlers::sys_set_exception_handler);
     handlers[SYS_PROCESS_KILL as usize] = Some(handlers::sys_process_kill);
+    handlers[SYS_NOTIFY_READY as usize] = Some(handlers::sys_notify_ready);
+    handlers[SYS_PROCESS_IS_READY as usize] = Some(handlers::sys_process_is_ready);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);

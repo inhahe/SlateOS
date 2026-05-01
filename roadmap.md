@@ -249,6 +249,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Change journal (persistent across reboots, JSON-lines /_JOURNAL file, 1024-entry ring buffer, 3 syscalls)
   - [x] In-memory filesystem (memfs/ramfs) for /tmp and pseudo-FS foundation, mounted at /tmp during boot
   - [x] Multi-mount VFS with longest-prefix path-boundary matching, mount-point synthesis in readdir
+  - [x] Procfs virtual filesystem at /proc (version, uptime, meminfo, cpuinfo, mounts, task stats)
 - [-] Filesystem features:
   - [x] Case-sensitive paths, forward slash separator (VFS is case-sensitive; FAT case-insensitive by nature)
   - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths

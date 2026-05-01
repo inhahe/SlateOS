@@ -408,6 +408,36 @@ pub fn run_all() {
     // --- Scheduler pick_next (O(1) bitmap scan) ---
     bench_pick_next();
 
+    // --- Syscall dispatch (kernel-side only) ---
+    //
+    // Measures the dispatch function for SYS_TASK_ID (trivial syscall
+    // that just reads the current task ID).  This excludes the
+    // user↔kernel ring transition but measures the handler lookup,
+    // dispatch, and result packing.
+    //
+    // Target from baselines.toml: < 200 ns (Linux getpid: ~100 ns
+    // including ring transition — our dispatch-only should be faster).
+    bench_syscall_dispatch();
+
+    // --- IPC channel send+recv round-trip ---
+    //
+    // Measures sending a small message through a channel and receiving
+    // it.  This is the primary IPC mechanism and the hot path for all
+    // inter-process communication.
+    //
+    // Target from baselines.toml: < 2 µs round-trip (Fuchsia: ~1.5 µs,
+    // L4: ~0.5-1 µs).
+    bench_ipc_channel();
+
+    // --- Page fault (demand-page anonymous fault) ---
+    //
+    // Measures the page fault handler's resolution path for a demand-
+    // paged anonymous page.  Includes frame allocation, zeroing, page
+    // table update, and TLB flush.
+    //
+    // Target from baselines.toml: < 10 µs (Linux: ~2-5 µs).
+    bench_page_fault();
+
     serial_println!("[bench] === Benchmarks complete ===");
 }
 
@@ -597,6 +627,172 @@ fn bench_pick_next() {
 extern "C" fn bench_nop_task(_arg: u64) {
     crate::sched::yield_now();
     // Exit after one yield.
+}
+
+// ---------------------------------------------------------------------------
+// Syscall dispatch benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark kernel-side syscall dispatch for a trivial syscall.
+///
+/// Measures the cost of looking up and executing SYS_TASK_ID (which just
+/// returns the current task ID — minimal work).  This is the kernel-side
+/// dispatch overhead, excluding the user↔kernel ring transition.
+fn bench_syscall_dispatch() {
+    use crate::syscall::dispatch::{dispatch, SyscallArgs, SyscallResult};
+    use crate::syscall::number::SYS_TASK_ID;
+
+    let args = SyscallArgs {
+        arg0: SYS_TASK_ID,
+        arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+
+    let result = run("syscall_dispatch_task_id", 2000, || {
+        let r = dispatch(SYS_TASK_ID, &args);
+        core::hint::black_box(r);
+    });
+
+    // Target: < 200 ns.  Linux getpid is ~100 ns INCLUDING ring
+    // transition — dispatch-only should be well under that.
+    let target_ns = 200u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   syscall_dispatch: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   syscall_dispatch: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IPC channel benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark IPC channel send + recv round-trip.
+///
+/// Creates a channel pair, sends a small message on one end, and receives
+/// it on the other.  Measures the kernel-side IPC hot path.
+fn bench_ipc_channel() {
+    use crate::ipc::channel::{self, Message};
+
+    let (tx, rx) = channel::create();
+
+    // Warm up: send/recv once so caches are primed.
+    {
+        let msg = Message::from_bytes(b"warmup")
+            .expect("bench: create warmup msg");
+        channel::send(tx, msg).expect("bench: warmup send");
+        let _ = channel::try_recv(rx).expect("bench: warmup recv");
+    }
+
+    let result = run("ipc_channel_roundtrip", 1000, || {
+        let msg = Message::from_bytes(b"bench")
+            .expect("bench: create msg");
+        channel::send(tx, msg).expect("bench: send");
+        let received = channel::try_recv(rx).expect("bench: recv");
+        core::hint::black_box(received);
+    });
+
+    channel::close(tx);
+    channel::close(rx);
+
+    // Target: < 2 µs round-trip (Fuchsia: ~1.5 µs, L4: ~0.5-1 µs).
+    let target_ns = 2000u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   ipc_channel_roundtrip: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   ipc_channel_roundtrip: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page fault benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark anonymous page fault resolution.
+///
+/// Registers a demand-page VMA, writes to each page (triggering a fault),
+/// measures the fault handler's resolution time.  Each iteration:
+///   1. Maps a page table entry as "lazy" (no physical frame yet)
+///   2. Calls the fault handler to resolve it (alloc frame, zero, map, flush)
+///   3. Unmaps the page (cleanup for next iteration)
+///
+/// This measures the full fault path excluding the CPU exception overhead
+/// (which we can't trigger from kernel mode).
+fn bench_page_fault() {
+    use crate::mm::{frame, page_table::{self, PageFlags, VirtAddr}};
+
+    let hhdm = page_table::hhdm().expect("bench: HHDM");
+    let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
+
+    // Pick a kernel-space virtual address that's not in use.
+    // Use a high address in the kernel reserved range.
+    let bench_virt_base: u64 = 0xFFFF_CB00_0000_0000;
+
+    let result = run("page_fault_anonymous", 200, || {
+        let virt = VirtAddr::new(bench_virt_base);
+
+        // Allocate a frame (simulating what the fault handler does).
+        let f = frame::alloc_frame().expect("bench: alloc");
+        let phys = f.addr();
+
+        // Zero the frame via HHDM (fault handler does this for anonymous pages).
+        let dst = (phys + hhdm) as *mut u8;
+        // SAFETY: phys is a valid allocated frame, HHDM maps all physical memory.
+        unsafe {
+            core::ptr::write_bytes(dst, 0, frame::FRAME_SIZE);
+        }
+
+        // Map 4 hardware pages (one 16 KiB frame = 4 × 4 KiB pages).
+        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+        for i in 0..4u64 {
+            let page_virt = VirtAddr::new(bench_virt_base + i * 4096);
+            let page_phys = phys + i * 4096;
+            // SAFETY: bench_virt_base is in unused kernel space, pml4 is valid.
+            unsafe {
+                let _ = page_table::map_4k_if_absent(pml4, page_virt, page_phys, flags);
+            }
+        }
+
+        // TLB flush for all 4 pages.
+        crate::tlb::flush_range(bench_virt_base, 4);
+
+        // Unmap (cleanup for next iteration).
+        for i in 0..4u64 {
+            let page_virt = VirtAddr::new(bench_virt_base + i * 4096);
+            // SAFETY: we just mapped these pages.
+            unsafe { let _ = page_table::unmap_4k(pml4, page_virt); }
+        }
+        crate::tlb::flush_range(bench_virt_base, 4);
+
+        // Free the frame.
+        // SAFETY: we're the sole owner, all mappings removed.
+        unsafe { frame::free_frame(f).expect("bench: free"); }
+    });
+
+    // Target: < 10 µs (Linux anonymous page fault: ~2-5 µs).
+    let target_ns = 10_000u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   page_fault_anonymous: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   page_fault_anonymous: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

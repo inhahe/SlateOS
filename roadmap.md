@@ -52,8 +52,12 @@ _The minimum kernel that can run a single userspace process._
 - [x] Physical page allocator (buddy allocator for 16 KiB pages)
   - [x] Per-CPU frame caches (lock-free single-frame alloc/free, batch refill/drain)
   - [x] Per-frame reference counting (u16 refcount array for CoW support)
+  - [x] Zone-aware constrained allocation (DMA below 16M / below 4G, free-list scan)
+- [x] Per-CPU heap slab caches (two-tier: interrupt-disabled local free lists + global spinlock)
 - [x] Virtual memory manager (page tables, mapping, unmapping)
   - [x] Copy-on-Write page fault handling (COW PTE flag, resolve_cow_fault)
+  - [x] CoW batch optimization: sole-owner eagerly resolves all 4 sibling PTEs
+  - [x] CoW batch optimization: shared-frame copies all 4 pages into single new frame
 - [x] Kernel virtual address space layout
 - [x] Userspace virtual address space layout
 - [x] Demand paging (page fault handler, lazy allocation)

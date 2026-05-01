@@ -99,12 +99,12 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - `dequeue_task(task)`
   - `task_tick(task)` (timer interrupt)
   - `balance_load()` (periodic)
-- [-] Priority round-robin scheduler (default):
+- [x] Priority round-robin scheduler (default):
   - [x] 32 or 64 priority levels, real-time levels at top
   - [x] Round-robin within each priority level
   - [x] Configurable time slices per level (shorter = higher priority)
-  - [ ] Per-CPU run queues
-  - [ ] Work stealing from longest queue when idle (prefer same NUMA node)
+  - [x] Per-CPU run queues (PerCpuScheduler, MAX_CPUS=16, cache-warm enqueue via last_cpu)
+  - [x] Work stealing from longest queue when idle (steal half, prefer same NUMA node when SMP)
   - [x] Priority inheritance on mutex contention
     - [x] `inherited_priority: Option<u8>` on Task struct, `effective_priority()` considers it
     - [x] `sched::boost_priority()` / `sched::set_inherited_priority()` for PI donation/clear

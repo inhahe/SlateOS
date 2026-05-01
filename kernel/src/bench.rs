@@ -749,47 +749,48 @@ fn bench_page_fault() {
 
     // Pick a kernel-space virtual address that's not in use.
     // Use a high address in the kernel reserved range.
+    // Must be 16 KiB aligned for map_frame.
     let bench_virt_base: u64 = 0xFFFF_CB00_0000_0000;
 
+    // OPT: Use map_frame/unmap_frame (single page table walk for all 4
+    // hardware pages) instead of 4× map_4k_if_absent.  This matches the
+    // real page fault handler in try_grow_user_stack / pcb::try_resolve_fault
+    // which both use map_frame.  The old 4× walk added 3 redundant
+    // PML4→PDPT→PD→PT traversals per iteration.
     let result = run("page_fault_anonymous", 200, || {
-        let _virt = VirtAddr::new(bench_virt_base);
+        let virt = VirtAddr::new(bench_virt_base);
 
         // Allocate a frame (simulating what the fault handler does).
         let f = frame::alloc_frame().expect("bench: alloc");
-        let phys = f.addr();
 
         // Zero the frame via HHDM (fault handler does this for anonymous pages).
-        let dst = (phys + hhdm) as *mut u8;
-        // SAFETY: phys is a valid allocated frame, HHDM maps all physical memory.
+        let dst = f.to_virt(hhdm) as *mut u8;
+        // SAFETY: f is a valid allocated frame, HHDM maps all physical memory.
         unsafe {
             core::ptr::write_bytes(dst, 0, frame::FRAME_SIZE);
         }
 
-        // Map 4 hardware pages (one 16 KiB frame = 4 × 4 KiB pages).
+        // Map the 16 KiB frame (4 hardware pages in a single page table walk).
         let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
-        for i in 0..4u64 {
-            let page_virt = VirtAddr::new(bench_virt_base + i * 4096);
-            let page_phys = phys + i * 4096;
-            // SAFETY: bench_virt_base is in unused kernel space, pml4 is valid.
-            unsafe {
-                let _ = page_table::map_4k_if_absent(pml4, page_virt, page_phys, flags);
-            }
+        // SAFETY: bench_virt_base is in unused kernel space, pml4 is valid,
+        // f is freshly allocated.
+        unsafe {
+            page_table::map_frame(pml4, virt, f, flags).expect("bench: map");
         }
 
         // TLB flush for all 4 pages.
         crate::tlb::flush_range(bench_virt_base, 4);
 
-        // Unmap (cleanup for next iteration).
-        for i in 0..4u64 {
-            let page_virt = VirtAddr::new(bench_virt_base + i * 4096);
-            // SAFETY: we just mapped these pages.
-            unsafe { let _ = page_table::unmap_4k(pml4, page_virt); }
-        }
+        // Unmap (cleanup for next iteration) — single walk for all 4 pages.
+        // SAFETY: we just mapped these pages.
+        let returned = unsafe {
+            page_table::unmap_frame(pml4, virt).expect("bench: unmap")
+        };
         crate::tlb::flush_range(bench_virt_base, 4);
 
         // Free the frame.
         // SAFETY: we're the sole owner, all mappings removed.
-        unsafe { frame::free_frame(f).expect("bench: free"); }
+        unsafe { frame::free_frame(returned).expect("bench: free"); }
     });
 
     // Target: < 10 µs (Linux anonymous page fault: ~2-5 µs).

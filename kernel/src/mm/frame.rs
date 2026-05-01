@@ -475,48 +475,10 @@ impl BuddyAllocator {
             self.push_free(buddy_addr, source_order);
         }
 
-        // Update free-frame count.  We consumed 2^order frames from the
-        // free pool (the split halves that went back don't count — push_free
-        // already accounted for them, and pop_free removed the parent).
-        //
-        // pop_free removed 2^source_order frames (via remove_free, which
-        // doesn't update free_frames — that's our job).  The splits put
-        // back everything except the 2^order block we're returning.
-        //
-        // Net change: free_frames -= 2^order (the splits cancel out against
-        // the pop, leaving only the returned block unaccounted for).
-        //
-        // Wait — push_free in add_free_range updates free_frames, but
-        // push_free during splitting does NOT update free_frames (it's
-        // an internal redistribution).  Let me fix this: push_free always
-        // updates free_frames, so I need to compensate.
-        //
-        // Actually, let me reconsider.  push_free adds to free_frames in
-        // add_free_range (init path).  But during splitting, the frames
-        // being split are already counted.  pop_free → remove_free doesn't
-        // change free_frames.  push_free during splitting would double-count.
-        //
-        // The cleanest fix: DON'T update free_frames in push_free/remove_free.
-        // Only update it in alloc_inner, free_inner, and add_free_range.
-        //
-        // ... but I already have push_free updating free_frames in
-        // add_free_range.  Let me restructure.
-
-        // Actually, the simplest correct approach:
-        // - add_free_range tracks free_frames itself (already does)
-        // - push_free / remove_free do NOT touch free_frames
-        // - alloc_inner subtracts 2^order
-        // - free_inner adds 2^order
-        //
-        // But wait, I have push_free updating free_frames via saturating_add
-        // in add_free_range... no, look at the code: push_free doesn't
-        // update free_frames.  add_free_range calls push_free and then
-        // updates free_frames itself.  Let me verify...
-
-        // OK, looking at my code above: push_free does NOT update
-        // self.free_frames.  add_free_range does it explicitly after
-        // push_free.  Good — so push_free / remove_free are pure list
-        // operations.  alloc_inner and free_inner manage the counter.
+        // Update free-frame count.  push_free / remove_free are pure list
+        // operations — only alloc_inner, free_inner, and add_free_range
+        // modify the counter.  Net change: we consumed 2^order frames
+        // (the split halves cancel out).
 
         let frames_out = 1usize << order;
         self.free_frames = self.free_frames.saturating_sub(frames_out);

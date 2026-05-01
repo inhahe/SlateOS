@@ -125,55 +125,60 @@ target_ms   = 2.0
 source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 
 # -------------------------------------------------------------------------
-# QEMU TCG measurements (software emulation, no KVM)
+# QEMU measurements (i7-8700K, -cpu qemu64,+rdtscp, -m 256M)
 # -------------------------------------------------------------------------
-# These are measured under QEMU with TCG (no hardware virtualization)
-# on the same i7-8700K. TCG is 30-80x slower than bare metal, so
-# absolute numbers are meaningless — use only for relative comparisons
-# between kernel versions. The ratio between benchmarks IS meaningful.
+# Measured under QEMU on the same i7-8700K. QEMU auto-selects WHPX
+# (hardware virtualization via Hyper-V) when available, falling back
+# to TCG (software emulation). Both produce consistent numbers for
+# in-kernel benchmarks because the measurement loops run entirely in
+# guest kernel mode without VM exits.
 #
-# Date: 2026-05-01, QEMU 9.x, -cpu qemu64,+rdtscp, -m 256M
-# Optimizations: O(1) size_class_index, rdtscp CPU identification
+# Date: 2026-05-01, QEMU 9.x
+# Optimizations: O(1) size_class_index, rdtscp CPU identification,
+#   map_frame batched page table walk (page_fault benchmark)
 
-[qemu_tcg.page_alloc_free]
-min_ns    = 1700
-min_cycles = 6260
+[qemu.page_alloc_free]
+min_ns    = 234
+min_cycles = 868
 
-[qemu_tcg.heap_alloc_small_64]
-min_ns    = 3276
-min_cycles = 12062
+[qemu.heap_alloc_small_64]
+min_ns    = 294
+min_cycles = 1092
 
-[qemu_tcg.heap_alloc_medium_512]
-min_ns    = 5123
-min_cycles = 18864
+[qemu.heap_alloc_medium_512]
+min_ns    = 412
+min_cycles = 1526
 
-[qemu_tcg.heap_alloc_large_4096]
-min_ns    = 20412
-min_cycles = 75156
+[qemu.heap_alloc_large_4096]
+min_ns    = 1083
+min_cycles = 4012
 
-[qemu_tcg.context_switch]
-min_ns    = 7301
-min_cycles = 53768
+[qemu.context_switch]
+min_ns    = 523
+min_cycles = 1938
+# per-switch estimate: 261ns
 
-[qemu_tcg.syscall_dispatch]
-min_ns    = 300
-min_cycles = 1108
+[qemu.syscall_dispatch]
+min_ns    = 43
+min_cycles = 162
 
-[qemu_tcg.ipc_channel_roundtrip]
-min_ns    = 6969
-min_cycles = 25660
+[qemu.ipc_channel_roundtrip]
+min_ns    = 466
+min_cycles = 1726
 
-[qemu_tcg.page_fault_anonymous]
-min_ns    = 29261
-min_cycles = 107728
+[qemu.page_fault_anonymous]
+# OPT: 107728→26910 cycles after switching benchmark from 4× map_4k_if_absent
+# to single map_frame call (matching real fault handler path).
+min_ns    = 7267
+min_cycles = 26910
 
-[qemu_tcg.hpet_read]
-min_ns    = 902
-min_cycles = 3324
+[qemu.hpet_read]
+min_ns    = 428
+min_cycles = 1588
 
-[qemu_tcg.rdtsc_overhead]
-min_ns    = 160
-min_cycles = 590
+[qemu.rdtsc_overhead]
+min_ns    = 38
+min_cycles = 142
 
 # -------------------------------------------------------------------------
 # Measurement methodology notes

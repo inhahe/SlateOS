@@ -713,6 +713,9 @@ fn dispatch_or_kill_userspace(
 // faults are unrecoverable kernel bugs and halt the system.
 // ---------------------------------------------------------------------------
 
+/// Handle #DE (Divide Error, vector 0).
+///
+/// Ring 3: dispatch to SEH handler or kill task.  Ring 0: halt (kernel bug).
 #[unsafe(no_mangle)]
 extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
@@ -724,21 +727,27 @@ extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #DB (Debug, vector 1).  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("EXCEPTION: Debug (#DB) at {:#x}", frame.rip);
 }
 
+/// Handle NMI (Non-Maskable Interrupt, vector 2).  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("EXCEPTION: NMI at {:#x}", frame.rip);
 }
 
+/// Handle #BP (Breakpoint, vector 3).  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("EXCEPTION: Breakpoint (#BP) at {:#x}", frame.rip);
 }
 
+/// Handle #OF (Overflow, vector 4).
+///
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_overflow(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
@@ -750,6 +759,9 @@ extern "C" fn handle_overflow(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #BR (Bound Range Exceeded, vector 5).
+///
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
@@ -761,6 +773,9 @@ extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #UD (Invalid Opcode, vector 6).
+///
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
@@ -772,6 +787,10 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #NM (Device Not Available, vector 7).
+///
+/// Typically means FPU context isn't loaded.  Ring 3: SEH dispatch.
+/// Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
@@ -785,6 +804,10 @@ extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) 
     cpu::halt_loop();
 }
 
+/// Handle #DF (Double Fault, vector 8).  Always fatal.
+///
+/// Runs on IST1 (dedicated stack) so it works even if the kernel
+/// stack is corrupted.
 #[unsafe(no_mangle)]
 extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     // Double faults are always unrecoverable — even from ring 3.
@@ -803,6 +826,7 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #TS (Invalid TSS, vector 10).  Always fatal — broken task state.
 #[unsafe(no_mangle)]
 extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
     serial_println!(
@@ -812,6 +836,9 @@ extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #NP (Segment Not Present, vector 11).  Error code = selector index.
+///
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
     if is_userspace_exception(frame) {
@@ -827,6 +854,9 @@ extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #SS (Stack-Segment Fault, vector 12).
+///
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
     if is_userspace_exception(frame) {
@@ -842,6 +872,10 @@ extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #GP (General Protection Fault, vector 13).
+///
+/// Catches privilege violations, bad segment access, non-canonical addresses.
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64) {
     if is_userspace_exception(frame) {
@@ -861,6 +895,10 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
     cpu::halt_loop();
 }
 
+/// Handle #PF (Page Fault, vector 14).  CR2 = faulting address.
+///
+/// Tries in order: kernel VMA resolve, swap-in, demand paging (VMAs),
+/// stack growth, SEH dispatch.  Ring 0 faults halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     // CR2 contains the faulting virtual address.
@@ -1040,6 +1078,9 @@ fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
     }
 }
 
+/// Handle #MF (x87 Floating-Point Error, vector 16).
+///
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
@@ -1051,6 +1092,7 @@ extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #AC (Alignment Check, vector 17).  Only triggers from ring 3.
 #[unsafe(no_mangle)]
 extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
     // #AC can only occur in ring 3 (when CR0.AM and RFLAGS.AC are set).
@@ -1067,6 +1109,7 @@ extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #MC (Machine Check, vector 18).  Hardware error — always fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
     // Machine check is a hardware error — always fatal.
@@ -1075,6 +1118,9 @@ extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// Handle #XM (SIMD Floating-Point, vector 19).
+///
+/// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_simd_fp(frame: &InterruptStackFrame, _error: u64) {
     if is_userspace_exception(frame) {
@@ -1086,6 +1132,7 @@ extern "C" fn handle_simd_fp(frame: &InterruptStackFrame, _error: u64) {
     cpu::halt_loop();
 }
 
+/// Catch-all for unhandled interrupt vectors.  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_default(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("INTERRUPT: Unhandled vector at {:#x}", frame.rip);

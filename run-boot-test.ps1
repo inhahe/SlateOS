@@ -20,7 +20,7 @@ Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
 Start-Sleep 1
 
 if (Test-Path serial.log) {
-    Get-Content serial.log | Select-String "syscall|BOOT_OK|Console write"
+    Get-Content serial.log | Select-String "syscall|bench|BOOT_OK|Console write|PASSED|FAILED"
 } else {
     Write-Host "ERROR: serial.log not created"
 }

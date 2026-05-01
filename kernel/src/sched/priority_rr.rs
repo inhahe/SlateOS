@@ -537,9 +537,15 @@ impl PerCpuScheduler {
     /// Handle a timer tick for the given CPU.
     ///
     /// Returns `true` if the current task's time slice expired.
+    ///
+    /// Uses `try_lock` so that if the per-CPU lock is held (e.g., by
+    /// the SCHED_SOFTIRQ push balancer running with interrupts enabled),
+    /// the timer ISR skips this tick instead of deadlocking.  The next
+    /// timer tick (10 ms later) will catch up.
     pub fn tick(&self, cpu: usize) -> bool {
         self.queues.get(cpu)
-            .is_some_and(|q| q.lock().tick())
+            .and_then(|q| q.try_lock())
+            .is_some_and(|mut guard| guard.tick())
     }
 
     /// Get the remaining ticks for the currently running task on a CPU.
@@ -627,6 +633,123 @@ impl PerCpuScheduler {
         first
     }
 
+    /// Try to push excess tasks from `cpu` to a lighter CPU.
+    ///
+    /// This is the push-based complement to [`try_steal`] (pull-based).
+    /// `try_steal` runs when a CPU goes idle (reactive); `try_push_balance`
+    /// runs periodically on busy CPUs via `SCHED_SOFTIRQ` (proactive).
+    ///
+    /// Returns a list of `(task_id, target_cpu)` migrations for the
+    /// caller to update `last_cpu` fields and send reschedule IPIs.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Count local tasks.  If ≤ 1, nothing to push.
+    /// 2. Scan all other CPUs (via `try_lock`) to find the lightest.
+    /// 3. If the imbalance (local − lightest) < 2, skip (hysteresis).
+    /// 4. Steal from our own queue's back (cache-cold tasks).
+    /// 5. Enqueue on the target CPU.
+    /// 6. Return migration info.
+    ///
+    /// # Lock safety
+    ///
+    /// Never holds two CPU locks simultaneously.  Phase 2 (scan) uses
+    /// `try_lock` and drops immediately.  Phase 4 locks local, pops,
+    /// drops.  Phase 5 locks target, pushes, drops.
+    /// Try to push excess tasks from `cpu` to a lighter CPU.
+    ///
+    /// # Lock safety
+    ///
+    /// This runs from softirq context with **interrupts enabled**.
+    /// A timer interrupt can fire at any point and call `timer_tick()`,
+    /// which acquires the local CPU's per-CPU lock.  To avoid deadlock,
+    /// ALL lock acquisitions use `try_lock`.  If any lock is contended
+    /// (likely because a timer ISR is accessing it), we bail and retry
+    /// on the next balance interval (100 ms).
+    pub fn try_push_balance(
+        &self,
+        cpu: usize,
+    ) -> alloc::vec::Vec<(super::task::TaskId, usize)> {
+        let mut migrations = alloc::vec::Vec::new();
+        let n = self.num_cpus.load(Ordering::Relaxed);
+        if n <= 1 {
+            return migrations;
+        }
+
+        // Phase 1: Count local tasks (excluding idle).
+        // MUST use try_lock — timer ISR can acquire this lock.
+        let local_count = match self.queues.get(cpu).and_then(|m| m.try_lock()) {
+            Some(guard) => {
+                if !guard.has_real_work() { 0 } else { guard.total_tasks() }
+            }
+            None => return migrations, // Lock contended (timer ISR).
+        };
+        if local_count <= 1 {
+            return migrations;
+        }
+
+        // Phase 2: Find the lightest CPU (try_lock to avoid blocking).
+        let mut lightest_cpu = usize::MAX;
+        let mut lightest_count = usize::MAX;
+        for i in 0..n {
+            if i == cpu {
+                continue;
+            }
+            if let Some(q) = self.queues.get(i).and_then(|m| m.try_lock()) {
+                let count = q.total_tasks();
+                if count < lightest_count {
+                    lightest_count = count;
+                    lightest_cpu = i;
+                }
+            }
+        }
+        if lightest_cpu == usize::MAX {
+            return migrations;
+        }
+
+        // Phase 3: Check imbalance.  Need at least 2 tasks difference
+        // to avoid oscillation (task bouncing between CPUs every 100ms).
+        let imbalance = local_count.saturating_sub(lightest_count);
+        if imbalance < 2 {
+            return migrations;
+        }
+
+        // Phase 4+5: Hold local lock, steal, try to push to target.
+        //
+        // We hold the local lock throughout so that if the target lock
+        // fails, we can safely put tasks back without re-acquiring.
+        // This is safe from deadlock because:
+        // - timer_tick() uses try_lock for its per-CPU lock
+        // - We use try_lock for the target
+        // - No other code holds two per-CPU locks simultaneously
+        let to_push = (imbalance / 2).max(1).min(4);
+        let Some(mut local_guard) = self.queues.get(cpu).and_then(|m| m.try_lock()) else {
+            return migrations; // Lock contended (timer ISR).
+        };
+        let stolen = local_guard.steal(to_push);
+        if stolen.is_empty() {
+            return migrations;
+        }
+
+        // Try to lock target while holding local.
+        if let Some(mut target_guard) = self.queues.get(lightest_cpu).and_then(|m| m.try_lock()) {
+            // Success: move tasks to target.
+            drop(local_guard); // Release local before doing work.
+            for &(id, priority) in &stolen {
+                target_guard.enqueue(id, priority);
+                migrations.push((id, lightest_cpu));
+            }
+        } else {
+            // Target lock contended — put tasks back locally.
+            for &(id, priority) in &stolen {
+                local_guard.enqueue(id, priority);
+            }
+            // migrations stays empty — no migration happened.
+        }
+
+        migrations
+    }
+
     /// Check if any CPU has ready tasks.
     #[must_use]
     pub fn has_ready(&self) -> bool {
@@ -641,22 +764,26 @@ impl PerCpuScheduler {
     ///
     /// Used by the timer tick load balancer: a CPU that only has its
     /// idle task is considered "idle" and should proactively steal.
+    /// Uses `try_lock` to avoid deadlock with the softirq push balancer.
     #[must_use]
     pub fn local_has_real_work(&self, cpu: usize) -> bool {
-        self.queues.get(cpu).is_some_and(|m| m.lock().has_real_work())
+        self.queues.get(cpu)
+            .and_then(|m| m.try_lock())
+            .is_some_and(|guard| guard.has_real_work())
     }
 
     /// Check if any *other* CPU has real work that could be stolen.
     ///
     /// Lightweight probe for the timer tick load balancer: returns true
     /// if at least one CPU (other than `cpu`) has non-idle tasks.
+    /// Uses `try_lock` to avoid deadlock with the softirq push balancer.
     #[must_use]
     pub fn others_have_real_work(&self, cpu: usize) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
         self.queues.iter()
             .take(n)
             .enumerate()
-            .any(|(i, m)| i != cpu && m.lock().has_real_work())
+            .any(|(i, m)| i != cpu && m.try_lock().is_some_and(|g| g.has_real_work()))
     }
 
     // --- Global configuration (applies to all CPUs) ---

@@ -301,14 +301,18 @@ fn handle_timer() {
     crate::ipc::timer::process_timer_expirations();
 }
 
-/// Scheduler softirq handler (placeholder).
+/// Scheduler softirq handler — proactive push-based load balancing.
 ///
-/// Reserved for future scheduler load-balancing work that should
-/// run with interrupts enabled (e.g., cross-CPU task migration
-/// decisions that involve non-trivial computation).
+/// Runs with interrupts enabled (unlike the timer ISR's reactive
+/// pull-based work stealing).  Checks if this CPU has significantly
+/// more tasks than the lightest CPU and migrates excess tasks to
+/// equalize load.
+///
+/// Raised every [`BALANCE_INTERVAL`](crate::sched) ticks (100 ms)
+/// when the local CPU has real work.  Idle CPUs use the reactive
+/// pull path in [`timer_tick`](crate::sched::timer_tick) instead.
 fn handle_sched() {
-    // Future: periodic load balance checks that are too expensive
-    // for hard-IRQ context.
+    crate::sched::push_balance();
 }
 
 /// IRQ poll softirq handler.

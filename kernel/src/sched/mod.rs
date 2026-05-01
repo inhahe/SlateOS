@@ -667,11 +667,17 @@ pub fn timer_tick() -> bool {
     if tick_count % BALANCE_INTERVAL == 0 {
         // Check: does our local queue have real work (above idle)?
         if !PER_CPU_SCHED.local_has_real_work(cpu) {
-            // Is anyone else overloaded with real tasks?
+            // Idle CPU: pull work via reactive work stealing.
             if PER_CPU_SCHED.others_have_real_work(cpu) {
                 // Trigger a reschedule — schedule_inner will try_steal.
                 return true;
             }
+        } else {
+            // Busy CPU: raise SCHED_SOFTIRQ for push-based balancing.
+            // The softirq handler runs with interrupts re-enabled
+            // (after EOI), so the balance computation doesn't extend
+            // the hard-IRQ phase.
+            crate::softirq::raise(crate::softirq::SCHED_SOFTIRQ);
         }
     }
 
@@ -686,6 +692,50 @@ pub fn timer_tick() -> bool {
 /// ready task is scheduled.
 pub fn preempt() {
     schedule_inner(true);
+}
+
+/// Proactive push-based load balancing.
+///
+/// Called from `SCHED_SOFTIRQ` handler with interrupts enabled.
+/// If this CPU has significantly more tasks than the lightest CPU,
+/// migrates some excess tasks to equalize load.
+///
+/// Complements the reactive work-stealing in [`schedule_inner`]
+/// (which only fires when a CPU runs out of local work).  Push
+/// balancing ensures that a CPU with 10 tasks and a neighbor with 2
+/// don't wait until the neighbor goes fully idle before equalizing.
+///
+/// Uses `try_lock` for the global task table to avoid blocking in
+/// softirq context.  If the lock is contended, we skip this balance
+/// check and try again in the next `BALANCE_INTERVAL` (100 ms).
+pub fn push_balance() {
+    let cpu = current_cpu_id();
+
+    let migrations = PER_CPU_SCHED.try_push_balance(cpu);
+    if migrations.is_empty() {
+        return;
+    }
+
+    // Update `last_cpu` on migrated tasks so they get enqueued on
+    // the correct CPU on their next wake.  Uses try_lock to avoid
+    // blocking in softirq context.
+    if let Some(mut state) = SCHED.try_lock() {
+        for &(task_id, target_cpu) in &migrations {
+            if let Some(task) = state.tasks.get_mut(&task_id) {
+                task.last_cpu = target_cpu;
+            }
+        }
+    }
+    // Even if we couldn't update last_cpu (lock contended), the
+    // tasks are already enqueued on the target CPU's queue.  On
+    // their next reschedule/wake, they'll land on the wrong CPU
+    // but self-correct on the following balance pass.
+
+    // Wake target CPUs that might be idle (HLTing).
+    // Deduplicate: all migrations go to the same target CPU.
+    if let Some(&(_, target_cpu)) = migrations.first() {
+        signal_cpu(target_cpu);
+    }
 }
 
 /// Suspend a task (pause execution).

@@ -1,3 +1,10 @@
+## Completed
+- Per-CPU scheduler lock refactor: DONE (commit 449e218).  Split global
+  SCHED lock into per-CPU spinlocks inside PerCpuScheduler + separate
+  global task table lock.  timer_tick() no longer needs the global lock
+  on the fast path.  Boot-tested SMP=1 and SMP=2.
+
+
 ## Known Bugs / Limitations
 
 - Debug kernel binary too large for Limine: The debug build (~9MB) causes
@@ -34,7 +41,7 @@
 - kernel-ipc: Wire transitive priority inheritance into futex_lock_pi /
   futex_unlock_pi (ipc/futex.rs).  The scheduler-side infrastructure is
   ready in sched/mod.rs and sched/task.rs:
-    - `Task.blocked_on_pi_addr: Option<u64>` �� set before blocking, clear on acquire
+    - `Task.blocked_on_pi_addr: Option<u64>`    set before blocking, clear on acquire
     - `sched::set_blocked_on_pi_addr(task_id, addr)` — setter
     - `sched::get_blocked_on_pi_addr(task_id)` — getter
     - `sched::pi_chain_boost(start_owner, donor_prio, find_owner)` — walk chain

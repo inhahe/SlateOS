@@ -203,7 +203,10 @@ _Port ext4 first. Don't write a custom filesystem._
 - [-] PID 1 init process
   - [x] Minimal userspace init binary (ring 3, SYSCALL-based I/O, embedded in kernel ELF)
   - [x] Interactive shell: console read/write, echo command, help, exit
-  - [ ] Service spawn/management (start other processes from init)
+  - [x] Filesystem shell commands: ls, cat, write, stat, mkdir, rmdir, rm
+  - [x] System info commands: pid, uptime
+  - [x] Userspace pointer validation on all syscall handlers
+  - [-] Service spawn/management (start other processes from init)
 - [ ] Dependency-based parallel service startup
 - [ ] Socket activation
 - [ ] Automatic crash restart with backoff

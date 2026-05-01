@@ -500,6 +500,19 @@ extern "C" fn kmain() -> ! {
     static INIT_ELF: &[u8] = include_bytes!(
         "../../userspace/init/target/x86_64-unknown-none/release/init"
     );
+    static HELLO_ELF: &[u8] = include_bytes!(
+        "../../userspace/hello/target/x86_64-unknown-none/release/hello"
+    );
+
+    // Write embedded binaries to the VFS so init can spawn them.
+    if let Err(e) = fs::Vfs::mkdir("/bin") {
+        serial_println!("[init] Note: /bin mkdir: {:?} (may already exist)", e);
+    }
+    if let Err(e) = fs::Vfs::write_file("/bin/hello", HELLO_ELF) {
+        serial_println!("[init] WARNING: failed to write /bin/hello: {:?}", e);
+    } else {
+        serial_println!("[init] Installed /bin/hello ({} bytes)", HELLO_ELF.len());
+    }
 
     serial_println!("[init] Spawning init process ({} bytes ELF)", INIT_ELF.len());
 

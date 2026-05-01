@@ -8,6 +8,7 @@ members = [
 # separately via `cargo build` in their own directories.
 exclude = [
     "userspace/init",
+    "userspace/hello",
 ]
 
 [workspace.lints.clippy]

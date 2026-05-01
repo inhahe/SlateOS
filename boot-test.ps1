@@ -14,6 +14,7 @@ if (Test-Path $kernelBin) {
 $proc = Start-Process -FilePath $qemu -ArgumentList @(
     "-drive", "`"if=pflash,format=raw,readonly=on,file=$fw`"",
     "-drive", "format=raw,file=fat:rw:esp",
+    "-drive", "format=raw,if=virtio,file=disk.img",
     "-m", "256M",
     "-serial", "file:serial.log",
     "-display", "none",

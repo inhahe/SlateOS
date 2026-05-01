@@ -40,6 +40,8 @@ const SYS_TASK_ID: u64 = 2;
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CONSOLE_READ_CHAR: u64 = 101;
+const SYS_PROCESS_SPAWN: u64 = 500;
+const SYS_PROCESS_WAIT: u64 = 501;
 const SYS_FS_READ_FILE: u64 = 600;
 const SYS_FS_WRITE_FILE: u64 = 601;
 const SYS_FS_DELETE: u64 = 602;
@@ -236,6 +238,24 @@ fn fs_rmdir(path: &[u8]) -> i64 {
         path.as_ptr() as u64,
         path.len() as u64,
     )
+}
+
+/// Spawn a new process from ELF data in memory.
+/// Returns the child PID (positive) or negative error.
+fn process_spawn(elf: &[u8], name: &[u8]) -> i64 {
+    syscall4(
+        SYS_PROCESS_SPAWN,
+        elf.as_ptr() as u64,
+        elf.len() as u64,
+        name.as_ptr() as u64,
+        name.len() as u64,
+    )
+}
+
+/// Wait for a child process to exit.
+/// Returns the exit code or negative error.
+fn process_wait(pid: u64) -> i64 {
+    syscall1(SYS_PROCESS_WAIT, pid)
 }
 
 /// Stat a file.  Returns 0 or negative error.
@@ -613,6 +633,67 @@ fn cmd_rm(args: &[u8]) {
     }
 }
 
+/// `spawn <path>` — load an ELF from the filesystem and run it.
+fn cmd_spawn(args: &[u8]) {
+    if args.is_empty() {
+        print("spawn: missing path\n");
+        return;
+    }
+
+    // Read the ELF from the filesystem.
+    // 64 KiB max — init has no heap, so this is a stack buffer.
+    let mut elf_buf = [0u8; 65536];
+    let result = fs_read_file(args, &mut elf_buf);
+    if result < 0 {
+        print("spawn: failed to read ");
+        console_write(args);
+        print(": error ");
+        print_i64(result);
+        print("\n");
+        return;
+    }
+
+    let elf_len = result as usize;
+    let elf_data = &elf_buf[..elf_len];
+
+    // Extract filename from path for the process name.
+    let name = {
+        let mut last_slash = 0;
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == b'/' {
+                last_slash = i + 1;
+            }
+            i += 1;
+        }
+        &args[last_slash..]
+    };
+
+    print("Spawning ");
+    console_write(args);
+    print(" (");
+    print_u64(elf_len as u64);
+    print(" bytes)...\n");
+
+    let pid = process_spawn(elf_data, name);
+    if pid < 0 {
+        print("spawn: error ");
+        print_i64(pid);
+        print("\n");
+        return;
+    }
+
+    print("Started PID ");
+    print_i64(pid);
+    print(", waiting...\n");
+
+    // Wait for the child to exit.
+    let exit_code = process_wait(pid as u64);
+    print("Process exited with code ");
+    print_i64(exit_code);
+    print("\n");
+}
+
 /// Execute a command.
 fn execute(line: &[u8]) {
     let trimmed = trim(line);
@@ -633,6 +714,7 @@ fn execute(line: &[u8]) {
         print("  mkdir <path> - create directory\n");
         print("  rmdir <path> - remove empty directory\n");
         print("  rm <path>   - delete a file\n");
+        print("  spawn <path> - run an ELF program\n");
         print("  pid         - show task ID\n");
         print("  uptime      - show time since boot\n");
         print("  exit        - shut down\n");
@@ -658,6 +740,8 @@ fn execute(line: &[u8]) {
         cmd_rmdir(args);
     } else if bytes_eq(cmd, b"rm") {
         cmd_rm(args);
+    } else if bytes_eq(cmd, b"spawn") {
+        cmd_spawn(args);
     } else if bytes_eq(cmd, b"pid") {
         let tid = task_id();
         print("Task ID: ");

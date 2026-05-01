@@ -12,7 +12,18 @@
 //!    privilege transitions and the Interrupt Stack Table (IST) for
 //!    per-interrupt stacks.
 //!
-//! ## GDT Layout
+//! ## Per-CPU Architecture
+//!
+//! Each CPU gets its own GDT and TSS.  The TSS contains per-CPU stacks:
+//! - **RSP0**: kernel stack for ring 3→0 transitions (interrupts, syscalls)
+//! - **IST1**: dedicated double-fault stack (catches kernel stack overflow)
+//!
+//! The GDT code/data segments are identical across CPUs, but the TSS
+//! descriptor must point to each CPU's own TSS, so we need per-CPU GDTs.
+//!
+//! Based on Linux `arch/x86/kernel/cpu/common.c` per-CPU GDT approach.
+//!
+//! ## GDT Layout (per CPU)
 //!
 //! | Index | Offset | Segment           | DPL | Notes                       |
 //! |-------|--------|-------------------|-----|-----------------------------|
@@ -28,6 +39,7 @@ use core::ptr::addr_of;
 use core::ptr::addr_of_mut;
 
 use crate::cpu;
+use crate::smp::MAX_CPUS;
 
 // ---------------------------------------------------------------------------
 // Segment selectors (byte offsets into GDT, with RPL bits)
@@ -79,16 +91,6 @@ const GDT_USER_CODE: u64 = 0x00AF_FA00_0000_FFFF;
 
 /// Size of the per-CPU interrupt stack (16 KiB — one of our base pages).
 const INTERRUPT_STACK_SIZE: usize = 16 * 1024;
-
-/// Stack used for double-fault handling (IST1).
-///
-/// Having a separate stack for double faults means we can catch stack
-/// overflows in the kernel itself.
-static mut DOUBLE_FAULT_STACK: [u8; INTERRUPT_STACK_SIZE] = [0; INTERRUPT_STACK_SIZE];
-
-/// Stack used as the privilege-level-0 stack (RSP0) when transitioning
-/// from ring 3 to ring 0.
-static mut PRIVILEGE_STACK: [u8; INTERRUPT_STACK_SIZE] = [0; INTERRUPT_STACK_SIZE];
 
 /// 64-bit Task State Segment.
 ///
@@ -145,19 +147,38 @@ impl TaskStateSegment {
     }
 }
 
-/// The single TSS instance.
+// ---------------------------------------------------------------------------
+// Per-CPU GDT and TSS arrays
+// ---------------------------------------------------------------------------
+
+/// Per-CPU stacks for RSP0 (ring 3→0 transitions).
+///
+/// Each CPU needs its own interrupt/syscall stack so concurrent interrupts
+/// on different CPUs don't stomp each other's stacks.
 ///
 /// # Safety
 ///
-/// Mutable statics are unsafe because of potential data races.
-/// The TSS is initialized once during boot before any other CPU
-/// accesses it, and afterward only the scheduler writes to `rsp0`
-/// (under a critical section).
-static mut TSS: TaskStateSegment = TaskStateSegment::new();
+/// Mutable statics — each CPU accesses only its own slot, initialized
+/// during sequential bootstrap.
+static mut PRIVILEGE_STACKS: [[u8; INTERRUPT_STACK_SIZE]; MAX_CPUS] =
+    [[0; INTERRUPT_STACK_SIZE]; MAX_CPUS];
 
-// ---------------------------------------------------------------------------
-// GDT structure
-// ---------------------------------------------------------------------------
+/// Per-CPU stacks for IST1 (double-fault handling).
+///
+/// Same per-CPU isolation rationale as `PRIVILEGE_STACKS`.
+static mut DOUBLE_FAULT_STACKS: [[u8; INTERRUPT_STACK_SIZE]; MAX_CPUS] =
+    [[0; INTERRUPT_STACK_SIZE]; MAX_CPUS];
+
+/// Per-CPU TSS instances.
+///
+/// # Safety
+///
+/// Each CPU accesses only its own TSS.  The BSP initializes TSS[0] during
+/// early boot; each AP initializes its own during SMP bootstrap.  After
+/// init, only the scheduler writes to `rsp0` (under a critical section
+/// with interrupts disabled on the local CPU).
+static mut TSS_ARRAY: [TaskStateSegment; MAX_CPUS] =
+    [const { TaskStateSegment::new() }; MAX_CPUS];
 
 /// The GDT itself: 5 normal 8-byte entries + 1 TSS entry (16 bytes) = 7 u64s.
 #[repr(C, align(16))]
@@ -172,17 +193,28 @@ struct GdtPointer {
     base: u64,
 }
 
-static mut GDT: Gdt = Gdt {
-    entries: [
-        GDT_NULL,
-        GDT_KERNEL_CODE,
-        GDT_KERNEL_DATA,
-        GDT_USER_DATA,
-        GDT_USER_CODE,
-        0, // TSS low  — filled at runtime
-        0, // TSS high — filled at runtime
-    ],
-};
+/// Per-CPU GDT instances.
+///
+/// Each CPU needs its own GDT because the TSS descriptor (entries 5–6)
+/// encodes the base address of that CPU's TSS.  The code/data segments
+/// (entries 0–4) are identical across all CPUs.
+///
+/// # Safety
+///
+/// Each CPU accesses only its own GDT, initialized during sequential boot.
+static mut GDT_ARRAY: [Gdt; MAX_CPUS] = [const {
+    Gdt {
+        entries: [
+            GDT_NULL,
+            GDT_KERNEL_CODE,
+            GDT_KERNEL_DATA,
+            GDT_USER_DATA,
+            GDT_USER_CODE,
+            0, // TSS low  — filled at runtime
+            0, // TSS high — filled at runtime
+        ],
+    }
+}; MAX_CPUS];
 
 /// Build the two u64 halves of a 64-bit TSS descriptor from the TSS
 /// base address and size.
@@ -207,55 +239,45 @@ fn make_tss_descriptor(base: u64, limit: u32) -> (u64, u64) {
 }
 
 // ---------------------------------------------------------------------------
-// Public interface
+// Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Initialize the GDT and TSS, then load them.
-///
-/// Must be called exactly once during early boot, on the BSP (Bootstrap
-/// Processor).  Other CPUs (APs) will need their own TSS but can share
-/// the same GDT.
+/// Initialize GDT entry 5–6 with the TSS descriptor for the given CPU,
+/// then load the GDT and TSS.
 ///
 /// # Safety
 ///
-/// - Must be called in ring 0 with interrupts disabled.
-/// - The stacks referenced by the TSS must remain valid for the lifetime
-///   of the system.
-pub unsafe fn init() {
-    // SAFETY: We are the only code running during early boot.  No other
-    // CPU is online yet, so there are no data races on these statics.
+/// - `cpu` must be a valid CPU index (0..MAX_CPUS).
+/// - The caller must be running on the CPU identified by `cpu`.
+/// - Must be called with interrupts disabled.
+unsafe fn init_cpu_gdt_tss(cpu: usize) {
+    // SAFETY: We're initializing our own CPU's data, no concurrent access.
     unsafe {
-        // Set up TSS stack pointers.
-        //
-        // RSP0: the stack the CPU switches to when an interrupt or
-        // syscall transitions from ring 3 to ring 0.
-        //
-        // SAFETY: We use addr_of!/addr_of_mut! to avoid creating
-        // references to mutable statics (Rust 2024 requirement).
-        let priv_stack_top = addr_of!(PRIVILEGE_STACK).cast::<u8>().add(INTERRUPT_STACK_SIZE);
-        (*addr_of_mut!(TSS)).rsp0 = priv_stack_top as u64;
+        // Set up this CPU's TSS stack pointers.
+        let priv_stack_top = addr_of!(PRIVILEGE_STACKS[cpu])
+            .cast::<u8>()
+            .add(INTERRUPT_STACK_SIZE);
+        (*addr_of_mut!(TSS_ARRAY[cpu])).rsp0 = priv_stack_top as u64;
 
-        // IST1: dedicated double-fault stack so a kernel stack overflow
-        // doesn't prevent us from handling the double fault.
-        let df_stack_top = addr_of!(DOUBLE_FAULT_STACK).cast::<u8>().add(INTERRUPT_STACK_SIZE);
-        (*addr_of_mut!(TSS)).ist1 = df_stack_top as u64;
+        let df_stack_top = addr_of!(DOUBLE_FAULT_STACKS[cpu])
+            .cast::<u8>()
+            .add(INTERRUPT_STACK_SIZE);
+        (*addr_of_mut!(TSS_ARRAY[cpu])).ist1 = df_stack_top as u64;
 
-        // Build the TSS descriptor and write it into the GDT.
-        let tss_base = addr_of!(TSS) as u64;
-        // TSS is 104 bytes; limit (103) always fits in u32.
+        // Build TSS descriptor and write into this CPU's GDT.
+        let tss_base = addr_of!(TSS_ARRAY[cpu]) as u64;
         #[allow(clippy::cast_possible_truncation)]
         let tss_limit = (size_of::<TaskStateSegment>() - 1) as u32;
         let (tss_low, tss_high) = make_tss_descriptor(tss_base, tss_limit);
 
-        (*addr_of_mut!(GDT)).entries[5] = tss_low;
-        (*addr_of_mut!(GDT)).entries[6] = tss_high;
+        (*addr_of_mut!(GDT_ARRAY[cpu])).entries[5] = tss_low;
+        (*addr_of_mut!(GDT_ARRAY[cpu])).entries[6] = tss_high;
 
-        // Load the GDT.
-        // GDT is 7 × 8 = 56 bytes; limit (55) always fits in u16.
+        // Load this CPU's GDT.
         #[allow(clippy::cast_possible_truncation)]
         let gdt_ptr = GdtPointer {
             limit: (size_of::<Gdt>() - 1) as u16,
-            base: addr_of!(GDT) as u64,
+            base: addr_of!(GDT_ARRAY[cpu]) as u64,
         };
 
         core::arch::asm!(
@@ -265,27 +287,26 @@ pub unsafe fn init() {
         );
 
         // Reload segment registers.
-        //
-        // CS must be loaded via a far return (retfq).  DS/ES/SS are
-        // loaded normally.  FS/GS are zeroed (we'll set GS base later
-        // for per-CPU data).
         reload_segments();
 
-        // Load the TSS.
+        // Load this CPU's TSS.
+        // No need to clear busy bit — each CPU has its own fresh TSS descriptor.
         core::arch::asm!(
             "ltr {:x}",
             in(reg) TSS_SEL,
             options(nostack, preserves_flags),
         );
     }
+}
 
-    // Set up the STAR MSR for syscall/sysret.
-    //
+/// Set up the STAR MSR for syscall/sysret on the current CPU.
+///
+/// This is a per-CPU MSR — each CPU must set it independently.
+fn setup_star_msr() {
     // STAR[47:32] = kernel CS for SYSCALL  (0x08)
     // STAR[63:48] = base for SYSRET       (0x10)
     //   → SYSRET SS = 0x10 + 8 = 0x18 (user data)
     //   → SYSRET CS = 0x10 + 16 = 0x20 (user code)
-    #[allow(clippy::items_after_statements)]
     const IA32_STAR: u32 = 0xC000_0081;
     let star_value: u64 = (u64::from(KERNEL_CS) << 32) | (0x10_u64 << 48);
     // SAFETY: IA32_STAR is a valid MSR on all x86_64 CPUs.
@@ -294,81 +315,62 @@ pub unsafe fn init() {
     }
 }
 
-/// Update RSP0 in the TSS (called by the scheduler on context switch).
+// ---------------------------------------------------------------------------
+// Public interface
+// ---------------------------------------------------------------------------
+
+/// Initialize the BSP's GDT and TSS, then load them.
+///
+/// Must be called exactly once during early boot, on the BSP (CPU 0).
+///
+/// # Safety
+///
+/// - Must be called in ring 0 with interrupts disabled.
+/// - The stacks referenced by the TSS must remain valid for the lifetime
+///   of the system.
+pub unsafe fn init() {
+    // SAFETY: CPU 0 is the BSP, we're the only code running.
+    unsafe {
+        init_cpu_gdt_tss(0);
+    }
+    setup_star_msr();
+}
+
+/// Update RSP0 in the current CPU's TSS (called by the scheduler on
+/// context switch).
 ///
 /// # Safety
 ///
 /// Must be called with interrupts disabled or from within an interrupt
 /// handler (otherwise a nested interrupt could see a half-written RSP0).
 pub unsafe fn set_kernel_stack(stack_top: u64) {
-    // SAFETY: Called under a critical section; no concurrent access.
-    // Using addr_of_mut! to avoid creating a reference to a mutable static.
+    let cpu = crate::smp::current_cpu_index();
+    // SAFETY: Called under a critical section; no concurrent access to
+    // this CPU's TSS.  Using addr_of_mut! to avoid references to mutable
+    // statics.
     unsafe {
-        (*addr_of_mut!(TSS)).rsp0 = stack_top;
+        (*addr_of_mut!(TSS_ARRAY[cpu])).rsp0 = stack_top;
     }
 }
 
-/// Load the BSP's GDT and segment registers on an Application Processor.
+/// Initialize and load the GDT and TSS for an Application Processor.
 ///
-/// APs share the BSP's GDT (same code/data/TSS descriptors).  Each AP
-/// calls this during its boot sequence after entering 64-bit mode.
+/// Each AP gets its own GDT and TSS with independent RSP0 and IST stacks.
+/// This eliminates the shared-TSS race condition where concurrent interrupts
+/// on different CPUs would corrupt each other's stacks.
 ///
 /// Also sets up the STAR MSR for syscall/sysret, which is per-CPU.
 ///
 /// # Safety
 ///
 /// Must be called exactly once per AP during SMP bootstrap, with
-/// interrupts disabled.
-pub unsafe fn reload_for_ap() {
-    // Load the same GDT as the BSP.
-    // SAFETY: GDT was initialized by BSP and is immutable (except TSS busy bit).
-    #[allow(clippy::cast_possible_truncation)]
-    let gdt_ptr = GdtPointer {
-        limit: (size_of::<Gdt>() - 1) as u16,
-        base: addr_of!(GDT) as u64,
-    };
-
+/// interrupts disabled.  `cpu` must be the caller's CPU index.
+pub unsafe fn init_for_ap(cpu: usize) {
+    // SAFETY: Each AP initializes only its own GDT/TSS slot.
     unsafe {
-        core::arch::asm!(
-            "lgdt [{}]",
-            in(reg) &raw const gdt_ptr,
-            options(readonly, nostack, preserves_flags),
-        );
-
-        reload_segments();
-
-        // Clear the TSS descriptor's "busy" bit before loading it.
-        //
-        // When the BSP executed `ltr`, the CPU changed the TSS descriptor
-        // type from 0x9 (available 64-bit TSS) to 0xB (busy 64-bit TSS).
-        // Attempting `ltr` on a busy TSS causes a #GP.  We clear bit 41
-        // of the low half (the busy bit in the type field) to make it
-        // available again.
-        //
-        // This is safe because we boot APs sequentially (only one AP
-        // loads the TSS at a time) and the BSP's ring-0 interrupt
-        // handling doesn't require the TSS to be marked busy.
-        //
-        // TODO: Per-CPU TSS with independent RSP0 and IST stacks.
-        // Once per-CPU TSS is implemented, each CPU gets its own TSS
-        // descriptor and this hack becomes unnecessary.
-        (*addr_of_mut!(GDT)).entries[5] &= !(1u64 << 41);
-
-        core::arch::asm!(
-            "ltr {:x}",
-            in(reg) TSS_SEL,
-            options(nostack, preserves_flags),
-        );
+        init_cpu_gdt_tss(cpu);
     }
-
-    // Set up the STAR MSR for syscall/sysret (per-CPU MSR).
-    #[allow(clippy::items_after_statements)]
-    const IA32_STAR: u32 = 0xC000_0081;
-    let star_value: u64 = (u64::from(KERNEL_CS) << 32) | (0x10_u64 << 48);
-    // SAFETY: IA32_STAR is a valid MSR.
-    unsafe {
-        cpu::wrmsr(IA32_STAR, star_value);
-    }
+    setup_star_msr();
 }
 
 /// Reload CS, DS, ES, SS, FS, GS after loading a new GDT.

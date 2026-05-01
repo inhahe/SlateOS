@@ -579,15 +579,16 @@ extern "C" fn ap_entry() -> ! {
 
     serial_println!("[smp] AP {} entered kernel (64-bit mode)", cpu_index);
 
-    // Load the kernel's GDT.
-    // APs can share the BSP's GDT entries (code/data segments are the same
-    // for all CPUs).  Each AP needs its own TSS for RSP0 (interrupt stacks).
-    // For now, we load the BSP's GDT — the TSS is shared (single-threaded
-    // kernel ISRs).  Per-CPU TSS will be added when needed.
+    // Initialize this AP's own GDT and TSS.
     //
-    // SAFETY: The GDT is already set up by the BSP.
+    // Each CPU gets its own GDT (with a TSS descriptor pointing to its
+    // own TSS) and its own TSS (with independent RSP0 and IST stacks).
+    // This ensures concurrent interrupts on different CPUs don't corrupt
+    // each other's stacks.
+    //
+    // SAFETY: cpu_index is our CPU index, interrupts are disabled.
     unsafe {
-        crate::gdt::reload_for_ap();
+        crate::gdt::init_for_ap(cpu_index);
     }
 
     // Load the kernel's IDT.

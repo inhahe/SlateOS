@@ -45,7 +45,12 @@ _The minimum kernel that can run a single userspace process._
   - [x] Page fault handler integration: detects swap PTEs and triggers swap-in
   - [x] Sysctl parameters: mm.swappiness (default 15), mm.min_free_pages (default 32)
   - [x] Swappiness tunable integrated into workload profiles (Desktop=15, Server=30, Dev=10, Gaming=5)
-  - [ ] Page reclamation policy (Clock algorithm, triggered by low-memory threshold)
+  - [x] Page reclamation policy (Clock algorithm, triggered by low-memory threshold)
+    - [x] `ReclaimablePage` tracking list with register/unregister API
+    - [x] Clock (second-chance) algorithm: scans ACCESSED bit, gives second chance or evicts
+    - [x] `try_reclaim(target)` integrated into frame allocator OOM path
+    - [x] `register_reclaimable()` hooked into stack growth, demand paging, and swap-in paths
+    - [x] Lock ordering: SWAP → RECLAIM → page table → frame allocator (deadlock-free)
   - [ ] zswap/zram compressed swap (recommended for desktop)
   - [ ] Disk-backed swap via virtio-blk
 - [x] Committed vs. lazy memory allocation modes

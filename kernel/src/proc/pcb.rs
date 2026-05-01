@@ -586,6 +586,10 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         page_table::flush_frame(virt);
     }
 
+    // Register the new page as reclaimable so the swap subsystem's
+    // Clock algorithm can evict it under memory pressure.
+    crate::mm::swap::register_reclaimable(pml4_phys, frame_base, flags);
+
     serial_println!(
         "[fault] Demand-paged user frame for pid {} at {:#x}",
         pid, frame_base

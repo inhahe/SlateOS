@@ -761,12 +761,39 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
 ///
 /// The returned frame is naturally aligned to the block size
 /// (e.g., order 2 = 64 KiB aligned).  `order` must be ≤ [`MAX_ORDER`].
+///
+/// If the allocator is out of memory, attempts to reclaim pages via
+/// the swap subsystem's Clock algorithm before giving up.
 pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
+
+    // First attempt — fast path.
+    {
+        let mut guard = allocator.lock();
+        match guard.alloc_inner(order) {
+            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
+            Err(KernelError::OutOfMemory) => {
+                // Fall through to reclamation.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Allocator lock released before reclamation (lock ordering:
+    // SWAP → RECLAIM → page table → frame allocator).
+
+    // Try to reclaim pages via swap to free physical memory.
+    // Request enough frames for the order, plus a small buffer so the
+    // allocator can potentially coalesce buddies.
+    let needed = 1usize << order;
+    let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
+
+    if reclaimed == 0 {
+        return Err(KernelError::OutOfMemory);
+    }
+
+    // Retry allocation after reclamation.
     let mut guard = allocator.lock();
     let addr = guard.alloc_inner(order)?;
-
-    // The buddy allocator always returns frame-aligned addresses.
     PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)
 }
 

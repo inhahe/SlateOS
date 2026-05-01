@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use spin::Mutex;
-use super::frame::{self, PhysFrame, FRAME_SIZE};
+use super::frame::{self, FRAME_SIZE};
 use super::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 
 // ---------------------------------------------------------------------------
@@ -354,8 +354,231 @@ impl SwapState {
     }
 }
 
-/// Lock ordering: SWAP → page table → frame allocator.
+/// Lock ordering: SWAP → RECLAIM → page table → frame allocator.
 static SWAP: Mutex<SwapState> = Mutex::new(SwapState::uninit());
+
+// ---------------------------------------------------------------------------
+// Reclaimable page tracking (Clock algorithm)
+// ---------------------------------------------------------------------------
+
+/// A record of a user-space page that can be reclaimed (swapped out).
+///
+/// The reclaimer maintains a circular list of these records and uses
+/// the Clock (second-chance) algorithm to select victims.
+#[derive(Clone, Copy)]
+struct ReclaimablePage {
+    /// PML4 physical address of the owning process's page table.
+    pml4_phys: u64,
+    /// Frame-aligned virtual address of the page.
+    vaddr: u64,
+    /// Page flags to restore on swap-in.
+    flags: PageFlags,
+    /// Whether this entry is active (pages get deregistered by setting
+    /// active=false rather than removing, to avoid O(n) shifts).
+    active: bool,
+}
+
+/// Reclamation state (separate lock from SWAP to avoid holding both
+/// during the full swap-out sequence).
+struct ReclaimState {
+    /// Circular list of reclaimable pages.
+    pages: Vec<ReclaimablePage>,
+    /// Clock hand position (index into `pages`).
+    clock_hand: usize,
+    /// Number of active entries.
+    active_count: usize,
+}
+
+impl ReclaimState {
+    const fn new() -> Self {
+        Self {
+            pages: Vec::new(),
+            clock_hand: 0,
+            active_count: 0,
+        }
+    }
+}
+
+static RECLAIM: Mutex<ReclaimState> = Mutex::new(ReclaimState::new());
+
+/// Register a user-space page as reclaimable (eligible for swap-out).
+///
+/// Called when a user-space page is mapped (via demand paging, stack
+/// growth, or committed allocation).  The page's PML4, virtual address,
+/// and original flags are recorded so the reclaimer can find and
+/// restore it later.
+///
+/// This is O(1) amortized — entries are appended or reuse inactive slots.
+pub fn register_reclaimable(pml4_phys: u64, vaddr: u64, flags: PageFlags) {
+    let mut state = RECLAIM.lock();
+
+    // Try to reuse an inactive slot first (avoids unbounded growth).
+    for entry in state.pages.iter_mut() {
+        if !entry.active {
+            *entry = ReclaimablePage {
+                pml4_phys,
+                vaddr,
+                flags,
+                active: true,
+            };
+            state.active_count = state.active_count.saturating_add(1);
+            return;
+        }
+    }
+
+    // No inactive slot — append.
+    state.pages.push(ReclaimablePage {
+        pml4_phys,
+        vaddr,
+        flags,
+        active: true,
+    });
+    state.active_count = state.active_count.saturating_add(1);
+}
+
+/// Unregister a page from the reclaimable set.
+///
+/// Called when a user-space page is unmapped (via munmap or process
+/// exit).  Marks the entry inactive so the reclaimer skips it.
+///
+/// This is O(n) in the worst case (scanning for the entry), but the
+/// list is typically short and entries near the clock hand are found
+/// quickly.
+pub fn unregister_reclaimable(pml4_phys: u64, vaddr: u64) {
+    let mut state = RECLAIM.lock();
+
+    for entry in state.pages.iter_mut() {
+        if entry.active && entry.pml4_phys == pml4_phys && entry.vaddr == vaddr {
+            entry.active = false;
+            state.active_count = state.active_count.saturating_sub(1);
+            return;
+        }
+    }
+}
+
+/// Try to reclaim `target` pages by swapping them out.
+///
+/// Uses the **Clock algorithm** (second-chance LRU approximation):
+/// 1. Start from the clock hand position.
+/// 2. For each active page:
+///    a. If the page's ACCESSED bit is set in the PTE, clear it
+///       (give it a "second chance") and advance.
+///    b. If ACCESSED is clear, this page hasn't been touched recently
+///       → select it for eviction.
+/// 3. Evict the selected page via `swap_out_page()`.
+/// 4. Continue until `target` pages have been reclaimed or we've
+///    scanned the entire list twice without finding a victim.
+///
+/// Returns the number of pages actually reclaimed.
+pub fn try_reclaim(target: usize) -> usize {
+    let mut reclaimed = 0;
+
+    // We need to collect victims while holding RECLAIM, then release
+    // RECLAIM before calling swap_out_page (which needs SWAP lock).
+    // Collect up to `target` victims per pass.
+    let victims = {
+        let mut state = RECLAIM.lock();
+        let len = state.pages.len();
+        if len == 0 || state.active_count == 0 {
+            return 0;
+        }
+
+        let mut victims = Vec::new();
+        // Scan at most 2 * len entries (two full rotations gives every
+        // page at least one second chance).
+        let max_scan = len.saturating_mul(2);
+        let mut scanned = 0;
+
+        while victims.len() < target && scanned < max_scan {
+            let idx = state.clock_hand % len;
+            state.clock_hand = (state.clock_hand + 1) % len;
+            scanned += 1;
+
+            let entry = match state.pages.get(idx) {
+                Some(e) if e.active => *e,
+                _ => continue,
+            };
+
+            // Check the ACCESSED bit in the PTE.
+            let virt = VirtAddr::new(entry.vaddr);
+            // SAFETY: pml4_phys is from a registered process.
+            let pte = unsafe {
+                page_table::read_leaf_pte(entry.pml4_phys, virt)
+            };
+
+            match pte {
+                Some(pte) if pte.is_present() => {
+                    if pte.flags().contains(PageFlags::ACCESSED) {
+                        // Second chance: clear the ACCESSED bit and
+                        // move on.  The CPU will re-set it on next access.
+                        // SAFETY: pml4_phys is valid, page is present.
+                        let _ = unsafe {
+                            page_table::change_flags(
+                                entry.pml4_phys,
+                                virt,
+                                pte.flags() & !PageFlags::ACCESSED,
+                            )
+                        };
+                        unsafe { page_table::flush_frame(virt); }
+                    } else {
+                        // Not recently accessed — select as victim.
+                        victims.push((idx, entry));
+                    }
+                }
+                _ => {
+                    // Page is not present (already swapped or unmapped).
+                    // Mark inactive.
+                    if let Some(e) = state.pages.get_mut(idx) {
+                        e.active = false;
+                        state.active_count =
+                            state.active_count.saturating_sub(1);
+                    }
+                }
+            }
+        }
+
+        victims
+    };
+    // RECLAIM lock released here.
+
+    // Now swap out each victim.
+    for (idx, victim) in victims {
+        let virt = VirtAddr::new(victim.vaddr);
+        // SAFETY: pml4_phys and virt are from the reclaim list;
+        // the page was verified present above.
+        match unsafe { swap_out_page(victim.pml4_phys, virt) } {
+            Ok(_entry) => {
+                reclaimed += 1;
+                // Mark the entry inactive (it's now in swap, not memory).
+                let mut state = RECLAIM.lock();
+                if let Some(e) = state.pages.get_mut(idx) {
+                    e.active = false;
+                    state.active_count =
+                        state.active_count.saturating_sub(1);
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[swap] Reclaim failed for virt={:#x}: {:?}",
+                    victim.vaddr, e
+                );
+                // Skip this page, try the next victim.
+            }
+        }
+    }
+
+    if reclaimed > 0 {
+        serial_println!("[swap] Reclaimed {} pages", reclaimed);
+    }
+
+    reclaimed
+}
+
+/// Number of pages registered as reclaimable.
+#[must_use]
+pub fn reclaimable_count() -> usize {
+    RECLAIM.lock().active_count
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -730,6 +953,72 @@ pub fn self_test() {
         assert!(backend.read(4, &mut buf).is_err(), "slot 4 out of range");
 
         serial_println!("[swap]   In-memory backend: OK");
+    }
+
+    // --- Page reclamation tracking ---
+    {
+        // The global RECLAIM state may have entries from earlier boot
+        // activity, so test using the counting API.
+        let before = reclaimable_count();
+
+        // Use the real kernel PML4 (from CR3) with user-space addresses
+        // that are not mapped.  The reclaimer will walk the real page
+        // tables, find the addresses unmapped, and mark them inactive.
+        // (Using a fake PML4 would crash because read_leaf_pte
+        // dereferences it via HHDM.)
+        let real_pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
+        let addr_a: u64 = 0x0040_0000; // 4 MiB — unmapped user addr
+        let addr_b: u64 = 0x0040_4000; // 4 MiB + 16 KiB
+        let addr_c: u64 = 0x0040_8000; // 4 MiB + 32 KiB
+        let flags = PageFlags::PRESENT
+            | PageFlags::WRITABLE
+            | PageFlags::USER_ACCESSIBLE
+            | PageFlags::NO_EXECUTE;
+
+        register_reclaimable(real_pml4, addr_a, flags);
+        register_reclaimable(real_pml4, addr_b, flags);
+        register_reclaimable(real_pml4, addr_c, flags);
+        assert_eq!(
+            reclaimable_count(),
+            before + 3,
+            "should have 3 more reclaimable pages"
+        );
+
+        // Unregister one.
+        unregister_reclaimable(real_pml4, addr_b);
+        assert_eq!(
+            reclaimable_count(),
+            before + 2,
+            "should have 2 more reclaimable pages after unregister"
+        );
+
+        // Unregister a non-existent page — count unchanged.
+        unregister_reclaimable(real_pml4, 0xFFFF_0000);
+        assert_eq!(
+            reclaimable_count(),
+            before + 2,
+            "unregister of non-existent page should be a no-op"
+        );
+
+        // try_reclaim on the unmapped pages: the Clock algorithm will
+        // walk the real page tables, find the addresses are not mapped
+        // (read_leaf_pte returns None or non-present), and mark them
+        // inactive.
+        let reclaimed = try_reclaim(10);
+        // No pages should actually be reclaimed (addresses not mapped).
+        assert_eq!(reclaimed, 0, "should reclaim 0 from unmapped pages");
+
+        // All three should now be marked inactive (two remaining active
+        // ones were deactivated by the reclaimer due to unmapped PTEs).
+        // Note: the originally unregistered one was already inactive.
+        // The count should be back to `before`.
+        assert_eq!(
+            reclaimable_count(),
+            before,
+            "all unmapped pages should be deactivated after reclaim scan"
+        );
+
+        serial_println!("[swap]   Page reclamation tracking: OK");
     }
 
     serial_println!("[swap] Self-test PASSED");

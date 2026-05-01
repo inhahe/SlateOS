@@ -900,6 +900,9 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
                 // SAFETY: pml4 is valid, PTE contains a swap entry.
                 if unsafe { mm::swap::swap_in_page(pml4, virt, flags) }.is_ok() {
+                    // Re-register the restored page as reclaimable so it
+                    // can be swapped out again if memory pressure returns.
+                    mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
                     return; // Swap-in successful — retry the instruction.
                 }
                 // If swap-in fails (OOM, etc.), fall through to other
@@ -1020,7 +1023,12 @@ fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
     // freshly allocated and exclusively ours, virt is in user space
     // within the stack region.
     match unsafe { page_table::map_frame(pml4_phys, virt, phys_frame, flags) } {
-        Ok(()) => true,
+        Ok(()) => {
+            // Register the new page as reclaimable so the Clock algorithm
+            // can swap it out under memory pressure.
+            mm::swap::register_reclaimable(pml4_phys, virt.as_u64(), flags);
+            true
+        }
         Err(_) => {
             // Mapping failed (e.g., OOM for page table allocation).
             // SAFETY: phys_frame was just allocated and is exclusively ours.

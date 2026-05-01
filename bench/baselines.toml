@@ -135,39 +135,53 @@ source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 #
 # Date: 2026-05-01, QEMU 9.x
 # Optimizations: O(1) size_class_index, rdtscp CPU identification,
-#   map_frame batched page table walk (page_fault benchmark)
+#   map_frame batched page table walk (page_fault benchmark),
+#   256-frame zero-page pool (page_alloc_zeroed hot path)
 
 [qemu.page_alloc_free]
-min_ns    = 234
-min_cycles = 868
+min_ns    = 229
+min_cycles = 856
 
 [qemu.page_alloc_zeroed_free]
-# Measures alloc + 16 KiB zero + free.  Zeroing adds ~11600 cycles
-# (~3.1µs) on top of the raw alloc/free (868 cycles).
-min_ns    = 3351
-min_cycles = 12468
+# OPT: 12468→1386 cycles after increasing zero-pool capacity 64→256.
+# Single-alloc hot path now almost always hits the pool (no 16 KiB
+# zero).  The old number (12468 cycles) reflected inline zeroing.
+min_ns    = 371
+min_cycles = 1386
 
 [qemu.heap_raw_alloc_free_64]
 # Raw alloc + dealloc cycle (no Vec overhead, no zero-fill).
-# Per-operation estimate: ~half of cycle = ~408ns.
+# Per-operation estimate: ~half of cycle = ~397ns.
 # Previous vec-based benchmark (alloc+zero+drop) showed 1092 cycles;
 # the raw measurement is more accurate for isolating allocator cost.
 # High QEMU variability: numbers swing 30-50% between runs (TCG emulation).
-min_ns    = 816
-min_cycles = 3028
+min_ns    = 795
+min_cycles = 2970
 
 [qemu.heap_raw_alloc_free_512]
 min_ns    = 1222
 min_cycles = 4534
 
 [qemu.heap_raw_alloc_free_4096]
-min_ns    = 244
+min_ns    = 242
 min_cycles = 906
 
 [qemu.context_switch]
+# Lightweight yield-bounce benchmark (two tasks at same priority, yield_now
+# round-trip).  Includes scheduler pick_next, register save/restore, and
+# TLB overhead.  Numbers vary 2-50x between QEMU runs depending on TCG
+# scheduling; the min represents the best-case hot-path.
 min_ns    = 523
 min_cycles = 1938
 # per-switch estimate: 261ns
+
+[qemu.context_switch_rt]
+# Full task-spawned context switch benchmark: 2 tasks yield in a loop,
+# measured via rdtsc round-trip.  More realistic than the lightweight
+# yield bounce — includes task selection from the scheduler run queue.
+min_ns    = 904
+min_cycles = 3378
+# per-switch estimate: 452ns
 
 [qemu.syscall_dispatch]
 min_ns    = 43

@@ -164,7 +164,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP client (3-way handshake, data transfer, FIN teardown)
   - [x] DNS resolver (A record queries via UDP)
   - [ ] Move to userspace service
-- [ ] Sockets API (not file descriptors — dedicated socket handles)
+- [x] Sockets API (not file descriptors — dedicated socket handles)
+  - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
+  - [x] UDP syscalls: bind, send, recv, close (SYS_UDP_BIND through SYS_UDP_CLOSE)
+  - [x] DNS resolution syscall (SYS_DNS_RESOLVE)
 - [ ] Firewall (basic packet filtering)
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 

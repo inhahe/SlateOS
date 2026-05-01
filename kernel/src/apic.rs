@@ -558,6 +558,43 @@ pub unsafe fn send_ipi_all_excluding_self(vector: u8) {
     wait_icr_idle();
 }
 
+/// Send a fixed-mode IPI to a specific CPU (by APIC ID).
+///
+/// The target CPU's ISR at `vector` will fire.  Used for targeted
+/// wake-ups such as reschedule IPIs (only wake the CPU that has new
+/// work, not all CPUs).
+///
+/// # Safety
+///
+/// APIC must be initialized.  The vector must have a valid ISR in the IDT.
+/// Must not send to the current CPU (self-IPI has a different mechanism
+/// and could cause re-entrancy issues in ISR context).
+pub unsafe fn send_fixed_ipi(apic_id: u8, vector: u8) {
+    wait_icr_idle();
+
+    // ICR high: destination APIC ID in bits [31:24].
+    // SAFETY: Valid APIC register write.
+    unsafe {
+        apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
+    }
+
+    // ICR low: fixed delivery (000), physical dest, edge trigger.
+    // Bits 19:18 = 00 (no shorthand — use specific destination).
+    // SAFETY: Valid APIC register write, triggers the IPI.
+    unsafe {
+        apic_write(APIC_ICR_LOW, u32::from(vector));
+    }
+
+    wait_icr_idle();
+}
+
+/// Reschedule IPI vector.
+///
+/// Sent to wake an idle CPU from HLT when new work is enqueued on its
+/// queue.  The ISR handler just does EOI and returns — the idle loop
+/// then checks the `RESCHEDULE_PENDING` flag and yields.
+pub const RESCHEDULE_VECTOR: u8 = 252;
+
 /// Initialize the Local APIC on an Application Processor.
 ///
 /// Reuses the BSP's calibrated timer count (APs don't recalibrate via PIT).
@@ -659,6 +696,27 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     // would save the ISR + idle-loop stack as the task's resume point).
     if needs_reschedule && !crate::sched::cpu_is_idle(crate::smp::current_cpu_index()) {
         crate::sched::preempt();
+    }
+}
+
+/// Handler for reschedule IPI (vector 252).
+///
+/// Sent by [`crate::sched::signal_cpu`] when work is enqueued on this
+/// CPU's run queue.  The ISR's only job is to send EOI and return —
+/// its purpose is to break the CPU out of HLT.  The idle loop then
+/// checks [`crate::sched::reschedule_pending`] and yields.
+///
+/// No scheduling is done in the ISR itself to avoid deadlock with code
+/// that holds the SCHED lock when interrupted.
+#[unsafe(no_mangle)]
+pub extern "C" fn handle_reschedule_irq(
+    _frame: &crate::idt::InterruptStackFrame,
+    _error: u64,
+) {
+    // SAFETY: APIC is initialized.  EOI is required for all non-spurious
+    // interrupts to clear the in-service bit and allow further interrupts.
+    unsafe {
+        eoi();
     }
 }
 

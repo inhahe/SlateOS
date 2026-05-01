@@ -167,6 +167,21 @@ static IDLE_FLAGS: [AtomicBool; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per-CPU flag: new work has been enqueued on this CPU's run queue.
+///
+/// Set by [`signal_cpu`] when a task is enqueued on a remote CPU.
+/// Checked (and cleared) by the idle loop to trigger a yield without
+/// waiting for the next timer tick.  The IPI (vector 252) wakes the
+/// CPU from HLT; this flag tells the idle loop to actually reschedule.
+///
+/// Without this mechanism, an idle CPU would only discover new work on
+/// the next timer tick (up to 10ms delay).  With it, work is picked up
+/// within a few microseconds of the enqueue.
+static RESCHEDULE_PENDING: [AtomicBool; priority_rr::MAX_CPUS] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; priority_rr::MAX_CPUS]
+};
+
 /// Get the current CPU ID (sequential index).
 ///
 /// Returns 0 for the BSP.  After SMP bootstrap, reads the LAPIC ID
@@ -305,6 +320,47 @@ pub fn cpu_is_idle(cpu: usize) -> bool {
         .map_or(false, |f| f.load(Ordering::Acquire))
 }
 
+/// Signal a CPU that new work has been enqueued on its run queue.
+///
+/// Sets the `RESCHEDULE_PENDING` flag and, if the target is a remote
+/// CPU, sends a reschedule IPI (vector 252) to wake it from HLT.
+///
+/// The idle loop checks this flag after every HLT wake and calls
+/// `yield_now()` to pick up the new task immediately instead of
+/// waiting for the next timer tick (up to 10ms).
+///
+/// For the local CPU, only the flag is set — the timer ISR's
+/// `preempt()` will handle scheduling on the next tick.
+pub fn signal_cpu(target_cpu: usize) {
+    if let Some(flag) = RESCHEDULE_PENDING.get(target_cpu) {
+        flag.store(true, Ordering::Release);
+    }
+    // Only send IPI to remote CPUs.  Self-IPI is unnecessary (and
+    // risky from ISR context).
+    let local = current_cpu_id();
+    if target_cpu != local {
+        if let Some(apic_id) = crate::smp::cpu_apic_id(target_cpu) {
+            // SAFETY: APIC is initialized (we're past init).
+            // Vector 252 has a valid ISR registered in the IDT.
+            unsafe {
+                crate::apic::send_fixed_ipi(apic_id, crate::apic::RESCHEDULE_VECTOR);
+            }
+        }
+    }
+}
+
+/// Check and clear the reschedule-pending flag for a CPU.
+///
+/// Returns `true` if the flag was set (meaning new work was enqueued).
+/// The flag is atomically cleared so the next check returns `false`
+/// until `signal_cpu` is called again.
+#[must_use]
+pub fn reschedule_pending(cpu: usize) -> bool {
+    RESCHEDULE_PENDING
+        .get(cpu)
+        .is_some_and(|f| f.swap(false, Ordering::Acquire))
+}
+
 /// Spawn a new kernel task.
 ///
 /// The task starts in [`Ready`](TaskState::Ready) state and will run
@@ -335,6 +391,10 @@ pub fn spawn(
 
     state.tasks.insert(id, new_task);
     state.scheduler.enqueue(id, prio, target_cpu);
+    drop(state); // Release lock before IPI to minimize hold time.
+
+    // Wake the target CPU if it's idle (remote CPUs may be in HLT).
+    signal_cpu(target_cpu);
 
     serial_println!("[sched] Spawned task {} (priority {}, cpu {})", id, prio, target_cpu);
     Ok(id)
@@ -414,20 +474,26 @@ pub fn block_current() {
 /// Returns `true` if the task was blocked and is now ready.
 /// Returns `false` if the task was not in the Blocked state.
 pub fn wake(task_id: TaskId) -> bool {
-    let mut state = SCHED.lock();
-    if let Some(task) = state.tasks.get_mut(&task_id)
-        && task.state == TaskState::Blocked
+    let target_cpu;
     {
-        task.state = TaskState::Ready;
-        // Reset burst counter for the new wake cycle.
-        // Enqueue on the CPU the task last ran on (cache warmth).
-        task.burst_ticks = 0;
-        let prio = task.effective_priority();
-        let target_cpu = task.last_cpu;
-        state.scheduler.enqueue(task_id, prio, target_cpu);
-        return true;
+        let mut state = SCHED.lock();
+        if let Some(task) = state.tasks.get_mut(&task_id)
+            && task.state == TaskState::Blocked
+        {
+            task.state = TaskState::Ready;
+            // Reset burst counter for the new wake cycle.
+            // Enqueue on the CPU the task last ran on (cache warmth).
+            task.burst_ticks = 0;
+            let prio = task.effective_priority();
+            target_cpu = task.last_cpu;
+            state.scheduler.enqueue(task_id, prio, target_cpu);
+        } else {
+            return false;
+        }
     }
-    false
+    // Signal the target CPU after releasing the lock.
+    signal_cpu(target_cpu);
+    true
 }
 
 /// Wake a blocked task using `try_lock` — safe in ISR context.
@@ -439,6 +505,7 @@ pub fn wake(task_id: TaskId) -> bool {
 /// The caller (typically the timer ISR's deferred-wake path) should
 /// retry on the next tick if this fails.
 pub fn try_wake(task_id: TaskId) -> bool {
+    let target_cpu;
     if let Some(mut state) = SCHED.try_lock() {
         if let Some(task) = state.tasks.get_mut(&task_id)
             && task.state == TaskState::Blocked
@@ -446,8 +513,10 @@ pub fn try_wake(task_id: TaskId) -> bool {
             task.state = TaskState::Ready;
             task.burst_ticks = 0;
             let prio = task.effective_priority();
-            let target_cpu = task.last_cpu;
+            target_cpu = task.last_cpu;
             state.scheduler.enqueue(task_id, prio, target_cpu);
+            drop(state);
+            signal_cpu(target_cpu);
             return true;
         }
     }
@@ -619,19 +688,23 @@ pub fn suspend(task_id: TaskId) -> bool {
 /// Returns `true` if the task was resumed, `false` if it was not
 /// in the Suspended state.
 pub fn resume(task_id: TaskId) -> bool {
-    let mut state = SCHED.lock();
-    let Some(task) = state.tasks.get_mut(&task_id) else {
-        return false;
-    };
+    let target_cpu;
+    {
+        let mut state = SCHED.lock();
+        let Some(task) = state.tasks.get_mut(&task_id) else {
+            return false;
+        };
 
-    if task.state != TaskState::Suspended {
-        return false;
+        if task.state != TaskState::Suspended {
+            return false;
+        }
+
+        task.state = TaskState::Ready;
+        let prio = task.effective_priority();
+        target_cpu = task.last_cpu;
+        state.scheduler.enqueue(task_id, prio, target_cpu);
     }
-
-    task.state = TaskState::Ready;
-    let prio = task.effective_priority();
-    let target_cpu = task.last_cpu;
-    state.scheduler.enqueue(task_id, prio, target_cpu);
+    signal_cpu(target_cpu);
 
     serial_println!("[sched] Resumed task {}", task_id);
     true

@@ -275,6 +275,8 @@ isr_stub_no_error!(isr_default, handle_default);
 isr_stub_no_error!(isr_timer, handle_timer_irq);
 // TLB shootdown IPI (vector 251) — sent by other CPUs to request TLB flush.
 isr_stub_no_error!(isr_tlb_shootdown, handle_tlb_shootdown_irq);
+// Reschedule IPI (vector 252) — sent to wake idle CPUs when work is enqueued.
+isr_stub_no_error!(isr_reschedule, handle_reschedule_irq);
 // Spurious (vector 255) — APIC spurious interrupts.
 isr_stub_no_error!(isr_spurious, handle_spurious_irq);
 
@@ -1226,6 +1228,8 @@ pub unsafe fn init() {
         idt.entries[32] = IdtEntry::new(isr_timer as *const () as u64, cs, 0, 0);
         // Vector 251: TLB shootdown IPI.
         idt.entries[251] = IdtEntry::new(isr_tlb_shootdown as *const () as u64, cs, 0, 0);
+        // Vector 252: Reschedule IPI (wake idle CPU when work enqueued).
+        idt.entries[252] = IdtEntry::new(isr_reschedule as *const () as u64, cs, 0, 0);
         // Vector 255: APIC spurious interrupt.
         idt.entries[255] = IdtEntry::new(isr_spurious as *const () as u64, cs, 0, 0);
 

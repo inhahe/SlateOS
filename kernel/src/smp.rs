@@ -111,6 +111,16 @@ static APIC_TO_CPU: [AtomicU8; 256] = {
     [UNMAPPED; 256]
 };
 
+/// Reverse mapping: CPU index → APIC ID.
+///
+/// Index: sequential CPU number (0 = BSP).  Value: APIC ID (0xFF = unmapped).
+/// Populated during SMP bootstrap alongside `APIC_TO_CPU`.
+/// Used by `send_fixed_ipi` to target a specific CPU.
+static CPU_TO_APIC: [AtomicU8; MAX_CPUS] = {
+    const UNMAPPED: AtomicU8 = AtomicU8::new(0xFF);
+    [UNMAPPED; MAX_CPUS]
+};
+
 /// Whether SMP has been initialized.
 static SMP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -125,6 +135,16 @@ const BSP_CPU_INDEX: usize = 0;
 #[must_use]
 pub fn cpu_count() -> usize {
     NUM_CPUS_ONLINE.load(Ordering::Relaxed) as usize
+}
+
+/// Get the APIC ID for a CPU index.
+///
+/// Returns `None` if the CPU index is out of range or not yet online.
+/// Used by the reschedule IPI mechanism to target a specific CPU.
+#[must_use]
+pub fn cpu_apic_id(cpu_index: usize) -> Option<u8> {
+    let id = CPU_TO_APIC.get(cpu_index)?.load(Ordering::Relaxed);
+    if id == 0xFF { None } else { Some(id) }
 }
 
 /// Get the current CPU's sequential index.
@@ -660,10 +680,11 @@ extern "C" fn ap_entry() -> ! {
         crate::apic::init_ap();
     }
 
-    // Register this AP's APIC ID → CPU index mapping (lock-free).
+    // Register this AP's APIC ID ↔ CPU index bidirectional mapping (lock-free).
     let apic_id = crate::apic::read_id();
     #[allow(clippy::cast_possible_truncation)]
     APIC_TO_CPU[apic_id as usize].store(cpu_index as u8, Ordering::Relaxed);
+    CPU_TO_APIC[cpu_index].store(apic_id, Ordering::Relaxed);
 
     // Write CPU index to IA32_TSC_AUX for fast rdtscp-based lookup.
     if RDTSCP_AVAILABLE.load(Ordering::Relaxed) {
@@ -711,9 +732,16 @@ extern "C" fn ap_entry() -> ! {
     // on every wake.
     let mut tick_counter = 0u32;
     loop {
-        crate::cpu::hlt(); // Sleep until next interrupt (timer tick).
+        crate::cpu::hlt(); // Sleep until next interrupt (timer tick or IPI).
 
         tick_counter = tick_counter.wrapping_add(1);
+
+        // If a reschedule IPI woke us (someone enqueued work for this
+        // CPU), yield immediately to pick up the new task.  This gives
+        // microsecond-level latency vs the 10ms timer tick interval.
+        if crate::sched::reschedule_pending(cpu_index) {
+            crate::sched::yield_now();
+        }
 
         // Reap dead tasks once per second (~100 ticks at 100 Hz).
         // reap_dead_tasks allocates Vecs and acquires the SCHED lock
@@ -926,6 +954,7 @@ pub fn init() {
 fn register_bsp(bsp_apic_id: u8) {
     #[allow(clippy::cast_possible_truncation)]
     APIC_TO_CPU[bsp_apic_id as usize].store(BSP_CPU_INDEX as u8, Ordering::Relaxed);
+    CPU_TO_APIC[BSP_CPU_INDEX].store(bsp_apic_id, Ordering::Relaxed);
 
     // Detect rdtscp support: CPUID.80000001H:EDX bit 27.
     let has_rdtscp = detect_rdtscp();

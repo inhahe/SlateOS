@@ -739,9 +739,16 @@ extern "C" fn kmain() -> ! {
 fn idle_loop() -> ! {
     let mut tick_counter = 0u32;
     loop {
-        cpu::hlt(); // Sleep until next interrupt (timer tick).
+        cpu::hlt(); // Sleep until next interrupt (timer tick or IPI).
 
         tick_counter = tick_counter.wrapping_add(1);
+
+        // If a reschedule IPI woke us (someone enqueued work for CPU 0),
+        // yield immediately to pick up the new task.  This avoids the
+        // up-to-10ms latency of waiting for the next timer tick.
+        if sched::reschedule_pending(0) {
+            sched::yield_now();
+        }
 
         // Reap dead tasks once per second (~100 ticks at 100 Hz).
         // reap_dead_tasks allocates Vecs and acquires the SCHED lock

@@ -289,6 +289,19 @@ impl PriorityRoundRobin {
         self.bitmap != 0
     }
 
+    /// Check if any task above IDLE_PRIORITY is ready.
+    ///
+    /// The idle task (priority 31) is always in the queue when its CPU
+    /// is running, but it shouldn't count as "real work" for load
+    /// balance decisions.  Without this distinction, a CPU with only
+    /// its idle task never triggers work stealing — it looks busy.
+    #[must_use]
+    pub fn has_real_work(&self) -> bool {
+        // Mask out the IDLE_PRIORITY bit (bit 31) from the bitmap.
+        let idle_bit = 1u32 << super::task::IDLE_PRIORITY;
+        (self.bitmap & !idle_bit) != 0
+    }
+
     /// Set the time slice for a specific priority level.
     ///
     /// `level` must be in `0..NUM_PRIORITIES` and `ticks` must be at
@@ -588,25 +601,28 @@ impl PerCpuScheduler {
             .any(PriorityRoundRobin::has_ready)
     }
 
-    /// Check if a specific CPU's local queue has ready tasks.
+    /// Check if a specific CPU's local queue has real work
+    /// (non-idle tasks).
     ///
-    /// Used by the timer tick to detect idle CPUs that should
-    /// proactively try work stealing.
+    /// Used by the timer tick load balancer: a CPU that only has its
+    /// idle task is considered "idle" and should proactively steal.
+    /// Previous implementation used `has_ready()` which counted the
+    /// idle task, preventing APs from ever work-stealing.
     #[must_use]
-    pub fn local_has_ready(&self, cpu: usize) -> bool {
-        self.queues.get(cpu).is_some_and(PriorityRoundRobin::has_ready)
+    pub fn local_has_real_work(&self, cpu: usize) -> bool {
+        self.queues.get(cpu).is_some_and(PriorityRoundRobin::has_real_work)
     }
 
-    /// Check if any *other* CPU has ready tasks that could be stolen.
+    /// Check if any *other* CPU has real work that could be stolen.
     ///
     /// Lightweight probe for the timer tick load balancer: returns true
-    /// if at least one CPU (other than `cpu`) has work in its queue.
+    /// if at least one CPU (other than `cpu`) has non-idle tasks.
     #[must_use]
-    pub fn others_have_ready(&self, cpu: usize) -> bool {
+    pub fn others_have_real_work(&self, cpu: usize) -> bool {
         self.queues.iter()
             .take(self.num_cpus)
             .enumerate()
-            .any(|(i, q)| i != cpu && q.has_ready())
+            .any(|(i, q)| i != cpu && q.has_real_work())
     }
 
     // --- Global configuration (applies to all CPUs) ---

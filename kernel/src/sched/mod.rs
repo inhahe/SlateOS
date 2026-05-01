@@ -527,10 +527,13 @@ pub fn timer_tick() -> bool {
         let Some(balance_counter) = BALANCE_TICKS.get(cpu) else { return false; };
         let tick_count = balance_counter.fetch_add(1, Ordering::Relaxed);
         if tick_count % BALANCE_INTERVAL == 0 {
-            // Check: is our local queue empty?
-            if !state.scheduler.local_has_ready(cpu) {
-                // Is anyone else overloaded?
-                if state.scheduler.others_have_ready(cpu) {
+            // Check: does our local queue have real work (above idle)?
+            // Using has_real_work instead of has_ready so the idle task
+            // doesn't mask an empty-queue condition — otherwise APs with
+            // only their idle task never trigger work stealing.
+            if !state.scheduler.local_has_real_work(cpu) {
+                // Is anyone else overloaded with real tasks?
+                if state.scheduler.others_have_real_work(cpu) {
                     // Trigger a reschedule — schedule_inner will try_steal.
                     return true;
                 }

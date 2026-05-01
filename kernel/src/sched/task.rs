@@ -156,6 +156,18 @@ pub const TASK_STACK_SIZE: usize = 2 * FRAME_SIZE;
 #[allow(clippy::arithmetic_side_effects)]
 const TASK_STACK_FRAMES: usize = TASK_STACK_SIZE / FRAME_SIZE;
 
+/// Maximum number of ticks a CPU burst can be to still count as
+/// "interactive."  At 100 Hz, 5 ticks = 50 ms.  Tasks that use
+/// less than this before blocking are considered I/O-bound / interactive.
+pub const INTERACTIVE_THRESHOLD_TICKS: u64 = 5;
+
+/// Number of priority levels to boost interactive tasks.
+///
+/// A task at priority 16 that is detected as interactive will
+/// effectively schedule at priority 14 (16 - 2).  The boost is
+/// clamped so it never goes above priority 0 (highest).
+pub const INTERACTIVE_BOOST: u8 = 2;
+
 /// A kernel task (thread).
 pub struct Task {
     /// Unique identifier (never reused).
@@ -166,7 +178,10 @@ pub struct Task {
     pub name_len: usize,
     /// Current scheduling state.
     pub state: TaskState,
-    /// Priority level (0 = highest, 31 = lowest).
+    /// Base priority level (0 = highest, 31 = lowest).
+    ///
+    /// This is the user-assigned priority.  The effective scheduling
+    /// priority may be higher (lower number) due to interactive boost.
     pub priority: u8,
     /// Saved CPU register state.
     pub context: Context,
@@ -183,9 +198,81 @@ pub struct Task {
     /// with its own page table hierarchy — the scheduler will load
     /// this PML4 via `write_cr3` on context switch.
     pub pml4_phys: u64,
+
+    // --- Interactive task detection fields ---
+
+    /// Number of timer ticks the task has run in the current burst.
+    ///
+    /// Reset to 0 each time the task transitions from Blocked → Ready
+    /// (i.e., wakes from I/O).  Incremented on each timer tick while
+    /// the task is Running.
+    pub burst_ticks: u64,
+
+    /// Exponentially weighted moving average of CPU burst lengths.
+    ///
+    /// Updated each time the task blocks (transitions Running → Blocked).
+    /// Low values (< `INTERACTIVE_THRESHOLD_TICKS`) indicate an
+    /// interactive / I/O-bound task.
+    ///
+    /// Uses fixed-point arithmetic: stored as `avg * 8` to avoid
+    /// floating point.  Divide by 8 to get the actual average.
+    ///
+    /// EWMA formula: `avg = (7 * avg + burst_ticks) / 8`
+    /// (equivalent to α = 1/8, weighting recent history ~87.5%).
+    pub avg_burst_x8: u64,
+
+    /// Whether the task currently has an interactive priority boost.
+    ///
+    /// When true, the task is enqueued at `effective_priority()` which
+    /// is `priority - INTERACTIVE_BOOST` (clamped to 0).
+    pub interactive: bool,
 }
 
 impl Task {
+    /// Get the effective scheduling priority, accounting for interactive boost.
+    ///
+    /// If the task is interactive, the effective priority is
+    /// `priority - INTERACTIVE_BOOST` (clamped to 0).
+    #[must_use]
+    pub fn effective_priority(&self) -> u8 {
+        if self.interactive {
+            self.priority.saturating_sub(INTERACTIVE_BOOST)
+        } else {
+            self.priority
+        }
+    }
+
+    /// Update the burst EWMA when the task is about to block.
+    ///
+    /// Called when the task transitions from Running → Blocked.
+    /// Records the current burst length into the exponentially weighted
+    /// moving average and determines if the task is interactive.
+    pub fn record_block(&mut self) {
+        // EWMA update: avg = (7 * avg + burst * 8) / 8
+        // Stored as avg_x8, so: avg_x8 = (7 * avg_x8 / 8) + burst
+        // Simplified: avg_x8 = avg_x8 - avg_x8/8 + burst
+        #[allow(clippy::arithmetic_side_effects)]
+        {
+            self.avg_burst_x8 = self.avg_burst_x8
+                .saturating_sub(self.avg_burst_x8 / 8)
+                .saturating_add(self.burst_ticks);
+        }
+
+        // Interactive if average burst < threshold (compare x8 values).
+        #[allow(clippy::arithmetic_side_effects)]
+        let threshold_x8 = INTERACTIVE_THRESHOLD_TICKS * 8;
+        self.interactive = self.avg_burst_x8 < threshold_x8;
+
+        // Reset burst counter for the next wake cycle.
+        self.burst_ticks = 0;
+    }
+
+    /// Increment the burst tick counter.  Called on each timer tick
+    /// while the task is Running.
+    pub fn tick_burst(&mut self) {
+        self.burst_ticks = self.burst_ticks.saturating_add(1);
+    }
+
     /// Create the idle task (task 0).
     ///
     /// The idle task uses the bootloader-provided stack; no allocation
@@ -207,6 +294,9 @@ impl Task {
             stack_phys: 0,
             stack_bottom: 0,
             pml4_phys: 0, // Kernel address space.
+            burst_ticks: 0,
+            avg_burst_x8: 0,
+            interactive: false,
         }
     }
 
@@ -269,6 +359,9 @@ impl Task {
             stack_phys,
             stack_bottom,
             pml4_phys,
+            burst_ticks: 0,
+            avg_burst_x8: 0,
+            interactive: false,
         })
     }
 

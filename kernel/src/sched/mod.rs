@@ -241,6 +241,10 @@ pub fn current_task_id() -> TaskId {
 /// NOT placed in the run queue.  It must be explicitly woken via
 /// [`wake`] to become runnable again.
 ///
+/// Before blocking, records the current CPU burst length into the
+/// task's interactivity EWMA.  Tasks with short bursts (< 50 ms)
+/// are marked as interactive and receive a priority boost when woken.
+///
 /// This is used by IPC channels, futexes, and other blocking
 /// primitives.
 pub fn block_current() {
@@ -248,6 +252,8 @@ pub fn block_current() {
     {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&current_id) {
+            // Record burst length for interactive task detection.
+            task.record_block();
             task.state = TaskState::Blocked;
         }
     }
@@ -258,7 +264,8 @@ pub fn block_current() {
 /// Wake a blocked task, making it runnable again.
 ///
 /// Sets the task's state to [`Ready`](TaskState::Ready) and places
-/// it in the run queue at its original priority.
+/// it in the run queue at its effective priority (which may be
+/// boosted for interactive tasks).
 ///
 /// Returns `true` if the task was blocked and is now ready.
 /// Returns `false` if the task was not in the Blocked state.
@@ -268,7 +275,9 @@ pub fn wake(task_id: TaskId) -> bool {
         && task.state == TaskState::Blocked
     {
         task.state = TaskState::Ready;
-        let prio = task.priority;
+        // Reset burst counter for the new wake cycle.
+        task.burst_ticks = 0;
+        let prio = task.effective_priority();
         state.scheduler.enqueue(task_id, prio);
         return true;
     }
@@ -289,7 +298,8 @@ pub fn try_wake(task_id: TaskId) -> bool {
             && task.state == TaskState::Blocked
         {
             task.state = TaskState::Ready;
-            let prio = task.priority;
+            task.burst_ticks = 0;
+            let prio = task.effective_priority();
             state.scheduler.enqueue(task_id, prio);
             return true;
         }
@@ -304,6 +314,9 @@ pub fn try_wake(task_id: TaskId) -> bool {
 /// the timer fired while `schedule_inner` was running), we skip this
 /// tick.  The next timer interrupt will catch it.
 ///
+/// Also increments the current task's burst tick counter for
+/// interactive task detection.
+///
 /// Returns `true` if the current task's time slice has expired and a
 /// reschedule is needed.
 pub fn timer_tick() -> bool {
@@ -313,6 +326,13 @@ pub fn timer_tick() -> bool {
         if !state.initialized {
             return false;
         }
+
+        // Track CPU burst length for interactive task detection.
+        let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+        if let Some(task) = state.tasks.get_mut(&current_id) {
+            task.tick_burst();
+        }
+
         state.scheduler.tick()
     } else {
         // Couldn't acquire lock — skip this tick.
@@ -352,7 +372,7 @@ pub fn suspend(task_id: TaskId) -> bool {
 
         match task.state {
             TaskState::Ready => {
-                let prio = task.priority;
+                let prio = task.effective_priority();
                 task.state = TaskState::Suspended;
                 state.scheduler.dequeue(task_id, prio);
             }
@@ -385,7 +405,8 @@ pub fn suspend(task_id: TaskId) -> bool {
 /// Resume a suspended task (unpause execution).
 ///
 /// Transitions the task from [`Suspended`] to [`Ready`] and places
-/// it back in the run queue.
+/// it back in the run queue at its effective priority (which may
+/// include an interactive boost).
 ///
 /// Returns `true` if the task was resumed, `false` if it was not
 /// in the Suspended state.
@@ -400,7 +421,7 @@ pub fn resume(task_id: TaskId) -> bool {
     }
 
     task.state = TaskState::Ready;
-    let prio = task.priority;
+    let prio = task.effective_priority();
     state.scheduler.enqueue(task_id, prio);
 
     serial_println!("[sched] Resumed task {}", task_id);
@@ -427,19 +448,28 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
     let mut state = SCHED.lock();
     let task = state.tasks.get(&task_id)?;
     let old_priority = task.priority;
+    let old_effective = task.effective_priority();
     let task_state = task.state;
+    let is_interactive = task.interactive;
 
     if old_priority == clamped {
         return Some(old_priority);
     }
+
+    // Compute the new effective priority (with interactive boost).
+    let new_effective = if is_interactive {
+        clamped.saturating_sub(task::INTERACTIVE_BOOST)
+    } else {
+        clamped
+    };
 
     // If the task is Ready (in the run queue), move it to the new
     // priority queue.  We do the dequeue/enqueue first with the
     // scheduler, then update the task's stored priority, to avoid
     // two mutable borrows of `state`.
     if task_state == TaskState::Ready {
-        state.scheduler.dequeue(task_id, old_priority);
-        state.scheduler.enqueue(task_id, clamped);
+        state.scheduler.dequeue(task_id, old_effective);
+        state.scheduler.enqueue(task_id, new_effective);
     }
 
     // Now update the task's stored priority.
@@ -448,8 +478,9 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
     }
 
     serial_println!(
-        "[sched] Task {} priority: {} → {}",
-        task_id, old_priority, clamped
+        "[sched] Task {} priority: {} → {}{}",
+        task_id, old_priority, clamped,
+        if is_interactive { " (interactive)" } else { "" }
     );
     Some(old_priority)
 }
@@ -486,7 +517,7 @@ pub fn kill_task(task_id: TaskId) -> bool {
         TaskState::Dead => return false,
         TaskState::Ready => {
             // Remove from the run queue before marking Dead.
-            let prio = task.priority;
+            let prio = task.effective_priority();
             task.state = TaskState::Dead;
             state.scheduler.dequeue(task_id, prio);
         }
@@ -736,7 +767,7 @@ fn schedule_inner(requeue: bool) {
         // Re-enqueue the current task if requested.
         if requeue && let Some(task) = state.tasks.get_mut(&current_id) {
             task.state = TaskState::Ready;
-            let prio = task.priority;
+            let prio = task.effective_priority();
             state.scheduler.enqueue(current_id, prio);
         }
 
@@ -895,6 +926,7 @@ pub fn self_test() -> KernelResult<()> {
     test_cooperative_scheduling()?;
     test_suspend_resume()?;
     test_set_priority()?;
+    test_interactive_detection()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -1082,6 +1114,96 @@ fn test_set_priority() -> KernelResult<()> {
     }
 
     serial_println!("[sched]   Set priority: OK");
+    Ok(())
+}
+
+/// Test 4: Interactive task detection via burst tracking.
+///
+/// Verifies that a task which frequently blocks with short CPU bursts
+/// gets marked as interactive (and thus receives a priority boost).
+fn test_interactive_detection() -> KernelResult<()> {
+    use task::{INTERACTIVE_BOOST, INTERACTIVE_THRESHOLD_TICKS};
+
+    // Create a task directly to test the detection logic without
+    // needing actual I/O blocking (which we can't easily simulate).
+    let base_priority: u8 = 16;
+    let id = spawn(b"test-interactive", base_priority, test_task_incr, 1, 0)?;
+
+    // Simulate several short CPU bursts (1 tick each) by manually
+    // manipulating the task's burst tracking fields.
+    {
+        let mut state = SCHED.lock();
+        if let Some(task) = state.tasks.get_mut(&id) {
+            // Simulate 5 block events with 1-tick bursts each.
+            // After enough short bursts, avg should be < threshold.
+            for _ in 0..5 {
+                task.burst_ticks = 1;
+                task.record_block();
+            }
+
+            if !task.interactive {
+                serial_println!(
+                    "[sched]   FAIL: task should be interactive after short bursts (avg_x8={})",
+                    task.avg_burst_x8
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            let effective = task.effective_priority();
+            let expected = base_priority.saturating_sub(INTERACTIVE_BOOST);
+            if effective != expected {
+                serial_println!(
+                    "[sched]   FAIL: effective priority should be {}, got {}",
+                    expected, effective
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // Now simulate a long CPU burst (50 ticks).
+            // This should eventually make the task non-interactive.
+            for _ in 0..3 {
+                task.burst_ticks = 50;
+                task.record_block();
+            }
+
+            if task.interactive {
+                serial_println!(
+                    "[sched]   FAIL: task should NOT be interactive after long bursts (avg_x8={})",
+                    task.avg_burst_x8
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            let effective = task.effective_priority();
+            if effective != base_priority {
+                serial_println!(
+                    "[sched]   FAIL: non-interactive effective priority should be {}, got {}",
+                    base_priority, effective
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // Let the task run and clean up.
+    yield_now();
+    yield_now();
+
+    {
+        let mut state = SCHED.lock();
+        if let Some(mut task) = state.tasks.remove(&id)
+            && task.state == TaskState::Dead
+            && task.stack_phys != 0
+        {
+            unsafe { let _ = task.free_stack(); }
+            task.stack_phys = 0;
+        }
+    }
+
+    serial_println!(
+        "[sched]   Interactive detection (threshold={}ticks, boost={}): OK",
+        INTERACTIVE_THRESHOLD_TICKS, INTERACTIVE_BOOST
+    );
     Ok(())
 }
 

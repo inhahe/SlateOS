@@ -1032,25 +1032,11 @@ fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
         core::arch::asm!("mov {}, cr3", out(reg) pml4_phys, options(nomem, nostack, preserves_flags));
     }
 
-    // Allocate a physical frame.
-    let phys_frame = match frame::alloc_frame() {
+    // Allocate a zeroed physical frame for the new stack page.
+    let phys_frame = match frame::alloc_frame_zeroed() {
         Ok(f) => f,
-        Err(_) => return false, // OOM — can't grow stack.
+        Err(_) => return false, // OOM or HHDM unavailable — can't grow stack.
     };
-
-    // Zero the frame (stack pages must be zeroed).
-    let Some(hhdm) = page_table::hhdm() else {
-        // No HHDM — can't zero the frame.  Free it and fail.
-        // SAFETY: phys_frame was just allocated and is exclusively ours.
-        let _ = unsafe { frame::free_frame(phys_frame) };
-        return false;
-    };
-    let frame_virt = phys_frame.to_virt(hhdm);
-    // SAFETY: frame_virt is the HHDM mapping of a freshly
-    // allocated, exclusively owned frame.
-    unsafe {
-        core::ptr::write_bytes(frame_virt as *mut u8, 0, FRAME_SIZE);
-    }
 
     // Map the frame with user read/write/no-execute permissions.
     let flags = PageFlags::PRESENT

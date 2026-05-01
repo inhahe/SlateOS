@@ -744,7 +744,6 @@ fn bench_ipc_channel() {
 fn bench_page_fault() {
     use crate::mm::{frame, page_table::{self, PageFlags, VirtAddr}};
 
-    let hhdm = page_table::hhdm().expect("bench: HHDM");
     let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
 
     // Pick a kernel-space virtual address that's not in use.
@@ -760,15 +759,8 @@ fn bench_page_fault() {
     let result = run("page_fault_anonymous", 200, || {
         let virt = VirtAddr::new(bench_virt_base);
 
-        // Allocate a frame (simulating what the fault handler does).
-        let f = frame::alloc_frame().expect("bench: alloc");
-
-        // Zero the frame via HHDM (fault handler does this for anonymous pages).
-        let dst = f.to_virt(hhdm) as *mut u8;
-        // SAFETY: f is a valid allocated frame, HHDM maps all physical memory.
-        unsafe {
-            core::ptr::write_bytes(dst, 0, frame::FRAME_SIZE);
-        }
+        // Allocate and zero a frame (matches real fault handler path).
+        let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
 
         // Map the 16 KiB frame (4 hardware pages in a single page table walk).
         let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;

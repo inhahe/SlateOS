@@ -40,6 +40,12 @@ add to roadmap-detailed.md to support a number of programming languages. rust, p
 - kernel-ipc: Verify SYS_PROCESS_ID (handlers.rs:1549) returns the
   owning process PID, not just the task ID.  Has a TODO comment.
 
+- fs: Need a ramfs/tmpfs implementation for the root mount point.
+  Currently no filesystem is mounted at "/" at boot, so init's writes
+  to /bin/hello and /bin/ticker fail with NotFound.  A simple in-memory
+  filesystem would unblock init binary deployment.  Alternatively,
+  mount the ESP's FAT filesystem at boot.
+
 ## Judgment Calls
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from

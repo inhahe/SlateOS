@@ -1197,6 +1197,53 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
     alloc_order(0)
 }
 
+/// Allocate a single physical frame (16 KiB) and zero it.
+///
+/// Convenience wrapper around [`alloc_frame`] + zeroing via HHDM.
+/// This is the most common allocation pattern in the kernel (page
+/// faults, stack growth, process creation all need zeroed frames).
+///
+/// Centralizing the zero here enables future optimizations:
+/// - Pre-zeroed frame pool (background zeroing by idle CPU)
+/// - Non-temporal stores (`movnti`) to avoid cache pollution
+/// - Batch zeroing when allocating multiple frames
+///
+/// Returns the zeroed frame on success, or `OutOfMemory`/`NotSupported`.
+pub fn alloc_frame_zeroed() -> KernelResult<PhysFrame> {
+    let frame = alloc_frame()?;
+
+    let hhdm = crate::mm::page_table::hhdm().ok_or_else(|| {
+        // Can't zero without HHDM — free the frame and return error.
+        // SAFETY: frame was just allocated, exclusively ours.
+        let _ = unsafe { free_frame(frame) };
+        KernelError::NotSupported
+    })?;
+
+    let virt = frame.to_virt(hhdm) as *mut u8;
+    // SAFETY: frame is freshly allocated and exclusively ours.
+    // The HHDM mapping is valid for all physical memory.
+    unsafe {
+        core::ptr::write_bytes(virt, 0, FRAME_SIZE);
+    }
+
+    Ok(frame)
+}
+
+/// Zero an already-allocated frame via its HHDM mapping.
+///
+/// # Safety
+///
+/// The caller must own the frame exclusively (no other CPU or mapping
+/// references the memory).
+#[allow(dead_code)] // Public API for other zones (proc, ipc, drivers).
+pub unsafe fn zero_frame(frame: PhysFrame) -> KernelResult<()> {
+    let hhdm = crate::mm::page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let virt = frame.to_virt(hhdm) as *mut u8;
+    // SAFETY: Caller guarantees exclusive ownership.  HHDM is valid.
+    unsafe { core::ptr::write_bytes(virt, 0, FRAME_SIZE); }
+    Ok(())
+}
+
 /// Allocate a contiguous block of 2^order physical frames.
 ///
 /// The returned frame is naturally aligned to the block size

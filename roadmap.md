@@ -108,7 +108,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [ ] User/group model with named capability groups
 - [ ] File/directory capability tags (AND-composition between groups, OR within a group)
 - [ ] Resource limits as cgroup-like controls (set at launch, kernel-enforced)
-- [-] Capability-gated syscalls
+- [x] Capability-gated syscalls
 - [ ] "Request capability from user" dialog mechanism
 - [ ] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
 - [ ] Enable LLVM CFI as default for C/C++ compilation
@@ -206,7 +206,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Filesystem shell commands: ls, cat, write, stat, mkdir, rmdir, rm
   - [x] System info commands: pid, uptime
   - [x] Userspace pointer validation on all syscall handlers
-  - [-] Service spawn/management (start other processes from init)
+  - [x] Service spawn/management (init reads ELF from VFS, spawns child, waits for exit)
 - [ ] Dependency-based parallel service startup
 - [ ] Socket activation
 - [ ] Automatic crash restart with backoff

@@ -445,6 +445,24 @@ pub fn has_capability_for(
     }
 }
 
+/// Check if a process holds any capability of a given type with
+/// sufficient rights, regardless of resource ID.
+///
+/// Used for "does this process have general filesystem access?" or
+/// "can this process use the network?" style queries.
+pub fn has_capability_type(
+    pid: ProcessId,
+    resource_type: ResourceType,
+    required_rights: Rights,
+) -> bool {
+    let table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get(&pid) {
+        proc.cap_table.has_capability_type(resource_type, required_rights)
+    } else {
+        false
+    }
+}
+
 /// Get the number of valid capabilities a process holds.
 pub fn cap_count(pid: ProcessId) -> Option<usize> {
     let table = PROCESS_TABLE.lock();
@@ -599,6 +617,33 @@ fn test_capability_integration() -> KernelResult<()> {
             destroy(pid);
             return Err(KernelError::InternalError);
         }
+    }
+
+    // Type-level check: should find Channel+READ.
+    if !has_capability_type(pid, ResourceType::Channel, Rights::READ) {
+        serial_println!("[proc]   FAIL: has_capability_type should find Channel+READ");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Type-level check: should NOT find File (not granted).
+    if has_capability_type(pid, ResourceType::File, Rights::READ) {
+        serial_println!("[proc]   FAIL: has_capability_type should NOT find File");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Grant a File cap and re-check.
+    grant_capability(pid, ResourceType::File, 0, Rights::READ | Rights::WRITE)?;
+    if !has_capability_type(pid, ResourceType::File, Rights::READ) {
+        serial_println!("[proc]   FAIL: has_capability_type should find File+READ after grant");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    if has_capability_type(pid, ResourceType::File, Rights::DELETE) {
+        serial_println!("[proc]   FAIL: has_capability_type should NOT find File+DELETE");
+        destroy(pid);
+        return Err(KernelError::InternalError);
     }
 
     destroy(pid);

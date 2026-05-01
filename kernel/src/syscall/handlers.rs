@@ -31,6 +31,88 @@ use crate::serial_println;
 use super::dispatch::{SyscallArgs, SyscallResult};
 
 // ---------------------------------------------------------------------------
+// Capability enforcement helpers
+// ---------------------------------------------------------------------------
+
+/// Get the calling process's PID.
+///
+/// Returns `None` for bare kernel tasks (no owning process).
+/// Used by [`require_cap`] and [`require_cap_type`] to identify
+/// the caller.
+fn caller_pid() -> Option<u64> {
+    let task_id = sched::current_task_id();
+    crate::proc::thread::owner_process(task_id)
+}
+
+/// Check that the calling process holds a capability for a specific
+/// resource (type + ID + rights).
+///
+/// Kernel tasks (no owning process, or PID 0) bypass all checks —
+/// the kernel has implicit authority over all resources.
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the process lacks the required capability.
+#[allow(dead_code)] // Will be used for per-resource checks (per-IRQ, per-port).
+fn require_cap(
+    resource_type: crate::cap::ResourceType,
+    resource_id: u64,
+    required_rights: crate::cap::Rights,
+) -> Result<(), KernelError> {
+    let pid = match caller_pid() {
+        Some(pid) => pid,
+        None => return Ok(()), // Bare kernel task — bypass.
+    };
+    if pid == 0 {
+        return Ok(()); // Kernel process — implicit authority.
+    }
+    if crate::proc::pcb::has_capability_for(
+        pid,
+        resource_type,
+        resource_id,
+        required_rights,
+    ) {
+        Ok(())
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+/// Check that the calling process holds *any* capability of the given
+/// type with the required rights (ignoring resource ID).
+///
+/// Used for resource types where the specific ID is not relevant to
+/// the check — e.g., "does this process have filesystem access?"
+/// or "can this process open network sockets?"
+///
+/// Kernel tasks (no owning process, or PID 0) bypass all checks.
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the process lacks the required capability.
+fn require_cap_type(
+    resource_type: crate::cap::ResourceType,
+    required_rights: crate::cap::Rights,
+) -> Result<(), KernelError> {
+    let pid = match caller_pid() {
+        Some(pid) => pid,
+        None => return Ok(()), // Bare kernel task — bypass.
+    };
+    if pid == 0 {
+        return Ok(()); // Kernel process — implicit authority.
+    }
+    if crate::proc::pcb::has_capability_type(
+        pid,
+        resource_type,
+        required_rights,
+    ) {
+        Ok(())
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kernel-core handlers (0–199)
 // ---------------------------------------------------------------------------
 
@@ -122,7 +204,15 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // TODO: Require a DeviceIrq capability for this IRQ line.
+    // Capability check: caller must hold a DeviceIrq capability.
+    // Currently type-level (any DeviceIrq cap with WRITE grants access).
+    // Future: per-IRQ capabilities with resource_id = IRQ number.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::DeviceIrq,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
 
     let task_id = sched::current_task_id();
 
@@ -222,14 +312,21 @@ pub fn sys_port_read(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // TODO: Require a PortIo capability for this port range.
+    // Capability check: caller must hold a PortIo capability.
+    // Currently type-level (any PortIo cap with READ grants access).
+    // Future: per-port capabilities with resource_id = port number.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
 
     #[allow(clippy::cast_possible_truncation)]
     let port_u16 = port as u16;
 
-    // SAFETY: The caller is requesting port I/O from a driver process.
-    // Port validity is the caller's responsibility.  Capability gating
-    // will be added to restrict which ports each driver can access.
+    // SAFETY: Capability-gated — only processes holding PortIo caps can
+    // reach this point.  Port validity is the caller's responsibility.
     let value: u64 = match width {
         1 => u64::from(unsafe { crate::port::inb(port_u16) }),
         2 => u64::from(unsafe { crate::port::inw(port_u16) }),
@@ -257,13 +354,21 @@ pub fn sys_port_write(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // TODO: Require a PortIo capability for this port range.
+    // Capability check: caller must hold a PortIo capability.
+    // Currently type-level (any PortIo cap with WRITE grants access).
+    // Future: per-port capabilities with resource_id = port number.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
 
     #[allow(clippy::cast_possible_truncation)]
     let port_u16 = port as u16;
 
-    // SAFETY: Same as sys_port_read — caller takes responsibility for
-    // port validity.  Capability gating forthcoming.
+    // SAFETY: Capability-gated — only processes holding PortIo caps can
+    // reach this point.  Port validity is the caller's responsibility.
     match width {
         1 => unsafe { crate::port::outb(port_u16, value as u8) },
         2 => unsafe { crate::port::outw(port_u16, value as u16) },
@@ -1903,6 +2008,14 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_FS_READ_FILE` — read an entire file into a buffer.
 pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with READ rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
     let buf_ptr = args.arg2 as *mut u8;
@@ -1946,6 +2059,14 @@ pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_FS_WRITE_FILE` — write data to a file (create or overwrite).
 pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
     let data_ptr = args.arg2 as *const u8;
@@ -1982,6 +2103,14 @@ pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_FS_DELETE` — delete a file.
 pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with DELETE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::DELETE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
 
@@ -2011,6 +2140,14 @@ pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Packs entries as `FS_DIR_ENTRY_SIZE`-byte records into the buffer.
 pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with READ rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     use super::number::FS_DIR_ENTRY_SIZE;
 
     let path_ptr = args.arg0 as *const u8;
@@ -2090,6 +2227,14 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_FS_MKDIR` — create a directory.
 pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with CREATE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::CREATE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
 
@@ -2117,6 +2262,14 @@ pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_FS_RMDIR` — remove an empty directory.
 pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with DELETE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::DELETE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
 
@@ -2149,6 +2302,14 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
 /// - byte 8: entry type (0=file, 1=directory)
 /// - bytes 9–15: reserved (zeros)
 pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with METADATA rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
     let out_ptr = args.arg2 as *mut u8;
@@ -2209,6 +2370,14 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: IPv4 address as u32 (network byte order).
 /// `arg1`: remote port.
 pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     use crate::net::interface::Ipv4Addr;
 
     #[allow(clippy::cast_possible_truncation)]
@@ -2235,6 +2404,14 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: pointer to data.
 /// `arg2`: data length.
 pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let handle = args.arg0 as usize;
     let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
@@ -2271,6 +2448,14 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: pointer to receive buffer.
 /// `arg2`: buffer capacity.
 pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with READ rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let handle = args.arg0 as usize;
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
@@ -2314,6 +2499,14 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: socket handle.
 pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let handle = args.arg0 as usize;
 
     match crate::net::tcp::close(handle) {
@@ -2326,6 +2519,14 @@ pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: local port.
 pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     let port = args.arg0 as u16;
 
@@ -2350,6 +2551,14 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
 /// `arg3`: pointer to data.
 /// `arg4`: data length.
 pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     use crate::net::interface::Ipv4Addr;
 
     #[allow(clippy::cast_possible_truncation)]
@@ -2404,6 +2613,14 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: buffer capacity.
 /// `arg3`: pointer to 6-byte source address output.
 pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with READ rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let handle = args.arg0 as usize;
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
@@ -2470,6 +2687,14 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: socket handle.
 pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let handle = args.arg0 as usize;
     crate::net::udp::close(handle);
     SyscallResult::ok(0)
@@ -2737,6 +2962,15 @@ pub fn sys_io_ring_destroy(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: hostname length.
 /// `arg2`: pointer to 4-byte output buffer for IPv4 address.
 pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with READ rights
+    // (DNS is a network operation).
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
     let out_ptr = args.arg2 as *mut u8;

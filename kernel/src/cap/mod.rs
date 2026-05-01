@@ -86,7 +86,30 @@ pub enum ResourceType {
     Process = 6,
     /// A thread (for suspend, resume, priority change).
     Thread = 7,
-    // Future: File, Directory, Socket, Timer, etc.
+    /// I/O port access (for userspace drivers).
+    ///
+    /// `resource_id` is the port number for fine-grained control,
+    /// or checked via `has_capability_type` for "any port" access.
+    PortIo = 8,
+    /// Device IRQ line ownership (for userspace drivers).
+    ///
+    /// `resource_id` is the IRQ number for fine-grained control,
+    /// or checked via `has_capability_type` for "any IRQ" access.
+    DeviceIrq = 9,
+    /// Filesystem access.
+    ///
+    /// `resource_id` is reserved for future per-file handles.
+    /// Currently checked via `has_capability_type` for general FS
+    /// access (any File cap with appropriate rights grants access).
+    File = 10,
+    /// Network socket access.
+    ///
+    /// `resource_id` is reserved for future per-socket handles.
+    /// Currently checked via `has_capability_type` for general
+    /// network access.
+    Socket = 11,
+    /// Timer resource.
+    Timer = 12,
 }
 
 // ---------------------------------------------------------------------------

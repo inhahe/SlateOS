@@ -275,6 +275,25 @@ impl CapTable {
         })
     }
 
+    /// Check if the table contains a valid capability for the specified
+    /// resource *type* with sufficient rights, ignoring resource ID.
+    ///
+    /// Used for "does this process have *any* File capability with READ
+    /// rights?" style queries where the specific resource doesn't matter
+    /// (e.g., path-based filesystem operations, general network access).
+    #[must_use]
+    pub fn has_capability_type(
+        &self,
+        resource_type: ResourceType,
+        required_rights: Rights,
+    ) -> bool {
+        self.entries.values().any(|e| {
+            e.valid
+                && e.resource_type == resource_type
+                && e.rights.contains(required_rights)
+        })
+    }
+
     /// Revoke all entries referencing a specific resource.
     ///
     /// Called when a kernel object is destroyed (e.g., channel closed).
@@ -359,6 +378,7 @@ pub fn self_test() -> KernelResult<()> {
     test_revoke()?;
     test_revoke_by_resource()?;
     test_delegation_cannot_escalate()?;
+    test_has_capability_type()?;
 
     Ok(())
 }
@@ -545,5 +565,56 @@ fn test_delegation_cannot_escalate() -> KernelResult<()> {
     }
 
     serial_println!("[cap]   No escalation: OK");
+    Ok(())
+}
+
+/// Test 7: `has_capability_type` checks type+rights, ignoring resource ID.
+fn test_has_capability_type() -> KernelResult<()> {
+    let mut table = CapTable::new();
+
+    // Insert a File capability with READ+WRITE for resource_id 42.
+    table.insert(
+        ResourceType::File,
+        42,
+        Rights::READ | Rights::WRITE,
+    )?;
+
+    // Type-level check should match regardless of resource_id.
+    if !table.has_capability_type(ResourceType::File, Rights::READ) {
+        serial_println!("[cap]   FAIL: has_capability_type should find File+READ");
+        return Err(KernelError::InternalError);
+    }
+
+    // Should also find WRITE.
+    if !table.has_capability_type(ResourceType::File, Rights::WRITE) {
+        serial_println!("[cap]   FAIL: has_capability_type should find File+WRITE");
+        return Err(KernelError::InternalError);
+    }
+
+    // Should NOT find EXECUTE (not granted).
+    if table.has_capability_type(ResourceType::File, Rights::EXECUTE) {
+        serial_println!("[cap]   FAIL: has_capability_type should not find File+EXECUTE");
+        return Err(KernelError::InternalError);
+    }
+
+    // Should NOT find Socket (wrong type).
+    if table.has_capability_type(ResourceType::Socket, Rights::READ) {
+        serial_println!("[cap]   FAIL: has_capability_type should not find Socket+READ");
+        return Err(KernelError::InternalError);
+    }
+
+    // Existing resource-specific check should still work for exact ID.
+    if !table.has_resource(ResourceType::File, 42, Rights::READ) {
+        serial_println!("[cap]   FAIL: has_resource should find File+42+READ");
+        return Err(KernelError::InternalError);
+    }
+
+    // Exact ID mismatch should fail.
+    if table.has_resource(ResourceType::File, 99, Rights::READ) {
+        serial_println!("[cap]   FAIL: has_resource should NOT find File+99+READ");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[cap]   has_capability_type: OK");
     Ok(())
 }

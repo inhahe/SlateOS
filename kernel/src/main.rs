@@ -516,7 +516,23 @@ extern "C" fn kmain() -> ! {
 
     serial_println!("[init] Spawning init process ({} bytes ELF)", INIT_ELF.len());
 
-    let spawn_opts = proc::spawn::SpawnOptions::new("init");
+    // Init process capabilities — init is the root userspace process
+    // and needs broad access.  Child processes will receive restricted
+    // subsets of these capabilities.
+    let init_caps: &[(cap::ResourceType, u64, cap::Rights)] = &[
+        // Filesystem: full access (read, write, create, delete, metadata).
+        (cap::ResourceType::File, 0, cap::Rights::ALL),
+        // Network: full access (connect, bind, send, recv).
+        (cap::ResourceType::Socket, 0, cap::Rights::ALL),
+        // Process management: spawn and manage children.
+        (cap::ResourceType::Process, 0, cap::Rights::ALL),
+    ];
+    let spawn_opts = proc::spawn::SpawnOptions {
+        name: "init",
+        parent: 0,
+        priority: sched::task::DEFAULT_PRIORITY,
+        capabilities: init_caps,
+    };
     match proc::spawn::spawn_process(INIT_ELF, &spawn_opts) {
         Ok(result) => {
             serial_println!(

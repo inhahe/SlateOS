@@ -552,6 +552,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::journal::self_test() {
                 serial_println!("WARNING: Change journal self-test failed: {:?}", e);
             }
+            // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
+            if let Err(e) = fs::memfs::self_test() {
+                serial_println!("WARNING: MemFs self-test failed: {:?}", e);
+            }
             // Flush buffer cache to disk so data survives power loss / QEMU kill.
             if let Err(e) = fs::cache::flush_all() {
                 serial_println!("WARNING: Buffer cache flush failed: {:?}", e);

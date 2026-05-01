@@ -83,7 +83,11 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] IOCP-like completion port / unified wait:
   - [x] Register/unregister waitable objects with arbitrary user-data int
   - [-] Wait on: I/O completion, timers, process exit, eventfd counters, semaphores, channel messages (channels, pipes, eventfds, process exit done; timers/semaphores/IO TODO)
-- [ ] io_uring-style submission queue (optional async path for batch I/O)
+- [x] io_uring-style submission queue (optional async path for batch I/O)
+  - [x] Shared-memory SQ/CQ ring buffers with atomic head/tail pointers
+  - [x] 8 opcodes: NOP, console write, channel send/recv, pipe read/write, FS read/write
+  - [x] SYS_IO_RING_SETUP (260), SYS_IO_RING_ENTER (261), SYS_IO_RING_DESTROY (262)
+  - [x] 3 self-tests: create/destroy, NOP submission, console write batch
 - [x] Futexes (for userspace synchronization without syscall in uncontended case)
 - [x] Console I/O syscalls (SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR — bootstrap console for early userspace)
 - [x] Filesystem I/O syscalls (SYS_FS_READ_FILE through SYS_FS_STAT — stateless whole-file operations via VFS)

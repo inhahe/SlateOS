@@ -1913,6 +1913,99 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[mm]   Double-free detection: OK");
 
+    // -- Test 5: Zeroed frame allocation (every byte zero) ------------------
+    test_zeroed_alloc()?;
+
+    // -- Test 6: Per-CPU cache (alloc/free pattern after enabling) ----------
+    test_pcpu_cache()?;
+
     serial_println!("[mm] Frame allocator self-test PASSED");
+    Ok(())
+}
+
+/// Verify `alloc_frame_zeroed` returns a completely zero-filled frame.
+///
+/// Requires page_table::hhdm() to be available (page_table::init must
+/// have been called).  Skips gracefully if called too early in boot.
+fn test_zeroed_alloc() -> KernelResult<()> {
+    let hhdm = match crate::mm::page_table::hhdm() {
+        Some(h) => h,
+        None => {
+            // Page table module not initialized yet — alloc_frame_zeroed
+            // won't work either.  Skip this test at early boot; it will
+            // be exercised indirectly by the demand paging self-test.
+            serial_println!("[mm]   Zeroed frame allocation: SKIP (HHDM not ready)");
+            return Ok(());
+        }
+    };
+
+    let frame = alloc_frame_zeroed()?;
+    let ptr = frame.to_virt(hhdm) as *const u8;
+
+    // Check every byte in the 16 KiB frame is zero.
+    // SAFETY: frame is allocated, HHDM mapping is valid.
+    let all_zero = unsafe {
+        let slice = core::slice::from_raw_parts(ptr, FRAME_SIZE);
+        slice.iter().all(|&b| b == 0)
+    };
+
+    // SAFETY: sole owner.
+    unsafe { free_frame(frame)?; }
+
+    if !all_zero {
+        serial_println!("[mm]   FAIL: alloc_frame_zeroed returned non-zero frame!");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[mm]   Zeroed frame allocation: OK");
+    Ok(())
+}
+
+/// Test per-CPU cache behavior: rapid alloc/free pattern should hit
+/// the per-CPU path (no contention, no global lock).
+fn test_pcpu_cache() -> KernelResult<()> {
+    let initial = stats().ok_or(KernelError::NotSupported)?;
+
+    // Rapid alloc-free-alloc-free pattern (exercises per-CPU cache).
+    for _ in 0..32 {
+        let f = alloc_frame()?;
+        // SAFETY: just allocated, sole owner.
+        unsafe { free_frame(f)?; }
+    }
+
+    // Free count should be unchanged (all frames returned).
+    let after = stats().ok_or(KernelError::NotSupported)?;
+    if after.free_frames != initial.free_frames {
+        serial_println!(
+            "[mm]   FAIL: pcpu cache test: free count {} != initial {}",
+            after.free_frames, initial.free_frames
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Batch alloc (exceeds per-CPU cache size), then batch free.
+    // Per-CPU cache is typically PCPU_MAX_CACHE=8, so 32 frames
+    // will force multiple global lock acquisitions.
+    let mut frames = [0u64; 32];
+    for slot in &mut frames {
+        let f = alloc_frame()?;
+        *slot = f.addr();
+    }
+    for &addr in &frames {
+        if let Some(f) = PhysFrame::from_addr(addr) {
+            // SAFETY: allocated in the loop above.
+            unsafe { free_frame(f)?; }
+        }
+    }
+
+    let after2 = stats().ok_or(KernelError::NotSupported)?;
+    if after2.free_frames != initial.free_frames {
+        serial_println!(
+            "[mm]   FAIL: pcpu batch test: free count {} != initial {}",
+            after2.free_frames, initial.free_frames
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[mm]   Per-CPU cache alloc/free: OK");
     Ok(())
 }

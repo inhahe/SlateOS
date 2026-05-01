@@ -885,6 +885,81 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
         .collect()
 }
 
+/// Summary of scheduler state for the panic handler.
+///
+/// All fields are gathered via `try_lock` so the panic handler never
+/// deadlocks even if the panic occurred while holding the scheduler lock.
+pub struct PanicSchedInfo {
+    /// ID of the task that was running when the panic occurred.
+    pub current_task_id: TaskId,
+    /// Name of the current task (UTF-8 bytes, length in `name_len`).
+    pub name: [u8; 32],
+    /// Valid bytes in `name`.
+    pub name_len: usize,
+    /// Base priority of the current task.
+    pub priority: u8,
+    /// Stack bottom address of the current task (0 if idle/unknown).
+    pub stack_bottom: u64,
+    /// Total number of tasks in the task table.
+    pub total_tasks: usize,
+    /// Number of tasks in each state: [ready, running, blocked, suspended, dead].
+    pub state_counts: [usize; 5],
+    /// Whether the SCHED lock could be acquired.
+    pub lock_acquired: bool,
+}
+
+/// Gather scheduler diagnostics for the panic handler.
+///
+/// Uses `try_lock` to avoid deadlocking if the panic occurred
+/// inside a scheduler critical section.  Returns basic info even
+/// if the lock cannot be acquired (task ID is always available
+/// via the atomic `CURRENT_TASK_ID`).
+#[must_use]
+pub fn panic_diagnostics() -> PanicSchedInfo {
+    let current_id = CURRENT_TASK_ID.load(Ordering::Relaxed);
+
+    let mut info = PanicSchedInfo {
+        current_task_id: current_id,
+        name: [0u8; 32],
+        name_len: 0,
+        priority: 0,
+        stack_bottom: 0,
+        total_tasks: 0,
+        state_counts: [0; 5],
+        lock_acquired: false,
+    };
+
+    // Try to get detailed info from the task table.
+    if let Some(state) = SCHED.try_lock() {
+        info.lock_acquired = true;
+        info.total_tasks = state.tasks.len();
+
+        // Count tasks by state.
+        for task in state.tasks.values() {
+            let idx = match task.state {
+                TaskState::Ready => 0,
+                TaskState::Running => 1,
+                TaskState::Blocked => 2,
+                TaskState::Suspended => 3,
+                TaskState::Dead => 4,
+            };
+            // idx is always 0..5, matching state_counts length.
+            info.state_counts[idx] = info.state_counts[idx].saturating_add(1);
+        }
+
+        // Get current task details.
+        if let Some(task) = state.tasks.get(&current_id) {
+            let len = task.name_len.min(32);
+            info.name[..len].copy_from_slice(&task.name[..len]);
+            info.name_len = len;
+            info.priority = task.priority;
+            info.stack_bottom = task.stack_bottom;
+        }
+    }
+
+    info
+}
+
 // ---------------------------------------------------------------------------
 // Sleep queue — timer-driven wakeups for SYS_SLEEP
 // ---------------------------------------------------------------------------

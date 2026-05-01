@@ -714,10 +714,20 @@ fn idle_loop() -> ! {
 
 /// Panic handler for the kernel.
 ///
-/// Prints the panic info to serial and halts.  In a kernel, panics are
-/// always fatal — there is no higher-level runtime to catch them.
+/// Prints the panic info to serial along with diagnostic context:
+/// current task, CPU, stack usage, and memory statistics.  All lock
+/// acquisitions use `try_lock` to avoid deadlock if the panic occurred
+/// while holding a lock.
+///
+/// In a kernel, panics are always fatal — there is no higher-level
+/// runtime to catch them.
 #[panic_handler]
+#[allow(clippy::unwrap_used)] // Panic handler uses unwrap_or for best-effort diagnostics.
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Capture volatile state before disabling interrupts.
+    let rsp = cpu::read_rsp();
+    let interrupts_were_enabled = cpu::interrupts_enabled();
+
     // Disable interrupts immediately — we don't want an interrupt
     // handler running on top of a panicking kernel.
     //
@@ -729,6 +739,68 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     serial_println!("!!! KERNEL PANIC !!!");
     serial_println!("{}", info);
+
+    // --- Task context ---
+    let sched_info = sched::panic_diagnostics();
+    let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);
+    let task_name = core::str::from_utf8(name_slice).unwrap_or("<invalid utf8>");
+    serial_println!(
+        "  Task: {} ({:?}), priority {}, cpu {}",
+        sched_info.current_task_id,
+        task_name,
+        sched_info.priority,
+        sched::current_cpu_id(),
+    );
+
+    // Stack usage estimate: compare RSP to the task's stack region.
+    if sched_info.stack_bottom != 0 {
+        #[allow(clippy::arithmetic_side_effects)]
+        let stack_top = sched_info.stack_bottom + sched::task::TASK_STACK_SIZE as u64;
+        let used = stack_top.saturating_sub(rsp);
+        serial_println!(
+            "  Stack: bottom={:#x}, top={:#x}, rsp={:#x}, used={} / {} bytes",
+            sched_info.stack_bottom,
+            stack_top,
+            rsp,
+            used,
+            sched::task::TASK_STACK_SIZE,
+        );
+    } else {
+        serial_println!("  Stack: rsp={:#x} (idle task, bootloader stack)", rsp);
+    }
+
+    serial_println!(
+        "  Interrupts were {}",
+        if interrupts_were_enabled { "enabled" } else { "disabled" },
+    );
+
+    // --- Scheduler summary ---
+    if sched_info.lock_acquired {
+        let [ready, running, blocked, suspended, dead] = sched_info.state_counts;
+        serial_println!(
+            "  Tasks: {} total (ready={}, running={}, blocked={}, suspended={}, dead={})",
+            sched_info.total_tasks,
+            ready, running, blocked, suspended, dead,
+        );
+    } else {
+        serial_println!("  Tasks: <scheduler lock held, cannot inspect>");
+    }
+
+    // --- Memory summary ---
+    if let Some(stats) = mm::frame::try_stats() {
+        let used = stats.total_frames.saturating_sub(stats.free_frames);
+        let total_kb = stats.total_frames.saturating_mul(mm::frame::FRAME_SIZE) / 1024;
+        let free_kb = stats.free_frames.saturating_mul(mm::frame::FRAME_SIZE) / 1024;
+        let used_kb = used.saturating_mul(mm::frame::FRAME_SIZE) / 1024;
+        serial_println!(
+            "  Memory: {} KiB total, {} KiB used, {} KiB free ({} frames free)",
+            total_kb, used_kb, free_kb, stats.free_frames,
+        );
+    } else {
+        serial_println!("  Memory: <allocator lock held or not initialized>");
+    }
+
+    serial_println!("--- end panic ---");
 
     cpu::halt_loop();
 }

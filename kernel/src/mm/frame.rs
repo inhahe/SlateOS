@@ -1450,6 +1450,30 @@ pub fn stats() -> Option<FrameAllocStats> {
     })
 }
 
+/// Non-blocking variant of [`stats()`] for use in panic handlers.
+///
+/// Uses `try_lock` to avoid deadlock if the panic occurred while the
+/// allocator lock was held.  Returns `None` if the allocator is not
+/// initialized or the lock is currently held.
+#[must_use]
+#[allow(clippy::indexing_slicing)]
+pub fn try_stats() -> Option<FrameAllocStats> {
+    let allocator = ALLOCATOR.get()?;
+    let guard = allocator.try_lock()?;
+
+    let mut order_counts = [0usize; MAX_ORDER + 1];
+    for (i, count) in order_counts.iter_mut().enumerate() {
+        *count = guard.free_lists[i].count;
+    }
+
+    Some(FrameAllocStats {
+        total_frames: guard.total_frames,
+        free_frames: guard.free_frames,
+        free_bytes: guard.free_frames.saturating_mul(FRAME_SIZE),
+        order_counts,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Copy-on-Write reference counting API
 // ---------------------------------------------------------------------------

@@ -60,6 +60,26 @@ pub fn halt_loop() -> ! {
     }
 }
 
+/// Read the current stack pointer (RSP).
+///
+/// In a panic handler, the value reflects the handler's stack frame
+/// rather than the faulting instruction.  Still useful for estimating
+/// remaining stack space relative to the task's `stack_bottom`.
+#[inline]
+#[must_use]
+pub fn read_rsp() -> u64 {
+    let rsp: u64;
+    // SAFETY: Reading RSP is always safe.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rsp",
+            out(reg) rsp,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    rsp
+}
+
 /// Read the current value of the RFLAGS register.
 #[inline]
 #[allow(dead_code)] // Used by without_interrupts and future CPU state inspection.

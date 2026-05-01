@@ -699,12 +699,22 @@ extern "C" fn kmain() -> ! {
 /// The kernel idle loop.
 ///
 /// After spawning the init process, the boot thread enters this loop.
-/// It halts the CPU between timer interrupts, so the processor is not
-/// spinning while the init process (or other tasks) runs.  The APIC
-/// timer wakes the CPU for scheduling decisions.
+/// Each iteration performs lightweight housekeeping before yielding
+/// and halting:
+///
+/// 1. **Reap dead tasks** — free kernel stacks for tasks that have
+///    exited.  Without this, each dead task leaks 32 KiB of stack
+///    memory permanently.
+///
+/// The APIC timer wakes the CPU from HLT for scheduling decisions.
 fn idle_loop() -> ! {
     loop {
-        // Yield our time slice first, then HLT until the next interrupt.
+        // Reap dead tasks (free their stacks).  This is the only
+        // place reaping happens outside of self-tests, so any task
+        // that exits will have its stack freed on the next idle cycle.
+        sched::reap_dead_tasks();
+
+        // Yield our time slice, then HLT until the next interrupt.
         sched::yield_now();
         cpu::hlt();
     }

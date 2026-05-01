@@ -25,7 +25,7 @@ _The minimum kernel that can run a single userspace process._
 
 ### 1.1 Boot and hardware init
 - [x] UEFI boot → enter kernel entry point (Limine bootloader, kmain entry)
-- [ ] Parse ACPI tables (hardware discovery for x86) — IOAPIC address currently hardcoded
+- [x] Parse ACPI tables (RSDP→RSDT→MADT: I/O APIC address, IRQ overrides, processor count)
 - [x] Initialize GDT, IDT, interrupt handlers
 - [x] Set up 16 KiB page tables (4×4KiB hardware pages per logical frame)
 - [x] Set up kernel heap allocator (slab allocator, power-of-2 size classes)

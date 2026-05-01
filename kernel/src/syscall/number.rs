@@ -249,6 +249,37 @@ pub const SYS_SYSCTL_GET: u64 = 60;
 /// unknown or the value is out of range.
 pub const SYS_SYSCTL_SET: u64 = 61;
 
+/// Apply a memory workload profile preset.
+///
+/// `arg0`: profile ID.
+///   - 0 = Desktop (committed, moderate stack, kill-largest OOM)
+///   - 1 = Server (lazy, large stack, return-error OOM)
+///   - 2 = Development (committed, large stack, kill-largest OOM)
+///   - 3 = Gaming (committed, large stack, kill-largest OOM, zero-on-free)
+///
+/// Sets all mm.* sysctl parameters to the profile's preset values.
+///
+/// Returns: 0 on success, `InvalidArgument` if ID is unknown.
+pub const SYS_MM_SET_PROFILE: u64 = 70;
+
+/// Query the current memory workload profile.
+///
+/// Returns: profile ID (0–3) if the current mm.* parameters match a
+/// known profile, or `InvalidArgument` if the configuration has been
+/// manually tuned.
+pub const SYS_MM_GET_PROFILE: u64 = 71;
+
+/// Apply a unified system workload profile (scheduler + memory).
+///
+/// `arg0`: profile ID (0–3).
+///
+/// Configures both scheduler time slices and mm.* sysctl parameters
+/// in one call.  Equivalent to calling `SYS_SCHED_SET_PROFILE` and
+/// `SYS_MM_SET_PROFILE` with the same profile ID.
+///
+/// Returns: 0 on success, `InvalidArgument` if ID is unknown.
+pub const SYS_SYSTEM_SET_PROFILE: u64 = 80;
+
 /// Debug print (temporary — write a byte string to serial).
 ///
 /// `arg0`: pointer to bytes.

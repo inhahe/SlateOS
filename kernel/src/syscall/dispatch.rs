@@ -39,6 +39,8 @@ use super::number::{
     SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE,
     SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
     SYS_SYSCTL_GET, SYS_SYSCTL_SET,
+    SYS_MM_SET_PROFILE, SYS_MM_GET_PROFILE,
+    SYS_SYSTEM_SET_PROFILE,
     SYS_CAP_QUERY, SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
@@ -184,6 +186,13 @@ const fn build_v1_table() -> SyscallTable {
     // Sysctl — kernel parameter registry (60–69).
     handlers[SYS_SYSCTL_GET as usize] = Some(handlers::sys_sysctl_get);
     handlers[SYS_SYSCTL_SET as usize] = Some(handlers::sys_sysctl_set);
+
+    // Memory workload profiles (70–79).
+    handlers[SYS_MM_SET_PROFILE as usize] = Some(handlers::sys_mm_set_profile);
+    handlers[SYS_MM_GET_PROFILE as usize] = Some(handlers::sys_mm_get_profile);
+
+    // System-wide workload profiles (80–89).
+    handlers[SYS_SYSTEM_SET_PROFILE as usize] = Some(handlers::sys_system_set_profile);
 
     // IPC (200–399)
     handlers[SYS_CHANNEL_CREATE as usize] = Some(handlers::sys_channel_create);

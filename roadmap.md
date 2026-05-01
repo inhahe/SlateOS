@@ -54,7 +54,13 @@ _The minimum kernel that can run a single userspace process._
   - [x] SYS_SYSCTL_GET (60), SYS_SYSCTL_SET (61) syscalls
   - [x] mm.lazy_default wired to SYS_MMAP (system-wide lazy allocation default)
   - [x] Self-test: read/write/range-check/unknown-ID
-- [ ] Workload profiles (Desktop, Database, Development, Gaming) as presets for memory
+- [x] Workload profiles (Desktop, Server, Development, Gaming) as presets for memory
+  - [x] `MemoryProfilePreset` struct: per-profile mm.* parameter values
+  - [x] `apply_memory_profile(profile_id)` sets max_stack_frames, lazy_default, oom_policy, zero_on_alloc
+  - [x] `current_memory_profile()` detects active profile (returns None if manually tuned)
+  - [x] `apply_system_profile(profile_id)` unified call setting both scheduler and memory parameters
+  - [x] SYS_MM_SET_PROFILE (70), SYS_MM_GET_PROFILE (71), SYS_SYSTEM_SET_PROFILE (80) syscalls
+  - [x] Self-test: all 4 profiles verified, invalid IDs rejected, manual tuning breaks detection
 
 ### 1.3 Scheduler
 _Define scheduler trait interface first, implement one scheduler behind it._

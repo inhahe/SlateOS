@@ -110,7 +110,7 @@ OVMF_WIN="$(to_win_path "$OVMF")"
     -serial "file:$SERIAL_FILE_WIN" \
     -display none \
     -no-reboot \
-    -m 128M \
+    -m 256M \
     -machine q35 &
 QEMU_PID=$!
 

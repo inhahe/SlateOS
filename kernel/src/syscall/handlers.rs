@@ -3308,3 +3308,62 @@ pub fn sys_sysctl_set(args: &SyscallArgs) -> SyscallResult {
         None => SyscallResult::err(KernelError::InvalidArgument),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Memory workload profiles (70–79)
+// ---------------------------------------------------------------------------
+
+/// `SYS_MM_SET_PROFILE` — apply a memory workload profile preset.
+///
+/// `arg0`: profile ID (0=Desktop, 1=Server, 2=Development, 3=Gaming).
+///
+/// Sets all mm.* sysctl parameters (max_stack_frames, lazy_default,
+/// oom_policy, zero_on_alloc) to the profile's preset values.
+pub fn sys_mm_set_profile(args: &SyscallArgs) -> SyscallResult {
+    let profile_id = args.arg0 as u8;
+
+    if crate::sysctl::apply_memory_profile(profile_id) {
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidArgument)
+    }
+}
+
+/// `SYS_MM_GET_PROFILE` — query the current memory workload profile.
+///
+/// Returns the profile ID (0–3) if the current mm.* parameters match
+/// a known profile.  If the parameters have been manually tuned,
+/// returns `InvalidArgument`.
+pub fn sys_mm_get_profile(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+
+    match crate::sysctl::current_memory_profile() {
+        Some(profile) => {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                SyscallResult::ok(profile as u8 as i64)
+            }
+        }
+        None => SyscallResult::err(KernelError::InvalidArgument),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System-wide workload profiles (80–89)
+// ---------------------------------------------------------------------------
+
+/// `SYS_SYSTEM_SET_PROFILE` — apply a unified system workload profile.
+///
+/// `arg0`: profile ID (0=Desktop, 1=Server, 2=Development, 3=Gaming).
+///
+/// Configures both scheduler time slices and mm.* sysctl parameters
+/// for the selected workload.
+pub fn sys_system_set_profile(args: &SyscallArgs) -> SyscallResult {
+    let profile_id = args.arg0 as u8;
+
+    if crate::sysctl::apply_system_profile(profile_id) {
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult::err(KernelError::InvalidArgument)
+    }
+}

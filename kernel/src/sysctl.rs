@@ -30,6 +30,7 @@
 //! reads/writes are atomic at the u64 level, but the lock ensures
 //! consistency when a workload profile sets multiple parameters.
 
+use crate::sched::WorkloadProfile;
 use crate::serial_println;
 use spin::Mutex;
 
@@ -352,6 +353,176 @@ pub fn count() -> usize {
     REGISTRY.lock().count
 }
 
+// ---------------------------------------------------------------------------
+// Memory workload profiles
+// ---------------------------------------------------------------------------
+
+/// Memory-subsystem parameter presets for each workload profile.
+///
+/// These mirror the scheduler workload profiles defined in
+/// [`WorkloadProfile`], applying tuned mm.* sysctl values for the
+/// selected workload.  The idea (from the design spec) is that a
+/// single "apply profile" action configures both scheduler and memory
+/// subsystems for the workload.
+///
+/// ## Presets
+///
+/// | Parameter           | Desktop | Server | Development | Gaming |
+/// |---------------------|---------|--------|-------------|--------|
+/// | mm.max_stack_frames | 256     | 512    | 512         | 512    |
+/// | mm.lazy_default     | 0       | 1      | 0           | 0      |
+/// | mm.oom_policy       | 0       | 2      | 0           | 0      |
+/// | mm.zero_on_alloc    | 0       | 1      | 0           | 1      |
+///
+/// **Desktop**: Committed allocation, moderate stack, kill-largest OOM.
+/// Predictable and secure — good for mixed interactive workloads.
+///
+/// **Server**: Lazy allocation reduces memory pressure for many-process
+/// server deployments (fork-heavy, CoW-friendly).  Return-error OOM
+/// lets servers handle memory exhaustion gracefully.  Zero-on-free
+/// amortises zeroing cost for high-throughput allocation patterns.
+///
+/// **Development**: Committed allocation for predictable behavior during
+/// debugging.  Larger stack (compiler recursion, test harnesses).
+/// Kill-largest OOM avoids complex error handling in dev tools.
+///
+/// **Gaming**: Committed allocation avoids page-fault latency spikes
+/// during gameplay.  Large stack for deep game-engine call stacks.
+/// Zero-on-free slightly reduces allocation latency on the hot path.
+struct MemoryProfilePreset {
+    max_stack_frames: u64,
+    lazy_default: u64,
+    oom_policy: u64,
+    zero_on_alloc: u64,
+}
+
+impl MemoryProfilePreset {
+    /// Get the preset for a workload profile.
+    const fn for_profile(profile: WorkloadProfile) -> Self {
+        match profile {
+            WorkloadProfile::Desktop => Self {
+                max_stack_frames: 256, // 4 MiB — moderate, enough for typical apps
+                lazy_default: 0,       // committed (per design spec default)
+                oom_policy: 0,         // kill largest — protect desktop responsiveness
+                zero_on_alloc: 0,      // secure default
+            },
+            WorkloadProfile::Server => Self {
+                max_stack_frames: 512, // 8 MiB — servers may have deep stacks (Java, etc.)
+                lazy_default: 1,       // lazy — many-process servers benefit from CoW/overcommit
+                oom_policy: 2,         // return error — servers should handle OOM gracefully
+                zero_on_alloc: 1,      // zero on free — amortise for high-throughput alloc
+            },
+            WorkloadProfile::Development => Self {
+                max_stack_frames: 512, // 8 MiB — compilers/debuggers use deep stacks
+                lazy_default: 0,       // committed — predictable for debugging
+                oom_policy: 0,         // kill largest — just kill the runaway build
+                zero_on_alloc: 0,      // secure default, clean state for debugging
+            },
+            WorkloadProfile::Gaming => Self {
+                max_stack_frames: 512, // 8 MiB — game engines use deep stacks
+                lazy_default: 0,       // committed — avoid page fault latency during gameplay
+                oom_policy: 0,         // kill largest — protect the game process
+                zero_on_alloc: 1,      // zero on free — reduce alloc latency spikes
+            },
+        }
+    }
+}
+
+/// Apply a memory workload profile, setting all mm.* sysctl parameters.
+///
+/// Returns `true` if the profile was applied successfully (all four
+/// parameters set).  Returns `false` if the profile ID is invalid
+/// or any parameter write failed (e.g., value out of range — should
+/// not happen with well-defined presets).
+///
+/// The sysctl lock is acquired once per parameter.  Callers who need
+/// both scheduler and memory profiles applied atomically should call
+/// this from within a higher-level coordination function.
+pub fn apply_memory_profile(profile_id: u8) -> bool {
+    let Some(profile) = WorkloadProfile::from_u8(profile_id) else {
+        return false;
+    };
+
+    let preset = MemoryProfilePreset::for_profile(profile);
+
+    // Apply all four mm.* parameters.  Each `set()` call acquires and
+    // releases the registry lock, which is fine — the parameters are
+    // independent and the lock is very fast (no contention during
+    // profile application).
+    let ok = set(PARAM_MM_MAX_STACK_FRAMES, preset.max_stack_frames).is_some()
+        && set(PARAM_MM_LAZY_DEFAULT, preset.lazy_default).is_some()
+        && set(PARAM_MM_OOM_POLICY, preset.oom_policy).is_some()
+        && set(PARAM_MM_ZERO_ON_ALLOC, preset.zero_on_alloc).is_some();
+
+    if ok {
+        serial_println!(
+            "[sysctl] Applied memory profile: {} (stack={}, lazy={}, oom={}, zero={})",
+            profile.name(),
+            preset.max_stack_frames,
+            preset.lazy_default,
+            preset.oom_policy,
+            preset.zero_on_alloc
+        );
+    }
+
+    ok
+}
+
+/// Detect the current memory workload profile, if the mm.* sysctl
+/// parameters match a known preset.
+///
+/// Returns `None` if the parameters have been manually tuned and
+/// don't match any profile exactly.
+#[must_use]
+pub fn current_memory_profile() -> Option<WorkloadProfile> {
+    let reg = REGISTRY.lock();
+
+    // Read current values under a single lock acquisition for consistency.
+    let stack = reg.get(PARAM_MM_MAX_STACK_FRAMES)?;
+    let lazy = reg.get(PARAM_MM_LAZY_DEFAULT)?;
+    let oom = reg.get(PARAM_MM_OOM_POLICY)?;
+    let zero = reg.get(PARAM_MM_ZERO_ON_ALLOC)?;
+    drop(reg);
+
+    // Check each profile's preset against current values.
+    for id in 0..=3u8 {
+        if let Some(profile) = WorkloadProfile::from_u8(id) {
+            let preset = MemoryProfilePreset::for_profile(profile);
+            if stack == preset.max_stack_frames
+                && lazy == preset.lazy_default
+                && oom == preset.oom_policy
+                && zero == preset.zero_on_alloc
+            {
+                return Some(profile);
+            }
+        }
+    }
+    None
+}
+
+/// Apply a unified system workload profile — both scheduler and memory.
+///
+/// This is the "one call to rule them all" function that sets both
+/// scheduler time slices (via `sched::apply_workload_profile`) and
+/// memory parameters (via `apply_memory_profile`).
+///
+/// Returns `true` if both subsystems were configured successfully.
+pub fn apply_system_profile(profile_id: u8) -> bool {
+    let sched_ok = crate::sched::apply_workload_profile(profile_id);
+    let mm_ok = apply_memory_profile(profile_id);
+
+    if sched_ok && mm_ok {
+        if let Some(profile) = WorkloadProfile::from_u8(profile_id) {
+            serial_println!(
+                "[sysctl] Applied system profile: {} (scheduler + memory)",
+                profile.name()
+            );
+        }
+    }
+
+    sched_ok && mm_ok
+}
+
 /// Run self-test.
 pub fn self_test() {
     serial_println!("[sysctl] Running self-test...");
@@ -377,6 +548,49 @@ pub fn self_test() {
 
     // Restore default.
     let _ = set(PARAM_MM_MAX_STACK_FRAMES, 256);
+
+    // -----------------------------------------------------------------------
+    // Memory workload profiles
+    // -----------------------------------------------------------------------
+
+    // Default values match the Desktop profile.
+    assert_eq!(current_memory_profile(), Some(WorkloadProfile::Desktop));
+
+    // Apply Server profile.
+    assert!(apply_memory_profile(1)); // Server
+    assert_eq!(get(PARAM_MM_MAX_STACK_FRAMES), Some(512));
+    assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(1));
+    assert_eq!(get(PARAM_MM_OOM_POLICY), Some(2));
+    assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(1));
+    assert_eq!(current_memory_profile(), Some(WorkloadProfile::Server));
+
+    // Apply Development profile.
+    assert!(apply_memory_profile(2)); // Development
+    assert_eq!(get(PARAM_MM_MAX_STACK_FRAMES), Some(512));
+    assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(0));
+    assert_eq!(get(PARAM_MM_OOM_POLICY), Some(0));
+    assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(0));
+    assert_eq!(current_memory_profile(), Some(WorkloadProfile::Development));
+
+    // Apply Gaming profile.
+    assert!(apply_memory_profile(3)); // Gaming
+    assert_eq!(get(PARAM_MM_MAX_STACK_FRAMES), Some(512));
+    assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(0));
+    assert_eq!(get(PARAM_MM_OOM_POLICY), Some(0));
+    assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(1));
+    assert_eq!(current_memory_profile(), Some(WorkloadProfile::Gaming));
+
+    // Invalid profile ID.
+    assert!(!apply_memory_profile(4));
+    assert!(!apply_memory_profile(255));
+
+    // Manual tuning breaks profile detection.
+    let _ = set(PARAM_MM_OOM_POLICY, 1); // change one param
+    assert_eq!(current_memory_profile(), None); // no profile matches
+
+    // Restore Desktop defaults.
+    assert!(apply_memory_profile(0));
+    assert_eq!(current_memory_profile(), Some(WorkloadProfile::Desktop));
 
     serial_println!("[sysctl] Self-test PASSED");
 }

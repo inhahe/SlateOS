@@ -402,8 +402,9 @@ extern "C" fn kmain() -> ! {
     //
     // SAFETY: GDT, IDT, and heap are initialized.  We are single-threaded
     // with interrupts disabled.  Called exactly once.
-    unsafe {
-        apic::init();
+    if let Err(e) = unsafe { apic::init() } {
+        serial_println!("FATAL: APIC init failed: {:?}", e);
+        cpu::halt_loop();
     }
 
     // Step 20b: Initialize I/O APIC for external device interrupts.
@@ -415,8 +416,9 @@ extern "C" fn kmain() -> ! {
     //
     // SAFETY: LAPIC is initialized (required for EOI routing).
     // Interrupts are disabled.  Called exactly once.
-    unsafe {
-        ioapic::init();
+    if let Err(e) = unsafe { ioapic::init() } {
+        serial_println!("FATAL: IOAPIC init failed: {:?}", e);
+        cpu::halt_loop();
     }
 
     // Verify IOAPIC configuration.

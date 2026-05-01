@@ -39,6 +39,7 @@
 //! - OSDev wiki: <https://wiki.osdev.org/APIC_timer>
 
 use crate::cpu;
+use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::PhysFrame;
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::port;
@@ -208,12 +209,18 @@ pub fn tick_count() -> u64 {
 
 /// Initialize the Local APIC and start the periodic timer.
 ///
+/// # Errors
+///
+/// Returns [`KernelError::NotSupported`] if the HHDM is not initialized,
+/// or [`KernelError::BadAlignment`] if the APIC base address is not
+/// frame-aligned (should never happen on real hardware).
+///
 /// # Safety
 ///
 /// - Must be called exactly once during boot.
 /// - The GDT, IDT, and heap must already be initialized.
 /// - Interrupts must be disabled.
-pub unsafe fn init() {
+pub unsafe fn init() -> KernelResult<()> {
     serial_println!("[apic] Initializing Local APIC...");
 
     // Step 1: Read the APIC base address from the MSR.
@@ -232,13 +239,13 @@ pub unsafe fn init() {
     // The HHDM (Higher Half Direct Map) set up by Limine may not cover
     // MMIO regions like the APIC (which is device memory, not RAM).
     // We explicitly map the APIC page so it's accessible.
-    let hhdm = page_table::hhdm().expect("HHDM not initialized");
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
     let apic_base_virt = apic_base_phys + hhdm;
 
     // Map the APIC MMIO page (16 KiB frame covering 0xFEE00000).
     // Use PRESENT | WRITABLE | NO_CACHE flags for MMIO.
     let apic_frame = PhysFrame::from_addr(apic_base_phys)
-        .expect("APIC base not frame-aligned");
+        .ok_or(KernelError::BadAlignment)?;
     let apic_virt = VirtAddr::new(apic_base_virt);
     let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
     let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
@@ -327,6 +334,8 @@ pub unsafe fn init() {
         TICK_RATE_HZ,
         TIMER_VECTOR
     );
+
+    Ok(())
 }
 
 /// Configure the APIC timer for periodic mode.

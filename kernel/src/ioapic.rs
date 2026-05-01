@@ -316,12 +316,18 @@ unsafe fn disable_pic() {
 /// After init, all IRQ lines are masked.  Call [`unmask_irq`] to
 /// enable delivery for specific IRQ lines once a driver is ready.
 ///
+/// # Errors
+///
+/// Returns [`KernelError::NotSupported`] if the HHDM is not initialized,
+/// or [`KernelError::BadAlignment`] if the IOAPIC base address is not
+/// frame-aligned.
+///
 /// # Safety
 ///
 /// - Must be called exactly once during boot.
 /// - The LAPIC must already be initialized (for EOI routing).
 /// - Interrupts should be disabled during initialization.
-pub unsafe fn init() {
+pub unsafe fn init() -> KernelResult<()> {
     serial_println!("[ioapic] Initializing I/O APIC...");
 
     // Step 1: Disable the legacy 8259 PIC.
@@ -338,11 +344,11 @@ pub unsafe fn init() {
         IOAPIC_DEFAULT_PHYS
     });
 
-    let hhdm = page_table::hhdm().expect("HHDM not initialized");
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
     let ioapic_virt = ioapic_base_phys.wrapping_add(hhdm);
 
     let ioapic_frame = PhysFrame::from_addr(ioapic_base_phys)
-        .expect("IOAPIC base not frame-aligned");
+        .ok_or(KernelError::BadAlignment)?;
     let ioapic_va = VirtAddr::new(ioapic_virt);
     let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
     let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
@@ -452,6 +458,8 @@ pub unsafe fn init() {
         IRQ_VECTOR_BASE,
         IRQ_VECTOR_BASE as usize + usable - 1,
     );
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

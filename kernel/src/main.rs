@@ -523,6 +523,20 @@ extern "C" fn kmain() -> ! {
         serial_println!("[init] Installed /bin/hello ({} bytes)", HELLO_ELF.len());
     }
 
+    // Create /etc directory and write a default service list.
+    // Init reads this at startup to auto-register services.
+    if let Err(e) = fs::Vfs::mkdir("/etc") {
+        serial_println!("[init] Note: /etc mkdir: {:?} (may already exist)", e);
+    }
+    if let Err(e) = fs::Vfs::write_file(
+        "/etc/services",
+        b"# Startup services (one per line)\n# Format: /path/to/elf [depends:dep1,dep2]\n/bin/hello\n",
+    ) {
+        serial_println!("[init] Note: /etc/services write: {:?}", e);
+    } else {
+        serial_println!("[init] Created /etc/services");
+    }
+
     serial_println!("[init] Spawning init process ({} bytes ELF)", INIT_ELF.len());
 
     // Init process capabilities — init is the root userspace process

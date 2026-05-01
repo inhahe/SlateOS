@@ -310,12 +310,21 @@ impl AddressSpace {
             return Err(e);
         }
 
-        // Flush the TLB so the CPU sees the new mapping when it
+        // Flush the local TLB so this CPU sees the new mapping when it
         // retries the faulting instruction.
         //
-        // SAFETY: invlpg is always safe in ring 0.
+        // OPT: Use local-only flush (no IPI broadcast) because this is
+        // a demand fault — the page was never mapped before, so no other
+        // CPU can have a stale TLB entry for it.  The previous unmap (if
+        // any) would have done a full TLB shootdown already.
+        //
+        // This avoids an IPI round-trip on every page fault in SMP mode
+        // (~1-5µs saved per fault on real hardware).
+        //
+        // SAFETY: invlpg is always safe in ring 0.  Local-only is
+        // correct because the mapping didn't exist before this handler.
         unsafe {
-            page_table::flush_frame(virt);
+            page_table::flush_frame_local(virt);
         }
 
         Ok(())

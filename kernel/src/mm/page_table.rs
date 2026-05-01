@@ -1251,7 +1251,6 @@ pub unsafe fn flush_frame(virt: VirtAddr) {
 /// Same as [`invlpg`].  The caller must ensure no other CPU relies
 /// on the TLB entries being flushed.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-#[allow(dead_code)] // Used during boot identity map teardown.
 pub unsafe fn flush_frame_local(virt: VirtAddr) {
     let base = virt.as_u64();
     for i in 0..HW_PAGES_PER_FRAME {

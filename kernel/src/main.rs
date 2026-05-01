@@ -562,9 +562,29 @@ extern "C" fn kmain() -> ! {
     // Verifies refcount API and COW PTE flag manipulation.
     mm::cow::self_test();
 
-    // Step 22e2: Memory protection (mprotect / W^X) self-test.
+    // Step 22e2: Harden page permissions — set NX on HHDM and fix kernel
+    // section permissions (W^X enforcement for kernel's own pages).
+    {
+        let pml4 = mm::page_table::active_pml4_phys();
+
+        let hhdm_hardened = mm::protect::harden_hhdm_nx(pml4);
+        serial_println!(
+            "[protect] HHDM NX hardened: {} PML4 entries updated",
+            hhdm_hardened
+        );
+
+        let (sections_hardened, section_errors) =
+            mm::protect::harden_kernel_sections(pml4);
+        serial_println!(
+            "[protect] Kernel section permissions hardened: {} PTEs updated, {} errors",
+            sections_hardened, section_errors
+        );
+    }
+
+    // Step 22e3: Memory protection (mprotect / W^X) self-test.
     // Verifies mprotect flag changes, W^X enforcement, JIT capability gate,
     // and audits kernel page tables for write+execute violations.
+    // Runs AFTER hardening so the audit reflects the fixed state.
     if let Err(e) = mm::protect::self_test() {
         serial_println!("[FATAL] Memory protection self-test failed: {:?}", e);
     }

@@ -34,25 +34,33 @@ SECTIONS
      * These must be contiguous and in the correct order for the bootloader
      * to discover them. */
     .requests : ALIGN(4K) {
+        __requests_start = .;
         KEEP(*(.requests_start_marker))
         KEEP(*(.requests))
         KEEP(*(.requests_end_marker))
+        __requests_end = .;
     } :requests
 
     /* Executable code. */
     .text : ALIGN(4K) {
+        __text_start = .;
         *(.text .text.*)
+        __text_end = .;
     } :text
 
     /* Read-only data (constants, string literals, vtables). */
     .rodata : ALIGN(4K) {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        __rodata_end = .;
     } :rodata
 
     /* Initialized read-write data. */
     .data : ALIGN(4K) {
+        __data_start = .;
         *(.data .data.*)
         *(.got .got.*)
+        __data_end = .;
     } :data
 
     /* Zero-initialized read-write data. */

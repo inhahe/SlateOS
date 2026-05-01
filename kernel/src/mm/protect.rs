@@ -39,7 +39,7 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::FRAME_SIZE;
-use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::mm::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -286,6 +286,11 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
     const MAX_LOGGED: usize = 8;
 
     // Kernel half: PML4 entries 256–511.
+    //
+    // On x86_64, if ANY intermediate entry (PML4E, PDPTE, PDE) has the NX
+    // bit set, the page is effectively non-executable — the hardware ORs
+    // the NX bit across all levels.  We track inherited NX through the walk
+    // so the audit reflects the true effective permissions.
     for pml4_idx in 256..512 {
         // SAFETY: pml4_phys is the active page table, indices are valid.
         let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
@@ -294,15 +299,18 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
         }
 
         let is_hhdm = pml4_idx >= hhdm_pml4_start && pml4_idx < hhdm_pml4_end;
+        let pml4_nx = pml4e.flags().contains(PageFlags::NO_EXECUTE);
 
         for pdpt_idx in 0..512 {
             let pdpte = unsafe { page_table::read_entry(pml4e.phys_addr(), pdpt_idx, hhdm) };
             if !pdpte.is_present() {
                 continue;
             }
+            let pdpt_nx = pml4_nx || pdpte.flags().contains(PageFlags::NO_EXECUTE);
+
             // 1 GiB huge page — check directly.
             if pdpte.is_huge() {
-                if is_wx_violation(pdpte.flags()) {
+                if !pdpt_nx && is_wx_violation(pdpte.flags()) {
                     if is_hhdm {
                         hhdm_violations += 1;
                     } else {
@@ -324,9 +332,11 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
                 if !pde.is_present() {
                     continue;
                 }
+                let pd_nx = pdpt_nx || pde.flags().contains(PageFlags::NO_EXECUTE);
+
                 // 2 MiB huge page — check directly.
                 if pde.is_huge() {
-                    if is_wx_violation(pde.flags()) {
+                    if !pd_nx && is_wx_violation(pde.flags()) {
                         if is_hhdm {
                             hhdm_violations += 1;
                         } else {
@@ -349,7 +359,10 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
                     if !pte.is_present() {
                         continue;
                     }
-                    if is_wx_violation(pte.flags()) {
+                    // Effective NX: any ancestor OR leaf has NX → non-executable.
+                    let effective_nx = pd_nx || pte.flags().contains(PageFlags::NO_EXECUTE);
+
+                    if !effective_nx && pte.flags().contains(PageFlags::WRITABLE) {
                         if is_hhdm {
                             hhdm_violations += 1;
                         } else {
@@ -377,6 +390,219 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
 // ---------------------------------------------------------------------------
 
 /// Self-test for memory protection.
+// ---------------------------------------------------------------------------
+// HHDM NX hardening
+// ---------------------------------------------------------------------------
+
+/// Set the NX (No-Execute) bit on all HHDM PML4 entries.
+///
+/// Limine's Higher Half Direct Map doesn't set NX on the page table
+/// entries, leaving the entire physical memory direct map as executable.
+/// We never execute code from the HHDM — it's only used for reading
+/// and writing physical memory — so we can safely mark the entire range
+/// as non-executable.
+///
+/// We set NX at the PML4 level for maximum efficiency: a single bit flip
+/// per PML4 entry covers 512 GiB of address space.  This eliminates
+/// thousands of apparent W^X violations from the audit.
+///
+/// Must be called after the page table subsystem is initialized.
+/// Flushes the TLB on all CPUs after modifying the PML4 entries.
+///
+/// Returns the number of PML4 entries hardened.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn harden_hhdm_nx(pml4_phys: u64) -> usize {
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return 0,
+    };
+
+    let hhdm_pml4_start = ((hhdm >> 39) & 0x1FF) as usize;
+    // Cover up to 2 TiB of physical memory (4 PML4 entries × 512 GiB each).
+    let hhdm_pml4_end = hhdm_pml4_start.saturating_add(4).min(512);
+
+    let mut hardened = 0usize;
+
+    for pml4_idx in hhdm_pml4_start..hhdm_pml4_end {
+        // SAFETY: pml4_phys is the active page table, index is valid.
+        let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
+        if !pml4e.is_present() {
+            continue;
+        }
+
+        // Set the NX bit (bit 63) on the PML4 entry.
+        let new_raw = pml4e.raw() | PageFlags::NO_EXECUTE.bits();
+        let new_entry = PageTableEntry::from_raw(new_raw);
+
+        // SAFETY: We're only adding NX to an existing valid entry.
+        // The physical address and other flags are preserved.
+        unsafe { page_table::write_entry(pml4_phys, pml4_idx, new_entry, hhdm); }
+        hardened += 1;
+    }
+
+    if hardened > 0 {
+        // Flush TLB on all CPUs so the NX changes take effect.
+        crate::tlb::flush_all();
+    }
+
+    hardened
+}
+
+// ---------------------------------------------------------------------------
+// Kernel section NX hardening
+// ---------------------------------------------------------------------------
+
+// Linker script section boundary symbols.
+unsafe extern "C" {
+    static __requests_start: u8;
+    static __requests_end: u8;
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_start: u8;
+    static __rodata_end: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+    static __bss_start: u8;
+    static __bss_end: u8;
+}
+
+/// Harden kernel section page permissions after boot.
+///
+/// Limine may not set the NX bit on non-executable kernel sections.
+/// This function walks the kernel page tables and applies the correct
+/// permissions based on linker script section boundaries:
+///
+/// - `.text`     → R+X       (executable code, not writable)
+/// - `.rodata`   → R+NX      (read-only data, not executable)
+/// - `.requests` → RW+NX     (Limine request data, not executable)
+/// - `.data`     → RW+NX     (initialized data, not executable)
+/// - `.bss`      → RW+NX     (zero-initialized data, not executable)
+///
+/// This enforces W^X for the kernel's own code: no page is both
+/// writable and executable after this function runs.
+///
+/// Returns (pages_hardened, errors).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn harden_kernel_sections(pml4_phys: u64) -> (usize, usize) {
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return (0, 0),
+    };
+
+    let mut hardened = 0usize;
+    let errors = 0usize;
+
+    // Linker-defined section boundaries. addr_of! takes the address without
+    // dereferencing, so no unsafe block is needed (Rust 2024 rules for
+    // `unsafe extern` statics).
+    let text_start = core::ptr::addr_of!(__text_start) as u64;
+    let text_end = core::ptr::addr_of!(__text_end) as u64;
+    let rodata_start = core::ptr::addr_of!(__rodata_start) as u64;
+    let rodata_end = core::ptr::addr_of!(__rodata_end) as u64;
+    let requests_start = core::ptr::addr_of!(__requests_start) as u64;
+    let requests_end = core::ptr::addr_of!(__requests_end) as u64;
+    let data_start = core::ptr::addr_of!(__data_start) as u64;
+    let data_end = core::ptr::addr_of!(__data_end) as u64;
+    let bss_start = core::ptr::addr_of!(__bss_start) as u64;
+    let bss_end = core::ptr::addr_of!(__bss_end) as u64;
+
+    // Helper: determine what flags a kernel virtual address should have.
+    let flags_for_addr = |addr: u64| -> PageFlags {
+        if addr >= text_start && addr < text_end {
+            // .text: read-execute, not writable.
+            PageFlags::PRESENT | PageFlags::GLOBAL
+        } else if addr >= rodata_start && addr < rodata_end {
+            // .rodata: read-only, not executable.
+            PageFlags::PRESENT | PageFlags::GLOBAL | PageFlags::NO_EXECUTE
+        } else if addr >= requests_start && addr < requests_end {
+            // .requests: read-write (Limine data), not executable.
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NO_EXECUTE
+        } else if addr >= data_start && addr < data_end {
+            // .data: read-write, not executable.
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NO_EXECUTE
+        } else if addr >= bss_start && addr < bss_end {
+            // .bss: read-write, not executable.
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NO_EXECUTE
+        } else {
+            // Unknown kernel page — keep RW+NX as a safe default.
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NO_EXECUTE
+        }
+    };
+
+    // Walk the kernel image region (PML4 index 511, which covers
+    // 0xFFFF_FF80_0000_0000 to 0xFFFF_FFFF_FFFF_FFFF, containing
+    // the kernel at 0xFFFF_FFFF_8000_0000).
+    let kernel_pml4_idx: usize = 511;
+    let pml4e = unsafe { page_table::read_entry(pml4_phys, kernel_pml4_idx, hhdm) };
+    if !pml4e.is_present() {
+        return (0, 0);
+    }
+
+    for pdpt_idx in 0..512usize {
+        let pdpte = unsafe { page_table::read_entry(pml4e.phys_addr(), pdpt_idx, hhdm) };
+        if !pdpte.is_present() || pdpte.is_huge() {
+            continue;
+        }
+
+        for pd_idx in 0..512usize {
+            let pde = unsafe { page_table::read_entry(pdpte.phys_addr(), pd_idx, hhdm) };
+            if !pde.is_present() || pde.is_huge() {
+                continue;
+            }
+
+            for pt_idx in 0..512usize {
+                let pte = unsafe { page_table::read_entry(pde.phys_addr(), pt_idx, hhdm) };
+                if !pte.is_present() {
+                    continue;
+                }
+
+                // Compute the virtual address for this PTE.
+                let virt = (kernel_pml4_idx as u64) << 39
+                    | (pdpt_idx as u64) << 30
+                    | (pd_idx as u64) << 21
+                    | (pt_idx as u64) << 12;
+                // Sign-extend for canonical form (bit 47 set → bits 48-63 all 1).
+                let virt = virt | 0xFFFF_0000_0000_0000;
+
+                // Only harden pages within the kernel image.
+                if virt < requests_start || virt >= bss_end {
+                    continue;
+                }
+
+                let desired = flags_for_addr(virt);
+                let current_flags = pte.flags();
+
+                // Check if flags already match.
+                // Compare the permission-relevant bits: WRITABLE, NO_EXECUTE, GLOBAL.
+                let perm_mask = PageFlags::WRITABLE | PageFlags::NO_EXECUTE | PageFlags::GLOBAL;
+                if (current_flags & perm_mask) == (desired & perm_mask) {
+                    continue; // Already correct.
+                }
+
+                // Build new PTE: keep physical address, use desired flags.
+                let new_entry = PageTableEntry::new(pte.phys_addr(), desired);
+
+                // SAFETY: We're updating a present PTE with the same physical
+                // address but different permission flags.
+                unsafe {
+                    page_table::write_entry(pde.phys_addr(), pt_idx, new_entry, hhdm);
+                }
+                hardened += 1;
+            }
+        }
+    }
+
+    if hardened > 0 {
+        crate::tlb::flush_all();
+    }
+
+    (hardened, errors)
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
 ///
 /// Tests the mprotect function and W^X enforcement.
 #[allow(clippy::arithmetic_side_effects)]

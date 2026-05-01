@@ -375,16 +375,19 @@ fn build_trampoline() -> [u8; 1024] {
     // mov cr3, eax: 0F 22 D8
     buf[p] = 0x0F; buf[p+1] = 0x22; buf[p+2] = 0xD8; p += 3;
 
-    // Enable long mode via IA32_EFER MSR
+    // Enable long mode + NX support via IA32_EFER MSR.
+    // Bit 8 (LME) = Long Mode Enable.
+    // Bit 11 (NXE) = No-Execute Enable — required for NX bit in page tables.
+    // Without NXE, bit 63 in PTEs is reserved and will cause #PF(RSVD).
     // mov ecx, 0xC0000080: B9 80 00 00 C0
     buf[p] = 0xB9; p += 1;
     buf[p] = 0x80; buf[p+1] = 0x00; buf[p+2] = 0x00; buf[p+3] = 0xC0; p += 4;
     // rdmsr: 0F 32
     buf[p] = 0x0F; buf[p+1] = 0x32; p += 2;
-    // or eax, 0x100 (set LME bit)
-    // 0D 00 01 00 00
+    // or eax, 0x900 (set LME bit 8 + NXE bit 11)
+    // 0D 00 09 00 00
     buf[p] = 0x0D; p += 1;
-    buf[p] = 0x00; buf[p+1] = 0x01; buf[p+2] = 0x00; buf[p+3] = 0x00; p += 4;
+    buf[p] = 0x00; buf[p+1] = 0x09; buf[p+2] = 0x00; buf[p+3] = 0x00; p += 4;
     // wrmsr: 0F 30
     buf[p] = 0x0F; buf[p+1] = 0x30; p += 2;
 

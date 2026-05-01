@@ -1105,13 +1105,36 @@ pub unsafe fn invlpg(addr: u64) {
     }
 }
 
-/// Flush TLB entries for an entire 16 KiB frame (4 × [`invlpg`]).
+/// Flush TLB entries for an entire 16 KiB frame (4 × `invlpg`) on **all
+/// online CPUs**.
+///
+/// On single-CPU systems this is equivalent to 4 `invlpg` instructions.
+/// On SMP systems this sends a TLB shootdown IPI so all CPUs flush the
+/// range.
 ///
 /// # Safety
 ///
-/// Same as [`invlpg`].
+/// Same as [`invlpg`] — always safe in ring 0.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 pub unsafe fn flush_frame(virt: VirtAddr) {
+    // Delegate to the TLB module which handles both local and cross-CPU
+    // invalidation.  4 hardware pages per 16 KiB frame.
+    crate::tlb::flush_range(virt.as_u64(), HW_PAGES_PER_FRAME as u32);
+}
+
+/// Flush TLB entries for an entire 16 KiB frame on **only the local
+/// CPU** (no IPI).
+///
+/// Use this when cross-CPU consistency is guaranteed by other means
+/// (e.g., the address space is not yet active on other CPUs, or the
+/// caller is modifying identity mappings during single-threaded boot).
+///
+/// # Safety
+///
+/// Same as [`invlpg`].  The caller must ensure no other CPU relies
+/// on the TLB entries being flushed.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub unsafe fn flush_frame_local(virt: VirtAddr) {
     let base = virt.as_u64();
     for i in 0..HW_PAGES_PER_FRAME {
         // SAFETY: invlpg is always safe.

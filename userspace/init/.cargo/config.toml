@@ -1,0 +1,16 @@
+# Build configuration for userspace init binary.
+# Target: bare-metal x86_64, but running in ring 3 (user mode).
+#
+# This MUST override the workspace-level .cargo/config.toml which sets
+# code-model=kernel (upper 2 GiB).  Userspace code runs at lower
+# addresses and needs PIC for position independence.
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+linker = "rust-lld"
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "relocation-model=pic",
+]

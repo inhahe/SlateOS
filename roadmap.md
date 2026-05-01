@@ -200,7 +200,10 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] POSIX signals → translate to native IPC messages
 
 ### 2.6 Init / service manager
-- [ ] PID 1 init process
+- [-] PID 1 init process
+  - [x] Minimal userspace init binary (ring 3, SYSCALL-based I/O, embedded in kernel ELF)
+  - [x] Interactive shell: console read/write, echo command, help, exit
+  - [ ] Service spawn/management (start other processes from init)
 - [ ] Dependency-based parallel service startup
 - [ ] Socket activation
 - [ ] Automatic crash restart with backoff

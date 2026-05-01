@@ -36,7 +36,9 @@
 //!     at 100 Hz, register timer ISR on vector 32).
 //! 23. Enable interrupts — preemptive scheduling is now active.
 //!     (self-test: verify timer ticks are observed).
-//! 24. ... (per-process address spaces, ring 3 transition, first userspace process)
+//! 24. Spawn the userspace init process (PID 1) from an embedded ELF binary.
+//!     The init process runs in ring 3 with a minimal interactive shell.
+//!     The boot thread enters an idle loop after spawning init.
 
 #![no_std]
 #![no_main]
@@ -480,11 +482,55 @@ extern "C" fn kmain() -> ! {
     // Show boot-complete on the framebuffer console too.
     console_println!("=== Kernel boot complete ===");
 
-    // Enter the kernel debug shell.
-    // This replaces the idle loop — the shell blocks on keyboard input
-    // using HLT, so it is equally power-efficient.  The APIC timer
-    // still fires and drives the scheduler.
-    kshell::run();
+    // Step 24: Spawn the userspace init process (PID 1).
+    //
+    // The init binary is embedded in the kernel image at compile time.
+    // It runs in ring 3 and provides a minimal user-mode shell.  This
+    // is the first step toward Phase 2 (boot to a shell prompt).
+    //
+    // If init spawning fails, fall back to the kernel debug shell.
+    static INIT_ELF: &[u8] = include_bytes!(
+        "../../userspace/init/target/x86_64-unknown-none/release/init"
+    );
+
+    serial_println!("[init] Spawning init process ({} bytes ELF)", INIT_ELF.len());
+
+    let spawn_opts = proc::spawn::SpawnOptions::new("init");
+    match proc::spawn::spawn_process(INIT_ELF, &spawn_opts) {
+        Ok(result) => {
+            serial_println!(
+                "[init] Init process spawned: pid={}, tid={}, entry={:#x}",
+                result.pid, result.task_id, result.entry_point
+            );
+            // The init process is now in the scheduler's run queue.
+            // Drop into the idle loop — the scheduler will switch to
+            // init when it gets a time slice.
+            idle_loop();
+        }
+        Err(e) => {
+            serial_println!("[init] FAILED to spawn init: {:?}", e);
+            serial_println!("[init] Falling back to kernel debug shell");
+            kshell::run();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Idle loop
+// ---------------------------------------------------------------------------
+
+/// The kernel idle loop.
+///
+/// After spawning the init process, the boot thread enters this loop.
+/// It halts the CPU between timer interrupts, so the processor is not
+/// spinning while the init process (or other tasks) runs.  The APIC
+/// timer wakes the CPU for scheduling decisions.
+fn idle_loop() -> ! {
+    loop {
+        // Yield our time slice first, then HLT until the next interrupt.
+        sched::yield_now();
+        cpu::hlt();
+    }
 }
 
 // ---------------------------------------------------------------------------

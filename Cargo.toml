@@ -3,6 +3,12 @@ resolver = "2"
 members = [
     "kernel",
 ]
+# Userspace binaries are excluded because they need different rustflags
+# (no code-model=kernel, no kernel linker script).  They are built
+# separately via `cargo build` in their own directories.
+exclude = [
+    "userspace/init",
+]
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

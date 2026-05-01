@@ -536,6 +536,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::cache::self_test() {
                 serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);
             }
+            // Run recycle bin self-test (trash, list, restore, empty).
+            if let Err(e) = fs::trash::self_test() {
+                serial_println!("WARNING: Recycle bin self-test failed: {:?}", e);
+            }
         }
         Err(e) => {
             serial_println!("[fs] No FAT filesystem on vda: {:?} (non-fatal)", e);

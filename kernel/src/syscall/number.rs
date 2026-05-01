@@ -964,6 +964,53 @@ pub const O_TRUNC: u64 = 1 << 3;
 /// Open-flag constant: all writes go to end of file.
 pub const O_APPEND: u64 = 1 << 4;
 
+/// Move a file to the recycle bin (trash-capable delete).
+///
+/// `arg0`: pointer to file path string.
+/// `arg1`: path length (bytes).
+///
+/// The file is moved to `/.trash/<name>` on the same filesystem.
+/// Companion `.ORI` file records the original path for restoration.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_TRASH: u64 = 618;
+
+/// List items in the recycle bin.
+///
+/// `arg0`: pointer to output buffer for [`TrashListEntry`] array.
+/// `arg1`: buffer capacity (max number of entries).
+///
+/// Each entry is 528 bytes: 256 (trash name) + 256 (original path) + 8 (size) + 8 (flags).
+///
+/// Returns: number of entries written, or negative error code.
+pub const SYS_FS_TRASH_LIST: u64 = 619;
+
+/// Restore a file from the recycle bin to its original location.
+///
+/// `arg0`: pointer to trash filename string (as shown in `SYS_FS_TRASH_LIST`).
+/// `arg1`: trash filename length (bytes).
+/// `arg2`: pointer to output buffer for restored path (256 bytes).
+///
+/// Returns: length of restored path in bytes, or negative error code.
+pub const SYS_FS_TRASH_RESTORE: u64 = 620;
+
+/// Permanently delete all items in the recycle bin.
+///
+/// No arguments.
+///
+/// Returns: number of items deleted, or negative error code.
+pub const SYS_FS_TRASH_EMPTY: u64 = 621;
+
+/// Size of a trash list entry as returned by `SYS_FS_TRASH_LIST`.
+///
+/// Layout (528 bytes):
+/// - `[0..256]`: trash filename (null-terminated UTF-8)
+/// - `[256..512]`: original path (null-terminated UTF-8)
+/// - `[512..520]`: file size (u64, little-endian)
+/// - `[520..524]`: flags (u32: bit 0 = is_directory)
+/// - `[524..528]`: padding (zeros)
+pub const FS_TRASH_ENTRY_SIZE: usize = 528;
+
 /// Seek whence: from start of file.
 pub const SEEK_SET: u64 = 0;
 /// Seek whence: from current offset.

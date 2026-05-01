@@ -2796,6 +2796,199 @@ pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Recycle bin / trash handlers (618–621)
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_TRASH` — move a file to the recycle bin.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+pub fn sys_fs_trash(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with WRITE rights
+    // (deleting requires write access to the directory).
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let ptr = args.arg0 as *const u8;
+    let len = args.arg1 as usize;
+
+    if ptr.is_null() || len == 0 || len > 4096 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — pointer is in user-space and mapped.
+    let path_bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::trash::trash(path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_TRASH_LIST` — list items in the recycle bin.
+///
+/// `arg0`: pointer to output buffer.
+/// `arg1`: max number of entries.
+pub fn sys_fs_trash_list(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with READ rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let out_ptr = args.arg0 as *mut u8;
+    let max_entries = args.arg1 as usize;
+
+    if out_ptr.is_null() || max_entries == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let buf_size = max_entries.saturating_mul(crate::syscall::number::FS_TRASH_ENTRY_SIZE);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, buf_size) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::fs::trash::list() {
+        Ok(items) => {
+            let count = items.len().min(max_entries);
+
+            // SAFETY: Validated above.
+            unsafe {
+                core::ptr::write_bytes(out_ptr, 0, buf_size);
+
+                for (i, item) in items.iter().take(count).enumerate() {
+                    let entry_base = out_ptr.add(
+                        i.wrapping_mul(crate::syscall::number::FS_TRASH_ENTRY_SIZE),
+                    );
+
+                    // Write trash name (bytes 0..256).
+                    let name_bytes = item.trash_name.as_bytes();
+                    let name_len = name_bytes.len().min(255);
+                    core::ptr::copy_nonoverlapping(
+                        name_bytes.as_ptr(),
+                        entry_base,
+                        name_len,
+                    );
+
+                    // Write original path (bytes 256..512).
+                    let path_bytes = item.original_path.as_bytes();
+                    let path_len = path_bytes.len().min(255);
+                    core::ptr::copy_nonoverlapping(
+                        path_bytes.as_ptr(),
+                        entry_base.add(256),
+                        path_len,
+                    );
+
+                    // Write file size (bytes 512..520).
+                    let size_ptr = entry_base.add(512) as *mut u64;
+                    core::ptr::write(size_ptr, item.size);
+
+                    // Write flags (bytes 520..524).
+                    let flags: u32 = if item.is_directory { 1 } else { 0 };
+                    let flags_ptr = entry_base.add(520) as *mut u32;
+                    core::ptr::write(flags_ptr, flags);
+                }
+            }
+
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(count as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_TRASH_RESTORE` — restore a file from the recycle bin.
+///
+/// `arg0`: pointer to trash filename string.
+/// `arg1`: trash filename length.
+/// `arg2`: pointer to 256-byte output buffer for restored path.
+pub fn sys_fs_trash_restore(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let name_ptr = args.arg0 as *const u8;
+    let name_len = args.arg1 as usize;
+    let out_ptr = args.arg2 as *mut u8;
+
+    if name_ptr.is_null() || name_len == 0 || name_len > 256 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, name_len) {
+        return SyscallResult::err(e);
+    }
+
+    if !out_ptr.is_null() {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 256) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // SAFETY: Validated above.
+    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+    let trash_name = match core::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::trash::restore(trash_name) {
+        Ok(restored_path) => {
+            // Write the restored path to the output buffer.
+            if !out_ptr.is_null() {
+                let path_bytes = restored_path.as_bytes();
+                let copy_len = path_bytes.len().min(255);
+                // SAFETY: Validated above.
+                unsafe {
+                    core::ptr::write_bytes(out_ptr, 0, 256);
+                    core::ptr::copy_nonoverlapping(
+                        path_bytes.as_ptr(),
+                        out_ptr,
+                        copy_len,
+                    );
+                }
+            }
+
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(restored_path.len() as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_TRASH_EMPTY` — permanently delete all items in the recycle bin.
+pub fn sys_fs_trash_empty(_args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires File capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::fs::trash::empty() {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 

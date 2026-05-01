@@ -1485,6 +1485,416 @@ impl FileSystem for FatFs {
         crate::serial_println!("[fat] Renamed '{}' → '{}'", from, to);
         Ok(())
     }
+
+    /// Read a range of bytes from a file without reading the entire file.
+    ///
+    /// Walks the FAT cluster chain to skip directly to the cluster
+    /// containing `offset`, then reads only the sectors that overlap
+    /// with the requested range.  For a 100-byte read from a 10 MB
+    /// file at offset 5000, this reads ~1 cluster instead of the
+    /// entire file.
+    ///
+    /// Overrides the default [`FileSystem::read_at`] which reads the
+    /// whole file into memory and slices — O(file_size) even for
+    /// small reads.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let (_parent, entry) = self.resolve_path(path)?;
+        let entry = entry.ok_or(KernelError::NotFound)?;
+        if entry.is_directory() {
+            return Err(KernelError::IsADirectory);
+        }
+
+        let file_size = u64::from(entry.file_size);
+
+        // Clamp to file bounds.
+        if offset >= file_size {
+            return Ok(Vec::new());
+        }
+        let available = (file_size - offset) as usize;
+        let actual_len = len.min(available);
+        if actual_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Empty file (no clusters).
+        if entry.first_cluster < 2 {
+            return Ok(Vec::new());
+        }
+
+        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
+            * usize::from(self.bpb.bytes_per_sector);
+
+        // Which cluster in the chain contains `offset`?
+        let target_cluster_idx = offset as usize / cluster_bytes;
+        let offset_in_cluster = offset as usize % cluster_bytes;
+
+        // Walk the FAT chain to the target cluster.
+        let mut cluster = entry.first_cluster;
+        for _ in 0..target_cluster_idx {
+            if !self.is_valid_cluster(cluster) {
+                return Err(KernelError::IoError); // Truncated chain.
+            }
+            match self.fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => return Ok(Vec::new()), // Chain ended early.
+            }
+        }
+
+        // Now `cluster` is the first cluster we need to read from,
+        // and `offset_in_cluster` is the byte offset within it.
+        let mut result = Vec::with_capacity(actual_len);
+        let mut remaining = actual_len;
+        let mut skip_in_cluster = offset_in_cluster;
+        let mut iterations = 0u32;
+
+        while remaining > 0 && self.is_valid_cluster(cluster) {
+            iterations = iterations.wrapping_add(1);
+            if iterations > 65536 {
+                return Err(KernelError::IoError);
+            }
+
+            let lba = u64::from(self.bpb.cluster_to_lba(cluster));
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+
+            // Determine which sector within this cluster to start from.
+            let start_sector = skip_in_cluster / SECTOR_SIZE;
+            let skip_in_sector = skip_in_cluster % SECTOR_SIZE;
+
+            for s in start_sector..usize::from(self.bpb.sectors_per_cluster) {
+                if remaining == 0 {
+                    break;
+                }
+
+                self.read_sector(lba + s as u64, &mut sector_buf)?;
+
+                let sector_offset = if s == start_sector { skip_in_sector } else { 0 };
+                let avail_in_sector = SECTOR_SIZE - sector_offset;
+                let to_copy = remaining.min(avail_in_sector);
+
+                if let Some(src) = sector_buf.get(sector_offset..sector_offset + to_copy) {
+                    result.extend_from_slice(src);
+                }
+                remaining -= to_copy;
+            }
+
+            // Next cluster in the chain.
+            skip_in_cluster = 0; // Only the first cluster has an internal offset.
+            match self.fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => break,
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Write bytes at a specific offset without rewriting the entire file.
+    ///
+    /// Three cases:
+    /// 1. **Overwrite within existing data**: walk cluster chain to offset,
+    ///    read-modify-write the affected sectors.
+    /// 2. **Append past current size**: extend the cluster chain as needed,
+    ///    zero-fill any gap between old EOF and the write offset.
+    /// 3. **Write to new file**: create the file, allocate clusters, write.
+    ///
+    /// Overrides the default which reads the entire file, patches in
+    /// memory, and rewrites everything.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let (parent_path, filename) = split_path(path);
+        let name83 = Self::to_83_name(filename)
+            .ok_or(KernelError::InvalidArgument)?;
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
+
+        // Find or create the directory entry.
+        let (dir_lba, dir_offset, exists) =
+            self.find_or_create_slot_in(parent_cluster, &name83)?;
+
+        // Read existing metadata.
+        let (old_cluster, old_size) = if exists {
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            self.read_sector(dir_lba, &mut sector_buf)?;
+            let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
+            if attr & ATTR_DIRECTORY != 0 {
+                return Err(KernelError::IsADirectory);
+            }
+            let clo = u32::from(read_u16(&sector_buf, dir_offset + 26));
+            let chi = u32::from(read_u16(&sector_buf, dir_offset + 20));
+            let cluster = (chi << 16) | clo;
+            let size = read_u32(&sector_buf, dir_offset + 28);
+            (cluster, size)
+        } else {
+            (0u32, 0u32)
+        };
+
+        let new_end = offset as usize + data.len();
+        let new_size = new_end.max(old_size as usize);
+
+        // Check FAT file size limit.
+        if new_size > u32::MAX as usize {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
+            * usize::from(self.bpb.bytes_per_sector);
+
+        // Calculate how many clusters are needed for the new size.
+        let clusters_needed = if new_size == 0 { 0 } else {
+            (new_size + cluster_bytes - 1) / cluster_bytes
+        };
+
+        // Count existing clusters.
+        let mut existing_count = 0usize;
+        let mut last_cluster = 0u32;
+        {
+            let mut c = old_cluster;
+            while self.is_valid_cluster(c) {
+                existing_count += 1;
+                last_cluster = c;
+                match self.fat_entry(c)? {
+                    Some(next) => c = next,
+                    None => break,
+                }
+            }
+        }
+
+        // If the file needs to grow, allocate more clusters.
+        let eoc = match self.bpb.fat_type {
+            FatType::Fat16 => 0xFFFF,
+            FatType::Fat32 => 0x0FFF_FFFF,
+        };
+        let mut first_cluster = old_cluster;
+
+        if clusters_needed > existing_count {
+            let extra = clusters_needed - existing_count;
+            for _ in 0..extra {
+                let new_c = self.alloc_cluster()?;
+                self.set_fat_entry(new_c, eoc)?;
+
+                // Zero-fill the new cluster.
+                let new_lba = self.bpb.cluster_to_lba(new_c);
+                let zero = [0u8; SECTOR_SIZE];
+                for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                    self.write_sector(u64::from(new_lba + s), &zero)?;
+                }
+
+                if first_cluster < 2 {
+                    // File was empty — this is the first cluster.
+                    first_cluster = new_c;
+                } else {
+                    // Link to end of existing chain.
+                    self.set_fat_entry(last_cluster, new_c)?;
+                }
+                last_cluster = new_c;
+            }
+        }
+
+        // Now write the data at the requested offset.
+        // Walk chain to the target cluster.
+        let target_cluster_idx = offset as usize / cluster_bytes;
+        let offset_in_cluster = offset as usize % cluster_bytes;
+
+        let mut cluster = first_cluster;
+        for _ in 0..target_cluster_idx {
+            match self.fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => return Err(KernelError::IoError),
+            }
+        }
+
+        let mut written = 0usize;
+        let mut skip_in_cluster = offset_in_cluster;
+
+        while written < data.len() && self.is_valid_cluster(cluster) {
+            let lba = u64::from(self.bpb.cluster_to_lba(cluster));
+            let start_sector = skip_in_cluster / SECTOR_SIZE;
+            let skip_in_sector = skip_in_cluster % SECTOR_SIZE;
+
+            for s in start_sector..usize::from(self.bpb.sectors_per_cluster) {
+                if written >= data.len() {
+                    break;
+                }
+
+                let sector_lba = lba + s as u64;
+                let sector_offset = if s == start_sector { skip_in_sector } else { 0 };
+
+                // Read-modify-write if we're not writing a full sector.
+                let mut sector_buf = [0u8; SECTOR_SIZE];
+                if sector_offset > 0 || (data.len() - written) < SECTOR_SIZE {
+                    self.read_sector(sector_lba, &mut sector_buf)?;
+                }
+
+                let avail = SECTOR_SIZE - sector_offset;
+                let to_write = (data.len() - written).min(avail);
+                if let Some(src) = data.get(written..written + to_write) {
+                    if let Some(dest) = sector_buf.get_mut(sector_offset..sector_offset + to_write) {
+                        dest.copy_from_slice(src);
+                    }
+                }
+
+                self.write_sector(sector_lba, &sector_buf)?;
+                written += to_write;
+            }
+
+            skip_in_cluster = 0;
+            match self.fat_entry(cluster)? {
+                Some(next) => cluster = next,
+                None => break,
+            }
+        }
+
+        // Update directory entry with new first cluster and size.
+        self.write_dir_entry(
+            dir_lba, dir_offset, &name83,
+            first_cluster, new_size as u32, 0x20,
+        )?;
+
+        Ok(())
+    }
+
+    /// Truncate a file efficiently.
+    ///
+    /// Overrides the default read-resize-rewrite approach.
+    /// Shrinks by freeing excess clusters; grows by allocating and
+    /// zero-filling new clusters.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        if size > u64::from(u32::MAX) {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let (parent_path, filename) = split_path(path);
+        let name83 = Self::to_83_name(filename)
+            .ok_or(KernelError::InvalidArgument)?;
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
+
+        let (dir_lba, dir_offset, exists) =
+            self.find_or_create_slot_in(parent_cluster, &name83)?;
+        if !exists {
+            return Err(KernelError::NotFound);
+        }
+
+        // Read existing metadata.
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        self.read_sector(dir_lba, &mut sector_buf)?;
+        let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
+        if attr & ATTR_DIRECTORY != 0 {
+            return Err(KernelError::IsADirectory);
+        }
+        let clo = u32::from(read_u16(&sector_buf, dir_offset + 26));
+        let chi = u32::from(read_u16(&sector_buf, dir_offset + 20));
+        let old_cluster = (chi << 16) | clo;
+        let old_size = read_u32(&sector_buf, dir_offset + 28);
+
+        let new_size = size as u32;
+        let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
+            * usize::from(self.bpb.bytes_per_sector);
+        let eoc = match self.bpb.fat_type {
+            FatType::Fat16 => 0xFFFF,
+            FatType::Fat32 => 0x0FFF_FFFF,
+        };
+
+        let clusters_needed = if new_size == 0 { 0 } else {
+            ((new_size as usize) + cluster_bytes - 1) / cluster_bytes
+        };
+
+        // Walk existing chain to count clusters.
+        let mut chain: Vec<u32> = Vec::new();
+        let mut c = old_cluster;
+        while self.is_valid_cluster(c) {
+            chain.push(c);
+            match self.fat_entry(c)? {
+                Some(next) => c = next,
+                None => break,
+            }
+        }
+
+        let mut first_cluster = old_cluster;
+
+        if clusters_needed == 0 {
+            // Truncate to zero — free the entire chain.
+            if old_cluster >= 2 {
+                self.free_chain(old_cluster)?;
+            }
+            first_cluster = 0;
+        } else if clusters_needed < chain.len() {
+            // Shrink: mark the last-kept cluster as EOC, free the rest.
+            let keep = clusters_needed;
+            self.set_fat_entry(chain[keep - 1], eoc)?;
+            for &c in &chain[keep..] {
+                self.set_fat_entry(c, 0)?;
+            }
+        } else if clusters_needed > chain.len() {
+            // Grow: allocate more clusters, zero-fill.
+            let mut last = if chain.is_empty() { 0u32 } else { chain[chain.len() - 1] };
+            let extra = clusters_needed - chain.len();
+            for _ in 0..extra {
+                let new_c = self.alloc_cluster()?;
+                self.set_fat_entry(new_c, eoc)?;
+
+                // Zero-fill.
+                let new_lba = self.bpb.cluster_to_lba(new_c);
+                let zero = [0u8; SECTOR_SIZE];
+                for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                    self.write_sector(u64::from(new_lba + s), &zero)?;
+                }
+
+                if first_cluster < 2 {
+                    first_cluster = new_c;
+                } else {
+                    self.set_fat_entry(last, new_c)?;
+                }
+                last = new_c;
+            }
+        }
+        // else: same cluster count — just update the size.
+
+        // Zero-fill the partial cluster at the end if shrinking.
+        if new_size < old_size && clusters_needed > 0 && first_cluster >= 2 {
+            let tail_offset = new_size as usize % cluster_bytes;
+            if tail_offset > 0 {
+                // Walk to the last kept cluster.
+                let mut c = first_cluster;
+                for _ in 1..clusters_needed {
+                    match self.fat_entry(c)? {
+                        Some(next) => c = next,
+                        None => break,
+                    }
+                }
+
+                // Zero from tail_offset to end of cluster.
+                let lba = u64::from(self.bpb.cluster_to_lba(c));
+                let start_sector = tail_offset / SECTOR_SIZE;
+                let zero_from = tail_offset % SECTOR_SIZE;
+
+                for s in start_sector..usize::from(self.bpb.sectors_per_cluster) {
+                    let sector_lba = lba + s as u64;
+                    let mut sbuf = [0u8; SECTOR_SIZE];
+                    let from = if s == start_sector { zero_from } else { 0 };
+                    if from > 0 {
+                        self.read_sector(sector_lba, &mut sbuf)?;
+                    }
+                    if let Some(region) = sbuf.get_mut(from..SECTOR_SIZE) {
+                        region.fill(0);
+                    }
+                    self.write_sector(sector_lba, &sbuf)?;
+                }
+            }
+        }
+
+        // Update directory entry.
+        self.write_dir_entry(
+            dir_lba, dir_offset, &name83,
+            first_cluster, new_size, attr,
+        )?;
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

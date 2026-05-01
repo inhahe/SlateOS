@@ -1274,10 +1274,16 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                 print("'\n");
             }
         }
+    } else if bytes_eq(sub, b"cfg") {
+        // Reload /etc/services — register and start any new entries.
+        // Already-running services are not duplicated because register
+        // doesn't check for duplicates (the user should stop first).
+        print("[svc] Reloading /etc/services...\n");
+        load_startup_services(registry);
     } else {
         print("svc: unknown subcommand '");
         console_write(sub);
-        print("'\nUsage: svc start|stop|restart|remove|list|status\n");
+        print("'\nUsage: svc start|stop|restart|remove|list|status|cfg\n");
     }
 }
 
@@ -1311,6 +1317,7 @@ fn execute(line: &[u8], registry: &mut ServiceRegistry) {
         print("  svc remove <n> - unregister a service\n");
         print("  svc list       - list all services\n");
         print("  svc status <n> - detailed service info\n");
+        print("  svc cfg        - reload /etc/services\n");
         print("  pid            - show task ID\n");
         print("  uptime         - show time since boot\n");
         print("  logs           - show kernel log entries\n");
@@ -1384,6 +1391,52 @@ const POLL_INTERVAL_IDLE_NS: u64 = 50_000_000;
 /// 100 ms — balance between responsiveness and CPU usage.
 const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 
+/// Load the startup service list from `/etc/services`.
+///
+/// Each non-empty line is a filesystem path to an ELF binary.
+/// Lines starting with `#` are comments.  Each service is registered
+/// and started immediately.  If the file doesn't exist, this is a
+/// no-op (the system just boots without auto-started services).
+fn load_startup_services(registry: &mut ServiceRegistry) {
+    let mut buf = [0u8; 2048];
+    let result = fs_read_file(b"/etc/services", &mut buf);
+    if result < 0 {
+        // File not found or other error — silently skip.
+        return;
+    }
+
+    let data = &buf[..result as usize];
+    print("[init] Loading startup services from /etc/services\n");
+
+    // Parse line by line.  Lines are separated by '\n'.
+    let mut start = 0;
+    while start < data.len() {
+        // Find end of line.
+        let mut end = start;
+        while end < data.len() && data[end] != b'\n' {
+            end += 1;
+        }
+
+        let line = trim(&data[start..end]);
+
+        // Skip empty lines and comments.
+        if !line.is_empty() && line[0] != b'#' {
+            match registry.register(line) {
+                Some(idx) => {
+                    registry.start_service(idx);
+                }
+                None => {
+                    print("[init] Warning: could not register ");
+                    console_write(line);
+                    print(" (registry full?)\n");
+                }
+            }
+        }
+
+        start = end + 1;
+    }
+}
+
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.
 ///
 /// No Rust runtime is available — no heap, no std, no arguments.
@@ -1402,9 +1455,13 @@ pub extern "C" fn _start() -> ! {
     print("  Userspace init process (PID 1)\n");
     print("=======================================\n");
     print("\n");
-    print("Type 'help' for available commands.\n\n");
 
     let mut registry = ServiceRegistry::new();
+
+    // Auto-start services from /etc/services (if it exists).
+    load_startup_services(&mut registry);
+
+    print("Type 'help' for available commands.\n\n");
     let mut line_buf = [0u8; MAX_LINE];
     let mut line_pos: usize = 0;
     let mut prompt_shown = false;

@@ -100,6 +100,19 @@ pub const PARAM_MM_SWAPPINESS: u16 = 4;
 /// Default: 32 (512 KiB of free memory at 16 KiB pages).
 pub const PARAM_MM_MIN_FREE_PAGES: u16 = 5;
 
+/// Maximum pages to swap out per batch before yielding the CPU.
+///
+/// During page reclamation, the kernel swaps out pages in batches.
+/// After each batch of this many pages, the reclaimer yields the CPU
+/// so other tasks can run and the system stays responsive.
+///
+/// Lower values = more responsive system during heavy swapping, but
+/// slower reclaim throughput.  Higher values = faster reclaim but
+/// potential for UI stutters during swap storms.
+///
+/// Default: 4 (swap 4 pages, yield, repeat).
+pub const PARAM_MM_SWAP_BATCH_SIZE: u16 = 6;
+
 // ---------------------------------------------------------------------------
 // Parameter IDs — scheduler subsystem
 // ---------------------------------------------------------------------------
@@ -328,6 +341,14 @@ pub fn init() {
         1024, // Maximum: 16 MiB
     );
 
+    reg.register(
+        PARAM_MM_SWAP_BATCH_SIZE,
+        "mm.swap_batch_size",
+        4,  // Swap 4 pages per batch, then yield CPU
+        1,  // Minimum: yield after every page (most responsive)
+        64, // Maximum: swap 64 pages before yielding
+    );
+
     // Scheduler parameters (informational — actual values are in the
     // task module, but exposing them here allows the sysctl interface
     // to read them).
@@ -412,6 +433,7 @@ pub fn count() -> usize {
 /// | mm.lazy_default     | 0       | 1      | 0           | 0      |
 /// | mm.oom_policy       | 0       | 2      | 0           | 0      |
 /// | mm.zero_on_alloc    | 0       | 1      | 0           | 1      |
+/// | mm.swap_batch_size  | 4       | 16     | 4           | 2      |
 ///
 /// **Desktop**: Committed allocation, moderate stack, kill-largest OOM.
 /// Predictable and secure — good for mixed interactive workloads.
@@ -434,6 +456,7 @@ struct MemoryProfilePreset {
     oom_policy: u64,
     zero_on_alloc: u64,
     swappiness: u64,
+    swap_batch_size: u64,
 }
 
 impl MemoryProfilePreset {
@@ -446,6 +469,7 @@ impl MemoryProfilePreset {
                 oom_policy: 0,         // kill largest — protect desktop responsiveness
                 zero_on_alloc: 0,      // secure default
                 swappiness: 15,        // conservative — only swap under real pressure
+                swap_batch_size: 4,    // yield often — keep UI responsive during swap
             },
             WorkloadProfile::Server => Self {
                 max_stack_frames: 512, // 8 MiB — servers may have deep stacks (Java, etc.)
@@ -453,6 +477,7 @@ impl MemoryProfilePreset {
                 oom_policy: 2,         // return error — servers should handle OOM gracefully
                 zero_on_alloc: 1,      // zero on free — amortise for high-throughput alloc
                 swappiness: 30,        // moderate — servers benefit from more aggressive reclaim
+                swap_batch_size: 16,   // larger batches ��� throughput over responsiveness
             },
             WorkloadProfile::Development => Self {
                 max_stack_frames: 512, // 8 MiB — compilers/debuggers use deep stacks
@@ -460,6 +485,7 @@ impl MemoryProfilePreset {
                 oom_policy: 0,         // kill largest — just kill the runaway build
                 zero_on_alloc: 0,      // secure default, clean state for debugging
                 swappiness: 10,        // low — keep build artifacts in memory
+                swap_batch_size: 4,    // moderate — balance responsiveness and IDE perf
             },
             WorkloadProfile::Gaming => Self {
                 max_stack_frames: 512, // 8 MiB — game engines use deep stacks
@@ -467,6 +493,7 @@ impl MemoryProfilePreset {
                 oom_policy: 0,         // kill largest — protect the game process
                 zero_on_alloc: 1,      // zero on free — reduce alloc latency spikes
                 swappiness: 5,         // very low — minimize swap latency during gameplay
+                swap_batch_size: 2,    // smallest batches — minimize swap-induced stutters
             },
         }
     }
@@ -497,17 +524,19 @@ pub fn apply_memory_profile(profile_id: u8) -> bool {
         && set(PARAM_MM_LAZY_DEFAULT, preset.lazy_default).is_some()
         && set(PARAM_MM_OOM_POLICY, preset.oom_policy).is_some()
         && set(PARAM_MM_ZERO_ON_ALLOC, preset.zero_on_alloc).is_some()
-        && set(PARAM_MM_SWAPPINESS, preset.swappiness).is_some();
+        && set(PARAM_MM_SWAPPINESS, preset.swappiness).is_some()
+        && set(PARAM_MM_SWAP_BATCH_SIZE, preset.swap_batch_size).is_some();
 
     if ok {
         serial_println!(
-            "[sysctl] Applied memory profile: {} (stack={}, lazy={}, oom={}, zero={}, swap={})",
+            "[sysctl] Applied memory profile: {} (stack={}, lazy={}, oom={}, zero={}, swap={}, batch={})",
             profile.name(),
             preset.max_stack_frames,
             preset.lazy_default,
             preset.oom_policy,
             preset.zero_on_alloc,
-            preset.swappiness
+            preset.swappiness,
+            preset.swap_batch_size
         );
     }
 
@@ -529,6 +558,7 @@ pub fn current_memory_profile() -> Option<WorkloadProfile> {
     let oom = reg.get(PARAM_MM_OOM_POLICY)?;
     let zero = reg.get(PARAM_MM_ZERO_ON_ALLOC)?;
     let swap = reg.get(PARAM_MM_SWAPPINESS)?;
+    let batch = reg.get(PARAM_MM_SWAP_BATCH_SIZE)?;
     drop(reg);
 
     // Check each profile's preset against current values.
@@ -540,6 +570,7 @@ pub fn current_memory_profile() -> Option<WorkloadProfile> {
                 && oom == preset.oom_policy
                 && zero == preset.zero_on_alloc
                 && swap == preset.swappiness
+                && batch == preset.swap_batch_size
             {
                 return Some(profile);
             }
@@ -611,6 +642,7 @@ pub fn self_test() {
     assert_eq!(get(PARAM_MM_OOM_POLICY), Some(2));
     assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(1));
     assert_eq!(get(PARAM_MM_SWAPPINESS), Some(30));
+    assert_eq!(get(PARAM_MM_SWAP_BATCH_SIZE), Some(16));
     assert_eq!(current_memory_profile(), Some(WorkloadProfile::Server));
 
     // Apply Development profile.
@@ -620,6 +652,7 @@ pub fn self_test() {
     assert_eq!(get(PARAM_MM_OOM_POLICY), Some(0));
     assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(0));
     assert_eq!(get(PARAM_MM_SWAPPINESS), Some(10));
+    assert_eq!(get(PARAM_MM_SWAP_BATCH_SIZE), Some(4));
     assert_eq!(current_memory_profile(), Some(WorkloadProfile::Development));
 
     // Apply Gaming profile.
@@ -628,6 +661,7 @@ pub fn self_test() {
     assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(0));
     assert_eq!(get(PARAM_MM_OOM_POLICY), Some(0));
     assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(1));
+    assert_eq!(get(PARAM_MM_SWAP_BATCH_SIZE), Some(2));
     assert_eq!(current_memory_profile(), Some(WorkloadProfile::Gaming));
 
     // Invalid profile ID.

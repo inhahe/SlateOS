@@ -837,7 +837,17 @@ pub fn try_reclaim(target: usize) -> usize {
     };
     // RECLAIM lock released here.
 
-    // Now swap out each victim.
+    // Read the swap batch size from sysctl.  This controls how many
+    // pages we swap out before yielding the CPU, keeping the system
+    // responsive during heavy swap activity.
+    let batch_size = crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE)
+        .unwrap_or(4) as usize;
+    let batch_size = if batch_size == 0 { 1 } else { batch_size };
+    let mut batch_count = 0usize;
+
+    // Now swap out each victim, yielding the CPU after each batch
+    // to prevent swap I/O from monopolizing the CPU and making the
+    // system unresponsive.
     for (idx, victim) in victims {
         let virt = VirtAddr::new(victim.vaddr);
         // SAFETY: pml4_phys and virt are from the reclaim list;
@@ -845,12 +855,22 @@ pub fn try_reclaim(target: usize) -> usize {
         match unsafe { swap_out_page(victim.pml4_phys, virt) } {
             Ok(_entry) => {
                 reclaimed += 1;
+                batch_count += 1;
                 // Mark the entry inactive (it's now in swap, not memory).
                 let mut state = RECLAIM.lock();
                 if let Some(e) = state.pages.get_mut(idx) {
                     e.active = false;
                     state.active_count =
                         state.active_count.saturating_sub(1);
+                }
+                // OPT: Yield the CPU after every batch_size pages to let
+                // other tasks run.  Without this, a swap storm (many pages
+                // being evicted) would block all other work on this CPU
+                // for the duration of the disk I/O.  The batch size is
+                // tunable via mm.swap_batch_size (default 4, range 1-64).
+                if batch_count >= batch_size {
+                    batch_count = 0;
+                    crate::sched::yield_now();
                 }
             }
             Err(e) => {
@@ -864,7 +884,7 @@ pub fn try_reclaim(target: usize) -> usize {
     }
 
     if reclaimed > 0 {
-        serial_println!("[swap] Reclaimed {} pages", reclaimed);
+        serial_println!("[swap] Reclaimed {} pages (batch_size={})", reclaimed, batch_size);
     }
 
     reclaimed

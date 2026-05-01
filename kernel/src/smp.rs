@@ -1006,13 +1006,10 @@ pub fn init() {
 
     // Update the scheduler with the actual CPU count.
     let total_cpus = NUM_CPUS_ONLINE.load(Ordering::Acquire) as usize;
-    {
-        // Re-initialize the per-CPU scheduler with the real CPU count.
-        // This is safe because APs are in their idle loops and the BSP
-        // holds the scheduler lock during this update.
-        let mut sched = crate::sched::sched_lock();
-        sched.scheduler.init(total_cpus);
-    }
+    // Re-initialize the per-CPU scheduler with the real CPU count.
+    // This is safe because APs are in their idle loops (not touching
+    // the scheduler yet) and the BSP is the only one calling this.
+    crate::sched::update_cpu_count(total_cpus);
 
     SMP_INITIALIZED.store(true, Ordering::Release);
 

@@ -32,6 +32,8 @@
 //! are applied per-CPU.
 
 use alloc::collections::VecDeque;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use spin::Mutex;
 use super::task::{TaskId, NUM_PRIORITIES};
 
 // ---------------------------------------------------------------------------
@@ -452,20 +454,37 @@ pub const MAX_CPUS: usize = 16;
 /// implemented, this will be split into per-CPU locks for the fast path
 /// with a global lock only for cross-CPU operations (work stealing,
 /// profile changes).
+/// Per-CPU scheduler with internal per-CPU locks.
+///
+/// Each CPU has its own `PriorityRoundRobin` run queue protected by
+/// an independent spinlock.  This allows multiple CPUs to schedule
+/// simultaneously without contending on a global lock — the primary
+/// SMP scalability improvement over a single global scheduler lock.
+///
+/// ## Lock ordering
+///
+/// When multiple CPU queues must be locked (work stealing), locks are
+/// acquired in CPU index order (lower index first) to prevent deadlock.
+/// The caller's task-table lock (if any) must be acquired AFTER any
+/// per-CPU queue lock:  `RQ[i] < RQ[j] (i < j) < TASK_TABLE`.
 pub struct PerCpuScheduler {
-    /// Per-CPU run queues.  Index = CPU ID.
-    queues: [PriorityRoundRobin; MAX_CPUS],
-    /// Number of online (active) CPUs.
-    num_cpus: usize,
+    /// Per-CPU run queues, each with its own lock.
+    queues: [Mutex<PriorityRoundRobin>; MAX_CPUS],
+    /// Number of online (active) CPUs.  Atomic for lock-free reads.
+    num_cpus: AtomicUsize,
 }
+
+// SAFETY: PerCpuScheduler uses internal Mutex for synchronization.
+// All mutable state is behind per-CPU spinlocks.
+unsafe impl Sync for PerCpuScheduler {}
 
 impl PerCpuScheduler {
     /// Create a new per-CPU scheduler (const-initializable for static use).
     #[must_use]
     pub const fn new_const() -> Self {
         Self {
-            queues: [const { PriorityRoundRobin::new_const() }; MAX_CPUS],
-            num_cpus: 0,
+            queues: [const { Mutex::new(PriorityRoundRobin::new_const()) }; MAX_CPUS],
+            num_cpus: AtomicUsize::new(0),
         }
     }
 
@@ -473,18 +492,18 @@ impl PerCpuScheduler {
     ///
     /// Each CPU's queue gets default time slice configuration.
     /// Call once during scheduler init.
-    pub fn init(&mut self, num_cpus: usize) {
-        self.num_cpus = num_cpus.min(MAX_CPUS).max(1);
-        for i in 0..self.num_cpus {
-            self.queues[i] = PriorityRoundRobin::new();
+    pub fn init(&self, num_cpus: usize) {
+        let n = num_cpus.min(MAX_CPUS).max(1);
+        self.num_cpus.store(n, Ordering::Release);
+        for i in 0..n {
+            *self.queues[i].lock() = PriorityRoundRobin::new();
         }
     }
 
     /// Number of online CPUs.
     #[must_use]
-    #[allow(dead_code)] // Public API for topology queries and load balancing.
     pub fn num_cpus(&self) -> usize {
-        self.num_cpus
+        self.num_cpus.load(Ordering::Acquire)
     }
 
     /// Pick the next task from the given CPU's local queue.
@@ -492,83 +511,88 @@ impl PerCpuScheduler {
     /// Does NOT perform work stealing — call [`try_steal`] if this
     /// returns `None` and other CPUs might have work.
     #[must_use]
-    pub fn pick_next_local(&mut self, cpu: usize) -> Option<super::task::TaskId> {
-        self.queues.get_mut(cpu)?.pick_next()
+    pub fn pick_next_local(&self, cpu: usize) -> Option<super::task::TaskId> {
+        self.queues.get(cpu)?.lock().pick_next()
     }
 
     /// Enqueue a task on the specified CPU's run queue.
-    pub fn enqueue(&mut self, id: super::task::TaskId, priority: u8, cpu: usize) {
-        let target = cpu.min(self.num_cpus.saturating_sub(1));
-        if let Some(q) = self.queues.get_mut(target) {
-            q.enqueue(id, priority);
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn enqueue(&self, id: super::task::TaskId, priority: u8, cpu: usize) {
+        let n = self.num_cpus.load(Ordering::Relaxed);
+        let target = cpu.min(n.saturating_sub(1));
+        if let Some(q) = self.queues.get(target) {
+            q.lock().enqueue(id, priority);
         }
     }
 
     /// Dequeue a task from the specified CPU's run queue.
-    pub fn dequeue(&mut self, id: super::task::TaskId, priority: u8, cpu: usize) -> bool {
-        let target = cpu.min(self.num_cpus.saturating_sub(1));
-        self.queues.get_mut(target)
-            .is_some_and(|q| q.dequeue(id, priority))
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn dequeue(&self, id: super::task::TaskId, priority: u8, cpu: usize) -> bool {
+        let n = self.num_cpus.load(Ordering::Relaxed);
+        let target = cpu.min(n.saturating_sub(1));
+        self.queues.get(target)
+            .is_some_and(|q| q.lock().dequeue(id, priority))
     }
 
     /// Handle a timer tick for the given CPU.
     ///
     /// Returns `true` if the current task's time slice expired.
-    pub fn tick(&mut self, cpu: usize) -> bool {
-        self.queues.get_mut(cpu)
-            .is_some_and(|q| q.tick())
+    pub fn tick(&self, cpu: usize) -> bool {
+        self.queues.get(cpu)
+            .is_some_and(|q| q.lock().tick())
     }
 
     /// Get the remaining ticks for the currently running task on a CPU.
     #[must_use]
     pub fn current_remaining(&self, cpu: usize) -> u32 {
         self.queues.get(cpu)
-            .map_or(0, |q| q.current_remaining)
+            .map_or(0, |q| q.lock().current_remaining)
     }
 
     /// Set the remaining ticks for the currently running task on a CPU.
-    pub fn set_current_remaining(&mut self, cpu: usize, ticks: u32) {
-        if let Some(q) = self.queues.get_mut(cpu) {
-            q.current_remaining = ticks;
+    pub fn set_current_remaining(&self, cpu: usize, ticks: u32) {
+        if let Some(q) = self.queues.get(cpu) {
+            q.lock().current_remaining = ticks;
         }
     }
 
     /// Try to steal work from another CPU.
     ///
-    /// Scans all other CPUs, finds the most loaded one, and steals
-    /// half its tasks.  The first stolen task is returned directly
-    /// (ready to run); remaining tasks are enqueued on the thief's
-    /// local queue.
+    /// Scans all other CPUs (using `try_lock` to avoid blocking),
+    /// finds the most loaded one, and steals half its tasks.  The
+    /// first stolen task is returned directly (ready to run); remaining
+    /// tasks are enqueued on the thief's local queue.
     ///
     /// Also returns the IDs of ALL stolen tasks (via `migrated_out`)
     /// so the caller can update their `last_cpu` in the task table.
-    /// Without this update, operations like `wake()` and `kill_task()`
-    /// would target the victim's queue instead of the thief's,
-    /// causing the dequeue to silently miss.
     ///
     /// Returns the first stolen task's ID, or `None` if nothing stolen.
     pub fn try_steal(
-        &mut self,
+        &self,
         cpu: usize,
         migrated_out: &mut alloc::vec::Vec<super::task::TaskId>,
     ) -> Option<super::task::TaskId> {
-        if self.num_cpus <= 1 {
+        let n = self.num_cpus.load(Ordering::Relaxed);
+        if n <= 1 {
             return None;
         }
 
-        // Find the most loaded CPU (excluding ourselves).
+        // Phase 1: Find the most loaded CPU (excluding ourselves).
+        // Use try_lock to avoid blocking on busy queues.
         let mut victim_cpu = usize::MAX;
         let mut victim_count = 0usize;
 
-        for i in 0..self.num_cpus {
+        for i in 0..n {
             if i == cpu {
                 continue;
             }
-            let count = self.queues.get(i)
-                .map_or(0, PriorityRoundRobin::total_tasks);
-            if count > victim_count {
-                victim_count = count;
-                victim_cpu = i;
+            if let Some(q) = self.queues.get(i).and_then(|m| m.try_lock()) {
+                let count = q.total_tasks();
+                if count > victim_count {
+                    victim_count = count;
+                    victim_cpu = i;
+                }
+                // Lock dropped at end of if-let scope.
             }
         }
 
@@ -576,26 +600,27 @@ impl PerCpuScheduler {
             return None;
         }
 
-        // Steal half the victim's tasks (at least 1).
+        // Phase 2: Steal from victim.
+        // Lock only the victim's queue, not our own — avoids holding
+        // two locks simultaneously.
         let steal_count = (victim_count / 2).max(1);
-
-        // Two-phase: steal from victim, then enqueue on our queue.
-        // We need split borrows, so collect stolen tasks first.
-        let stolen = self.queues.get_mut(victim_cpu)?.steal(steal_count);
+        let stolen = self.queues.get(victim_cpu)?.lock().steal(steal_count);
         if stolen.is_empty() {
             return None;
         }
 
-        // The first stolen task is returned directly (will be the
-        // pick_next result).  Remaining stolen tasks go into our queue.
-        // Record ALL stolen IDs so the caller can update last_cpu.
+        // Phase 3: Enqueue stolen tasks on our queue.
+        // The first stolen task is returned directly (for the caller).
         let mut first = None;
-        for (i, (id, priority)) in stolen.into_iter().enumerate() {
-            migrated_out.push(id);
-            if i == 0 {
-                first = Some(id);
-            } else if let Some(q) = self.queues.get_mut(cpu) {
-                q.enqueue(id, priority);
+        {
+            let mut our_rq = self.queues[cpu].lock();
+            for (i, (id, priority)) in stolen.into_iter().enumerate() {
+                migrated_out.push(id);
+                if i == 0 {
+                    first = Some(id);
+                } else {
+                    our_rq.enqueue(id, priority);
+                }
             }
         }
 
@@ -605,9 +630,10 @@ impl PerCpuScheduler {
     /// Check if any CPU has ready tasks.
     #[must_use]
     pub fn has_ready(&self) -> bool {
+        let n = self.num_cpus.load(Ordering::Relaxed);
         self.queues.iter()
-            .take(self.num_cpus)
-            .any(PriorityRoundRobin::has_ready)
+            .take(n)
+            .any(|m| m.lock().has_ready())
     }
 
     /// Check if a specific CPU's local queue has real work
@@ -615,11 +641,9 @@ impl PerCpuScheduler {
     ///
     /// Used by the timer tick load balancer: a CPU that only has its
     /// idle task is considered "idle" and should proactively steal.
-    /// Previous implementation used `has_ready()` which counted the
-    /// idle task, preventing APs from ever work-stealing.
     #[must_use]
     pub fn local_has_real_work(&self, cpu: usize) -> bool {
-        self.queues.get(cpu).is_some_and(PriorityRoundRobin::has_real_work)
+        self.queues.get(cpu).is_some_and(|m| m.lock().has_real_work())
     }
 
     /// Check if any *other* CPU has real work that could be stolen.
@@ -628,19 +652,21 @@ impl PerCpuScheduler {
     /// if at least one CPU (other than `cpu`) has non-idle tasks.
     #[must_use]
     pub fn others_have_real_work(&self, cpu: usize) -> bool {
+        let n = self.num_cpus.load(Ordering::Relaxed);
         self.queues.iter()
-            .take(self.num_cpus)
+            .take(n)
             .enumerate()
-            .any(|(i, q)| i != cpu && q.has_real_work())
+            .any(|(i, m)| i != cpu && m.lock().has_real_work())
     }
 
     // --- Global configuration (applies to all CPUs) ---
 
     /// Set time slice for a priority level on all CPUs.
-    pub fn set_time_slice(&mut self, level: usize, ticks: u32) -> bool {
+    pub fn set_time_slice(&self, level: usize, ticks: u32) -> bool {
+        let n = self.num_cpus.load(Ordering::Relaxed);
         let mut ok = true;
-        for q in self.queues.iter_mut().take(self.num_cpus) {
-            if !q.set_time_slice(level, ticks) {
+        for q in self.queues.iter().take(n) {
+            if !q.lock().set_time_slice(level, ticks) {
                 ok = false;
             }
         }
@@ -650,14 +676,15 @@ impl PerCpuScheduler {
     /// Get the time slice for a priority level (from CPU 0).
     #[must_use]
     pub fn time_slice(&self, level: usize) -> Option<u32> {
-        self.queues.first()?.time_slice(level)
+        self.queues.first()?.lock().time_slice(level)
     }
 
     /// Reconfigure time slices on all CPUs.
-    pub fn reconfigure_slices(&mut self, base: u32, increment: u32) -> bool {
+    pub fn reconfigure_slices(&self, base: u32, increment: u32) -> bool {
+        let n = self.num_cpus.load(Ordering::Relaxed);
         let mut ok = true;
-        for q in self.queues.iter_mut().take(self.num_cpus) {
-            if !q.reconfigure_slices(base, increment) {
+        for q in self.queues.iter().take(n) {
+            if !q.lock().reconfigure_slices(base, increment) {
                 ok = false;
             }
         }
@@ -665,9 +692,10 @@ impl PerCpuScheduler {
     }
 
     /// Apply a workload profile to all CPUs.
-    pub fn apply_profile(&mut self, profile: WorkloadProfile) {
-        for q in self.queues.iter_mut().take(self.num_cpus) {
-            q.apply_profile(profile);
+    pub fn apply_profile(&self, profile: WorkloadProfile) {
+        let n = self.num_cpus.load(Ordering::Relaxed);
+        for q in self.queues.iter().take(n) {
+            q.lock().apply_profile(profile);
         }
     }
 }

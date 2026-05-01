@@ -103,7 +103,6 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
         // nearby pages to amortize TLB flushes and fault overhead.
         let page_index = ((old_phys - frame_base) as usize) / HW_PAGE_SIZE;
         let group_virt_base = hw_page_base - (page_index as u64 * HW_PAGE_SIZE as u64);
-        let mut pages_resolved = 0u32;
 
         for i in 0..HW_PAGES_PER_FRAME {
             let sibling_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
@@ -119,7 +118,6 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
                         let new_pte = PageTableEntry::new(sibling_pte.phys_addr(), new_flags);
                         // SAFETY: pml4_phys is valid, sibling_virt is in the same frame group.
                         unsafe { write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok(); }
-                        pages_resolved += 1;
                     }
                 }
             }
@@ -133,75 +131,83 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
 
     // Shared page (refcount > 1) — need to copy.
     //
-    // Allocate a new frame.  We allocate a full 16 KiB frame even though
-    // only one 4 KiB page triggered the fault, because the buddy allocator
-    // works in 16 KiB units.  The other 3 pages in the new frame will be
-    // wired up if/when they also fault.
+    // OPT: Batch all 4 pages of the 16 KiB frame together.  Instead of
+    // copying just the faulting 4 KiB page (wasting 12 KiB of the new
+    // frame), we scan all 4 sibling PTEs in the frame group.  Any that
+    // are present + CoW + point to the same old frame are copied into
+    // the corresponding offset of a single new frame.  This:
+    //   1. Eliminates up to 3 additional CoW faults
+    //   2. Uses the full 16 KiB of the allocated frame (no waste)
+    //   3. Amortizes the TLB flush across all 4 pages
     //
-    // Actually, the correct approach is to check whether ALL 4 pages in
-    // this frame's group are CoW.  If so, we can copy the entire frame
-    // at once and update all 4 PTEs.  If not (some pages might already
-    // be private), we need to handle each page individually.
+    // Refcounting: each resolved PTE had its own ref_inc during fork, so
+    // we decrement the old frame's refcount once per resolved PTE.
     //
-    // For simplicity and correctness, we copy just the single faulting
-    // 4 KiB page into a new frame and update only that PTE.  The other
-    // pages remain CoW and will be copied on their first write.
-    //
-    // Optimization (TODO): batch all 4 pages of a frame together.
+    // Based on Linux mm/memory.c do_wp_page() + copy_page_range() which
+    // track refcounts per-PTE and batch nearby resolutions.
 
-    // We need a fresh 4 KiB page.  The buddy allocator gives us 16 KiB
-    // frames.  We use the first 4 KiB page of the new frame for this
-    // CoW copy, and the remaining 3 pages are wasted unless other CoW
-    // faults in the same frame group can use them.
-    //
-    // Better approach: allocate one frame and use it for up to 4 CoW
-    // copies within the same frame group.  For now, we accept the waste
-    // and allocate a full frame per CoW copy.  This will be improved
-    // when we add a page-level sub-allocator.
+    // Compute the frame group's virtual base address.
+    let page_index = ((old_phys - frame_base) as usize) / HW_PAGE_SIZE;
+    let group_virt_base = hw_page_base - (page_index as u64 * HW_PAGE_SIZE as u64);
+
+    // Allocate one new 16 KiB frame for all resolved siblings.
     let new_frame = frame::alloc_frame()?;
     let new_phys = new_frame.addr();
 
-    // Compute which 4 KiB page within the frame we're replacing.
-    let page_offset = (old_phys - frame_base) as usize;
-    let page_index = page_offset / HW_PAGE_SIZE;
+    let mut pages_resolved = 0u32;
 
-    // The new physical address for this specific 4 KiB page.
-    // We place it at the same offset within the new frame to maintain
-    // natural alignment (and to make the remaining pages usable for
-    // future CoW faults in the same group).
-    let new_4k_phys = new_phys + (page_index as u64 * HW_PAGE_SIZE as u64);
+    for i in 0..HW_PAGES_PER_FRAME {
+        let sibling_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
 
-    // Copy the 4 KiB page contents from old to new via HHDM.
-    let src = (old_phys + hhdm) as *const u8;
-    let dst = (new_4k_phys + hhdm) as *mut u8;
-    // SAFETY: Both old and new physical addresses are valid (old is an
-    // allocated frame we can read, new is freshly allocated and mapped
-    // via HHDM).  The regions don't overlap (different physical frames).
-    unsafe {
-        core::ptr::copy_nonoverlapping(src, dst, HW_PAGE_SIZE);
+        // SAFETY: pml4_phys is valid (same address space).
+        let sibling_pte = match unsafe { read_pte(pml4_phys, sibling_virt, hhdm) } {
+            Ok(pte) => pte,
+            Err(_) => continue, // Unmapped intermediate — skip.
+        };
+
+        if !sibling_pte.is_present() || !sibling_pte.is_cow() {
+            continue; // Not a CoW page — leave it alone.
+        }
+
+        // Verify this sibling references the same physical frame.
+        let sib_phys = sibling_pte.phys_addr();
+        let sib_frame_base = sib_phys & !(FRAME_SIZE as u64 - 1);
+        if sib_frame_base != frame_base {
+            continue; // Different frame — not our business.
+        }
+
+        // Compute offsets within old and new frames.
+        let sib_page_offset = (sib_phys - frame_base) as usize;
+        let new_4k_phys = new_phys + sib_page_offset as u64;
+
+        // Copy 4 KiB from old frame to new frame via HHDM.
+        let src = (sib_phys + hhdm) as *const u8;
+        let dst = (new_4k_phys + hhdm) as *mut u8;
+        // SAFETY: Both addresses are valid (old is allocated + HHDM,
+        // new is freshly allocated + HHDM).  No overlap (different frames).
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst, HW_PAGE_SIZE);
+        }
+
+        // Update PTE: point to new frame, set WRITABLE, clear COW.
+        let mut new_flags = sibling_pte.flags() | PageFlags::WRITABLE;
+        new_flags = PageFlags::from_bits(new_flags.bits() & !PageFlags::COW.bits());
+        let new_pte = PageTableEntry::new(new_4k_phys, new_flags);
+
+        // SAFETY: pml4_phys is valid, sibling_virt is in the same group.
+        unsafe { write_pte(pml4_phys, sibling_virt, new_pte, hhdm).ok(); }
+        pages_resolved += 1;
     }
 
-    // Update the PTE: point to the new physical page, set WRITABLE,
-    // clear COW.
-    let mut new_flags = pte.flags();
-    new_flags = new_flags | PageFlags::WRITABLE;
-    new_flags = PageFlags::from_bits(new_flags.bits() & !PageFlags::COW.bits());
-    let new_pte = PageTableEntry::new(new_4k_phys, new_flags);
-
-    // SAFETY: pml4_phys is valid, virt is the faulting page.
-    unsafe { write_pte(pml4_phys, virt, new_pte, hhdm)?; }
-
-    // Decrement the old frame's refcount (we no longer reference it
-    // from this PTE).  Note: we decrement the frame refcount, not the
-    // individual 4 KiB page.  This is correct because refcounting is
-    // per-frame — when all 4 pages in the frame have been copied away,
-    // the frame's refcount reaches 1 (or 0) and can be freed.
-    //
+    // Decrement the old frame's refcount once per resolved PTE.
+    // Each PTE had its own ref_inc during fork/duplication.
     // SAFETY: old frame is a valid allocated frame.
-    let _ = unsafe { frame::ref_dec(frame) };
+    for _ in 0..pages_resolved {
+        let _ = unsafe { frame::ref_dec(frame) };
+    }
 
-    // Flush TLB for the updated page.
-    crate::tlb::flush_range(hw_page_base, 1);
+    // Flush TLB for the entire frame group.
+    crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 
     Ok(())
 }

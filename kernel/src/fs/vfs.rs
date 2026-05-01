@@ -269,8 +269,9 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, path)?;
             mp.fs.write_file(relative, data)?;
         }
-        // Notify after releasing VFS lock (avoids holding both locks).
+        // Notify and journal after releasing VFS lock (avoids holding both locks).
         super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -282,6 +283,7 @@ impl Vfs {
             mp.fs.remove(relative)?;
         }
         super::notify::emit_deleted(path);
+        super::journal::record(super::journal::JournalEventType::Deleted, path);
         Ok(())
     }
 
@@ -293,6 +295,7 @@ impl Vfs {
             mp.fs.mkdir(relative)?;
         }
         super::notify::emit_created(path);
+        super::journal::record(super::journal::JournalEventType::Created, path);
         Ok(())
     }
 
@@ -304,6 +307,7 @@ impl Vfs {
             mp.fs.rmdir(relative)?;
         }
         super::notify::emit_deleted(path);
+        super::journal::record(super::journal::JournalEventType::Deleted, path);
         Ok(())
     }
 
@@ -324,6 +328,7 @@ impl Vfs {
             mp.fs.write_at(relative, offset, data)?;
         }
         super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -335,6 +340,7 @@ impl Vfs {
             mp.fs.truncate(relative, size)?;
         }
         super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -360,6 +366,7 @@ impl Vfs {
             mp_to.fs.rename(&rel_from_owned, rel_to)?;
         }
         super::notify::emit_renamed(from, to);
+        super::journal::record_rename(from, to);
         Ok(())
     }
 

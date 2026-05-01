@@ -3119,6 +3119,100 @@ pub fn sys_fs_watch_close(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Change journal handlers (625–627)
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_JOURNAL_CURSOR` — get the current journal sequence number.
+///
+/// No arguments.
+pub fn sys_fs_journal_cursor(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::ok(crate::fs::journal::cursor() as i64)
+}
+
+/// `SYS_FS_JOURNAL_READ` — read journal entries since a sequence number.
+///
+/// `arg0`: sequence number (exclusive — returns entries with seq > arg0).
+/// `arg1`: pointer to output buffer.
+/// `arg2`: buffer length in bytes.
+pub fn sys_fs_journal_read(args: &SyscallArgs) -> SyscallResult {
+    use crate::syscall::number::FS_JOURNAL_ENTRY_SIZE;
+
+    let since_seq = args.arg0;
+    let buf_ptr = args.arg1 as usize;
+    let buf_len = args.arg2 as usize;
+
+    // Calculate how many entries fit in the buffer.
+    if buf_len < FS_JOURNAL_ENTRY_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let max_entries = buf_len / FS_JOURNAL_ENTRY_SIZE;
+
+    // Read entries from the journal.
+    let (entries, _current) = crate::fs::journal::read_since(since_seq);
+
+    let count = entries.len().min(max_entries);
+
+    // Marshal entries into the user buffer.
+    for (i, entry) in entries.iter().take(count).enumerate() {
+        let offset = i * FS_JOURNAL_ENTRY_SIZE;
+        let entry_ptr = buf_ptr + offset;
+
+        // Validate user buffer for this entry.
+        if let Err(e) = crate::mm::user::validate_user_write(entry_ptr as u64, FS_JOURNAL_ENTRY_SIZE) {
+            return SyscallResult::err(e);
+        }
+
+        // Write the entry to user memory.
+        // Layout: seq(8) + timestamp_ns(8) + event_type(1) + path(256) + old_path(256) = 529
+        // SAFETY: Buffer has been validated for the full entry size.
+        unsafe {
+            let base = entry_ptr as *mut u8;
+
+            // seq (u64 LE, offset 0)
+            core::ptr::copy_nonoverlapping(
+                entry.seq.to_le_bytes().as_ptr(),
+                base,
+                8,
+            );
+
+            // timestamp_ns (u64 LE, offset 8)
+            core::ptr::copy_nonoverlapping(
+                entry.timestamp_ns.to_le_bytes().as_ptr(),
+                base.add(8),
+                8,
+            );
+
+            // event_type (u8, offset 16)
+            *base.add(16) = entry.event_type as u8;
+
+            // path (256 bytes, null-terminated, offset 17)
+            let path_bytes = entry.path.as_bytes();
+            let path_len = path_bytes.len().min(255);
+            core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), base.add(17), path_len);
+            core::ptr::write_bytes(base.add(17 + path_len), 0, 256 - path_len);
+
+            // old_path (256 bytes, null-terminated, offset 273)
+            let old_bytes = entry.old_path.as_bytes();
+            let old_len = old_bytes.len().min(255);
+            core::ptr::copy_nonoverlapping(old_bytes.as_ptr(), base.add(273), old_len);
+            core::ptr::write_bytes(base.add(273 + old_len), 0, 256 - old_len);
+        }
+    }
+
+    SyscallResult::ok(count as i64)
+}
+
+/// `SYS_FS_JOURNAL_FLUSH` — flush the change journal to disk.
+///
+/// No arguments.
+pub fn sys_fs_journal_flush(_args: &SyscallArgs) -> SyscallResult {
+    match crate::fs::journal::flush() {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 

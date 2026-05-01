@@ -20,12 +20,12 @@
 //!
 //! ## Current limitations
 //!
-//! - No caching / buffer cache (each read goes to the device)
 //! - Single mount point (will become a mount table)
 
 pub mod cache;
 pub mod fat;
 pub mod handle;
+pub mod journal;
 pub mod notify;
 pub mod trash;
 pub mod vfs;

@@ -524,6 +524,10 @@ extern "C" fn kmain() -> ! {
     // Auto-detects FAT16 or FAT32.  Non-fatal if no filesystem is present.
     match fs::fat::init("vda") {
         Ok(()) => {
+            // Initialize the change journal (persistent change tracking).
+            // Must happen before self-tests so all VFS operations are captured.
+            fs::journal::init();
+
             // Run filesystem self-test.
             if let Err(e) = fs::fat::self_test() {
                 serial_println!("WARNING: FAT self-test failed: {:?}", e);
@@ -543,6 +547,14 @@ extern "C" fn kmain() -> ! {
             // Run change notification self-test (watch, emit, read, close).
             if let Err(e) = fs::notify::self_test() {
                 serial_println!("WARNING: Change notification self-test failed: {:?}", e);
+            }
+            // Initialize and self-test the change journal (persistent change tracking).
+            if let Err(e) = fs::journal::self_test() {
+                serial_println!("WARNING: Change journal self-test failed: {:?}", e);
+            }
+            // Flush buffer cache to disk so data survives power loss / QEMU kill.
+            if let Err(e) = fs::cache::flush_all() {
+                serial_println!("WARNING: Buffer cache flush failed: {:?}", e);
             }
         }
         Err(e) => {

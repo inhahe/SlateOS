@@ -1057,6 +1057,41 @@ pub const SYS_FS_WATCH_CLOSE: u64 = 624;
 /// Size of a watch event as returned by `SYS_FS_WATCH_READ`.
 pub const FS_WATCH_EVENT_SIZE: usize = 528;
 
+// -- Change journal syscalls (625–626) --
+
+/// Get the current journal cursor (latest sequence number).
+///
+/// No arguments.
+///
+/// Returns: current sequence number (0 if no events recorded yet).
+pub const SYS_FS_JOURNAL_CURSOR: u64 = 625;
+
+/// Read journal entries since a given sequence number.
+///
+/// `arg0`: sequence number to read from (exclusive — returns entries with seq > arg0).
+/// `arg1`: pointer to output buffer.
+/// `arg2`: buffer size in bytes.
+///
+/// Each entry is `FS_JOURNAL_ENTRY_SIZE` bytes:
+/// - `[0..8]`: sequence number (u64 LE)
+/// - `[8..16]`: timestamp_ns (u64 LE)
+/// - `[16]`: event type (0=create, 1=modify, 2=delete, 3=rename)
+/// - `[17..273]`: path (256 bytes, null-terminated UTF-8)
+/// - `[273..529]`: old_path for renames (256 bytes, null-terminated UTF-8)
+///
+/// Returns: number of entries written, or negative error code.
+pub const SYS_FS_JOURNAL_READ: u64 = 626;
+
+/// Size of a single journal entry as returned by `SYS_FS_JOURNAL_READ`.
+pub const FS_JOURNAL_ENTRY_SIZE: usize = 529;
+
+/// Flush the change journal to disk.
+///
+/// No arguments.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_JOURNAL_FLUSH: u64 = 627;
+
 /// Seek whence: from start of file.
 pub const SEEK_SET: u64 = 0;
 /// Seek whence: from current offset.

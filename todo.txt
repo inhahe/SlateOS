@@ -52,11 +52,8 @@
   After acquiring: `sched::set_blocked_on_pi_addr(caller_task, None)`.
   Self-test already passes for the sched-side; needs futex-side integration test.
 
-- fs: Need a ramfs/tmpfs implementation for the root mount point.
-  Currently no filesystem is mounted at "/" at boot, so init's writes
-  to /bin/hello and /bin/ticker fail with NotFound.  A simple in-memory
-  filesystem would unblock init binary deployment.  Alternatively,
-  mount the ESP's FAT filesystem at boot.
+- fs: (RESOLVED) Root mount now uses FAT on virtio-blk device.
+  The FAT driver auto-mounts at "/" on boot, init deploys binaries fine.
 
 ## Judgment Calls
 

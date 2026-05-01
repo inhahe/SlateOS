@@ -238,14 +238,20 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
 - [ ] ISO 9660 (optical media)
+- [x] Filesystem infrastructure:
+  - [x] Buffer cache (512-sector LRU, write-back, 90% hit rate on FAT workloads)
+  - [x] File handle system (open/close/read/write/seek/fstat, global handle table)
+  - [x] Path resolution cache (dcache, 64-entry LRU with prefix invalidation)
+  - [x] Efficient partial I/O (FAT read_at/write_at/truncate override default read-all-rewrite-all)
+  - [x] Filesystem change notification system (inotify equivalent, async watches with bounded queues)
+  - [x] Recycle bin (per-filesystem /_TRASH with _INDEX metadata file, trash/list/restore/empty)
+  - [x] 15 filesystem syscalls (600-624): file handles, trash, watch/notify
 - [ ] Filesystem features:
   - [ ] Case-sensitive paths, forward slash separator
   - [ ] Filenames: allow everything except `/` and null byte, 255 byte max
   - [ ] Journaling (via ext4)
   - [ ] File metadata: owner, group, capabilities, created/modified/accessed (relatime), hash, size, immutable flag, append-only flag, arbitrary extended attributes
-  - [ ] Filesystem change notification system (inotify equivalent)
   - [ ] Change journal for "what changed since timestamp X" queries (for backup programs)
-  - [ ] Recycle bin (per-filesystem, trash-capable delete vs. permanent delete syscalls)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

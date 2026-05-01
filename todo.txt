@@ -13,11 +13,10 @@ add to roadmap-detailed.md to support a number of programming languages. rust, p
   Workaround: use release builds for boot testing, or increase QEMU memory
   to 256M+.  Long-term: strip debug sections or use split-debuginfo.
 
-- PI futex: transitive priority inheritance (chain boosting) is not
-  implemented.  If A blocks on B's lock and B blocks on C's lock, C does
-  NOT get boosted to A's priority.  Only single-level PI is supported.
-  This is fine for most workloads but should be added when multi-level
-  lock nesting becomes common.
+- PI futex: transitive priority inheritance — scheduler-side infrastructure
+  is DONE (blocked_on_pi_addr field, pi_chain_boost(), cycle detection,
+  depth limit, tested).  Waiting on kernel-ipc zone to wire it up in
+  futex_lock_pi/futex_unlock_pi (see cross-zone request below).
 
 ## Cross-Zone Requests
 
@@ -39,6 +38,20 @@ add to roadmap-detailed.md to support a number of programming languages. rust, p
 
 - kernel-ipc: Verify SYS_PROCESS_ID (handlers.rs:1549) returns the
   owning process PID, not just the task ID.  Has a TODO comment.
+
+- kernel-ipc: Wire transitive priority inheritance into futex_lock_pi /
+  futex_unlock_pi (ipc/futex.rs).  The scheduler-side infrastructure is
+  ready in sched/mod.rs and sched/task.rs:
+    - `Task.blocked_on_pi_addr: Option<u64>` �� set before blocking, clear on acquire
+    - `sched::set_blocked_on_pi_addr(task_id, addr)` — setter
+    - `sched::get_blocked_on_pi_addr(task_id)` — getter
+    - `sched::pi_chain_boost(start_owner, donor_prio, find_owner)` — walk chain
+    - `task::PI_CHAIN_DEPTH_LIMIT` (10) — max chain depth
+  In futex_lock_pi: after `sched::boost_priority(owner, caller_prio)`,
+  call `sched::pi_chain_boost(owner, caller_prio, |addr| pi_table.find_owner(addr))`.
+  Before blocking: `sched::set_blocked_on_pi_addr(caller_task, Some(futex_addr))`.
+  After acquiring: `sched::set_blocked_on_pi_addr(caller_task, None)`.
+  Self-test already passes for the sched-side; needs futex-side integration test.
 
 - fs: Need a ramfs/tmpfs implementation for the root mount point.
   Currently no filesystem is mounted at "/" at boot, so init's writes

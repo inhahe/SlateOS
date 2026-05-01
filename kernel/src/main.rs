@@ -753,7 +753,7 @@ fn idle_loop() -> ! {
         // Reap dead tasks once per second (~100 ticks at 100 Hz).
         // reap_dead_tasks allocates Vecs and acquires the SCHED lock
         // even when nothing is dead, so throttling reduces contention.
-        if tick_counter % 100 == 0 {
+        if tick_counter.is_multiple_of(100) {
             sched::reap_dead_tasks();
         }
 

@@ -170,6 +170,18 @@ pub const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 /// less than this before blocking are considered I/O-bound / interactive.
 pub const INTERACTIVE_THRESHOLD_TICKS: u64 = 5;
 
+/// Maximum depth of the transitive PI chain walk.
+///
+/// When task A blocks on B's lock and B blocks on C's lock (and so on),
+/// the chain-walking code boosts each owner up to this depth.  A limit
+/// prevents infinite loops (from cycles in pathological/buggy lock
+/// orderings) and bounds the time spent in the boost path.
+///
+/// Linux uses a limit of 10 (`MAX_LOCK_DEPTH`).  We match that —
+/// real-world lock nesting beyond 10 levels is either a bug or a design
+/// that should be rethought.
+pub const PI_CHAIN_DEPTH_LIMIT: usize = 10;
+
 /// Number of priority levels to boost interactive tasks.
 ///
 /// A task at priority 16 that is detected as interactive will
@@ -246,6 +258,23 @@ pub struct Task {
     /// Managed by the futex PI subsystem: set when a high-priority
     /// task blocks on our lock, cleared when we release the lock.
     pub inherited_priority: Option<u8>,
+
+    /// The PI futex address this task is currently blocked on, if any.
+    ///
+    /// Set by `futex_lock_pi()` just before the task blocks on a
+    /// contended PI mutex.  Cleared when the task acquires the lock
+    /// or is interrupted.
+    ///
+    /// Used for **transitive priority inheritance**: when task A blocks
+    /// on a lock held by B, and B is itself blocked on a lock held by
+    /// C, the chain A→B→C is walked by following each task's
+    /// `blocked_on_pi_addr` to find the next owner.  This ensures C
+    /// gets boosted to A's priority, preventing unbounded priority
+    /// inversion chains.
+    ///
+    /// The chain walk is depth-limited by [`PI_CHAIN_DEPTH_LIMIT`] to
+    /// prevent cycles or excessive traversal.
+    pub blocked_on_pi_addr: Option<u64>,
 
     /// The CPU this task last ran on.
     ///
@@ -350,6 +379,7 @@ impl Task {
             avg_burst_x8: 0,
             interactive: false,
             inherited_priority: None,
+            blocked_on_pi_addr: None,
             last_cpu: 0,
             total_ticks: 0,
             schedule_count: 0,
@@ -406,6 +436,7 @@ impl Task {
             avg_burst_x8: 0,
             interactive: false,
             inherited_priority: None,
+            blocked_on_pi_addr: None,
             last_cpu: cpu_index,
             total_ticks: 0,
             schedule_count: 0,
@@ -483,6 +514,7 @@ impl Task {
             avg_burst_x8: 0,
             interactive: false,
             inherited_priority: None,
+            blocked_on_pi_addr: None,
             last_cpu: 0,
             total_ticks: 0,
             schedule_count: 0,

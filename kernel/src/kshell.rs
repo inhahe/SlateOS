@@ -243,14 +243,23 @@ fn cmd_ps() {
         return;
     }
 
-    crate::console_println!("{:<6} {:<10} {:<10}", "TID", "STATE", "PRIORITY");
-    crate::console_println!("------------------------------");
+    crate::console_println!(
+        "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
+        "TID", "NAME", "STATE", "PRI", "TICKS", "SCHED", "CPU"
+    );
+    crate::console_println!("------------------------------------------------------");
     for info in &task_list {
+        let name = core::str::from_utf8(&info.name[..info.name_len])
+            .unwrap_or("?");
         crate::console_println!(
-            "{:<6} {:<10} {:<10}",
+            "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
             info.id,
+            name,
             info.state,
-            info.priority
+            info.priority,
+            info.total_ticks,
+            info.schedule_count,
+            info.last_cpu,
         );
     }
     crate::console_println!("{} task(s) total", task_list.len());

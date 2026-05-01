@@ -863,10 +863,20 @@ pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Opt
 pub struct TaskInfo {
     /// Task ID.
     pub id: TaskId,
+    /// Human-readable name.
+    pub name: [u8; 32],
+    /// Valid bytes in `name`.
+    pub name_len: usize,
     /// Scheduling state.
     pub state: TaskState,
-    /// Priority level (0 = highest).
+    /// Base priority level (0 = highest).
     pub priority: u8,
+    /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz).
+    pub total_ticks: u64,
+    /// Number of times this task was scheduled.
+    pub schedule_count: u64,
+    /// CPU this task last ran on.
+    pub last_cpu: usize,
 }
 
 /// Return a snapshot of all tasks in the scheduler.
@@ -879,8 +889,13 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
         .iter()
         .map(|(&id, task)| TaskInfo {
             id,
+            name: task.name,
+            name_len: task.name_len,
             state: task.state,
             priority: task.priority,
+            total_ticks: task.total_ticks,
+            schedule_count: task.schedule_count,
+            last_cpu: task.last_cpu,
         })
         .collect()
 }
@@ -1129,6 +1144,7 @@ fn schedule_inner(requeue: bool) {
                 if let Some(next_task) = state.tasks.get_mut(&next_id) {
                     next_task.state = TaskState::Running;
                     next_task.last_cpu = cpu;
+                    next_task.schedule_count = next_task.schedule_count.saturating_add(1);
                 }
 
                 should_switch = true;

@@ -253,6 +253,22 @@ pub struct Task {
     /// the task last ran on (its caches are warm there).  For new
     /// tasks, defaults to the spawning CPU.
     pub last_cpu: usize,
+
+    // --- CPU time accounting ---
+
+    /// Total CPU time consumed by this task, in timer ticks.
+    ///
+    /// Incremented on every timer tick while the task is Running.
+    /// At 100 Hz, each tick = 10 ms.  Used by `ps`/`top`-style
+    /// commands and resource accounting.
+    pub total_ticks: u64,
+
+    /// Total number of times this task has been scheduled (context
+    /// switched into).
+    ///
+    /// Useful for detecting tasks that are being scheduled too
+    /// frequently (excessive context switch overhead).
+    pub schedule_count: u64,
 }
 
 impl Task {
@@ -302,10 +318,11 @@ impl Task {
         self.burst_ticks = 0;
     }
 
-    /// Increment the burst tick counter.  Called on each timer tick
-    /// while the task is Running.
+    /// Increment the burst tick counter and total CPU time.
+    /// Called on each timer tick while the task is Running.
     pub fn tick_burst(&mut self) {
         self.burst_ticks = self.burst_ticks.saturating_add(1);
+        self.total_ticks = self.total_ticks.saturating_add(1);
     }
 
     /// Create the idle task (task 0).
@@ -334,6 +351,8 @@ impl Task {
             interactive: false,
             inherited_priority: None,
             last_cpu: 0,
+            total_ticks: 0,
+            schedule_count: 0,
         }
     }
 
@@ -409,6 +428,8 @@ impl Task {
             interactive: false,
             inherited_priority: None,
             last_cpu: 0,
+            total_ticks: 0,
+            schedule_count: 0,
         })
     }
 

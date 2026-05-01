@@ -536,6 +536,11 @@ extern "C" fn kmain() -> ! {
     // Verifies refcount API and COW PTE flag manipulation.
     mm::cow::self_test();
 
+    // Step 22f: Enable per-CPU frame caches.
+    // Now that all CPUs are online and current_cpu_index() works,
+    // enable the per-CPU frame cache for lock-free order-0 allocation.
+    mm::frame::enable_pcpu_caches();
+
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-

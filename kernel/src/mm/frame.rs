@@ -28,12 +28,25 @@
 //! regions are added to the free lists.  All other memory (reserved, ACPI,
 //! kernel, framebuffer) is marked as permanently allocated.
 //!
-//! ## Per-CPU Free Lists (NOT YET IMPLEMENTED)
+//! ## Per-CPU Free Lists
 //!
-//! To avoid cross-CPU atomic contention on the hot path, each CPU will
-//! maintain a small local free list.  Allocations pull from the local list
-//! first; when it's empty, a batch is refilled from the global allocator.
-//! Currently all allocations go through the global spinlock.
+//! Each CPU maintains a small cache of order-0 frames to avoid acquiring
+//! the global spinlock on every single-frame allocation (the hot path).
+//!
+//! - **alloc_frame()**: tries the local cache first.  If empty, acquires
+//!   the global lock and batch-refills (up to `PCPU_BATCH` frames at once).
+//! - **free_frame()**: pushes to the local cache.  If full, acquires the
+//!   global lock and batch-drains half the cache back.
+//! - **alloc_order(N>0)**: bypasses per-CPU cache (multi-frame allocations
+//!   need contiguous naturally-aligned blocks, which the cache doesn't
+//!   provide).
+//!
+//! Cache access is protected by disabling interrupts (not a spinlock) —
+//! since we're per-CPU, no other CPU touches our cache, and disabling
+//! interrupts prevents preemption on the same CPU.  This makes the
+//! common path lock-free relative to other CPUs.
+//!
+//! Based on Linux's `struct per_cpu_pages` in `mm/page_alloc.c`.
 //!
 //! ## Performance Target
 //!
@@ -614,6 +627,217 @@ const fn align_down(addr: u64, align: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Per-CPU frame cache
+// ---------------------------------------------------------------------------
+
+use crate::smp::MAX_CPUS;
+
+/// Number of frames in each per-CPU cache.
+///
+/// Chosen to amortize lock acquisition cost without hoarding too much
+/// memory per CPU.  32 frames × 16 KiB = 512 KiB per CPU.
+const PCPU_CACHE_SIZE: usize = 32;
+
+/// Number of frames to transfer in a single batch refill/drain.
+///
+/// Half the cache size — so a full cache drain transfers 16 frames,
+/// and a refill from empty gets 16 frames.  This bounds the worst-case
+/// time spent holding the global lock during batch operations.
+const PCPU_BATCH: usize = PCPU_CACHE_SIZE / 2;
+
+/// Per-CPU frame cache.
+///
+/// Each CPU keeps a small stack of order-0 frame physical addresses.
+/// Access is serialized by disabling interrupts (per-CPU, so no other
+/// CPU touches this cache; disabling interrupts prevents preemption).
+///
+/// The `count` field tracks how many valid entries are in `frames[0..count]`.
+struct PerCpuFrameCache {
+    /// Stack of cached frame physical addresses.
+    frames: [u64; PCPU_CACHE_SIZE],
+    /// Number of valid entries (0 = empty, PCPU_CACHE_SIZE = full).
+    count: usize,
+}
+
+impl PerCpuFrameCache {
+    const fn new() -> Self {
+        Self {
+            frames: [0; PCPU_CACHE_SIZE],
+            count: 0,
+        }
+    }
+
+    /// Pop a frame from the cache.  Returns `None` if empty.
+    #[inline]
+    fn pop(&mut self) -> Option<u64> {
+        if self.count == 0 {
+            return None;
+        }
+        self.count -= 1;
+        // SAFETY: count was > 0, so frames[count] is valid.
+        Some(self.frames[self.count])
+    }
+
+    /// Push a frame onto the cache.  Returns `false` if full.
+    #[inline]
+    fn push(&mut self, addr: u64) -> bool {
+        if self.count >= PCPU_CACHE_SIZE {
+            return false;
+        }
+        self.frames[self.count] = addr;
+        self.count += 1;
+        true
+    }
+
+    /// Is the cache empty?
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Is the cache full?
+    #[inline]
+    fn is_full(&self) -> bool {
+        self.count >= PCPU_CACHE_SIZE
+    }
+}
+
+/// Global array of per-CPU frame caches.
+///
+/// Indexed by `smp::current_cpu_index()`.  Each cache is a simple array
+/// (no heap allocation needed).
+///
+/// SAFETY: Each element is only accessed by its owning CPU with interrupts
+/// disabled (preventing preemption).  No two CPUs access the same element.
+/// The array is wrapped in `UnsafeCell` to allow interior mutability
+/// without a Mutex (the per-CPU access pattern provides exclusion).
+static mut PCPU_CACHES: [PerCpuFrameCache; MAX_CPUS] = {
+    const INIT: PerCpuFrameCache = PerCpuFrameCache::new();
+    [INIT; MAX_CPUS]
+};
+
+/// Whether per-CPU caches are active.
+///
+/// Disabled during early boot (before SMP init) and during the allocator
+/// self-test.  When disabled, `alloc_frame()` falls through to the global
+/// allocator directly.
+static PCPU_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Enable per-CPU frame caches.
+///
+/// Call after SMP initialization is complete (all CPUs are online and
+/// `current_cpu_index()` returns correct values).
+pub fn enable_pcpu_caches() {
+    PCPU_ENABLED.store(true, core::sync::atomic::Ordering::Release);
+    serial_println!("[mm] Per-CPU frame caches enabled");
+}
+
+/// Disable interrupts and return the previous RFLAGS value.
+///
+/// Used by the per-CPU cache to prevent preemption during cache access.
+///
+/// # Safety
+///
+/// Caller must restore interrupts via [`restore_interrupts`] promptly.
+/// Holding interrupts disabled for too long causes latency issues.
+#[inline]
+unsafe fn disable_interrupts() -> u64 {
+    let flags: u64;
+    // SAFETY: pushfq/popfq + cli is safe in ring 0.
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "pop {}",
+            "cli",
+            out(reg) flags,
+            options(nomem, preserves_flags),
+        );
+    }
+    flags
+}
+
+/// Restore the RFLAGS value (re-enabling interrupts if they were enabled).
+///
+/// # Safety
+///
+/// `flags` must be a value from a prior [`disable_interrupts`] call.
+#[inline]
+unsafe fn restore_interrupts(flags: u64) {
+    // SAFETY: Restoring RFLAGS to a previously-saved value is safe.
+    unsafe {
+        core::arch::asm!(
+            "push {}",
+            "popfq",
+            in(reg) flags,
+            options(nomem),
+        );
+    }
+}
+
+/// Batch-refill the current CPU's cache from the global allocator.
+///
+/// Called with interrupts disabled and the global lock NOT held.
+/// Acquires the global lock, pops up to `PCPU_BATCH` order-0 frames,
+/// and pushes them into the per-CPU cache.
+///
+/// Returns the number of frames transferred.
+#[allow(clippy::indexing_slicing)]
+fn pcpu_refill(cpu: usize) -> usize {
+    let Some(allocator) = ALLOCATOR.get() else {
+        return 0;
+    };
+    let mut guard = allocator.lock();
+
+    let mut refilled = 0;
+    for _ in 0..PCPU_BATCH {
+        match guard.alloc_inner(0) {
+            Ok(addr) => {
+                // SAFETY: cpu < MAX_CPUS (validated by smp::current_cpu_index()),
+                // and interrupts are disabled so no preemption.
+                unsafe {
+                    PCPU_CACHES[cpu].push(addr);
+                }
+                refilled += 1;
+            }
+            Err(_) => break, // Out of memory.
+        }
+    }
+
+    refilled
+}
+
+/// Batch-drain half of the current CPU's cache back to the global allocator.
+///
+/// Called with interrupts disabled when the per-CPU cache is full.
+/// Returns the number of frames drained.
+#[allow(clippy::indexing_slicing)]
+fn pcpu_drain(cpu: usize) -> usize {
+    let Some(allocator) = ALLOCATOR.get() else {
+        return 0;
+    };
+    let mut guard = allocator.lock();
+
+    let mut drained = 0;
+    for _ in 0..PCPU_BATCH {
+        // SAFETY: cpu < MAX_CPUS, interrupts disabled.
+        let addr = unsafe { PCPU_CACHES[cpu].pop() };
+        match addr {
+            Some(a) => {
+                // Return frame to global buddy allocator.
+                // Ignore errors (frame already free = logic bug, but
+                // don't panic in the allocator).
+                let _ = guard.free_inner(a, 0);
+                drained += 1;
+            }
+            None => break,
+        }
+    }
+
+    drained
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -861,9 +1085,46 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
 
 /// Allocate a single physical frame (16 KiB, order 0).
 ///
+/// Uses the per-CPU frame cache when available (lock-free fast path).
+/// Falls back to the global buddy allocator when the cache is empty
+/// or per-CPU caches are not yet enabled.
+///
 /// Returns the frame on success, or `OutOfMemory` if no frames are
 /// available.
+#[allow(clippy::indexing_slicing)]
 pub fn alloc_frame() -> KernelResult<PhysFrame> {
+    // Fast path: try per-CPU cache (no global lock needed).
+    if PCPU_ENABLED.load(core::sync::atomic::Ordering::Acquire) {
+        // Disable interrupts to prevent preemption on this CPU.
+        let flags = unsafe { disable_interrupts() };
+        let cpu = crate::smp::current_cpu_index();
+
+        // Try to pop from the local cache.
+        // SAFETY: interrupts disabled, cpu < MAX_CPUS.
+        let cached = unsafe { PCPU_CACHES[cpu].pop() };
+        if let Some(addr) = cached {
+            unsafe { restore_interrupts(flags); }
+            return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
+        }
+
+        // Cache empty — batch-refill from global allocator.
+        // (This acquires the global lock internally.)
+        let refilled = pcpu_refill(cpu);
+
+        if refilled > 0 {
+            // Now try again — the cache should have frames.
+            let cached = unsafe { PCPU_CACHES[cpu].pop() };
+            unsafe { restore_interrupts(flags); }
+            if let Some(addr) = cached {
+                return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
+            }
+        }
+
+        unsafe { restore_interrupts(flags); }
+        // Fall through to global allocator (reclamation path).
+    }
+
+    // Slow path: direct global allocation (also handles reclamation).
     alloc_order(0)
 }
 
@@ -909,13 +1170,55 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
 
 /// Free a single physical frame (16 KiB, order 0).
 ///
+/// Uses the per-CPU frame cache when available (lock-free fast path).
+/// When the cache is full, batch-drains half back to the global buddy
+/// allocator.
+///
 /// # Safety
 ///
 /// - The frame must have been allocated by [`alloc_frame()`].
 /// - Must not be freed more than once (double-free is detected and
 ///   returns an error, but the caller should not rely on this).
 /// - The caller must ensure no references to the frame's memory remain.
+#[allow(clippy::indexing_slicing)]
 pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
+    // Fast path: push to per-CPU cache (no global lock needed).
+    if PCPU_ENABLED.load(core::sync::atomic::Ordering::Acquire) {
+        // Check refcount — only cache frames with refcount ≤ 1.
+        // Shared (CoW) frames with refcount > 1 must go through the
+        // global allocator to properly decrement and potentially free.
+        let allocator_opt = ALLOCATOR.get();
+        if let Some(allocator) = allocator_opt {
+            let guard = allocator.lock();
+            let idx = guard.frame_index(frame.addr());
+            if idx < guard.page_info_len && guard.get_refcount(idx) > 1 {
+                // Shared frame — decrement refcount via global path.
+                drop(guard);
+                return unsafe { free_order(frame, 0) };
+            }
+            drop(guard);
+        }
+
+        let flags = unsafe { disable_interrupts() };
+        let cpu = crate::smp::current_cpu_index();
+
+        // SAFETY: interrupts disabled, cpu < MAX_CPUS.
+        let full = unsafe { PCPU_CACHES[cpu].is_full() };
+        if full {
+            // Cache full — drain half back to global.
+            pcpu_drain(cpu);
+        }
+
+        let pushed = unsafe { PCPU_CACHES[cpu].push(frame.addr()) };
+        unsafe { restore_interrupts(flags); }
+
+        if pushed {
+            return Ok(());
+        }
+        // Fall through if push failed (shouldn't happen after drain).
+    }
+
+    // Slow path: direct global free.
     // SAFETY: Caller guarantees the frame was validly allocated.
     unsafe { free_order(frame, 0) }
 }

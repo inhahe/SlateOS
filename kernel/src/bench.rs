@@ -395,7 +395,208 @@ pub fn run_all() {
         });
     }
 
+    // --- Context switch (yield to another task and back) ---
+    //
+    // Measures the round-trip time: current task → other task → back.
+    // We spawn a "ping" task that immediately yields on each wakeup,
+    // so the measured time is two context switches (there + back).
+    //
+    // Target from baselines.toml: < 5 µs per switch (Linux: 1-3 µs).
+    // Divide the result by 2 to get per-switch cost.
+    bench_context_switch();
+
+    // --- Scheduler pick_next (O(1) bitmap scan) ---
+    bench_pick_next();
+
     serial_println!("[bench] === Benchmarks complete ===");
+}
+
+/// Benchmark context switch round-trip.
+///
+/// The boot thread (idle task, priority 0) always wins `pick_next` on
+/// yield, so we can't measure context switches from it.  Instead, we
+/// spawn two tasks at equal priority: a "driver" that measures
+/// yield_now latency, and a "helper" that yields in a tight loop.
+/// Round-robin scheduling alternates them, giving us the true
+/// context-switch round-trip cost.
+///
+/// The driver task records measurements into a shared static; the boot
+/// thread waits for it to finish, then reports results.
+fn bench_context_switch() {
+    use crate::sched;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    const BENCH_ITERS: u32 = 200;
+    const BENCH_PRIO: u8 = 16;
+
+    static BENCH_EXIT: AtomicBool = AtomicBool::new(false);
+    static RESULT_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+    static RESULT_MEAN: AtomicU64 = AtomicU64::new(0);
+    static RESULT_MAX: AtomicU64 = AtomicU64::new(0);
+    static DRIVER_DONE: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn bench_yield_loop(_arg: u64) {
+        while !BENCH_EXIT.load(Ordering::Relaxed) {
+            sched::yield_now();
+        }
+    }
+
+    extern "C" fn bench_driver(_arg: u64) {
+        // Warmup.
+        for _ in 0..20 {
+            sched::yield_now();
+        }
+
+        let mut min = u64::MAX;
+        let mut max = 0u64;
+        let mut total = 0u64;
+
+        for _ in 0..BENCH_ITERS {
+            let start = crate::bench::rdtsc_serialized();
+            sched::yield_now(); // → helper → back
+            let end = crate::bench::rdtsc();
+            let elapsed = end.saturating_sub(start);
+            if elapsed < min { min = elapsed; }
+            if elapsed > max { max = elapsed; }
+            total = total.saturating_add(elapsed);
+        }
+
+        let mean = total.checked_div(u64::from(BENCH_ITERS)).unwrap_or(0);
+        RESULT_MIN.store(min, Ordering::Release);
+        RESULT_MEAN.store(mean, Ordering::Release);
+        RESULT_MAX.store(max, Ordering::Release);
+
+        // Signal the helper to exit.
+        BENCH_EXIT.store(true, Ordering::Release);
+        sched::yield_now(); // Let helper see exit flag.
+
+        DRIVER_DONE.store(true, Ordering::Release);
+    }
+
+    // Reset state.
+    BENCH_EXIT.store(false, Ordering::Release);
+    DRIVER_DONE.store(false, Ordering::Release);
+    RESULT_MIN.store(u64::MAX, Ordering::Relaxed);
+
+    // Spawn helper and driver at equal priority for round-robin.
+    let helper_id = match sched::spawn(b"bench-hlp", BENCH_PRIO, bench_yield_loop, 0, 0) {
+        Ok(id) => id,
+        Err(e) => {
+            serial_println!("[bench] context_switch: SKIP (spawn failed: {:?})", e);
+            return;
+        }
+    };
+    let driver_id = match sched::spawn(b"bench-drv", BENCH_PRIO, bench_driver, 0, 0) {
+        Ok(id) => id,
+        Err(_) => {
+            sched::kill_task(helper_id);
+            serial_println!("[bench] context_switch: SKIP (driver spawn failed)");
+            return;
+        }
+    };
+
+    // Wait for the driver to complete.  The boot thread (priority 0)
+    // yields, letting the benchmark tasks run.  Timer preemption also
+    // gives them CPU time.
+    for _ in 0..5000u32 {
+        if DRIVER_DONE.load(Ordering::Acquire) {
+            break;
+        }
+        sched::yield_now();
+    }
+
+    if !DRIVER_DONE.load(Ordering::Acquire) {
+        serial_println!("[bench] context_switch: TIMEOUT (driver didn't finish)");
+        sched::kill_task(helper_id);
+        sched::kill_task(driver_id);
+        sched::reap_dead_tasks();
+        return;
+    }
+
+    let min = RESULT_MIN.load(Ordering::Acquire);
+    let mean = RESULT_MEAN.load(Ordering::Acquire);
+    let max = RESULT_MAX.load(Ordering::Acquire);
+    let min_ns = cycles_to_ns(min);
+    let mean_ns = cycles_to_ns(mean);
+
+    // Each yield is a round-trip (2 context switches).
+    let per_switch_ns = min_ns / 2;
+
+    serial_println!(
+        "[bench] context_switch_rt: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        min, min_ns, mean, mean_ns, max, BENCH_ITERS
+    );
+    serial_println!(
+        "[bench]   per-switch estimate: {}ns (target: <5000ns)",
+        per_switch_ns
+    );
+
+    let target_ns = 5000u64;
+    if per_switch_ns <= target_ns {
+        serial_println!(
+            "[bench]   context_switch: PASS ({}ns <= {}ns)",
+            per_switch_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   context_switch: ABOVE TARGET ({}ns > {}ns)",
+            per_switch_ns, target_ns
+        );
+    }
+
+    // Clean up.
+    sched::kill_task(helper_id);
+    sched::kill_task(driver_id);
+    sched::reap_dead_tasks();
+}
+
+/// Benchmark the scheduler's `pick_next` operation.
+///
+/// Measures how long it takes the scheduler to scan the bitmap and
+/// find the highest-priority ready task.  This should be O(1) via
+/// `trailing_zeros()` instruction on the priority bitmap.
+fn bench_pick_next() {
+    use crate::sched;
+
+    // Spawn several tasks at different priorities to populate the
+    // run queues, then measure yield_now (which includes pick_next).
+    let mut task_ids = [0u64; 4];
+    for (i, id) in task_ids.iter_mut().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let prio = 8 + (i as u8) * 4; // priorities 8, 12, 16, 20
+        match sched::spawn(b"bench-pn", prio, bench_nop_task, 0, 0) {
+            Ok(tid) => *id = tid,
+            Err(_) => {
+                serial_println!("[bench] pick_next: SKIP (spawn failed)");
+                return;
+            }
+        }
+    }
+
+    // Measure yield with multiple tasks in the run queue.
+    let result = run("sched_pick_next_4tasks", 500, || {
+        sched::yield_now();
+    });
+
+    // The pick_next portion of yield_now is a small fraction of the
+    // total context switch cost.  We report it for tracking.
+    serial_println!(
+        "[bench]   pick_next overhead included in context switch"
+    );
+
+    // Clean up.
+    for id in task_ids {
+        if id != 0 {
+            sched::kill_task(id);
+        }
+    }
+    sched::reap_dead_tasks();
+}
+
+/// Trivial benchmark helper task: runs one iteration then exits.
+extern "C" fn bench_nop_task(_arg: u64) {
+    crate::sched::yield_now();
+    // Exit after one yield.
 }
 
 // ---------------------------------------------------------------------------

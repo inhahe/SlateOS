@@ -821,6 +821,164 @@ pub fn build_test_elf_public() -> alloc::vec::Vec<u8> {
     build_test_elf()
 }
 
+/// Build a "Hello from userspace!" ELF that calls SYS_CONSOLE_WRITE
+/// then SYS_EXIT(0).
+///
+/// The ELF contains:
+/// - x86_64 code that uses LEA to compute the address of the embedded
+///   string, then issues `syscall` with rax=100 (SYS_CONSOLE_WRITE).
+/// - A second `syscall` with rax=1 (SYS_EXIT), rdi=0.
+///
+/// This proves the full userspace → kernel syscall → console output path.
+pub fn build_hello_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    // Layout:
+    // - 64-byte ELF header
+    // - 56-byte program header (one PT_LOAD)
+    // - Code + string data
+    //
+    // The string is embedded after the code instructions, in the same
+    // PT_LOAD segment so it's mapped alongside the code.
+
+    let msg = b"Hello from userspace!\n";
+    let msg_len = msg.len(); // 22 bytes
+
+    // We'll assemble x86_64 machine code manually:
+    //
+    //   ; rax = SYS_CONSOLE_WRITE (100)
+    //   mov eax, 100              ; B8 64 00 00 00
+    //   ; rdi = pointer to string (computed via RIP-relative LEA)
+    //   lea rdi, [rip + offset]   ; 48 8D 3D xx xx xx xx
+    //   ; rsi = string length
+    //   mov esi, <msg_len>        ; BE xx 00 00 00
+    //   syscall                   ; 0F 05
+    //   ; rax = SYS_EXIT (1)
+    //   mov eax, 1                ; B8 01 00 00 00
+    //   ; rdi = exit code 0
+    //   xor edi, edi              ; 31 FF
+    //   syscall                   ; 0F 05
+    //   int3                      ; CC (safety)
+    //   ; <string data follows here>
+    //
+    // Encoding sizes:
+    //   mov eax, 100:    5 bytes (offset 0)
+    //   lea rdi, [rip+]: 7 bytes (offset 5)
+    //   mov esi, len:    5 bytes (offset 12)
+    //   syscall:         2 bytes (offset 17)
+    //   mov eax, 1:      5 bytes (offset 19)
+    //   xor edi, edi:    2 bytes (offset 24)
+    //   syscall:         2 bytes (offset 26)
+    //   int3:            1 byte  (offset 28)
+    //   string:          starts at offset 29
+
+    let code_instructions_len: usize = 29;
+    let total_code_data = code_instructions_len + msg_len;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 + 56
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let file_size = code_offset as usize + total_code_data;
+    let mut buf = vec![0u8; file_size];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    // --- Program header ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, total_code_data as u64); // p_filesz
+    write_u64(&mut buf, ph + 40, total_code_data as u64); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    // --- Code ---
+    let cs = code_offset as usize;
+
+    // mov eax, 100 (SYS_CONSOLE_WRITE)
+    buf[cs] = 0xB8;
+    buf[cs + 1] = 100;
+    buf[cs + 2] = 0x00;
+    buf[cs + 3] = 0x00;
+    buf[cs + 4] = 0x00;
+
+    // lea rdi, [rip + offset_to_string]
+    // At this instruction, RIP points to the NEXT instruction (cs+12).
+    // The string starts at cs+29.  So offset = 29 - 12 = 17.
+    let rip_after_lea = 12; // offset within code segment after LEA
+    let string_offset_in_code = code_instructions_len;
+    #[allow(clippy::arithmetic_side_effects)]
+    let rip_rel = (string_offset_in_code - rip_after_lea) as i32;
+    buf[cs + 5] = 0x48; // REX.W
+    buf[cs + 6] = 0x8D; // LEA
+    buf[cs + 7] = 0x3D; // ModRM: rdi, [rip+disp32]
+    let rel_bytes = rip_rel.to_le_bytes();
+    buf[cs + 8] = rel_bytes[0];
+    buf[cs + 9] = rel_bytes[1];
+    buf[cs + 10] = rel_bytes[2];
+    buf[cs + 11] = rel_bytes[3];
+
+    // mov esi, msg_len
+    buf[cs + 12] = 0xBE;
+    #[allow(clippy::cast_possible_truncation)]
+    let len_bytes = (msg_len as u32).to_le_bytes();
+    buf[cs + 13] = len_bytes[0];
+    buf[cs + 14] = len_bytes[1];
+    buf[cs + 15] = len_bytes[2];
+    buf[cs + 16] = len_bytes[3];
+
+    // syscall
+    buf[cs + 17] = 0x0F;
+    buf[cs + 18] = 0x05;
+
+    // mov eax, 1 (SYS_EXIT)
+    buf[cs + 19] = 0xB8;
+    buf[cs + 20] = 0x01;
+    buf[cs + 21] = 0x00;
+    buf[cs + 22] = 0x00;
+    buf[cs + 23] = 0x00;
+
+    // xor edi, edi (exit code 0)
+    buf[cs + 24] = 0x31;
+    buf[cs + 25] = 0xFF;
+
+    // syscall
+    buf[cs + 26] = 0x0F;
+    buf[cs + 27] = 0x05;
+
+    // int3 (safety net)
+    buf[cs + 28] = 0xCC;
+
+    // --- String data ---
+    buf[cs + code_instructions_len..cs + code_instructions_len + msg_len]
+        .copy_from_slice(msg);
+
+    buf
+}
+
 /// Build a test ELF that exercises stack growth.
 ///
 /// The code decrements RSP by 128 KiB (well beyond the initial 64 KiB

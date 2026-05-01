@@ -190,7 +190,7 @@ fn cmd_help() {
     crate::console_println!("  mkdir DIR Create a directory");
     crate::console_println!("  rmdir DIR Remove an empty directory");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
-    crate::console_println!("  mkelf     Create a test ELF binary on disk");
+    crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
     crate::console_println!("  ping IP   Send ICMP echo requests (ping)");
@@ -631,20 +631,36 @@ fn cmd_run(args: &str) {
 }
 
 fn cmd_mkelf() {
-    // Generate a minimal test ELF using the existing test builder.
-    let elf_data = crate::proc::elf::build_test_elf_public();
+    // Generate both test ELFs and write them to the filesystem.
 
-    match crate::fs::Vfs::write_file("/EXIT.ELF", &elf_data) {
+    // 1. EXIT.ELF — minimal ELF that just calls SYS_EXIT(0).
+    let exit_elf = crate::proc::elf::build_test_elf_public();
+    match crate::fs::Vfs::write_file("/EXIT.ELF", &exit_elf) {
         Ok(()) => {
             crate::console_println!(
-                "Created /EXIT.ELF ({} bytes) — run it with: run EXIT.ELF",
-                elf_data.len()
+                "Created /EXIT.ELF ({} bytes) — calls SYS_EXIT(0)",
+                exit_elf.len()
             );
         }
         Err(e) => {
-            crate::console_println!("mkelf: failed to write: {:?}", e);
+            crate::console_println!("mkelf: failed to write EXIT.ELF: {:?}", e);
         }
     }
+
+    // 2. HELLO.ELF — prints "Hello from userspace!" via SYS_CONSOLE_WRITE, then exits.
+    let hello_elf = crate::proc::elf::build_hello_elf();
+    match crate::fs::Vfs::write_file("/HELLO.ELF", &hello_elf) {
+        Ok(()) => {
+            crate::console_println!(
+                "Created /HELLO.ELF ({} bytes) — prints to console, then exits",
+                hello_elf.len()
+            );
+        }
+        Err(e) => {
+            crate::console_println!("mkelf: failed to write HELLO.ELF: {:?}", e);
+        }
+    }
+    crate::console_println!("Run them with: run EXIT.ELF / run HELLO.ELF");
 }
 
 fn cmd_net() {

@@ -1535,6 +1535,30 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_PROCESS_TRY_WAIT` — non-blocking wait for a child process.
+///
+/// Like `SYS_PROCESS_WAIT` but returns `WouldBlock` immediately if
+/// the child is still running, instead of blocking the caller.
+pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let child_pid = args.arg0;
+    // Parent PID: use 0 (kernel) for now — same as sys_process_wait.
+    let parent_pid = 0;
+
+    match pcb::try_reap(parent_pid, child_pid) {
+        Ok(Some(exit_code)) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(exit_code as i64)
+        }
+        Ok(None) => {
+            // Child still running — return WouldBlock.
+            SyscallResult::err(KernelError::WouldBlock)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_PROCESS_ID` — get the current process ID.
 ///
 /// Returns: the calling process's PID, or 0 if the task isn't
@@ -2000,6 +2024,32 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
     unsafe { core::ptr::write(ptr, ch); }
 
     SyscallResult::ok(1)
+}
+
+/// `SYS_CONSOLE_TRY_READ_CHAR` — non-blocking read of one keyboard character.
+///
+/// If a keypress is buffered, writes the ASCII code to the output byte
+/// and returns 1.  Otherwise returns `WouldBlock` immediately.
+pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
+    let ptr = args.arg0 as *mut u8;
+
+    if ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate the output byte is in user space and writable.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 1) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::keyboard::try_read_char() {
+        Some(ch) => {
+            // SAFETY: Pointer validated above — in user space, mapped, writable.
+            unsafe { core::ptr::write(ptr, ch); }
+            SyscallResult::ok(1)
+        }
+        None => SyscallResult::err(KernelError::WouldBlock),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ use crate::serial_println;
 use super::number::{
     MAX_SYSCALL_NR, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV,
     SYS_CHANNEL_SEND, SYS_CHANNEL_TRY_RECV, SYS_CONSOLE_READ_CHAR,
+    SYS_CONSOLE_TRY_READ_CHAR,
     SYS_CONSOLE_WRITE, SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY,
     SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
     SYS_CLOCK_MONOTONIC,
@@ -36,7 +37,7 @@ use super::number::{
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
     SYS_PORT_READ, SYS_PORT_WRITE,
     SYS_CAP_QUERY, SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
-    SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT,
+    SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
     SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
@@ -215,6 +216,7 @@ const fn build_v1_table() -> SyscallTable {
     // Console I/O (100–109).
     handlers[SYS_CONSOLE_WRITE as usize] = Some(handlers::sys_console_write);
     handlers[SYS_CONSOLE_READ_CHAR as usize] = Some(handlers::sys_console_read_char);
+    handlers[SYS_CONSOLE_TRY_READ_CHAR as usize] = Some(handlers::sys_console_try_read_char);
     handlers[SYS_LOG_READ as usize] = Some(handlers::sys_log_read);
 
     // Security (400–499).
@@ -223,6 +225,7 @@ const fn build_v1_table() -> SyscallTable {
     // Process management (500–509).
     handlers[SYS_PROCESS_SPAWN as usize] = Some(handlers::sys_process_spawn);
     handlers[SYS_PROCESS_WAIT as usize] = Some(handlers::sys_process_wait);
+    handlers[SYS_PROCESS_TRY_WAIT as usize] = Some(handlers::sys_process_try_wait);
     handlers[SYS_PROCESS_ID as usize] = Some(handlers::sys_process_id);
     handlers[SYS_SET_EXCEPTION_HANDLER as usize] = Some(handlers::sys_set_exception_handler);
     handlers[SYS_PROCESS_KILL as usize] = Some(handlers::sys_process_kill);

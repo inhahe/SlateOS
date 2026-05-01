@@ -6,9 +6,14 @@
 //! ## Current Functionality
 //!
 //! - Prints a welcome banner via `SYS_CONSOLE_WRITE`.
-//! - Runs a minimal read-eval-print loop (kernel shell replacement).
+//! - Runs a poll-based main loop that interleaves keyboard input with
+//!   service health monitoring.
 //! - Built-in commands: `help`, `echo`, `exit`, `ls`, `cat`, `stat`,
-//!   `write`, `mkdir`, `rmdir`, `rm`, `pid`, `uptime`.
+//!   `write`, `mkdir`, `rmdir`, `rm`, `pid`, `uptime`, `logs`, `spawn`,
+//!   `svc start|stop|list|status`.
+//! - Service manager: registers background services, detects crashes via
+//!   non-blocking `SYS_PROCESS_TRY_WAIT`, restarts with exponential
+//!   backoff (1s → 2s → 4s → … → 60s cap).
 //!
 //! ## Syscall ABI
 //!
@@ -38,10 +43,13 @@
 const SYS_EXIT: u64 = 1;
 const SYS_TASK_ID: u64 = 2;
 const SYS_CLOCK_MONOTONIC: u64 = 10;
+const SYS_SLEEP: u64 = 11;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CONSOLE_READ_CHAR: u64 = 101;
+const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
 const SYS_PROCESS_SPAWN: u64 = 500;
 const SYS_PROCESS_WAIT: u64 = 501;
+const SYS_PROCESS_TRY_WAIT: u64 = 507;
 const SYS_FS_READ_FILE: u64 = 600;
 const SYS_FS_WRITE_FILE: u64 = 601;
 const SYS_FS_DELETE: u64 = 602;
@@ -176,10 +184,24 @@ fn print(s: &str) {
 
 /// Read one character from the keyboard (blocking).
 /// Returns the ASCII byte, or 0 for non-printable keys.
+#[allow(dead_code)]
 fn read_char() -> u8 {
     let mut ch: u8 = 0;
     syscall1(SYS_CONSOLE_READ_CHAR, &mut ch as *mut u8 as u64);
     ch
+}
+
+/// Try to read one character without blocking.
+/// Returns `Some(ch)` if a key was available, `None` otherwise.
+fn try_read_char() -> Option<u8> {
+    let mut ch: u8 = 0;
+    let ret = syscall1(SYS_CONSOLE_TRY_READ_CHAR, &mut ch as *mut u8 as u64);
+    if ret == 1 { Some(ch) } else { None }
+}
+
+/// Sleep for `ns` nanoseconds.
+fn sleep_ns(ns: u64) {
+    syscall1(SYS_SLEEP, ns);
 }
 
 /// Exit the process with the given exit code.
@@ -279,6 +301,15 @@ fn process_wait(pid: u64) -> i64 {
     syscall1(SYS_PROCESS_WAIT, pid)
 }
 
+/// Non-blocking check if a child has exited.
+/// Returns exit code if exited, -4 (WouldBlock) if still running.
+fn process_try_wait(pid: u64) -> i64 {
+    syscall1(SYS_PROCESS_TRY_WAIT, pid)
+}
+
+/// Kernel error code for "still running".
+const ERR_WOULD_BLOCK: i64 = -4;
+
 /// Stat a file.  Returns 0 or negative error.
 /// On success, fills `out` with 16-byte FsStatResult:
 ///   bytes 0-7: file size (u64 LE)
@@ -370,46 +401,6 @@ fn print_i64(v: i64) {
 /// Maximum command line length.
 const MAX_LINE: usize = 256;
 
-/// Read a line from the keyboard, echoing characters.
-/// Returns the number of valid bytes in `buf`.
-fn read_line(buf: &mut [u8; MAX_LINE]) -> usize {
-    let mut pos: usize = 0;
-
-    loop {
-        let ch = read_char();
-
-        match ch {
-            // Enter — end of line.
-            b'\r' | b'\n' => {
-                print("\n");
-                return pos;
-            }
-
-            // Backspace / DEL.
-            0x08 | 0x7F => {
-                if pos > 0 {
-                    pos -= 1;
-                    // Erase character on screen: backspace, space, backspace.
-                    console_write(b"\x08 \x08");
-                }
-            }
-
-            // Printable ASCII.
-            0x20..=0x7E => {
-                if pos < MAX_LINE {
-                    buf[pos] = ch;
-                    pos += 1;
-                    // Echo the character.
-                    console_write(&[ch]);
-                }
-            }
-
-            // Ignore non-printable keys (function keys, arrows, etc.).
-            _ => {}
-        }
-    }
-}
-
 /// Compare two byte slices for equality.
 fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -426,6 +417,7 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Check if `haystack` starts with `needle`.
+#[allow(dead_code)]
 fn starts_with(haystack: &[u8], needle: &[u8]) -> bool {
     if haystack.len() < needle.len() {
         return false;
@@ -456,6 +448,363 @@ fn split_first_word(s: &[u8]) -> (&[u8], &[u8]) {
     let cmd = &s[..i];
     let rest = if i < s.len() { trim(&s[i..]) } else { &[] };
     (cmd, rest)
+}
+
+// ---------------------------------------------------------------------------
+// Service manager
+// ---------------------------------------------------------------------------
+
+/// Maximum number of managed services.
+const MAX_SERVICES: usize = 16;
+
+/// Maximum length of a service name.
+const MAX_SVC_NAME: usize = 32;
+
+/// Maximum length of a service path (filesystem path to ELF binary).
+const MAX_SVC_PATH: usize = 128;
+
+/// Initial restart delay in nanoseconds (1 second).
+const BACKOFF_INITIAL_NS: u64 = 1_000_000_000;
+
+/// Maximum restart delay in nanoseconds (60 seconds).
+const BACKOFF_MAX_NS: u64 = 60_000_000_000;
+
+/// Backoff multiplier (shift left by 1 = multiply by 2).
+const BACKOFF_MULTIPLIER: u32 = 1;
+
+/// How long a service must run before we reset its backoff (10 seconds).
+const BACKOFF_RESET_THRESHOLD_NS: u64 = 10_000_000_000;
+
+/// A registered service entry.
+struct Service {
+    /// Human-readable name (extracted from path, null-terminated).
+    name: [u8; MAX_SVC_NAME],
+    name_len: usize,
+
+    /// Filesystem path to the ELF binary.
+    path: [u8; MAX_SVC_PATH],
+    path_len: usize,
+
+    /// PID of the running instance, or 0 if not running.
+    pid: u64,
+
+    /// Whether the service manager should restart this on crash.
+    auto_restart: bool,
+
+    /// Whether this slot is in use.
+    active: bool,
+
+    /// Current backoff delay (nanoseconds).  Doubles on each crash,
+    /// resets after the service runs for `BACKOFF_RESET_THRESHOLD_NS`.
+    backoff_ns: u64,
+
+    /// Timestamp (monotonic ns) when the service was last started.
+    started_at_ns: u64,
+
+    /// Timestamp when we should next attempt a restart (0 = now).
+    restart_after_ns: u64,
+
+    /// Total number of times this service has crashed.
+    crash_count: u64,
+}
+
+impl Service {
+    const fn empty() -> Self {
+        Self {
+            name: [0u8; MAX_SVC_NAME],
+            name_len: 0,
+            path: [0u8; MAX_SVC_PATH],
+            path_len: 0,
+            pid: 0,
+            auto_restart: true,
+            active: false,
+            backoff_ns: BACKOFF_INITIAL_NS,
+            started_at_ns: 0,
+            restart_after_ns: 0,
+            crash_count: 0,
+        }
+    }
+}
+
+/// The service registry.  Fixed-size, no heap.
+struct ServiceRegistry {
+    services: [Service; MAX_SERVICES],
+    count: usize,
+}
+
+impl ServiceRegistry {
+    const fn new() -> Self {
+        Self {
+            services: [
+                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
+                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
+                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
+                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
+            ],
+            count: 0,
+        }
+    }
+
+    /// Register a new service by filesystem path.  Extracts the filename
+    /// as the service name.  Returns the slot index or `None` if full.
+    fn register(&mut self, path: &[u8]) -> Option<usize> {
+        if self.count >= MAX_SERVICES || path.is_empty() {
+            return None;
+        }
+
+        // Find a free slot (prefer the first unused).
+        let mut slot = None;
+        let mut i = 0;
+        while i < MAX_SERVICES {
+            if !self.services[i].active {
+                slot = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        let idx = slot?;
+
+        let svc = &mut self.services[idx];
+
+        // Copy path.
+        let plen = if path.len() > MAX_SVC_PATH { MAX_SVC_PATH } else { path.len() };
+        svc.path[..plen].copy_from_slice(&path[..plen]);
+        svc.path_len = plen;
+
+        // Extract filename from path as service name.
+        let mut last_slash = 0;
+        let mut j = 0;
+        while j < plen {
+            if path[j] == b'/' {
+                last_slash = j + 1;
+            }
+            j += 1;
+        }
+        let name_src = &path[last_slash..plen];
+        let nlen = if name_src.len() > MAX_SVC_NAME { MAX_SVC_NAME } else { name_src.len() };
+        svc.name[..nlen].copy_from_slice(&name_src[..nlen]);
+        svc.name_len = nlen;
+
+        svc.active = true;
+        svc.auto_restart = true;
+        svc.pid = 0;
+        svc.backoff_ns = BACKOFF_INITIAL_NS;
+        svc.started_at_ns = 0;
+        svc.restart_after_ns = 0;
+        svc.crash_count = 0;
+
+        self.count += 1;
+        Some(idx)
+    }
+
+    /// Find a service by name.  Returns the slot index or `None`.
+    fn find_by_name(&self, name: &[u8]) -> Option<usize> {
+        let mut i = 0;
+        while i < MAX_SERVICES {
+            if self.services[i].active
+                && self.services[i].name_len == name.len()
+                && bytes_eq(&self.services[i].name[..self.services[i].name_len], name)
+            {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Start a service (read ELF from VFS, spawn process).
+    /// Returns the child PID or a negative error code.
+    fn start_service(&mut self, idx: usize) -> i64 {
+        if idx >= MAX_SERVICES || !self.services[idx].active {
+            return -1;
+        }
+
+        // Copy path and name to local buffers to avoid borrowing `self`
+        // across the mutable update below.
+        let mut path_buf = [0u8; MAX_SVC_PATH];
+        let path_len = self.services[idx].path_len;
+        path_buf[..path_len].copy_from_slice(
+            &self.services[idx].path[..path_len],
+        );
+
+        let mut name_buf = [0u8; MAX_SVC_NAME];
+        let name_len = self.services[idx].name_len;
+        name_buf[..name_len].copy_from_slice(
+            &self.services[idx].name[..name_len],
+        );
+
+        let path = &path_buf[..path_len];
+        let name = &name_buf[..name_len];
+
+        // Read the ELF binary from the filesystem.
+        // 64 KiB max — init has no heap.
+        let mut elf_buf = [0u8; 65536];
+        let result = fs_read_file(path, &mut elf_buf);
+        if result < 0 {
+            print("[svc] Failed to read ");
+            console_write(path);
+            print(": error ");
+            print_i64(result);
+            print("\n");
+            return result;
+        }
+
+        let elf_len = result as usize;
+        let elf_data = &elf_buf[..elf_len];
+
+        let pid = process_spawn(elf_data, name);
+        if pid < 0 {
+            print("[svc] Failed to spawn ");
+            console_write(name);
+            print(": error ");
+            print_i64(pid);
+            print("\n");
+            return pid;
+        }
+
+        // Update service state.
+        let svc = &mut self.services[idx];
+        #[allow(clippy::cast_sign_loss)]
+        {
+            svc.pid = pid as u64;
+        }
+        svc.started_at_ns = clock_monotonic() as u64;
+        svc.restart_after_ns = 0;
+
+        print("[svc] Started ");
+        console_write(name);
+        print(" (PID ");
+        print_i64(pid);
+        print(")\n");
+
+        pid
+    }
+
+    /// Stop a service by sending a kill and marking it for no-restart.
+    fn stop_service(&mut self, idx: usize) {
+        if idx >= MAX_SERVICES || !self.services[idx].active {
+            return;
+        }
+
+        let svc = &mut self.services[idx];
+        svc.auto_restart = false;
+
+        if svc.pid != 0 {
+            // Kill the process.
+            let ret = syscall2(506, svc.pid, 0); // SYS_PROCESS_KILL = 506
+            if ret >= 0 {
+                // Reap the zombie.
+                let _ = process_try_wait(svc.pid);
+            }
+            let name = &svc.name[..svc.name_len];
+            print("[svc] Stopped ");
+            console_write(name);
+            print(" (PID ");
+            print_u64(svc.pid);
+            print(")\n");
+            svc.pid = 0;
+        }
+    }
+
+    /// Unregister a service entirely.
+    fn unregister(&mut self, idx: usize) {
+        if idx >= MAX_SERVICES || !self.services[idx].active {
+            return;
+        }
+        self.stop_service(idx);
+        self.services[idx].active = false;
+        if self.count > 0 {
+            self.count -= 1;
+        }
+    }
+
+    /// Poll all registered services.  For any that have exited,
+    /// handle crash detection and restart scheduling.
+    fn poll(&mut self) {
+        let now_ns = clock_monotonic() as u64;
+
+        let mut i = 0;
+        while i < MAX_SERVICES {
+            if !self.services[i].active || self.services[i].pid == 0 {
+                // Not active or not currently running — check if pending restart.
+                if self.services[i].active
+                    && self.services[i].auto_restart
+                    && self.services[i].restart_after_ns > 0
+                    && now_ns >= self.services[i].restart_after_ns
+                {
+                    // Time to restart.
+                    let name = &self.services[i].name[..self.services[i].name_len];
+                    print("[svc] Restarting ");
+                    console_write(name);
+                    print(" (crash #");
+                    print_u64(self.services[i].crash_count);
+                    print(", backoff ");
+                    print_u64(self.services[i].backoff_ns / 1_000_000_000);
+                    print("s)\n");
+                    self.start_service(i);
+                }
+                i += 1;
+                continue;
+            }
+
+            let pid = self.services[i].pid;
+            let ret = process_try_wait(pid);
+
+            if ret == ERR_WOULD_BLOCK {
+                // Still running — good.
+                i += 1;
+                continue;
+            }
+
+            // Process has exited (ret = exit code) or we got an error
+            // (e.g., NoSuchProcess if it was already reaped).
+            let name_len = self.services[i].name_len;
+            let mut name_copy = [0u8; MAX_SVC_NAME];
+            name_copy[..name_len].copy_from_slice(
+                &self.services[i].name[..name_len],
+            );
+
+            let svc = &mut self.services[i];
+            let runtime_ns = now_ns.saturating_sub(svc.started_at_ns);
+
+            print("[svc] ");
+            console_write(&name_copy[..name_len]);
+            print(" (PID ");
+            print_u64(pid);
+            print(") exited with code ");
+            print_i64(ret);
+            print(" after ");
+            print_u64(runtime_ns / 1_000_000_000);
+            print("s\n");
+
+            svc.pid = 0;
+            svc.crash_count += 1;
+
+            // If it ran long enough, reset backoff.
+            if runtime_ns >= BACKOFF_RESET_THRESHOLD_NS {
+                svc.backoff_ns = BACKOFF_INITIAL_NS;
+            }
+
+            if svc.auto_restart {
+                // Schedule restart with current backoff.
+                svc.restart_after_ns = now_ns + svc.backoff_ns;
+                print("[svc] Will restart ");
+                console_write(&name_copy[..name_len]);
+                print(" in ");
+                print_u64(svc.backoff_ns / 1_000_000_000);
+                print("s\n");
+
+                // Increase backoff for next time (exponential, capped).
+                svc.backoff_ns = svc.backoff_ns.checked_shl(BACKOFF_MULTIPLIER)
+                    .unwrap_or(BACKOFF_MAX_NS);
+                if svc.backoff_ns > BACKOFF_MAX_NS {
+                    svc.backoff_ns = BACKOFF_MAX_NS;
+                }
+            }
+
+            i += 1;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,8 +1097,167 @@ fn cmd_logs() {
     }
 }
 
-/// Execute a command.
-fn execute(line: &[u8]) {
+/// `svc` — service manager commands.
+///
+/// Subcommands:
+///   `svc start <path>`   — register and start a service.
+///   `svc stop <name>`    — stop a service (disable auto-restart).
+///   `svc restart <name>` — restart a stopped/crashed service.
+///   `svc remove <name>`  — stop and unregister a service.
+///   `svc list`           — list all registered services.
+///   `svc status <name>`  — show detailed status of one service.
+fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
+    let (sub, rest) = split_first_word(args);
+
+    if bytes_eq(sub, b"start") {
+        if rest.is_empty() {
+            print("svc start: missing path\n");
+            return;
+        }
+        match registry.register(rest) {
+            Some(idx) => {
+                registry.start_service(idx);
+            }
+            None => print("svc start: registry full or invalid path\n"),
+        }
+    } else if bytes_eq(sub, b"stop") {
+        if rest.is_empty() {
+            print("svc stop: missing service name\n");
+            return;
+        }
+        match registry.find_by_name(rest) {
+            Some(idx) => registry.stop_service(idx),
+            None => {
+                print("svc stop: unknown service '");
+                console_write(rest);
+                print("'\n");
+            }
+        }
+    } else if bytes_eq(sub, b"restart") {
+        if rest.is_empty() {
+            print("svc restart: missing service name\n");
+            return;
+        }
+        match registry.find_by_name(rest) {
+            Some(idx) => {
+                // Re-enable auto-restart and start immediately.
+                registry.services[idx].auto_restart = true;
+                registry.services[idx].backoff_ns = BACKOFF_INITIAL_NS;
+                registry.services[idx].restart_after_ns = 0;
+                if registry.services[idx].pid != 0 {
+                    // Stop first, then restart.
+                    registry.stop_service(idx);
+                    registry.services[idx].auto_restart = true;
+                }
+                registry.start_service(idx);
+            }
+            None => {
+                print("svc restart: unknown service '");
+                console_write(rest);
+                print("'\n");
+            }
+        }
+    } else if bytes_eq(sub, b"remove") {
+        if rest.is_empty() {
+            print("svc remove: missing service name\n");
+            return;
+        }
+        match registry.find_by_name(rest) {
+            Some(idx) => {
+                let name_len = registry.services[idx].name_len;
+                let mut name = [0u8; MAX_SVC_NAME];
+                name[..name_len].copy_from_slice(
+                    &registry.services[idx].name[..name_len],
+                );
+                registry.unregister(idx);
+                print("[svc] Removed ");
+                console_write(&name[..name_len]);
+                print("\n");
+            }
+            None => {
+                print("svc remove: unknown service '");
+                console_write(rest);
+                print("'\n");
+            }
+        }
+    } else if bytes_eq(sub, b"list") {
+        if registry.count == 0 {
+            print("No registered services.\n");
+            return;
+        }
+        print("Services (");
+        print_u64(registry.count as u64);
+        print("):\n");
+        let mut i = 0;
+        while i < MAX_SERVICES {
+            if registry.services[i].active {
+                let svc = &registry.services[i];
+                print("  ");
+                console_write(&svc.name[..svc.name_len]);
+                if svc.pid != 0 {
+                    print("  [running, PID ");
+                    print_u64(svc.pid);
+                    print("]");
+                } else if svc.restart_after_ns > 0 {
+                    print("  [pending restart]");
+                } else {
+                    print("  [stopped]");
+                }
+                if !svc.auto_restart {
+                    print("  (no-restart)");
+                }
+                if svc.crash_count > 0 {
+                    print("  crashes=");
+                    print_u64(svc.crash_count);
+                }
+                print("\n");
+            }
+            i += 1;
+        }
+    } else if bytes_eq(sub, b"status") {
+        if rest.is_empty() {
+            print("svc status: missing service name\n");
+            return;
+        }
+        match registry.find_by_name(rest) {
+            Some(idx) => {
+                let svc = &registry.services[idx];
+                print("Service: ");
+                console_write(&svc.name[..svc.name_len]);
+                print("\n  Path:     ");
+                console_write(&svc.path[..svc.path_len]);
+                print("\n  PID:      ");
+                if svc.pid != 0 {
+                    print_u64(svc.pid);
+                } else {
+                    print("(not running)");
+                }
+                print("\n  Restart:  ");
+                if svc.auto_restart { print("yes"); } else { print("no"); }
+                print("\n  Crashes:  ");
+                print_u64(svc.crash_count);
+                print("\n  Backoff:  ");
+                print_u64(svc.backoff_ns / 1_000_000_000);
+                print("s\n");
+            }
+            None => {
+                print("svc status: unknown service '");
+                console_write(rest);
+                print("'\n");
+            }
+        }
+    } else {
+        print("svc: unknown subcommand '");
+        console_write(sub);
+        print("'\nUsage: svc start|stop|restart|remove|list|status\n");
+    }
+}
+
+/// Execute a command line.
+///
+/// The `registry` parameter allows commands (especially `svc`) to
+/// interact with the service manager state.
+fn execute(line: &[u8], registry: &mut ServiceRegistry) {
     let trimmed = trim(line);
     if trimmed.is_empty() {
         return;
@@ -759,20 +1267,26 @@ fn execute(line: &[u8]) {
 
     if bytes_eq(cmd, b"help") {
         print("Available commands:\n");
-        print("  help        - show this message\n");
-        print("  echo <text> - print text\n");
-        print("  ls [path]   - list directory\n");
-        print("  cat <path>  - print file contents\n");
-        print("  write <p> <d> - write data to file\n");
-        print("  stat <path> - show file metadata\n");
-        print("  mkdir <path> - create directory\n");
-        print("  rmdir <path> - remove empty directory\n");
-        print("  rm <path>   - delete a file\n");
-        print("  spawn <path> - run an ELF program\n");
-        print("  pid         - show task ID\n");
-        print("  uptime      - show time since boot\n");
-        print("  logs        - show kernel log entries\n");
-        print("  exit        - shut down\n");
+        print("  help           - show this message\n");
+        print("  echo <text>    - print text\n");
+        print("  ls [path]      - list directory\n");
+        print("  cat <path>     - print file contents\n");
+        print("  write <p> <d>  - write data to file\n");
+        print("  stat <path>    - show file metadata\n");
+        print("  mkdir <path>   - create directory\n");
+        print("  rmdir <path>   - remove empty directory\n");
+        print("  rm <path>      - delete a file\n");
+        print("  spawn <path>   - run an ELF program (blocking)\n");
+        print("  svc start <p>  - register & start a service\n");
+        print("  svc stop <n>   - stop a service\n");
+        print("  svc restart <n>- restart a service\n");
+        print("  svc remove <n> - unregister a service\n");
+        print("  svc list       - list all services\n");
+        print("  svc status <n> - detailed service info\n");
+        print("  pid            - show task ID\n");
+        print("  uptime         - show time since boot\n");
+        print("  logs           - show kernel log entries\n");
+        print("  exit           - shut down\n");
     } else if bytes_eq(cmd, b"exit") {
         print("Goodbye.\n");
         exit(0);
@@ -797,6 +1311,8 @@ fn execute(line: &[u8]) {
         cmd_rm(args);
     } else if bytes_eq(cmd, b"spawn") {
         cmd_spawn(args);
+    } else if bytes_eq(cmd, b"svc") {
+        cmd_svc(args, registry);
     } else if bytes_eq(cmd, b"pid") {
         let tid = task_id();
         print("Task ID: ");
@@ -831,10 +1347,24 @@ fn execute(line: &[u8]) {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Poll interval for the main loop when no services are registered.
+/// 50 ms in nanoseconds — long enough to avoid busy-waiting, short
+/// enough to feel responsive for keyboard input.
+const POLL_INTERVAL_IDLE_NS: u64 = 50_000_000;
+
+/// Poll interval when services are registered and may need monitoring.
+/// 100 ms — balance between responsiveness and CPU usage.
+const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
+
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.
 ///
 /// No Rust runtime is available — no heap, no std, no arguments.
 /// We communicate with the kernel exclusively via SYSCALL.
+///
+/// The main loop is poll-based: it alternates between checking for
+/// keyboard input (non-blocking) and monitoring registered services.
+/// When no keys are pressed and no services need attention, it sleeps
+/// briefly to avoid burning CPU.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Welcome banner.
@@ -846,14 +1376,79 @@ pub extern "C" fn _start() -> ! {
     print("\n");
     print("Type 'help' for available commands.\n\n");
 
-    // Main shell loop.
+    let mut registry = ServiceRegistry::new();
     let mut line_buf = [0u8; MAX_LINE];
+    let mut line_pos: usize = 0;
+    let mut prompt_shown = false;
 
     loop {
-        print("user> ");
-        let len = read_line(&mut line_buf);
-        if len > 0 {
-            execute(&line_buf[..len]);
+        // 1. Show prompt if we haven't yet.
+        if !prompt_shown {
+            print("user> ");
+            prompt_shown = true;
+        }
+
+        // 2. Poll for keyboard input (non-blocking).
+        //    Drain all available characters in a burst to avoid
+        //    missing fast typists.
+        let mut got_input = false;
+        loop {
+            match try_read_char() {
+                Some(ch) => {
+                    got_input = true;
+                    match ch {
+                        // Enter — execute the command line.
+                        b'\r' | b'\n' => {
+                            print("\n");
+                            if line_pos > 0 {
+                                execute(&line_buf[..line_pos], &mut registry);
+                            }
+                            line_pos = 0;
+                            prompt_shown = false;
+                            // Break out of input drain to re-show prompt.
+                            break;
+                        }
+
+                        // Backspace / DEL.
+                        0x08 | 0x7F => {
+                            if line_pos > 0 {
+                                line_pos -= 1;
+                                console_write(b"\x08 \x08");
+                            }
+                        }
+
+                        // Printable ASCII.
+                        0x20..=0x7E => {
+                            if line_pos < MAX_LINE {
+                                line_buf[line_pos] = ch;
+                                line_pos += 1;
+                                console_write(&[ch]);
+                            }
+                        }
+
+                        // Non-printable: ignore.
+                        _ => {}
+                    }
+                }
+                None => break, // No more characters in buffer.
+            }
+        }
+
+        // 3. Poll registered services for crashes / pending restarts.
+        if registry.count > 0 {
+            registry.poll();
+        }
+
+        // 4. If nothing happened this iteration, sleep briefly to
+        //    yield the CPU.  Use a shorter sleep when the user might
+        //    be typing (no services) vs. when we're monitoring.
+        if !got_input {
+            let interval = if registry.count > 0 {
+                POLL_INTERVAL_ACTIVE_NS
+            } else {
+                POLL_INTERVAL_IDLE_NS
+            };
+            sleep_ns(interval);
         }
     }
 }

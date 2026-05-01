@@ -225,6 +225,20 @@ pub const SYS_CONSOLE_WRITE: u64 = 100;
 /// Returns: 1 on success (one byte read), or negative error.
 pub const SYS_CONSOLE_READ_CHAR: u64 = 101;
 
+/// Non-blocking read of one character from the keyboard.
+///
+/// `arg0`: pointer to a 1-byte buffer.
+///
+/// If a keypress is buffered, writes the ASCII code into the buffer
+/// and returns 1.  If no key is available, returns `WouldBlock` (-4)
+/// immediately without blocking.
+///
+/// This is a kernel-provided bootstrap console.  It will be replaced
+/// by a userspace console server / terminal emulator.
+///
+/// Returns: 1 on success, `WouldBlock` if no key available.
+pub const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
+
 // ---------------------------------------------------------------------------
 // IPC syscalls (200–399)
 // ---------------------------------------------------------------------------
@@ -525,6 +539,18 @@ pub const SYS_PROCESS_WAIT: u64 = 501;
 
 /// Get the current process ID.
 pub const SYS_PROCESS_ID: u64 = 502;
+
+/// Non-blocking wait for a process to exit.
+///
+/// `arg0`: process ID.
+///
+/// If the process has exited (is a zombie), reaps it and returns
+/// the exit code.  If the process is still running, returns
+/// `-EAGAIN` (= `-11`) immediately without blocking.
+///
+/// Returns: exit code on success, `-11` if still running, other
+///          negative error if the PID is invalid.
+pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
 
 /// Replace the current process image with a new ELF binary.
 ///

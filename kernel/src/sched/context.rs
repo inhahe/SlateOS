@@ -2,16 +2,23 @@
 //!
 //! ## `switch_context`
 //!
-//! Saves the current task's callee-saved registers into `old_ctx`,
-//! then restores them from `new_ctx`.  The `ret` at the end pops the
-//! return address from the **new** task's stack, resuming execution
-//! where that task last called `switch_context` (or, for a new task,
-//! jumping to `task_entry_trampoline`).
+//! Saves the current task's callee-saved registers and RFLAGS into
+//! `old_ctx`, then restores them from `new_ctx`.  The `ret` at the
+//! end pops the return address from the **new** task's stack, resuming
+//! execution where that task last called `switch_context` (or, for a
+//! new task, jumping to `task_entry_trampoline`).
 //!
-//! Only callee-saved registers (`rbx`, `rbp`, `r12`–`r15`, `rsp`)
-//! are saved because the caller's compiler-generated code already
-//! saves caller-saved registers.  This keeps the context switch fast
-//! (7 register saves + 7 restores ≈ 14 memory accesses).
+//! Callee-saved registers (`rbx`, `rbp`, `r12`–`r15`, `rsp`) plus
+//! RFLAGS are saved.  Caller-saved registers are already handled by
+//! the compiler's calling convention.
+//!
+//! ### Why RFLAGS?
+//!
+//! The interrupt flag (IF) in RFLAGS must be preserved per-task.
+//! Without it, a task preempted while IF=0 (e.g., after softirq's
+//! CLI) would context-switch to another task that then runs with
+//! interrupts permanently disabled — losing timer ticks and device
+//! IRQ delivery on that CPU.
 //!
 //! ## `task_entry_trampoline`
 //!
@@ -44,6 +51,7 @@ global_asm!(
     //   offset 0x20: r14
     //   offset 0x28: r15
     //   offset 0x30: rsp
+    //   offset 0x38: rflags
     ".global switch_context",
     "switch_context:",
     // Save callee-saved registers to old context.
@@ -54,6 +62,13 @@ global_asm!(
     "mov [rdi + 0x20], r14",
     "mov [rdi + 0x28], r15",
     "mov [rdi + 0x30], rsp",
+    // Save RFLAGS — preserves the interrupt flag (IF) per-task.
+    // Without this, a task preempted after CLI would leak IF=0
+    // into the next task, permanently disabling interrupts on
+    // that CPU.
+    "pushfq",
+    "pop rax",
+    "mov [rdi + 0x38], rax",
 
     // Restore callee-saved registers from new context.
     "mov rbx, [rsi + 0x00]",
@@ -63,6 +78,13 @@ global_asm!(
     "mov r14, [rsi + 0x20]",
     "mov r15, [rsi + 0x28]",
     "mov rsp, [rsi + 0x30]",
+    // Restore RFLAGS from the target task's saved state.
+    // For new tasks, rflags is set to 0x202 (IF=1, reserved bit 1=1)
+    // by prepare_context(), ensuring interrupts are enabled when the
+    // task first runs.
+    "mov rax, [rsi + 0x38]",
+    "push rax",
+    "popfq",
 
     // Return.  For an existing task, this returns to where it last
     // called switch_context.  For a new task, this pops the

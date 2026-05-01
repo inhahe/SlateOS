@@ -356,10 +356,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // Test 2: process_pending with no bits is a no-op.
     let runs_before = TOTAL_RUNS.load(Ordering::Acquire);
-    // SAFETY: test context, interrupts may or may not be enabled.
-    // The STI/CLI inside process_pending is safe regardless.
+    // SAFETY: test context, interrupts should be enabled.
+    // process_pending does STI→handlers→CLI internally, so we
+    // re-enable interrupts after the call (we're in boot context,
+    // not an ISR that would do IRETQ to restore RFLAGS).
     unsafe {
         process_pending();
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
     let runs_after = TOTAL_RUNS.load(Ordering::Acquire);
     if runs_after != runs_before {
@@ -374,6 +377,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // SAFETY: See test 2 safety comment.
     unsafe {
         process_pending();
+        // process_pending() does STI→handlers→CLI internally.
+        // In boot context (no IRETQ), we must re-enable interrupts
+        // so the rest of the boot doesn't run with IF=0.
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
     let handlers_after = TOTAL_HANDLERS.load(Ordering::Acquire);
     if handlers_after <= handlers_before {

@@ -186,6 +186,19 @@ min_cycles = 1588
 min_ns    = 38
 min_cycles = 142
 
+[qemu.isr_hard_irq]
+# Timer ISR hard-IRQ phase: entry → scheduler timer_tick → EOI.
+# This is the interval during which device interrupts are blocked on
+# the CPU.  Measured via TSC inside handle_timer_irq, gated by
+# ISR_MEASURE_ACTIVE.  Release build, ~100 timer ticks (~1s window).
+min_ns     = 15434
+min_cycles = 56424
+mean_ns    = 40978
+mean_cycles = 149801
+# Note: Well above the 37000-cycle native target, but QEMU/WHPX adds
+# significant overhead to every atomic operation and MMIO access (APIC
+# EOI write).  On bare metal, expect 3-10x improvement.
+
 # -------------------------------------------------------------------------
 # Measurement methodology notes
 # -------------------------------------------------------------------------

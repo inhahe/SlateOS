@@ -128,6 +128,30 @@ static APIC_BASE_VIRT: core::sync::atomic::AtomicU64 =
 static TIMER_ACTIVE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+// ---------------------------------------------------------------------------
+// ISR latency measurement (for benchmarking)
+// ---------------------------------------------------------------------------
+
+/// Whether ISR latency measurement is active.
+static ISR_MEASURE_ACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Minimum hard-IRQ cycles observed (entry → EOI, interrupts disabled).
+static ISR_HARD_MIN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Maximum hard-IRQ cycles observed.
+static ISR_HARD_MAX: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Total hard-IRQ cycles accumulated during measurement window.
+static ISR_HARD_TOTAL: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Number of ticks measured.
+static ISR_MEASURE_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Tick counter — incremented on every timer interrupt.
 static TICK_COUNT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
@@ -205,6 +229,70 @@ pub unsafe fn eoi() {
 #[must_use]
 pub fn tick_count() -> u64 {
     TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
+// ISR latency measurement — public API
+// ---------------------------------------------------------------------------
+
+/// Start ISR latency measurement.
+///
+/// Resets all counters and enables per-tick TSC sampling in
+/// [`handle_timer_irq`].  Each timer ISR records entry → post-EOI
+/// cycles, giving the hard-IRQ phase duration (the time interrupts
+/// are disabled and other devices are blocked).
+///
+/// Call [`stop_isr_measurement`] to end the measurement window, then
+/// [`isr_measurement_results`] to read min/mean/max cycles.
+pub fn start_isr_measurement() {
+    // Reset counters before enabling measurement.
+    ISR_HARD_MIN.store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+    ISR_HARD_MAX.store(0, core::sync::atomic::Ordering::Relaxed);
+    ISR_HARD_TOTAL.store(0, core::sync::atomic::Ordering::Relaxed);
+    ISR_MEASURE_COUNT.store(0, core::sync::atomic::Ordering::Relaxed);
+    // Enable sampling — the next timer ISR will start recording.
+    ISR_MEASURE_ACTIVE.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Stop ISR latency measurement.
+///
+/// Disables per-tick TSC sampling.  Results remain readable via
+/// [`isr_measurement_results`] until the next [`start_isr_measurement`].
+pub fn stop_isr_measurement() {
+    ISR_MEASURE_ACTIVE.store(false, core::sync::atomic::Ordering::Release);
+}
+
+/// ISR latency measurement results.
+#[derive(Debug, Clone, Copy)]
+pub struct IsrMeasurement {
+    /// Minimum hard-IRQ phase cycles (entry → post-EOI).
+    pub min_cycles: u64,
+    /// Maximum hard-IRQ phase cycles.
+    pub max_cycles: u64,
+    /// Mean hard-IRQ phase cycles.
+    pub mean_cycles: u64,
+    /// Total ticks sampled.
+    pub count: u64,
+}
+
+/// Read ISR latency measurement results.
+///
+/// Returns `None` if no samples were collected (either measurement was
+/// never started, or no timer interrupts fired during the window).
+#[must_use]
+pub fn isr_measurement_results() -> Option<IsrMeasurement> {
+    let count = ISR_MEASURE_COUNT.load(core::sync::atomic::Ordering::Acquire);
+    if count == 0 {
+        return None;
+    }
+    let total = ISR_HARD_TOTAL.load(core::sync::atomic::Ordering::Acquire);
+    let mean = total.checked_div(count).unwrap_or(0);
+    Some(IsrMeasurement {
+        min_cycles: ISR_HARD_MIN.load(core::sync::atomic::Ordering::Acquire),
+        max_cycles: ISR_HARD_MAX.load(core::sync::atomic::Ordering::Acquire),
+        mean_cycles: mean,
+        count,
+    })
 }
 
 /// Initialize the Local APIC and start the periodic timer.
@@ -659,6 +747,17 @@ pub unsafe fn init_ap() {
 /// not acquire locks that could be held by the interrupted code.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
+    // --- ISR latency measurement: record entry TSC ---
+    //
+    // When benchmarking is active, capture the TSC at ISR entry and after
+    // EOI to measure the hard-IRQ phase.  The Relaxed load is ~1 cycle
+    // when measurement is inactive (branch not taken).
+    let measure_start = if ISR_MEASURE_ACTIVE.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::bench::rdtsc()
+    } else {
+        0
+    };
+
     // Only the BSP (CPU 0) increments the global tick counter.
     // Without this guard, each online CPU increments independently,
     // causing tick_count() to advance at N× rate (e.g., 200 Hz with
@@ -683,6 +782,34 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
         eoi();
     }
 
+    // --- ISR latency measurement: record hard-IRQ duration ---
+    //
+    // Captures entry → post-EOI cycles.  This is the time interrupts
+    // were disabled and other devices were blocked.  We measure after
+    // EOI because that's when the LAPIC is unblocked.
+    if measure_start != 0 {
+        let measure_end = crate::bench::rdtsc();
+        let elapsed = measure_end.saturating_sub(measure_start);
+        // Update min (CAS loop to atomically compute min).
+        let _ = ISR_HARD_MIN.fetch_update(
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+            |current| {
+                if elapsed < current { Some(elapsed) } else { None }
+            },
+        );
+        // Update max (CAS loop to atomically compute max).
+        let _ = ISR_HARD_MAX.fetch_update(
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+            |current| {
+                if elapsed > current { Some(elapsed) } else { None }
+            },
+        );
+        ISR_HARD_TOTAL.fetch_add(elapsed, core::sync::atomic::Ordering::Relaxed);
+        ISR_MEASURE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+
     // Raise softirqs for deferred work.  These will be processed below
     // with interrupts re-enabled, so device IRQs can preempt.
     //
@@ -701,6 +828,26 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     // (process_pending guarantees this).
     unsafe {
         crate::softirq::process_pending();
+    }
+
+    // Re-enable interrupts before potential preemption.
+    //
+    // process_pending() returns with interrupts disabled (CLI).  If we
+    // context-switch via preempt() below, switch_context saves the
+    // current task's RFLAGS — including IF.  Without this STI, the
+    // preempted task would be saved with IF=0, and when later resumed
+    // via a voluntary yield path (no IRETQ), it would run with
+    // interrupts permanently disabled on that CPU.
+    //
+    // Re-enabling here is safe: EOI has been sent (LAPIC won't re-
+    // deliver this vector), and IRETQ atomically restores the original
+    // RFLAGS regardless of the current IF state.
+    //
+    // SAFETY: Interrupts are safe to enable — all ISR-critical work is
+    // done, and the remaining code (preempt check + context switch) is
+    // designed to run with interrupts enabled.
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
 
     // If the scheduler says the time slice expired, reschedule.

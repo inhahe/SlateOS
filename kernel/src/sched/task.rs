@@ -109,11 +109,23 @@ pub struct Context {
     pub r14: u64,
     pub r15: u64,
     pub rsp: u64,
+    /// Saved RFLAGS register.
+    ///
+    /// Ensures each task resumes with its correct interrupt state.
+    /// Without this, a task preempted after `process_pending()` (which
+    /// calls CLI) would context-switch to another task that then runs
+    /// with interrupts disabled — permanently losing timer ticks and
+    /// device IRQ delivery on that CPU.
+    pub rflags: u64,
 }
 
 impl Context {
     /// An empty context (all zeros).  Used for the idle task whose
     /// context is captured on its first yield.
+    ///
+    /// `rflags` starts at 0 — the first context switch out of the idle
+    /// task captures the actual RFLAGS.  When the idle task is resumed,
+    /// it gets the RFLAGS it had when it last called `switch_context`.
     #[must_use]
     pub const fn empty() -> Self {
         Self {
@@ -124,6 +136,7 @@ impl Context {
             r14: 0,
             r15: 0,
             rsp: 0,
+            rflags: 0,
         }
     }
 }
@@ -574,6 +587,11 @@ impl Task {
             r14: 0,
             r15: 0,
             rsp: sp,
+            // RFLAGS with IF=1 (interrupts enabled) and reserved bit 1
+            // set.  When switch_context restores this via popfq, the new
+            // task starts with interrupts enabled — the expected state
+            // for all user and kernel tasks.
+            rflags: 0x202,
         }
     }
 

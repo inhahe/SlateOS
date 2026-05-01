@@ -498,6 +498,15 @@ pub fn run_all() {
     // Target from baselines.toml: < 10 µs (Linux: ~2-5 µs).
     bench_page_fault();
 
+    // --- ISR latency (timer interrupt hard-IRQ phase) ---
+    //
+    // Measures the time interrupts are disabled during the timer ISR:
+    // entry → tick counter increment → scheduler timer_tick → EOI.
+    // This is the hard-IRQ phase that blocks device interrupts.
+    //
+    // Target from baselines.toml: < 10 µs (37000 cycles).
+    bench_isr_latency();
+
     serial_println!("[bench] === Benchmarks complete ===");
 }
 
@@ -895,6 +904,107 @@ fn bench_page_fault() {
             "[bench]   page_fault_anonymous: ABOVE TARGET (min {}ns > target {}ns)",
             result.min_ns, target_ns
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISR latency benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark the timer ISR hard-IRQ phase latency.
+///
+/// Enables per-tick TSC sampling inside `handle_timer_irq`, lets the
+/// timer fire for ~100 ticks (~1 second at 100 Hz), then reads the
+/// accumulated min/mean/max cycles.
+///
+/// The hard-IRQ phase is the interval from ISR entry to EOI — the time
+/// during which other device interrupts are blocked on this CPU.  Our
+/// target (from `baselines.toml`) is < 10 µs (37 000 cycles).
+///
+/// Unlike other benchmarks that call a function in a loop, this one
+/// measures work driven by hardware interrupts, so we yield to let
+/// timer ticks accumulate.
+fn bench_isr_latency() {
+    use crate::apic;
+
+    let start_tick = apic::tick_count();
+    serial_println!(
+        "[bench] isr_latency: measuring ~100 timer ticks (start_tick={})...",
+        start_tick,
+    );
+
+    // Start measurement — next timer ISR begins sampling.
+    apic::start_isr_measurement();
+
+    // Busy-wait for ~100 timer ticks (~1 second at 100 Hz).
+    //
+    // We can't use yield_now() here because the boot task (priority 0)
+    // gets re-selected immediately on each yield — all 2000 yields
+    // complete before a single timer tick fires.  Instead, spin-wait
+    // on the tick counter.  The timer ISR fires normally (interrupts
+    // are enabled) and records ISR latency measurements on each tick.
+    //
+    // Use a TSC-based timeout (~5 seconds) as a safety net in case
+    // tick_count stops advancing (e.g., timer misconfiguration, CPU
+    // migration to a non-BSP core).
+    let target_ticks = 100u64;
+    let tsc_start = rdtsc();
+    let tsc_timeout = tsc_freq().saturating_mul(5); // 5 seconds worth of cycles
+    loop {
+        let elapsed_ticks = apic::tick_count().saturating_sub(start_tick);
+        if elapsed_ticks >= target_ticks {
+            break;
+        }
+        let elapsed_tsc = rdtsc().saturating_sub(tsc_start);
+        if elapsed_tsc > tsc_timeout {
+            serial_println!(
+                "[bench] isr_latency: TSC timeout after ~5s (ticks advanced: {}, expected: {})",
+                elapsed_ticks, target_ticks
+            );
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    // Stop measurement.
+    apic::stop_isr_measurement();
+
+    let actual_ticks = apic::tick_count().saturating_sub(start_tick);
+
+    match apic::isr_measurement_results() {
+        Some(m) => {
+            let min_ns = cycles_to_ns(m.min_cycles);
+            let mean_ns = cycles_to_ns(m.mean_cycles);
+            let max_ns = cycles_to_ns(m.max_cycles);
+
+            serial_println!(
+                "[bench] isr_hard_irq: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles ({}ns)  [{} samples in {} ticks]",
+                m.min_cycles, min_ns,
+                m.mean_cycles, mean_ns,
+                m.max_cycles, max_ns,
+                m.count, actual_ticks
+            );
+
+            // Target from baselines.toml: < 37000 cycles (< 10 µs).
+            let target_cycles = 37_000u64;
+            if m.min_cycles <= target_cycles {
+                serial_println!(
+                    "[bench]   isr_latency: PASS (min {} cycles <= target {} cycles)",
+                    m.min_cycles, target_cycles
+                );
+            } else {
+                serial_println!(
+                    "[bench]   isr_latency: ABOVE TARGET (min {} cycles > target {} cycles)",
+                    m.min_cycles, target_cycles
+                );
+            }
+        }
+        None => {
+            serial_println!(
+                "[bench] isr_latency: NO SAMPLES (timer ticks elapsed: {})",
+                actual_ticks
+            );
+        }
     }
 }
 

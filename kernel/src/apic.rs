@@ -56,6 +56,10 @@ const APIC_VERSION: u32 = 0x030;
 const APIC_EOI: u32 = 0x0B0;
 /// Spurious Interrupt Vector register (also contains APIC enable bit).
 const APIC_SPURIOUS: u32 = 0x0F0;
+/// Interrupt Command Register — low 32 bits (trigger IPI).
+const APIC_ICR_LOW: u32 = 0x300;
+/// Interrupt Command Register — high 32 bits (destination).
+const APIC_ICR_HIGH: u32 = 0x310;
 /// Timer Local Vector Table entry.
 const APIC_TIMER_LVT: u32 = 0x320;
 /// Timer initial count register.
@@ -126,6 +130,17 @@ static TIMER_ACTIVE: core::sync::atomic::AtomicBool =
 /// Tick counter — incremented on every timer interrupt.
 static TICK_COUNT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+
+/// Calibrated APIC timer initial count (ticks per 10 ms).
+///
+/// Saved by BSP during calibration so APs can reuse the same value
+/// without each needing PIT access (PIT is shared hardware).
+static CALIBRATED_TIMER_COUNT: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// BSP's Local APIC ID (set during init).
+static BSP_APIC_ID: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
 
 // ---------------------------------------------------------------------------
 // Register access helpers
@@ -288,15 +303,22 @@ pub unsafe fn init() {
         ticks_per_10ms
     );
 
+    // Save BSP's APIC ID for SMP bootstrap.
+    #[allow(clippy::cast_possible_truncation)]
+    let bsp_id = (unsafe { apic_read(APIC_ID) } >> 24) as u8;
+    BSP_APIC_ID.store(bsp_id, core::sync::atomic::Ordering::Release);
+
     if ticks_per_10ms == 0 {
         serial_println!("[apic] WARNING: Timer calibration failed (0 ticks). Using fallback.");
-        // Fallback: set a reasonable default for QEMU (~100 MHz bus / 16 divider).
-        configure_periodic_timer(625_000);
+        let fallback = 625_000_u32;
+        CALIBRATED_TIMER_COUNT.store(fallback, core::sync::atomic::Ordering::Release);
+        configure_periodic_timer(fallback);
     } else {
         // Configure periodic mode at TICK_RATE_HZ.
         // ticks_per_10ms gives us the count for 10 ms (100 Hz).
         // For other rates: initial_count = ticks_per_10ms * 100 / TICK_RATE_HZ.
         // But since we want 100 Hz (= 10 ms), just use ticks_per_10ms directly.
+        CALIBRATED_TIMER_COUNT.store(ticks_per_10ms, core::sync::atomic::Ordering::Release);
         configure_periodic_timer(ticks_per_10ms);
     }
 
@@ -389,6 +411,154 @@ unsafe fn calibrate_timer_with_pit() -> u32 {
 
         // Calculate elapsed APIC ticks.
         0xFFFF_FFFF_u32.wrapping_sub(current)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SMP support — IPI sending and AP initialization
+// ---------------------------------------------------------------------------
+
+/// Read the Local APIC ID for the current CPU.
+///
+/// The APIC ID is in bits [31:24] of the APIC ID register.
+#[must_use]
+pub fn read_id() -> u8 {
+    // SAFETY: APIC must be initialized.
+    #[allow(clippy::cast_possible_truncation)]
+    let id = unsafe { apic_read(APIC_ID) } >> 24;
+    id as u8
+}
+
+/// Get the BSP's APIC ID (set during `init()`).
+#[must_use]
+pub fn bsp_id() -> u8 {
+    BSP_APIC_ID.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Get the calibrated APIC timer count (ticks per 10 ms).
+///
+/// Returns 0 if calibration hasn't been done yet.
+#[must_use]
+pub fn calibrated_count() -> u32 {
+    CALIBRATED_TIMER_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Wait for the ICR delivery status bit to clear (IPI accepted).
+///
+/// Spins until the APIC reports the ICR is idle.  On real hardware
+/// this is typically immediate; under QEMU it may take a few cycles.
+fn wait_icr_idle() {
+    // Bit 12 of ICR low = delivery status (1 = pending).
+    loop {
+        // SAFETY: APIC is initialized, ICR_LOW is a valid register.
+        let icr = unsafe { apic_read(APIC_ICR_LOW) };
+        if icr & (1 << 12) == 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Send an INIT IPI to a specific AP (by APIC ID).
+///
+/// The INIT IPI resets the target processor to its INIT state.
+/// After sending INIT, wait 10 ms before sending a SIPI.
+///
+/// # Safety
+///
+/// APIC must be initialized.  Must only be called from the BSP.
+pub unsafe fn send_init_ipi(apic_id: u8) {
+    wait_icr_idle();
+
+    // ICR high: destination APIC ID in bits [31:24].
+    // SAFETY: Valid APIC register write.
+    unsafe {
+        apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
+    }
+
+    // ICR low: INIT delivery mode (101), level assert, edge trigger.
+    // Bits: vector=0, delivery=INIT(0b101=5), dest_mode=physical(0),
+    //       level=assert(1), trigger=level(1).
+    // = 0x0000_C500
+    // SAFETY: Valid APIC register write, triggers the IPI.
+    unsafe {
+        apic_write(APIC_ICR_LOW, 0x0000_C500);
+    }
+
+    wait_icr_idle();
+
+    // De-assert INIT (required sequence).
+    // SAFETY: Valid APIC register write.
+    unsafe {
+        apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
+        apic_write(APIC_ICR_LOW, 0x0000_8500); // INIT, de-assert, level
+    }
+
+    wait_icr_idle();
+}
+
+/// Send a Startup IPI (SIPI) to a specific AP.
+///
+/// `vector` is the page number of the real-mode entry point.
+/// For example, if the trampoline is at physical 0x8000, vector = 0x08.
+///
+/// # Safety
+///
+/// APIC must be initialized.  The trampoline code must be in place at
+/// `vector * 0x1000`.  Must only be called from the BSP.
+pub unsafe fn send_sipi(apic_id: u8, vector: u8) {
+    wait_icr_idle();
+
+    // ICR high: destination APIC ID.
+    // SAFETY: Valid APIC register write.
+    unsafe {
+        apic_write(APIC_ICR_HIGH, u32::from(apic_id) << 24);
+    }
+
+    // ICR low: SIPI delivery mode (110), vector = page number.
+    // = 0x0000_0600 | vector
+    // SAFETY: Valid APIC register write, triggers the SIPI.
+    unsafe {
+        apic_write(APIC_ICR_LOW, 0x0000_0600 | u32::from(vector));
+    }
+
+    wait_icr_idle();
+}
+
+/// Initialize the Local APIC on an Application Processor.
+///
+/// Reuses the BSP's calibrated timer count (APs don't recalibrate via PIT).
+/// Sets up the spurious vector, enables the APIC, and starts the periodic
+/// timer with the same configuration as the BSP.
+///
+/// # Safety
+///
+/// Must be called exactly once per AP during SMP bootstrap, after the
+/// AP has loaded its GDT and IDT.  Interrupts must be disabled.
+pub unsafe fn init_ap() {
+    let apic_base_virt = APIC_BASE_VIRT.load(core::sync::atomic::Ordering::Acquire);
+    debug_assert!(apic_base_virt != 0, "BSP must init APIC first");
+
+    // Read this AP's APIC ID for diagnostics.
+    let apic_id = read_id();
+    serial_println!("[apic] AP LAPIC ID={} initializing", apic_id);
+
+    // Enable the APIC via the spurious vector register.
+    // SAFETY: APIC base is valid (shared with BSP — same physical MMIO).
+    unsafe {
+        apic_write(APIC_SPURIOUS, 0x100 | u32::from(SPURIOUS_VECTOR));
+    }
+
+    // Start the periodic timer with the BSP's calibrated count.
+    let count = CALIBRATED_TIMER_COUNT.load(core::sync::atomic::Ordering::Acquire);
+    if count > 0 {
+        configure_periodic_timer(count);
+        serial_println!(
+            "[apic] AP {} timer started (count={}, {} Hz)",
+            apic_id, count, TICK_RATE_HZ
+        );
+    } else {
+        serial_println!("[apic] WARNING: AP {} — no calibrated timer count", apic_id);
     }
 }
 

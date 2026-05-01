@@ -308,6 +308,69 @@ pub unsafe fn set_kernel_stack(stack_top: u64) {
     }
 }
 
+/// Load the BSP's GDT and segment registers on an Application Processor.
+///
+/// APs share the BSP's GDT (same code/data/TSS descriptors).  Each AP
+/// calls this during its boot sequence after entering 64-bit mode.
+///
+/// Also sets up the STAR MSR for syscall/sysret, which is per-CPU.
+///
+/// # Safety
+///
+/// Must be called exactly once per AP during SMP bootstrap, with
+/// interrupts disabled.
+pub unsafe fn reload_for_ap() {
+    // Load the same GDT as the BSP.
+    // SAFETY: GDT was initialized by BSP and is immutable (except TSS busy bit).
+    #[allow(clippy::cast_possible_truncation)]
+    let gdt_ptr = GdtPointer {
+        limit: (size_of::<Gdt>() - 1) as u16,
+        base: addr_of!(GDT) as u64,
+    };
+
+    unsafe {
+        core::arch::asm!(
+            "lgdt [{}]",
+            in(reg) &raw const gdt_ptr,
+            options(readonly, nostack, preserves_flags),
+        );
+
+        reload_segments();
+
+        // Clear the TSS descriptor's "busy" bit before loading it.
+        //
+        // When the BSP executed `ltr`, the CPU changed the TSS descriptor
+        // type from 0x9 (available 64-bit TSS) to 0xB (busy 64-bit TSS).
+        // Attempting `ltr` on a busy TSS causes a #GP.  We clear bit 41
+        // of the low half (the busy bit in the type field) to make it
+        // available again.
+        //
+        // This is safe because we boot APs sequentially (only one AP
+        // loads the TSS at a time) and the BSP's ring-0 interrupt
+        // handling doesn't require the TSS to be marked busy.
+        //
+        // TODO: Per-CPU TSS with independent RSP0 and IST stacks.
+        // Once per-CPU TSS is implemented, each CPU gets its own TSS
+        // descriptor and this hack becomes unnecessary.
+        (*addr_of_mut!(GDT)).entries[5] &= !(1u64 << 41);
+
+        core::arch::asm!(
+            "ltr {:x}",
+            in(reg) TSS_SEL,
+            options(nostack, preserves_flags),
+        );
+    }
+
+    // Set up the STAR MSR for syscall/sysret (per-CPU MSR).
+    #[allow(clippy::items_after_statements)]
+    const IA32_STAR: u32 = 0xC000_0081;
+    let star_value: u64 = (u64::from(KERNEL_CS) << 32) | (0x10_u64 << 48);
+    // SAFETY: IA32_STAR is a valid MSR.
+    unsafe {
+        cpu::wrmsr(IA32_STAR, star_value);
+    }
+}
+
 /// Reload CS, DS, ES, SS, FS, GS after loading a new GDT.
 ///
 /// CS requires a far return; the data segments are loaded with `mov`.

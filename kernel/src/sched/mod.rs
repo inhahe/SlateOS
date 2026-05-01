@@ -115,9 +115,9 @@ impl Scheduler for PriorityRoundRobin {
 /// With a single CPU (current state), all tasks go to CPU 0's queue.
 /// When SMP is implemented, each CPU will have its own queue with
 /// work stealing for load balance.
-struct SchedState {
+pub(crate) struct SchedState {
     /// Per-CPU scheduler (run queues + work stealing).
-    scheduler: PerCpuScheduler,
+    pub(crate) scheduler: PerCpuScheduler,
     /// All tasks indexed by ID.
     tasks: BTreeMap<TaskId, Task>,
     /// Whether the scheduler has been initialized.
@@ -136,17 +136,22 @@ static SCHED: Mutex<SchedState> = Mutex::new(SchedState {
 /// For now, a single global (only one CPU is online).
 static CURRENT_TASK_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Get the current CPU ID.
+/// Get the current CPU ID (sequential index).
 ///
-/// Returns 0 for the boot CPU.  When SMP is implemented, this will
-/// read the LAPIC ID or use SWAPGS-based per-CPU data to determine
-/// which CPU is executing.
+/// Returns 0 for the BSP.  After SMP bootstrap, reads the LAPIC ID
+/// and maps it to a sequential CPU index.
 #[inline]
 #[must_use]
 pub fn current_cpu_id() -> usize {
-    // Single CPU for now.  When SMP is added, this will read the
-    // Local APIC ID and map it to a sequential CPU index.
-    0
+    crate::smp::current_cpu_index()
+}
+
+/// Acquire the scheduler lock (for SMP bootstrap to update CPU count).
+///
+/// The returned guard provides mutable access to `SchedState`.
+/// This is intentionally `pub(crate)` — only SMP bootstrap uses it.
+pub(crate) fn sched_lock() -> spin::MutexGuard<'static, SchedState> {
+    SCHED.lock()
 }
 
 /// The boot-time kernel PML4 physical address.

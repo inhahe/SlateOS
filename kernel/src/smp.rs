@@ -1,0 +1,890 @@
+//! Symmetric Multi-Processing (SMP) bootstrap.
+//!
+//! Wakes Application Processors (APs) from their INIT state using the
+//! standard INIT-SIPI-SIPI IPI sequence, and brings each AP through
+//! 16-bit real mode → 32-bit protected mode → 64-bit long mode into
+//! the kernel.
+//!
+//! ## AP Bootstrap Sequence
+//!
+//! 1. BSP copies a small trampoline to physical address 0x8000.
+//! 2. BSP temporarily identity-maps 0x0..0x200000 so the trampoline
+//!    code can execute while paging is being set up.
+//! 3. For each AP discovered in the MADT:
+//!    a. BSP patches the trampoline data area with the AP's stack, PML4,
+//!       entry point, and CPU index.
+//!    b. BSP sends INIT IPI → 10 ms delay → SIPI → 200 µs → SIPI.
+//!    c. BSP spins waiting for the AP to set its "started" flag.
+//!    d. AP executes trampoline: real → protected → long mode, jumps
+//!       to `ap_entry()` in the kernel.
+//!    e. AP loads GDT, IDT, enables APIC timer, enters scheduler.
+//! 4. BSP removes the identity mapping and updates the scheduler with
+//!    the actual CPU count.
+//!
+//! ## Per-CPU Data
+//!
+//! Each CPU has a `PerCpuData` record stored in a static array indexed
+//! by sequential CPU number (0 = BSP, 1+ = APs).  The LAPIC ID → CPU
+//! index mapping is stored in a separate lookup table.
+//!
+//! ## References
+//!
+//! - Intel SDM Vol. 3A §8.4 "Multiple-Processor (MP) Initialization"
+//! - OSDev wiki: <https://wiki.osdev.org/Symmetric_Multiprocessing>
+//! - Based on Linux `arch/x86/kernel/smpboot.c` AP bootstrap pattern.
+
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::error::KernelResult;
+use crate::serial_println;
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum CPUs supported (matches `PerCpuScheduler::MAX_CPUS`).
+pub const MAX_CPUS: usize = 16;
+
+/// Physical address where the AP trampoline is copied.
+/// Must be below 1 MiB, 4 KiB aligned.  0x8000 is conventionally used
+/// and avoids conflicts with BDA (0x400), EBDA, and VGA memory.
+const TRAMPOLINE_PHYS: u64 = 0x8000;
+
+/// SIPI vector = TRAMPOLINE_PHYS / 0x1000.
+#[allow(clippy::cast_possible_truncation)]
+const SIPI_VECTOR: u8 = (TRAMPOLINE_PHYS / 0x1000) as u8;
+
+/// Size of per-AP kernel stack (32 KiB — 2 of our 16 KiB frames).
+const AP_STACK_SIZE: usize = 32 * 1024;
+
+/// Timeout waiting for an AP to start (in PIT-calibrated busy-loop
+/// iterations).  ~200 ms under QEMU.
+const AP_STARTUP_TIMEOUT: u64 = 200_000_000;
+
+// ---------------------------------------------------------------------------
+// Trampoline data area offsets (from trampoline base at 0x8000)
+// ---------------------------------------------------------------------------
+
+/// Offset of PML4 physical address (8 bytes).
+const DATA_PML4: usize = 0x300;
+/// Offset of AP entry point virtual address (8 bytes).
+const DATA_ENTRY: usize = 0x308;
+/// Offset of AP kernel stack top virtual address (8 bytes).
+const DATA_STACK: usize = 0x310;
+/// Offset of CPU index for this AP (4 bytes).
+const DATA_CPU_IDX: usize = 0x318;
+/// Offset of "AP started" flag (4 bytes, set to 1 by AP).
+const DATA_STARTED: usize = 0x31C;
+
+// ---------------------------------------------------------------------------
+// Per-CPU data
+// ---------------------------------------------------------------------------
+
+/// Number of online CPUs (starts at 1 for the BSP).
+static NUM_CPUS_ONLINE: AtomicU32 = AtomicU32::new(1);
+
+/// LAPIC ID → sequential CPU index mapping.
+/// Index: APIC ID (0–255).  Value: CPU index (0xFF = unmapped).
+static APIC_TO_CPU: spin::Mutex<[u8; 256]> = spin::Mutex::new([0xFF; 256]);
+
+/// Whether SMP has been initialized.
+static SMP_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// BSP's sequential CPU index (always 0).
+const BSP_CPU_INDEX: usize = 0;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Get the number of online CPUs.
+#[must_use]
+pub fn cpu_count() -> usize {
+    NUM_CPUS_ONLINE.load(Ordering::Relaxed) as usize
+}
+
+/// Get the current CPU's sequential index.
+///
+/// Returns 0 (BSP) if SMP has not been initialized.
+/// After SMP init, reads the LAPIC ID and maps it to a CPU index.
+#[must_use]
+pub fn current_cpu_index() -> usize {
+    if !SMP_INITIALIZED.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let apic_id = crate::apic::read_id();
+    let table = APIC_TO_CPU.lock();
+    let idx = table[apic_id as usize];
+    if idx == 0xFF { 0 } else { idx as usize }
+}
+
+/// Check if SMP bootstrap has completed.
+#[must_use]
+#[allow(dead_code)] // Will be used by per-CPU data accessors.
+pub fn is_initialized() -> bool {
+    SMP_INITIALIZED.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
+// AP trampoline binary
+// ---------------------------------------------------------------------------
+
+/// Build the AP trampoline code as a byte array.
+///
+/// The trampoline runs at physical address TRAMPOLINE_PHYS (0x8000).
+/// It transitions from 16-bit real mode → 32-bit protected mode →
+/// 64-bit long mode, then jumps to the AP kernel entry point.
+///
+/// Layout:
+///   0x000 – 0x0FF: 16-bit real mode code
+///   0x100 – 0x1FF: 32-bit protected mode code
+///   0x200 – 0x2FF: 64-bit long mode code
+///   0x300 – 0x3FF: Data area (patched per-AP by BSP)
+fn build_trampoline() -> [u8; 1024] {
+    let mut buf = [0u8; 1024];
+    let base = TRAMPOLINE_PHYS;
+
+    // ===== 16-bit real mode code (offset 0x000) =====
+    let mut p = 0usize;
+
+    // cli
+    buf[p] = 0xFA; p += 1;
+    // cld
+    buf[p] = 0xFC; p += 1;
+    // xor ax, ax
+    buf[p] = 0x31; buf[p+1] = 0xC0; p += 2;
+    // mov ds, ax
+    buf[p] = 0x8E; buf[p+1] = 0xD8; p += 2;
+    // mov es, ax
+    buf[p] = 0x8E; buf[p+1] = 0xC0; p += 2;
+    // mov ss, ax
+    buf[p] = 0x8E; buf[p+1] = 0xD0; p += 2;
+    // mov sp, 0x7C00  (temporary stack below trampoline)
+    buf[p] = 0xBC; p += 1;
+    buf[p] = 0x00; buf[p+1] = 0x7C; p += 2;
+
+    // lgdt [gdt16_ptr]  — 16-bit absolute address mode
+    // The GDT pointer is at base + 0x340 (trampoline data area).
+    // In 16-bit mode with DS=0: lgdt [disp16]
+    // Opcode: 0F 01 16 <disp16>
+    let gdt16_ptr = (base + 0x340) as u16;
+    buf[p] = 0x0F; buf[p+1] = 0x01; buf[p+2] = 0x16; p += 3;
+    buf[p] = (gdt16_ptr & 0xFF) as u8; buf[p+1] = (gdt16_ptr >> 8) as u8; p += 2;
+
+    // mov eax, cr0  (operand-size prefix + mov eax, cr0)
+    // In 16-bit: 66 0F 20 C0
+    buf[p] = 0x66; buf[p+1] = 0x0F; buf[p+2] = 0x20; buf[p+3] = 0xC0; p += 4;
+    // or al, 1  (set PE bit)
+    buf[p] = 0x0C; buf[p+1] = 0x01; p += 2;
+    // mov cr0, eax  (operand-size prefix)
+    // 66 0F 22 C0
+    buf[p] = 0x66; buf[p+1] = 0x0F; buf[p+2] = 0x22; buf[p+3] = 0xC0; p += 4;
+
+    // Far jump to 32-bit code at base+0x100, selector 0x08
+    // In 16-bit: EA <offset16> <selector16>
+    // But our target address is 0x8100 which is > 0xFFFF in 16-bit offset.
+    // We need an operand-size prefix for 32-bit offset: 66 EA <offset32> <sel16>
+    let target32 = (base + 0x100) as u32;
+    buf[p] = 0x66; p += 1;  // operand-size prefix for 32-bit offset
+    buf[p] = 0xEA; p += 1;  // far jmp
+    // offset32 (little-endian)
+    buf[p]   = (target32 & 0xFF) as u8;
+    buf[p+1] = ((target32 >> 8) & 0xFF) as u8;
+    buf[p+2] = ((target32 >> 16) & 0xFF) as u8;
+    buf[p+3] = ((target32 >> 24) & 0xFF) as u8;
+    p += 4;
+    // selector16 (little-endian)
+    buf[p] = 0x08; buf[p+1] = 0x00;
+
+    // ===== 32-bit protected mode code (offset 0x100) =====
+    p = 0x100;
+
+    // mov ax, 0x10  (data segment selector)
+    // In 32-bit: 66 B8 10 00
+    buf[p] = 0x66; buf[p+1] = 0xB8; buf[p+2] = 0x10; buf[p+3] = 0x00; p += 4;
+    // mov ds, ax
+    buf[p] = 0x8E; buf[p+1] = 0xD8; p += 2;
+    // mov es, ax
+    buf[p] = 0x8E; buf[p+1] = 0xC0; p += 2;
+    // mov ss, ax
+    buf[p] = 0x8E; buf[p+1] = 0xD0; p += 2;
+
+    // Enable PAE in CR4 (required for long mode)
+    // mov eax, cr4: 0F 20 E0
+    buf[p] = 0x0F; buf[p+1] = 0x20; buf[p+2] = 0xE0; p += 3;
+    // or eax, 0x20: 83 C8 20  (or eax, imm8)
+    // Actually: or eax, imm32 = 0D 20 00 00 00
+    buf[p] = 0x0D; p += 1;
+    buf[p] = 0x20; buf[p+1] = 0x00; buf[p+2] = 0x00; buf[p+3] = 0x00; p += 4;
+    // mov cr4, eax: 0F 22 E0
+    buf[p] = 0x0F; buf[p+1] = 0x22; buf[p+2] = 0xE0; p += 3;
+
+    // Load PML4 into CR3 from trampoline data area
+    // mov eax, [base + DATA_PML4]: A1 <addr32>
+    let pml4_data_addr = (base as u32) + (DATA_PML4 as u32);
+    buf[p] = 0xA1; p += 1;
+    buf[p]   = (pml4_data_addr & 0xFF) as u8;
+    buf[p+1] = ((pml4_data_addr >> 8) & 0xFF) as u8;
+    buf[p+2] = ((pml4_data_addr >> 16) & 0xFF) as u8;
+    buf[p+3] = ((pml4_data_addr >> 24) & 0xFF) as u8;
+    p += 4;
+    // mov cr3, eax: 0F 22 D8
+    buf[p] = 0x0F; buf[p+1] = 0x22; buf[p+2] = 0xD8; p += 3;
+
+    // Enable long mode via IA32_EFER MSR
+    // mov ecx, 0xC0000080: B9 80 00 00 C0
+    buf[p] = 0xB9; p += 1;
+    buf[p] = 0x80; buf[p+1] = 0x00; buf[p+2] = 0x00; buf[p+3] = 0xC0; p += 4;
+    // rdmsr: 0F 32
+    buf[p] = 0x0F; buf[p+1] = 0x32; p += 2;
+    // or eax, 0x100 (set LME bit)
+    // 0D 00 01 00 00
+    buf[p] = 0x0D; p += 1;
+    buf[p] = 0x00; buf[p+1] = 0x01; buf[p+2] = 0x00; buf[p+3] = 0x00; p += 4;
+    // wrmsr: 0F 30
+    buf[p] = 0x0F; buf[p+1] = 0x30; p += 2;
+
+    // Enable paging (activates long mode since LME is set)
+    // mov eax, cr0: 0F 20 C0
+    buf[p] = 0x0F; buf[p+1] = 0x20; buf[p+2] = 0xC0; p += 3;
+    // or eax, 0x80000000 (set PG bit): 0D 00 00 00 80
+    buf[p] = 0x0D; p += 1;
+    buf[p] = 0x00; buf[p+1] = 0x00; buf[p+2] = 0x00; buf[p+3] = 0x80; p += 4;
+    // mov cr0, eax: 0F 22 C0
+    buf[p] = 0x0F; buf[p+1] = 0x22; buf[p+2] = 0xC0; p += 3;
+
+    // Load 64-bit GDT
+    // lgdt [gdt64_ptr]: 0F 01 15 <disp32>
+    let gdt64_ptr = (base as u32) + 0x368;
+    buf[p] = 0x0F; buf[p+1] = 0x01; buf[p+2] = 0x15; p += 3;
+    buf[p]   = (gdt64_ptr & 0xFF) as u8;
+    buf[p+1] = ((gdt64_ptr >> 8) & 0xFF) as u8;
+    buf[p+2] = ((gdt64_ptr >> 16) & 0xFF) as u8;
+    buf[p+3] = ((gdt64_ptr >> 24) & 0xFF) as u8;
+    p += 4;
+
+    // Far jump to 64-bit code at base+0x200, selector 0x08
+    // In 32-bit compatibility mode: EA <offset32> <selector16>
+    let target64 = (base + 0x200) as u32;
+    buf[p] = 0xEA; p += 1;
+    buf[p]   = (target64 & 0xFF) as u8;
+    buf[p+1] = ((target64 >> 8) & 0xFF) as u8;
+    buf[p+2] = ((target64 >> 16) & 0xFF) as u8;
+    buf[p+3] = ((target64 >> 24) & 0xFF) as u8;
+    p += 4;
+    buf[p] = 0x08; buf[p+1] = 0x00;
+
+    // ===== 64-bit long mode code (offset 0x200) =====
+    p = 0x200;
+
+    // mov ax, 0x10  (data segment)
+    // In 64-bit: 66 B8 10 00
+    buf[p] = 0x66; buf[p+1] = 0xB8; buf[p+2] = 0x10; buf[p+3] = 0x00; p += 4;
+    // mov ds, ax: 8E D8
+    buf[p] = 0x8E; buf[p+1] = 0xD8; p += 2;
+    // mov es, ax: 8E C0
+    buf[p] = 0x8E; buf[p+1] = 0xC0; p += 2;
+    // mov ss, ax: 8E D0
+    buf[p] = 0x8E; buf[p+1] = 0xD0; p += 2;
+    // xor ax, ax: 66 31 C0
+    buf[p] = 0x66; buf[p+1] = 0x31; buf[p+2] = 0xC0; p += 3;
+    // mov fs, ax: 8E E0
+    buf[p] = 0x8E; buf[p+1] = 0xE0; p += 2;
+    // mov gs, ax: 8E E8
+    buf[p] = 0x8E; buf[p+1] = 0xE8; p += 2;
+
+    // Load stack pointer from trampoline data area.
+    // Since we have identity mapping AND the HHDM, the data is at the
+    // identity-mapped address (low physical).
+    // mov rsp, [base + DATA_STACK]
+    // REX.W + MOV rsp, [rip+disp32] or REX.W + MOV rsp, [disp32]
+    // Using absolute addressing: 48 8B 24 25 <disp32>
+    let stack_addr = (base as u32) + (DATA_STACK as u32);
+    // REX.W mov rsp, [disp32]: 48 8B 24 25 <addr32>
+    // Actually: mov rsp, qword [addr]
+    // 48 A1 <addr64> would be "mov rax, [moffs64]" — only rax.
+    // For rsp: 48 8B 24 25 <disp32> = mov rsp, [sib] with base=none, index=none
+    buf[p] = 0x48; buf[p+1] = 0x8B; buf[p+2] = 0x24; buf[p+3] = 0x25; p += 4;
+    buf[p]   = (stack_addr & 0xFF) as u8;
+    buf[p+1] = ((stack_addr >> 8) & 0xFF) as u8;
+    buf[p+2] = ((stack_addr >> 16) & 0xFF) as u8;
+    buf[p+3] = ((stack_addr >> 24) & 0xFF) as u8;
+    p += 4;
+
+    // Set the "AP started" flag to 1.
+    // mov dword [base + DATA_STARTED], 1
+    // C7 04 25 <addr32> 01 00 00 00
+    let started_addr = (base as u32) + (DATA_STARTED as u32);
+    buf[p] = 0xC7; buf[p+1] = 0x04; buf[p+2] = 0x25; p += 3;
+    buf[p]   = (started_addr & 0xFF) as u8;
+    buf[p+1] = ((started_addr >> 8) & 0xFF) as u8;
+    buf[p+2] = ((started_addr >> 16) & 0xFF) as u8;
+    buf[p+3] = ((started_addr >> 24) & 0xFF) as u8;
+    p += 4;
+    buf[p] = 0x01; buf[p+1] = 0x00; buf[p+2] = 0x00; buf[p+3] = 0x00; p += 4;
+
+    // Load AP entry point and jump to it.
+    // mov rax, [base + DATA_ENTRY]: 48 A1 <addr64>
+    // Actually 48 A1 is only for moffs64 which is 8 bytes address in 64-bit.
+    // In 64-bit mode, "MOV RAX, moffs64" = A1 + 8-byte absolute address.
+    // But with REX.W: 48 A1 <addr64>
+    let entry_addr = (base as u64) + (DATA_ENTRY as u64);
+    buf[p] = 0x48; buf[p+1] = 0xA1; p += 2;
+    buf[p]   = (entry_addr & 0xFF) as u8;
+    buf[p+1] = ((entry_addr >> 8) & 0xFF) as u8;
+    buf[p+2] = ((entry_addr >> 16) & 0xFF) as u8;
+    buf[p+3] = ((entry_addr >> 24) & 0xFF) as u8;
+    buf[p+4] = ((entry_addr >> 32) & 0xFF) as u8;
+    buf[p+5] = ((entry_addr >> 40) & 0xFF) as u8;
+    buf[p+6] = ((entry_addr >> 48) & 0xFF) as u8;
+    buf[p+7] = ((entry_addr >> 56) & 0xFF) as u8;
+    p += 8;
+
+    // jmp rax: FF E0
+    buf[p] = 0xFF; buf[p+1] = 0xE0;
+    // p += 2;
+
+    // ===== Data area (offset 0x300) =====
+    // Patched per-AP by the BSP before sending SIPI.
+
+    // 0x300: PML4 physical address (8 bytes)  — filled by patch_trampoline
+    // 0x308: AP entry point virtual addr (8 bytes) — filled by patch_trampoline
+    // 0x310: AP stack top virtual addr (8 bytes) — filled by patch_trampoline
+    // 0x318: CPU index (4 bytes) — filled by patch_trampoline
+    // 0x31C: AP started flag (4 bytes) — set to 1 by AP code above
+
+    // 0x320: 32-bit temporary GDT (3 entries)
+    p = 0x320;
+    // Entry 0: null descriptor
+    let null_desc: u64 = 0;
+    write_u64(&mut buf, p, null_desc); p += 8;
+    // Entry 1 (selector 0x08): 32-bit code segment
+    // P=1, DPL=0, S=1, type=0xA (code, exec/read), G=1, D=1
+    let code32: u64 = 0x00CF_9A00_0000_FFFF;
+    write_u64(&mut buf, p, code32); p += 8;
+    // Entry 2 (selector 0x10): 32-bit data segment
+    // P=1, DPL=0, S=1, type=0x2 (data, read/write), G=1, D=1
+    let data32: u64 = 0x00CF_9200_0000_FFFF;
+    write_u64(&mut buf, p, data32);
+    // p += 8;
+
+    // 0x340: GDT pointer for 16-bit lgdt (6 bytes: limit16 + base32)
+    p = 0x340;
+    let gdt32_base = (base + 0x320) as u32;
+    // limit = 3*8 - 1 = 23
+    buf[p] = 23; buf[p+1] = 0; p += 2;
+    // base (32-bit, little-endian)
+    buf[p]   = (gdt32_base & 0xFF) as u8;
+    buf[p+1] = ((gdt32_base >> 8) & 0xFF) as u8;
+    buf[p+2] = ((gdt32_base >> 16) & 0xFF) as u8;
+    buf[p+3] = ((gdt32_base >> 24) & 0xFF) as u8;
+    // p += 4;
+
+    // 0x350: 64-bit GDT (3 entries)
+    p = 0x350;
+    // Entry 0: null
+    write_u64(&mut buf, p, 0); p += 8;
+    // Entry 1 (selector 0x08): 64-bit code segment
+    // P=1, DPL=0, S=1, type=0xA (code, exec/read), L=1, D=0
+    let code64: u64 = 0x00AF_9A00_0000_FFFF;
+    write_u64(&mut buf, p, code64); p += 8;
+    // Entry 2 (selector 0x10): 64-bit data segment
+    let data64: u64 = 0x00CF_9200_0000_FFFF;
+    write_u64(&mut buf, p, data64);
+    // p += 8;
+
+    // 0x368: GDT pointer for 64-bit lgdt (6 bytes in 32-bit mode)
+    // NOTE: The 64-bit GDT entries occupy 0x350-0x367 (3 × 8 bytes).
+    // The GDT pointer must NOT overlap with the GDT entries.
+    // In 32-bit compatibility mode, lgdt loads a 6-byte pseudo-descriptor:
+    // 2 bytes limit + 4 bytes base.  Since we're still identity-mapped,
+    // the base is the physical address of the 64-bit GDT.
+    p = 0x368;
+    let gdt64_base = (base + 0x350) as u32;
+    buf[p] = 23; buf[p+1] = 0; p += 2;
+    buf[p]   = (gdt64_base & 0xFF) as u8;
+    buf[p+1] = ((gdt64_base >> 8) & 0xFF) as u8;
+    buf[p+2] = ((gdt64_base >> 16) & 0xFF) as u8;
+    buf[p+3] = ((gdt64_base >> 24) & 0xFF) as u8;
+
+    buf
+}
+
+/// Write a u64 in little-endian to the buffer at the given offset.
+#[allow(clippy::indexing_slicing)]
+fn write_u64(buf: &mut [u8], off: usize, val: u64) {
+    let bytes = val.to_le_bytes();
+    buf[off..off + 8].copy_from_slice(&bytes);
+}
+
+/// Patch the trampoline data area for a specific AP.
+fn patch_trampoline(
+    tramp_virt: *mut u8,
+    pml4_phys: u64,
+    entry_virt: u64,
+    stack_top: u64,
+    cpu_index: u32,
+) {
+    // SAFETY: tramp_virt points to a mapped page with at least 1024 bytes.
+    unsafe {
+        // PML4 physical address
+        let dst = tramp_virt.add(DATA_PML4);
+        core::ptr::write_volatile(dst.cast::<u64>(), pml4_phys);
+
+        // AP entry point (kernel virtual address)
+        let dst = tramp_virt.add(DATA_ENTRY);
+        core::ptr::write_volatile(dst.cast::<u64>(), entry_virt);
+
+        // AP stack top (kernel virtual address)
+        let dst = tramp_virt.add(DATA_STACK);
+        core::ptr::write_volatile(dst.cast::<u64>(), stack_top);
+
+        // CPU index
+        let dst = tramp_virt.add(DATA_CPU_IDX);
+        core::ptr::write_volatile(dst.cast::<u32>(), cpu_index);
+
+        // Clear the started flag
+        let dst = tramp_virt.add(DATA_STARTED);
+        core::ptr::write_volatile(dst.cast::<u32>(), 0);
+    }
+}
+
+/// Read the AP started flag from the trampoline data area.
+fn read_started_flag(tramp_virt: *const u8) -> u32 {
+    // SAFETY: tramp_virt points to mapped memory.
+    unsafe {
+        core::ptr::read_volatile(tramp_virt.add(DATA_STARTED).cast::<u32>())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Identity mapping for trampoline
+// ---------------------------------------------------------------------------
+
+/// Add an identity mapping for the trampoline page(s) so the AP can
+/// execute the trampoline with paging enabled.
+///
+/// Maps physical 0x0000..0x10000 (64 KiB = 16 hardware pages) to
+/// virtual 0x0000..0x10000 in the kernel's PML4.
+///
+/// Returns `Ok(())` on success.
+///
+/// # Safety
+///
+/// PML4 must be the active page table.  Must be called with interrupts
+/// disabled.
+unsafe fn setup_identity_mapping(pml4_phys: u64) -> KernelResult<()> {
+    use crate::mm::page_table::{PageFlags, VirtAddr, map_4k_if_absent};
+
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE;
+
+    // Map 16 hardware pages (0x0000..0x10000) identity.
+    // This covers the trampoline at 0x8000 and its temporary stack area.
+    for page_idx in 0..16u64 {
+        let phys = page_idx * 4096;
+        let virt = VirtAddr::new(phys);
+        // SAFETY: We're adding an identity mapping for a known physical
+        // range that contains the AP trampoline code.
+        if let Err(e) = unsafe { map_4k_if_absent(pml4_phys, virt, phys, flags) } {
+            serial_println!(
+                "[smp] WARNING: identity map for {:#x} failed: {:?}",
+                phys, e
+            );
+            return Err(e);
+        }
+    }
+
+    // Flush TLB for the mapped range.
+    for page_idx in 0..16u64 {
+        let virt = page_idx * 4096;
+        // SAFETY: Standard TLB invalidation.
+        unsafe {
+            core::arch::asm!(
+                "invlpg [{}]",
+                in(reg) virt,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+
+    serial_println!("[smp] Identity mapping 0x0..0x10000 established");
+    Ok(())
+}
+
+/// Remove the identity mapping added by `setup_identity_mapping`.
+///
+/// We only need to clear the PML4[0] entry (which covers the entire
+/// lower 512 GiB).  The intermediate tables (PDPT, PD, PT) are leaked
+/// (a few KiB) — acceptable for a one-time operation.
+///
+/// # Safety
+///
+/// Must be called after all APs have started and left the trampoline.
+unsafe fn remove_identity_mapping(pml4_phys: u64) {
+    let hhdm = crate::mm::page_table::hhdm().unwrap_or(0);
+    let pml4_virt = pml4_phys + hhdm;
+
+    // Clear PML4 entry 0 (covers virtual 0x0..0x80_0000_0000).
+    // SAFETY: pml4_virt is valid, entry 0 was set by our identity mapping.
+    unsafe {
+        let entry_ptr = pml4_virt as *mut u64;
+        core::ptr::write_volatile(entry_ptr, 0);
+    }
+
+    // Flush TLB.
+    // SAFETY: Standard TLB invalidation for the low memory range.
+    unsafe {
+        core::arch::asm!(
+            "invlpg [{}]",
+            in(reg) 0u64,
+            options(nostack, preserves_flags),
+        );
+        // Full TLB flush via CR3 reload is more thorough.
+        let cr3 = crate::mm::page_table::read_cr3();
+        core::arch::asm!(
+            "mov cr3, {}",
+            in(reg) cr3,
+            options(nostack, preserves_flags),
+        );
+    }
+
+    serial_println!("[smp] Identity mapping removed");
+}
+
+// ---------------------------------------------------------------------------
+// AP kernel entry point
+// ---------------------------------------------------------------------------
+
+/// AP entry point — called by the trampoline after entering 64-bit mode.
+///
+/// At this point:
+/// - We're in 64-bit mode with identity mapping + HHDM active
+/// - RSP points to a per-AP kernel stack (in HHDM space)
+/// - The trampoline data area has our CPU index
+///
+/// We need to:
+/// 1. Load the kernel's GDT (with a per-AP TSS)
+/// 2. Load the kernel's IDT
+/// 3. Initialize the local APIC
+/// 4. Register with the scheduler
+/// 5. Enable interrupts
+/// 6. Enter the idle loop
+#[unsafe(no_mangle)]
+extern "C" fn ap_entry() -> ! {
+    // Read our CPU index from the trampoline data area.
+    // This is still identity-mapped, so we can access it directly.
+    let cpu_index = unsafe {
+        let addr = (TRAMPOLINE_PHYS + DATA_CPU_IDX as u64) as *const u32;
+        core::ptr::read_volatile(addr) as usize
+    };
+
+    serial_println!("[smp] AP {} entered kernel (64-bit mode)", cpu_index);
+
+    // Load the kernel's GDT.
+    // APs can share the BSP's GDT entries (code/data segments are the same
+    // for all CPUs).  Each AP needs its own TSS for RSP0 (interrupt stacks).
+    // For now, we load the BSP's GDT — the TSS is shared (single-threaded
+    // kernel ISRs).  Per-CPU TSS will be added when needed.
+    //
+    // SAFETY: The GDT is already set up by the BSP.
+    unsafe {
+        crate::gdt::reload_for_ap();
+    }
+
+    // Load the kernel's IDT.
+    // All CPUs share the same IDT — interrupt handlers are the same.
+    // SAFETY: IDT was set up by BSP.
+    unsafe {
+        crate::idt::load();
+    }
+
+    // Initialize the local APIC on this AP.
+    // Reuses the BSP's calibrated timer value.
+    // SAFETY: GDT and IDT are loaded, we're in a valid kernel context.
+    unsafe {
+        crate::apic::init_ap();
+    }
+
+    // Register this AP's APIC ID → CPU index mapping.
+    let apic_id = crate::apic::read_id();
+    {
+        let mut table = APIC_TO_CPU.lock();
+        if let Some(slot) = table.get_mut(apic_id as usize) {
+            #[allow(clippy::cast_possible_truncation)]
+            { *slot = cpu_index as u8; }
+        }
+    }
+
+    // Bump the online CPU count.
+    NUM_CPUS_ONLINE.fetch_add(1, Ordering::Release);
+
+    serial_println!(
+        "[smp] AP {} online (LAPIC ID={}, {} CPUs total)",
+        cpu_index, apic_id, NUM_CPUS_ONLINE.load(Ordering::Relaxed)
+    );
+
+    // Enable interrupts.  The APIC timer will start firing.
+    // SAFETY: IDT is loaded, APIC is configured.
+    unsafe {
+        crate::cpu::sti();
+    }
+
+    // Enter the AP idle loop.
+    // The scheduler will assign tasks to this CPU via work stealing.
+    loop {
+        crate::sched::yield_now();
+        crate::cpu::hlt();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SMP bootstrap (main init function)
+// ---------------------------------------------------------------------------
+
+/// Initialize SMP: discover APs via ACPI MADT and boot them.
+///
+/// Must be called after:
+/// - ACPI tables parsed (for CPU discovery)
+/// - APIC initialized (for IPI sending)
+/// - Scheduler initialized (for per-CPU queues)
+/// - Page tables initialized (for identity mapping)
+///
+/// Interrupts should be enabled (the BSP's timer is running).
+pub fn init() {
+    serial_println!("[smp] Starting SMP bootstrap...");
+
+    // Discover processors from ACPI MADT.
+    let processors = crate::acpi::processors();
+    let bsp_apic = crate::apic::bsp_id();
+
+    // Filter to enabled APs (exclude BSP).
+    let aps: alloc::vec::Vec<_> = processors.iter()
+        .filter(|p| p.enabled && p.apic_id != bsp_apic)
+        .collect();
+
+    let ap_count = aps.len();
+    if ap_count == 0 {
+        serial_println!("[smp] No APs found — single CPU system");
+        register_bsp(bsp_apic);
+        SMP_INITIALIZED.store(true, Ordering::Release);
+        return;
+    }
+
+    if ap_count + 1 > MAX_CPUS {
+        serial_println!(
+            "[smp] WARNING: {} CPUs found but MAX_CPUS={}, limiting to {}",
+            ap_count + 1, MAX_CPUS, MAX_CPUS
+        );
+    }
+    let ap_count = ap_count.min(MAX_CPUS - 1);
+
+    serial_println!(
+        "[smp] BSP APIC ID={}, {} AP(s) to boot",
+        bsp_apic, ap_count
+    );
+
+    // Register BSP in the APIC→CPU mapping.
+    register_bsp(bsp_apic);
+
+    // Get the PML4 physical address for the APs.
+    let pml4_phys = crate::mm::page_table::cr3_to_pml4(
+        crate::mm::page_table::read_cr3()
+    );
+
+    // Set up identity mapping so the trampoline can execute.
+    // SAFETY: We're the BSP, pml4_phys is valid.
+    if unsafe { setup_identity_mapping(pml4_phys) }.is_err() {
+        serial_println!("[smp] FAILED to set up identity mapping — aborting SMP");
+        SMP_INITIALIZED.store(true, Ordering::Release);
+        return;
+    }
+
+    // Build the trampoline code.
+    let trampoline = build_trampoline();
+
+    // Copy trampoline to the target physical address via HHDM.
+    let hhdm = crate::mm::page_table::hhdm().unwrap_or(0);
+    let tramp_virt = (TRAMPOLINE_PHYS + hhdm) as *mut u8;
+
+    // SAFETY: tramp_virt is a valid HHDM mapping of the trampoline page.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            trampoline.as_ptr(),
+            tramp_virt,
+            trampoline.len(),
+        );
+    }
+
+    serial_println!("[smp] Trampoline copied to phys={:#x}", TRAMPOLINE_PHYS);
+
+    // Get the AP entry point address.
+    let ap_entry_virt = ap_entry as *const () as u64;
+
+    // Boot each AP.
+    let mut booted_count: usize = 0;
+    for (i, ap) in aps.iter().take(ap_count).enumerate() {
+        let cpu_index = (i + 1) as u32; // BSP = 0, first AP = 1
+
+        // Allocate a kernel stack for this AP.
+        let stack = alloc::vec![0u8; AP_STACK_SIZE];
+        let stack_top = stack.as_ptr() as u64 + AP_STACK_SIZE as u64;
+
+        // Patch the trampoline data area for this AP.
+        patch_trampoline(
+            tramp_virt,
+            pml4_phys,
+            ap_entry_virt,
+            stack_top,
+            cpu_index,
+        );
+
+        serial_println!(
+            "[smp] Booting AP {} (APIC ID={}, stack_top={:#x})",
+            cpu_index, ap.apic_id, stack_top
+        );
+
+        // Send INIT-SIPI-SIPI sequence.
+        // SAFETY: APIC is initialized, trampoline is in place.
+        unsafe {
+            // INIT IPI.
+            crate::apic::send_init_ipi(ap.apic_id);
+
+            // Wait 10 ms (Intel SDM §8.4.4.1 recommends 10 ms after INIT).
+            busy_wait_us(10_000);
+
+            // First SIPI.
+            crate::apic::send_sipi(ap.apic_id, SIPI_VECTOR);
+
+            // Wait 200 µs.
+            busy_wait_us(200);
+
+            // Second SIPI (in case the first was lost — per Intel spec).
+            crate::apic::send_sipi(ap.apic_id, SIPI_VECTOR);
+        }
+
+        // Wait for the AP to set its started flag.
+        let mut started = false;
+        for _ in 0..AP_STARTUP_TIMEOUT {
+            if read_started_flag(tramp_virt as *const u8) != 0 {
+                started = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        if started {
+            booted_count += 1;
+            serial_println!("[smp] AP {} responded (APIC ID={})", cpu_index, ap.apic_id);
+        } else {
+            serial_println!(
+                "[smp] WARNING: AP {} (APIC ID={}) did not respond — skipping",
+                cpu_index, ap.apic_id
+            );
+        }
+
+        if started {
+            // Leak the stack allocation — the AP will use it for the
+            // kernel's lifetime.  Without leak, the Vec would be dropped
+            // when this iteration ends.
+            core::mem::forget(stack);
+        }
+        // If the AP didn't start, the stack Vec is dropped normally.
+    }
+
+    // Remove the identity mapping now that all APs are started.
+    // SAFETY: All APs have left the trampoline (identity-mapped) code
+    // and are executing in the kernel's higher-half virtual address space.
+    unsafe {
+        remove_identity_mapping(pml4_phys);
+    }
+
+    // Wait for all APs to fully initialize and increment NUM_CPUS_ONLINE.
+    //
+    // The "started" flag is set early in the trampoline (before jumping to
+    // ap_entry), but APs don't bump NUM_CPUS_ONLINE until after GDT/IDT/APIC
+    // init.  We spin briefly here so the scheduler gets the correct count.
+    let expected_cpus = (booted_count + 1) as u32; // +1 for BSP
+    let wait_limit: u64 = 50_000_000; // ~50 ms
+    for _ in 0..wait_limit {
+        if NUM_CPUS_ONLINE.load(Ordering::Acquire) >= expected_cpus {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    // Update the scheduler with the actual CPU count.
+    let total_cpus = NUM_CPUS_ONLINE.load(Ordering::Acquire) as usize;
+    {
+        // Re-initialize the per-CPU scheduler with the real CPU count.
+        // This is safe because APs are in their idle loops and the BSP
+        // holds the scheduler lock during this update.
+        let mut sched = crate::sched::sched_lock();
+        sched.scheduler.init(total_cpus);
+    }
+
+    SMP_INITIALIZED.store(true, Ordering::Release);
+
+    serial_println!(
+        "[smp] SMP bootstrap complete: {} CPU(s) online",
+        total_cpus
+    );
+}
+
+/// Register the BSP in the APIC→CPU index mapping.
+fn register_bsp(bsp_apic_id: u8) {
+    let mut table = APIC_TO_CPU.lock();
+    if let Some(slot) = table.get_mut(bsp_apic_id as usize) {
+        #[allow(clippy::cast_possible_truncation)]
+        { *slot = BSP_CPU_INDEX as u8; }
+    }
+}
+
+/// Busy-wait for approximately `us` microseconds using TSC.
+///
+/// Uses the calibrated TSC frequency from `bench::tsc_freq()`.
+/// Falls back to a simple loop if TSC is not calibrated.
+fn busy_wait_us(us: u64) {
+    let freq = crate::bench::tsc_freq();
+    if freq == 0 {
+        // Fallback: assume ~1 GHz TSC, loop approximately.
+        let target_ticks = us * 1000;
+        let start = crate::bench::rdtsc();
+        while crate::bench::rdtsc().wrapping_sub(start) < target_ticks {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+
+    // target_cycles = us * freq / 1_000_000
+    let target_cycles = us.saturating_mul(freq) / 1_000_000;
+    let start = crate::bench::rdtsc();
+    while crate::bench::rdtsc().wrapping_sub(start) < target_cycles {
+        core::hint::spin_loop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Verify SMP infrastructure is working.
+pub fn self_test() {
+    serial_println!("[smp] Running self-test...");
+
+    let total = cpu_count();
+    serial_println!("[smp]   Online CPUs: {}", total);
+
+    // Verify BSP can read its own CPU index.
+    let my_idx = current_cpu_index();
+    serial_println!("[smp]   BSP CPU index: {}", my_idx);
+    assert!(my_idx == 0, "BSP should be CPU 0");
+
+    // Verify BSP APIC ID is mapped.
+    let bsp_apic = crate::apic::bsp_id();
+    let mapped_idx = {
+        let table = APIC_TO_CPU.lock();
+        table[bsp_apic as usize]
+    };
+    assert!(mapped_idx == 0, "BSP APIC ID should map to CPU 0");
+
+    serial_println!("[smp] Self-test PASSED");
+}

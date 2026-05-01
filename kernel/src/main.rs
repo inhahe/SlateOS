@@ -76,6 +76,7 @@ mod rtc;
 mod sched;
 mod security;
 mod serial;
+mod smp;
 mod syscall;
 mod sysctl;
 mod virtio;
@@ -510,6 +511,17 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Keyboard self-test failed: {}", e);
         cpu::halt_loop();
     }
+
+    // Step 21b: Bootstrap Application Processors (SMP).
+    // Discovers APs via ACPI MADT, copies the real-mode trampoline to
+    // low memory, and sends INIT-SIPI-SIPI to each AP.  Each AP loads
+    // the kernel's GDT/IDT, enables its local APIC timer, and enters
+    // the scheduler's idle loop.
+    //
+    // Must be after: ACPI (CPU discovery), APIC (IPI sending),
+    //                scheduler (per-CPU queues), page tables (identity mapping).
+    smp::init();
+    smp::self_test();
 
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is

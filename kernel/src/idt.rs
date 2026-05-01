@@ -1193,3 +1193,30 @@ pub unsafe fn init() {
 
     serial_println!("[idt] IDT loaded with {} entries", IDT_ENTRIES);
 }
+
+/// Load the IDT on an Application Processor.
+///
+/// APs share the same IDT as the BSP — all interrupt handlers are the
+/// same across CPUs.  This just executes `lidt` to point this CPU's
+/// IDTR at the shared table.
+///
+/// # Safety
+///
+/// The IDT must have been initialized by `init()` on the BSP.
+/// Interrupts must be disabled.
+pub unsafe fn load() {
+    // SAFETY: IDT was initialized by BSP.
+    #[allow(clippy::cast_possible_truncation)]
+    let idt_ptr = IdtPointer {
+        limit: (core::mem::size_of::<Idt>() - 1) as u16,
+        base: core::ptr::addr_of!(IDT) as u64,
+    };
+
+    unsafe {
+        core::arch::asm!(
+            "lidt [{}]",
+            in(reg) &raw const idt_ptr,
+            options(readonly, nostack, preserves_flags),
+        );
+    }
+}

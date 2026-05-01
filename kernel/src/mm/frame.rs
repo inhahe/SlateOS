@@ -63,6 +63,21 @@ const MAX_ORDER: usize = 10;
 /// usable memory).
 const INFO_ALLOCATED: u8 = 0xFF;
 
+/// Physical memory below this address is never added to the free lists.
+///
+/// The first 1 MiB of physical address space on x86 is reserved for:
+/// - Real-mode IVT (0x000–0x3FF)
+/// - BIOS Data Area (0x400–0x4FF)
+/// - Extended BIOS Data Area (~0x80000–0x9FFFF)
+/// - SMP AP trampoline (typically 0x8000)
+/// - Legacy video memory (0xA0000–0xBFFFF)
+/// - ROM / option ROMs (0xC0000–0xFFFFF)
+///
+/// Linux does the same: `memblock_reserve(0, SZ_1M)`.  We accept the
+/// small memory loss (~640 KiB of usable conventional memory) in
+/// exchange for never having to worry about low-memory conflicts.
+const LOW_MEMORY_RESERVE: u64 = 0x10_0000; // 1 MiB
+
 // ---------------------------------------------------------------------------
 // PhysFrame
 // ---------------------------------------------------------------------------
@@ -625,7 +640,8 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
 }
 
 /// Populate the allocator's free lists from USABLE memory map regions,
-/// skipping the metadata area.  Returns the number of usable frames added.
+/// skipping the metadata area and low memory (below [`LOW_MEMORY_RESERVE`]).
+/// Returns the number of usable frames added.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn populate_free_lists(
     allocator: &mut BuddyAllocator,
@@ -643,6 +659,17 @@ fn populate_free_lists(
 
         let start = align_up(entry.base, frame_size);
         let end = align_down(entry.base.saturating_add(entry.length), frame_size);
+        if end <= start {
+            continue;
+        }
+
+        // Skip low memory — reserved for BIOS, IVT, and SMP trampoline.
+        // The frame allocator metadata may live in this range (it's carved
+        // separately), but the frames themselves are never added to the
+        // free list.  This avoids corruption when the SMP trampoline
+        // writes to physical 0x8000 (which would otherwise be a free-list
+        // node in the buddy allocator).
+        let start = start.max(LOW_MEMORY_RESERVE);
         if end <= start {
             continue;
         }

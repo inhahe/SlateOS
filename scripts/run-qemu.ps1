@@ -1,15 +1,18 @@
 # run-qemu.ps1 — Build the kernel and run it in QEMU.
 #
 # Usage:
-#   .\scripts\run-qemu.ps1           # build + run
-#   .\scripts\run-qemu.ps1 -NoBuild  # run without rebuilding
-#   .\scripts\run-qemu.ps1 -Test     # boot test: exits after BOOT_OK or timeout
+#   .\scripts\run-qemu.ps1               # build + run (2 CPUs)
+#   .\scripts\run-qemu.ps1 -NoBuild      # run without rebuilding
+#   .\scripts\run-qemu.ps1 -Test         # boot test: exits after BOOT_OK or timeout
+#   .\scripts\run-qemu.ps1 -Smp 4        # run with 4 CPUs
+#   .\scripts\run-qemu.ps1 -Smp 1 -Test  # single CPU boot test
 
 param(
     [switch]$NoBuild,
     [switch]$Test,
     [int]$Timeout = 30,
-    [int]$Memory = 256
+    [int]$Memory = 256,
+    [int]$Smp = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,7 +88,7 @@ if ($Test) {
 
     $argString = "$pflashArgs " +
                  "-drive `"format=raw,file=fat:rw:$EspDir`" " +
-                 "-m ${Memory}M -machine q35 -no-reboot " +
+                 "-m ${Memory}M -machine q35 -no-reboot -smp $Smp " +
                  "-serial `"file:$serialFile`" -display none"
 
     # Add virtio-blk disk if the disk image exists.
@@ -144,6 +147,7 @@ if ($Test) {
         "-m", "${Memory}M",
         "-machine", "q35",
         "-no-reboot",
+        "-smp", "$Smp",
         "-serial", "stdio"
     )
     # Add virtio-blk disk if the disk image exists.

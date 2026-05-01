@@ -37,6 +37,14 @@ _The minimum kernel that can run a single userspace process._
 - [x] Set up kernel heap allocator (slab allocator, power-of-2 size classes)
 - [x] Initialize serial console for debug output (UART 16550, COM1)
 - [x] Initialize PCI bus enumeration
+- [x] SMP bootstrap (wake Application Processors via INIT-SIPI-SIPI)
+  - [x] AP trampoline: hand-encoded 16-bit→32-bit→64-bit mode transitions
+  - [x] Identity mapping for trampoline execution (0x0..0x10000)
+  - [x] Low memory reserve: first 1 MiB excluded from frame allocator
+  - [x] Per-AP kernel stack allocation, GDT/IDT/APIC init on each AP
+  - [x] LAPIC ID → sequential CPU index mapping
+  - [x] Scheduler CPU count update after all APs come online
+  - [x] Tested with 1, 2, and 4 CPUs under QEMU
 
 ### 1.2 Memory manager
 - [x] Physical page allocator (buddy allocator for 16 KiB pages)

@@ -440,8 +440,8 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 
 ### 1.8 Interrupt Handling
 
-- [ ] Interrupt dispatch
-- [ ] Deferred work mechanism (softirq/tasklet equivalent)
+- [x] Interrupt dispatch
+- [x] Deferred work mechanism (softirq/tasklet equivalent)
 - [ ] Interrupt delivery from kernel to userspace drivers via IPC
 - [ ] Benchmark: total ISR latency < 10us
 

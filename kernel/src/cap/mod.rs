@@ -110,6 +110,12 @@ pub enum ResourceType {
     Socket = 11,
     /// Timer resource.
     Timer = 12,
+    /// I/O scheduler privilege (for realtime I/O priority class).
+    ///
+    /// A process needs this resource type with `Rights::IO_REALTIME`
+    /// to submit I/O requests at the Realtime priority class.
+    /// Without it, Realtime requests are downgraded to BestEffort.
+    IoScheduler = 13,
 }
 
 // ---------------------------------------------------------------------------

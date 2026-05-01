@@ -48,6 +48,15 @@ impl Rights {
     /// Signal this resource (e.g., write to an eventfd).
     pub const SIGNAL: Self = Self(1 << 9);
 
+    // --- Subsystem-specific rights (bits 16–31) ---
+
+    /// Permission to use Realtime I/O priority class.
+    ///
+    /// Required on an `IoScheduler` capability to submit I/O requests
+    /// at the Realtime priority class.  Without this right, Realtime
+    /// requests from userspace are downgraded to BestEffort.
+    pub const IO_REALTIME: Self = Self(1 << 16);
+
     // --- Convenience combinations ---
 
     /// All rights.
@@ -156,6 +165,7 @@ impl core::fmt::Display for Rights {
             (Self::DUPLICATE, "dup"),
             (Self::WAIT, "wait"),
             (Self::SIGNAL, "sig"),
+            (Self::IO_REALTIME, "io_rt"),
         ];
 
         for (flag, name) in &flags {

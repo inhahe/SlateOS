@@ -308,7 +308,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Per-process queues with elevator (C-SCAN) sector ordering
   - [x] Budget-based fairness with two-pass rotation
   - [x] Adjacent request merging
-  - [ ] Capability-gated realtime I/O priority
+  - [x] Capability-gated realtime I/O priority
 
 ---
 

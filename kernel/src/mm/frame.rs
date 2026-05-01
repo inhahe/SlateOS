@@ -652,6 +652,10 @@ const PCPU_BATCH: usize = PCPU_CACHE_SIZE / 2;
 /// CPU touches this cache; disabling interrupts prevents preemption).
 ///
 /// The `count` field tracks how many valid entries are in `frames[0..count]`.
+/// OPT: Aligned to 64 bytes (x86 cache line) to prevent false sharing
+/// between CPUs.  Without this, adjacent CPUs' caches share a cache
+/// line, causing expensive cache-line bouncing on every alloc/free.
+#[repr(align(64))]
 struct PerCpuFrameCache {
     /// Stack of cached frame physical addresses.
     frames: [u64; PCPU_CACHE_SIZE],

@@ -275,6 +275,9 @@ const HEAP_MAX_CPUS: usize = 16;
 ///
 /// We store the free list heads as `usize` (cast from `*mut FreeSlot`)
 /// to avoid raw-pointer Sync issues in a static.  Zero means empty.
+/// OPT: Aligned to 64 bytes (x86 cache line) to prevent false sharing
+/// between CPUs.  Each CPU's slab cache occupies its own cache line(s).
+#[repr(align(64))]
 struct PerCpuSlabCache {
     /// Free list heads for each size class (HHDM virtual addresses).
     heads: [usize; NUM_CLASSES],

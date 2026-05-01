@@ -443,14 +443,34 @@ static IO_SCHEDULER: Mutex<IoSchedulerInner> = Mutex::new(IoSchedulerInner::new(
 /// The request is queued and will be dispatched to the block device
 /// when [`dispatch`] is called (typically by the block device driver
 /// or a kernel I/O thread).
+///
+/// **Capability check**: If the request uses `IoPriorityClass::Realtime`
+/// and `pid != 0` (not kernel), the process must hold an `IoScheduler`
+/// capability with `Rights::IO_REALTIME`.  If not, the request is
+/// silently downgraded to `BestEffort` level 0 (highest best-effort).
+/// This prevents unprivileged processes from monopolizing I/O bandwidth
+/// via the Realtime class.
 pub fn submit(
     device_id: u32,
     sector: u64,
     count: u32,
     direction: IoDirection,
-    priority: IoPriority,
+    mut priority: IoPriority,
     pid: u32,
 ) -> IoRequestId {
+    // Capability gate: Realtime I/O requires an explicit capability.
+    // Kernel I/O (pid == 0) is always allowed.
+    if priority.class == IoPriorityClass::Realtime && pid != 0 {
+        if !crate::proc::pcb::has_capability_type(
+            u64::from(pid),
+            crate::cap::ResourceType::IoScheduler,
+            crate::cap::Rights::IO_REALTIME,
+        ) {
+            // Downgrade to highest-priority best-effort.
+            priority = IoPriority::new(IoPriorityClass::BestEffort, 0);
+        }
+    }
+
     let req = IoRequest {
         id: 0, // Will be assigned by submit()
         device_id,
@@ -536,6 +556,9 @@ pub fn self_test() {
 
     // Test 5: Budget fairness (alternating between processes).
     test_budget_fairness();
+
+    // Test 6: Capability-gated realtime priority.
+    test_realtime_cap_gate();
 
     serial_println!("[io_sched] Self-test PASSED");
 }
@@ -664,4 +687,34 @@ fn test_budget_fairness() {
         dispatched,
         max_consecutive
     );
+}
+
+fn test_realtime_cap_gate() {
+    // PID 0 (kernel) should always be able to submit Realtime.
+    let rt_prio = IoPriority::new(IoPriorityClass::Realtime, 0);
+    submit(0, 900, 4, IoDirection::Read, rt_prio, 0);
+
+    let dispatched = dispatch(0).expect("kernel RT should dispatch");
+    assert!(
+        dispatched.priority.class == IoPriorityClass::Realtime,
+        "kernel RT should not be downgraded"
+    );
+
+    // PID 999 (non-existent process, no capabilities) should get
+    // Realtime downgraded to BestEffort.
+    submit(0, 1000, 4, IoDirection::Read, rt_prio, 999);
+
+    let dispatched = dispatch(0).expect("downgraded request should dispatch");
+    assert!(
+        dispatched.priority.class == IoPriorityClass::BestEffort,
+        "uncapped process RT should downgrade to BestEffort (got {:?})",
+        dispatched.priority.class
+    );
+    assert!(
+        dispatched.priority.level == 0,
+        "downgraded level should be 0 (highest BE)"
+    );
+
+    assert!(dispatch(0).is_none(), "no more");
+    serial_println!("[io_sched]   Realtime capability gate: OK");
 }

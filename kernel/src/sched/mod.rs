@@ -9,11 +9,14 @@
 //! - **Trait-based**: [`Scheduler`] trait with `pick_next`, `enqueue`,
 //!   `dequeue`, `tick`, `has_ready`.  Alternative schedulers (EEVDF,
 //!   deadline) can be added behind the same trait.
-//! - **Default**: priority round-robin with 32 levels.  Per-CPU queues
-//!   and work stealing will be added when SMP support is implemented.
-//! - **Cooperative for now**: tasks yield explicitly via [`yield_now`].
-//!   Preemptive scheduling will be added when the APIC timer is wired
-//!   up (§2.2 Hardware Foundation in the roadmap).
+//! - **Per-CPU queues**: each CPU has its own run queue set via
+//!   [`PerCpuScheduler`](priority_rr::PerCpuScheduler).  Tasks are
+//!   enqueued on their `last_cpu` (cache-warm scheduling).
+//! - **Work stealing**: when a CPU's local queue is empty, it steals
+//!   half the tasks from the most-loaded CPU.
+//! - **Preemptive**: the APIC timer fires at 100 Hz, calling
+//!   [`timer_tick`] which decrements time slices and triggers
+//!   reschedule on expiry.
 //!
 //! ## Performance Targets
 //!
@@ -26,7 +29,8 @@
 //! The scheduler state is protected by a single spinlock (`SCHED`).
 //! During context switch, the lock is dropped *before* calling
 //! `switch_context` so the new task doesn't resume inside a critical
-//! section.
+//! section.  When SMP is fully implemented, the global lock will be
+//! split into per-CPU locks for the fast path.
 //!
 //! Lock ordering: `SCHED` → frame allocator (via task stack allocation).
 
@@ -42,7 +46,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use self::context::switch_context;
-use self::priority_rr::PriorityRoundRobin;
+use self::priority_rr::{PerCpuScheduler, PriorityRoundRobin};
 pub use self::priority_rr::WorkloadProfile;
 use self::task::{Context, Task, TaskId, TaskState, NUM_PRIORITIES};
 
@@ -106,9 +110,14 @@ impl Scheduler for PriorityRoundRobin {
 ///
 /// Protected by a spinlock.  Lock ordering: this lock before any
 /// memory allocator locks.
+///
+/// The per-CPU scheduler holds independent run queues for each CPU.
+/// With a single CPU (current state), all tasks go to CPU 0's queue.
+/// When SMP is implemented, each CPU will have its own queue with
+/// work stealing for load balance.
 struct SchedState {
-    /// The scheduler implementation.
-    scheduler: PriorityRoundRobin,
+    /// Per-CPU scheduler (run queues + work stealing).
+    scheduler: PerCpuScheduler,
     /// All tasks indexed by ID.
     tasks: BTreeMap<TaskId, Task>,
     /// Whether the scheduler has been initialized.
@@ -116,15 +125,29 @@ struct SchedState {
 }
 
 static SCHED: Mutex<SchedState> = Mutex::new(SchedState {
-    scheduler: PriorityRoundRobin::new_const(),
+    scheduler: PerCpuScheduler::new_const(),
     tasks: BTreeMap::new(),
     initialized: false,
 });
 
 /// ID of the task currently running on this CPU.
 ///
-/// For SMP, this would be per-CPU.  For now, a single global.
+/// For SMP, this would be per-CPU (indexed by LAPIC ID or GS-based).
+/// For now, a single global (only one CPU is online).
 static CURRENT_TASK_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Get the current CPU ID.
+///
+/// Returns 0 for the boot CPU.  When SMP is implemented, this will
+/// read the LAPIC ID or use SWAPGS-based per-CPU data to determine
+/// which CPU is executing.
+#[inline]
+#[must_use]
+pub fn current_cpu_id() -> usize {
+    // Single CPU for now.  When SMP is added, this will read the
+    // Local APIC ID and map it to a sequential CPU index.
+    0
+}
 
 /// The boot-time kernel PML4 physical address.
 ///
@@ -150,8 +173,11 @@ pub fn init() {
 
     let mut state = SCHED.lock();
 
-    // Replace the placeholder scheduler with a properly initialized one.
-    state.scheduler = PriorityRoundRobin::new();
+    // Initialize per-CPU scheduler with 1 CPU (boot CPU).
+    // When SMP is implemented, this will be updated with the actual
+    // number of online CPUs after AP bootstrap.
+    let num_cpus = 1;
+    state.scheduler.init(num_cpus);
 
     // Create the idle task.  It represents the current execution
     // context (kmain), using the bootloader-provided stack.
@@ -160,7 +186,12 @@ pub fn init() {
     CURRENT_TASK_ID.store(0, Ordering::Release);
 
     state.initialized = true;
-    serial_println!("[sched] Scheduler initialized (priority round-robin, {} levels)", NUM_PRIORITIES);
+    serial_println!(
+        "[sched] Scheduler initialized (priority round-robin, {} levels, {} CPU{})",
+        NUM_PRIORITIES,
+        num_cpus,
+        if num_cpus > 1 { "s" } else { "" }
+    );
 }
 
 /// Spawn a new kernel task.
@@ -184,6 +215,7 @@ pub fn spawn(
     let new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
     let id = new_task.id;
     let prio = new_task.priority;
+    let target_cpu = new_task.last_cpu;
 
     let mut state = SCHED.lock();
     if !state.initialized {
@@ -191,9 +223,9 @@ pub fn spawn(
     }
 
     state.tasks.insert(id, new_task);
-    state.scheduler.enqueue(id, prio);
+    state.scheduler.enqueue(id, prio, target_cpu);
 
-    serial_println!("[sched] Spawned task {} (priority {})", id, prio);
+    serial_println!("[sched] Spawned task {} (priority {}, cpu {})", id, prio, target_cpu);
     Ok(id)
 }
 
@@ -277,9 +309,11 @@ pub fn wake(task_id: TaskId) -> bool {
     {
         task.state = TaskState::Ready;
         // Reset burst counter for the new wake cycle.
+        // Enqueue on the CPU the task last ran on (cache warmth).
         task.burst_ticks = 0;
         let prio = task.effective_priority();
-        state.scheduler.enqueue(task_id, prio);
+        let target_cpu = task.last_cpu;
+        state.scheduler.enqueue(task_id, prio, target_cpu);
         return true;
     }
     false
@@ -301,7 +335,8 @@ pub fn try_wake(task_id: TaskId) -> bool {
             task.state = TaskState::Ready;
             task.burst_ticks = 0;
             let prio = task.effective_priority();
-            state.scheduler.enqueue(task_id, prio);
+            let target_cpu = task.last_cpu;
+            state.scheduler.enqueue(task_id, prio, target_cpu);
             return true;
         }
     }
@@ -334,7 +369,8 @@ pub fn timer_tick() -> bool {
             task.tick_burst();
         }
 
-        state.scheduler.tick()
+        let cpu = current_cpu_id();
+        state.scheduler.tick(cpu)
     } else {
         // Couldn't acquire lock — skip this tick.
         false
@@ -374,8 +410,9 @@ pub fn suspend(task_id: TaskId) -> bool {
         match task.state {
             TaskState::Ready => {
                 let prio = task.effective_priority();
+                let cpu = task.last_cpu;
                 task.state = TaskState::Suspended;
-                state.scheduler.dequeue(task_id, prio);
+                state.scheduler.dequeue(task_id, prio, cpu);
             }
             TaskState::Running => {
                 // Suspending the current task — mark it and yield
@@ -423,7 +460,8 @@ pub fn resume(task_id: TaskId) -> bool {
 
     task.state = TaskState::Ready;
     let prio = task.effective_priority();
-    state.scheduler.enqueue(task_id, prio);
+    let target_cpu = task.last_cpu;
+    state.scheduler.enqueue(task_id, prio, target_cpu);
 
     serial_println!("[sched] Resumed task {}", task_id);
     true
@@ -452,6 +490,7 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
     let old_effective = task.effective_priority();
     let task_state = task.state;
     let is_interactive = task.interactive;
+    let task_cpu = task.last_cpu;
 
     if old_priority == clamped {
         return Some(old_priority);
@@ -469,8 +508,8 @@ pub fn set_priority(task_id: TaskId, new_priority: u8) -> Option<u8> {
     // scheduler, then update the task's stored priority, to avoid
     // two mutable borrows of `state`.
     if task_state == TaskState::Ready {
-        state.scheduler.dequeue(task_id, old_effective);
-        state.scheduler.enqueue(task_id, new_effective);
+        state.scheduler.dequeue(task_id, old_effective, task_cpu);
+        state.scheduler.enqueue(task_id, new_effective, task_cpu);
     }
 
     // Now update the task's stored priority.
@@ -519,8 +558,9 @@ pub fn kill_task(task_id: TaskId) -> bool {
         TaskState::Ready => {
             // Remove from the run queue before marking Dead.
             let prio = task.effective_priority();
+            let cpu = task.last_cpu;
             task.state = TaskState::Dead;
-            state.scheduler.dequeue(task_id, prio);
+            state.scheduler.dequeue(task_id, prio, cpu);
         }
         TaskState::Blocked | TaskState::Suspended => {
             // Not in the run queue — just mark Dead.
@@ -601,8 +641,8 @@ pub fn reap_dead_tasks() -> usize {
 
 /// Set the time slice (in timer ticks) for a specific priority level.
 ///
-/// `level` must be in `0..NUM_PRIORITIES` (0–31) and `ticks` must be >= 1.
-/// A zero-tick time slice would starve the task.
+/// Applies to all CPUs.  `level` must be in `0..NUM_PRIORITIES` (0–31)
+/// and `ticks` must be >= 1.  A zero-tick time slice would starve the task.
 ///
 /// Returns `true` on success, `false` if the level or ticks are invalid.
 pub fn set_time_slice(level: usize, ticks: u32) -> bool {
@@ -621,7 +661,7 @@ pub fn get_time_slice(level: usize) -> Option<u32> {
 
 /// Reconfigure all time slices with a new base and increment.
 ///
-/// Formula: `time_slice[level] = base + level * increment`.
+/// Applies to all CPUs.  Formula: `time_slice[level] = base + level * increment`.
 /// `base` must be >= 1 (zero would starve priority-0 tasks).
 ///
 /// Returns `true` on success, `false` if `base` is 0.
@@ -714,6 +754,7 @@ pub fn boost_priority(task_id: TaskId, donor_priority: u8) -> Option<u8> {
     let current_inherited = t.inherited_priority;
     let base_prio = t.priority;
     let is_interactive = t.interactive;
+    let task_cpu = t.last_cpu;
 
     // Compute new inherited priority (keep the most aggressive boost).
     let new_inh = match current_inherited {
@@ -736,8 +777,8 @@ pub fn boost_priority(task_id: TaskId, donor_priority: u8) -> Option<u8> {
 
     // Re-queue if Ready and effective priority changed.
     if task_state == TaskState::Ready && new_effective != old_effective {
-        state.scheduler.dequeue(task_id, old_effective);
-        state.scheduler.enqueue(task_id, new_effective);
+        state.scheduler.dequeue(task_id, old_effective, task_cpu);
+        state.scheduler.enqueue(task_id, new_effective, task_cpu);
     }
 
     // Write the new inherited priority.
@@ -770,6 +811,7 @@ pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Opt
     let task_state = t.state;
     let base_prio = t.priority;
     let is_interactive = t.interactive;
+    let task_cpu = t.last_cpu;
 
     let base_eff = if is_interactive {
         base_prio.saturating_sub(task::INTERACTIVE_BOOST)
@@ -782,8 +824,8 @@ pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Opt
     };
 
     if task_state == TaskState::Ready && new_effective != old_effective {
-        state.scheduler.dequeue(task_id, old_effective);
-        state.scheduler.enqueue(task_id, new_effective);
+        state.scheduler.dequeue(task_id, old_effective, task_cpu);
+        state.scheduler.enqueue(task_id, new_effective, task_cpu);
     }
 
     if let Some(task) = state.tasks.get_mut(&task_id) {
@@ -959,11 +1001,15 @@ pub fn process_sleep_wakeups() {
 ///
 /// If `requeue` is true, the current task is placed back in its
 /// priority queue.  If false, it is not (used for blocking/exiting).
+///
+/// Uses per-CPU queues: first tries the local queue, then work-steals
+/// from other CPUs if the local queue is empty.
 fn schedule_inner(requeue: bool) {
     // We need two contexts: the old one (current task) and the new
     // one (next task).  We extract raw pointers to avoid holding the
     // lock across the context switch.
     let current_id = CURRENT_TASK_ID.load(Ordering::Acquire);
+    let cpu = current_cpu_id();
 
     let mut next_id: TaskId = current_id;
     let mut should_switch = false;
@@ -975,15 +1021,19 @@ fn schedule_inner(requeue: bool) {
             return;
         }
 
-        // Re-enqueue the current task if requested.
+        // Re-enqueue the current task if requested (on its current CPU).
         if requeue && let Some(task) = state.tasks.get_mut(&current_id) {
             task.state = TaskState::Ready;
             let prio = task.effective_priority();
-            state.scheduler.enqueue(current_id, prio);
+            state.scheduler.enqueue(current_id, prio, cpu);
         }
 
-        // Pick the next task.
-        if let Some(picked_id) = state.scheduler.pick_next() {
+        // Pick the next task from the local CPU's queue.
+        let picked = state.scheduler.pick_next_local(cpu)
+            // If local queue is empty, try work stealing from other CPUs.
+            .or_else(|| state.scheduler.try_steal(cpu));
+
+        if let Some(picked_id) = picked {
             if picked_id != current_id || !requeue {
                 // Switching to a different task (or the current task
                 // exited and we must switch regardless).
@@ -991,6 +1041,7 @@ fn schedule_inner(requeue: bool) {
 
                 if let Some(next_task) = state.tasks.get_mut(&next_id) {
                     next_task.state = TaskState::Running;
+                    next_task.last_cpu = cpu;
                 }
 
                 should_switch = true;
@@ -1140,6 +1191,7 @@ pub fn self_test() -> KernelResult<()> {
     test_interactive_detection()?;
     test_time_slice_config()?;
     test_workload_profiles()?;
+    test_per_cpu_work_stealing()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -1624,6 +1676,84 @@ fn test_workload_profiles() -> KernelResult<()> {
     }
 
     serial_println!("[sched]   Workload profiles: OK (Desktop/Server/Development/Gaming)");
+    Ok(())
+}
+
+/// Test 7: Per-CPU work stealing data structure.
+///
+/// Tests the `PerCpuScheduler` directly: enqueue on one CPU, steal
+/// from another.  This validates the work stealing algorithm without
+/// requiring actual SMP hardware.
+fn test_per_cpu_work_stealing() -> KernelResult<()> {
+    use alloc::boxed::Box;
+    use self::priority_rr::PerCpuScheduler;
+
+    // PerCpuScheduler is ~58 KB (MAX_CPUS=64 × ~900 bytes each).
+    // Must be heap-allocated — kernel task stacks are only 32 KB.
+    let mut sched = Box::new(PerCpuScheduler::new_const());
+    sched.init(4); // Simulate 4 CPUs
+
+    // Enqueue several tasks on CPU 1.
+    for id in 100..108u64 {
+        sched.enqueue(id, 16, 1);
+    }
+
+    // CPU 0's local queue should be empty.
+    if sched.pick_next_local(0).is_some() {
+        serial_println!("[sched]   FAIL: CPU 0 should have no local tasks");
+        return Err(KernelError::InternalError);
+    }
+
+    // CPU 0 steals from the most-loaded CPU (CPU 1 has 8 tasks).
+    let stolen = sched.try_steal(0);
+    if stolen.is_none() {
+        serial_println!("[sched]   FAIL: work stealing returned None");
+        return Err(KernelError::InternalError);
+    }
+
+    // The first stolen task is returned directly.
+    let first_stolen = stolen.expect("just checked");
+
+    // The rest were enqueued on CPU 0.  Pick them all.
+    let mut picked = alloc::vec![first_stolen];
+    while let Some(id) = sched.pick_next_local(0) {
+        picked.push(id);
+    }
+
+    // We should have stolen ~4 tasks (half of 8).
+    if picked.len() < 2 {
+        serial_println!(
+            "[sched]   FAIL: expected at least 2 stolen tasks, got {}",
+            picked.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // CPU 1 should still have ~4 tasks remaining.
+    let mut remaining = 0usize;
+    while sched.pick_next_local(1).is_some() {
+        remaining += 1;
+    }
+    if remaining == 0 {
+        serial_println!("[sched]   FAIL: CPU 1 should have remaining tasks after steal");
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify total tasks = 8.
+    #[allow(clippy::arithmetic_side_effects)]
+    let total = picked.len() + remaining;
+    if total != 8 {
+        serial_println!(
+            "[sched]   FAIL: total tasks {} != 8 (stolen={}, remaining={})",
+            total, picked.len(), remaining
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[sched]   Per-CPU work stealing: OK (stolen={}, remaining={}, total=8)",
+        picked.len(), remaining
+    );
     Ok(())
 }
 

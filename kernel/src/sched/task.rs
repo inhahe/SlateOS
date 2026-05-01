@@ -237,6 +237,13 @@ pub struct Task {
     /// Managed by the futex PI subsystem: set when a high-priority
     /// task blocks on our lock, cleared when we release the lock.
     pub inherited_priority: Option<u8>,
+
+    /// The CPU this task last ran on.
+    ///
+    /// Used for cache-warm scheduling: when enqueuing, prefer the CPU
+    /// the task last ran on (its caches are warm there).  For new
+    /// tasks, defaults to the spawning CPU.
+    pub last_cpu: usize,
 }
 
 impl Task {
@@ -317,6 +324,7 @@ impl Task {
             avg_burst_x8: 0,
             interactive: false,
             inherited_priority: None,
+            last_cpu: 0,
         }
     }
 
@@ -383,6 +391,7 @@ impl Task {
             avg_burst_x8: 0,
             interactive: false,
             inherited_priority: None,
+            last_cpu: 0,
         })
     }
 

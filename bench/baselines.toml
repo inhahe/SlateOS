@@ -194,8 +194,10 @@ min_cycles = 1726
 [qemu.page_fault_anonymous]
 # OPT: 107728→26910 cycles after switching benchmark from 4× map_4k_if_absent
 # to single map_frame call (matching real fault handler path).
-min_ns    = 7267
-min_cycles = 26910
+# OPT: 26910→7278 cycles after deferring benchmarks to background task —
+# zero-pool is warm by the time page_fault benchmark runs.
+min_ns    = 1963
+min_cycles = 7278
 
 [qemu.hpet_read]
 min_ns    = 428

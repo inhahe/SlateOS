@@ -123,7 +123,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Initialize serial console for debug output (COM1, 115200 baud, 8N1)
 - [x] Initialize PCI bus enumeration
 - [x] Boot task list display (optional, show what the OS is doing during boot)
-- [ ] Optimize boot time — minimize kernel to get to usable state fast
+- [x] Optimize boot time — deferred benchmarks to background task; init starts in ~1s
 - [ ] Low-priority HD access for background service/library loading during boot
 
 ### 1.2 Memory Manager

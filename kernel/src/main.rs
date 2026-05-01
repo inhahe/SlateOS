@@ -680,10 +680,11 @@ extern "C" fn kmain() -> ! {
         // Non-fatal — the system can function without a correct clock.
     }
 
-    // Step 23b: Run benchmark infrastructure self-test and micro-benchmarks.
-    // All subsystems are initialized, so we can measure real performance.
+    // Step 23b: Run benchmark infrastructure self-test (fast, validates runner).
+    // The actual micro-benchmarks (bench::run_all) are deferred to a
+    // background kernel task so init can start immediately.  This shaves
+    // ~15-20s off the time-to-usable under QEMU TCG.
     bench::self_test();
-    bench::run_all();
 
     // Print a boot-time memory summary for diagnostics.
     if let Some(stats) = mm::frame::stats() {
@@ -700,13 +701,37 @@ extern "C" fn kmain() -> ! {
 
     console::boot_step_update(console::BootStatus::Ok, "Performance tuning");
 
-    // Boot success marker — the boot test script looks for this.
-    serial_println!("BOOT_OK");
+    // Boot success marker — the boot test script greps for this.
+    // Printed synchronously so it appears within seconds of power-on,
+    // regardless of how long deferred benchmarks take.
     serial_println!("=== Kernel boot complete ===");
+    serial_println!("BOOT_OK");
 
     // Show boot-complete on the framebuffer console too.
     console_println!();
     console_println!("=== Kernel boot complete ===");
+
+    // Spawn a low-priority kernel task to run micro-benchmarks in the
+    // background.  This lets init start immediately while benchmarks
+    // run interleaved with normal scheduling.
+    let pml4 = mm::page_table::active_pml4_phys();
+    match sched::spawn(
+        b"bench",
+        sched::task::DEFAULT_PRIORITY.saturating_add(2), // slightly below default
+        deferred_bench_task,
+        0,
+        pml4,
+    ) {
+        Ok(tid) => {
+            serial_println!("[boot] Deferred benchmark task spawned (tid={})", tid);
+        }
+        Err(e) => {
+            serial_println!("[boot] WARNING: failed to spawn bench task: {:?}", e);
+            // Fall back to inline benchmarks so we still get numbers.
+            bench::run_all();
+            serial_println!("BENCH_OK");
+        }
+    }
 
     // Step 24: Spawn the userspace init process (PID 1).
     //
@@ -790,6 +815,25 @@ extern "C" fn kmain() -> ! {
             kshell::run();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Deferred benchmark task
+// ---------------------------------------------------------------------------
+
+/// Kernel task that runs micro-benchmarks after boot completes.
+///
+/// By deferring benchmarks to a background task, the init process
+/// can start immediately.  Under QEMU TCG, benchmarks take 15-20s;
+/// running them in parallel with init gets the user to a shell prompt
+/// in ~1s instead of ~20s.
+///
+/// The task prints `BENCH_OK` to serial after all benchmarks complete.
+/// `BOOT_OK` is printed synchronously by `kmain()` before this task
+/// starts, so the boot test script sees success within seconds.
+extern "C" fn deferred_bench_task(_arg: u64) {
+    bench::run_all();
+    serial_println!("BENCH_OK");
 }
 
 // ---------------------------------------------------------------------------

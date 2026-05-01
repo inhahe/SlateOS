@@ -1193,6 +1193,46 @@ pub const SYS_FS_REMOVE_XATTR: u64 = 635;
 /// Keys are written as null-terminated strings packed sequentially.
 pub const SYS_FS_LIST_XATTRS: u64 = 636;
 
+// ---------------------------------------------------------------------------
+// Symlink syscalls (637–639)
+// ---------------------------------------------------------------------------
+
+/// Create a symbolic link.
+///
+/// `arg0`: pointer to symlink path string (where to create the link).
+/// `arg1`: symlink path length (bytes).
+/// `arg2`: pointer to target string (what the link points to).
+/// `arg3`: target length (bytes).
+///
+/// The target string is stored as-is and resolved during path
+/// traversal.  It can be absolute or relative.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_SYMLINK: u64 = 637;
+
+/// Read the target of a symbolic link.
+///
+/// `arg0`: pointer to symlink path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to output buffer for the target string.
+/// `arg3`: buffer capacity.
+///
+/// Returns: length of the target string in bytes, or negative error.
+pub const SYS_FS_READLINK: u64 = 638;
+
+/// Stat a path without following the final symbolic link.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to output `FsStatResult` buffer (16 bytes).
+///
+/// If the final component is a symlink, returns the symlink's own
+/// metadata (type = 3 for symlink, size = target path length).
+/// Intermediate symlinks in the path are still followed.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_LSTAT: u64 = 639;
+
 /// Seek whence: from start of file.
 pub const SEEK_SET: u64 = 0;
 /// Seek whence: from current offset.

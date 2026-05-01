@@ -11,12 +11,15 @@
 //!
 //! ## Design
 //!
-//! Uses a tree of [`MemFsNode`] nodes.  Each node is either a
-//! [`File`](MemFsNodeKind::File) (data: `Vec<u8>`) or a
-//! [`Dir`](MemFsNodeKind::Dir) (children: `BTreeMap<name, node>`).
+//! Uses a tree of [`MemFsNode`] nodes.  Each node is a
+//! [`File`](MemFsNodeKind::File) (data: `Vec<u8>`), a
+//! [`Dir`](MemFsNodeKind::Dir) (children: `BTreeMap<name, node>`),
+//! or a [`Symlink`](MemFsNodeKind::Symlink) (target path string).
 //!
 //! Path resolution walks the tree component by component with
-//! exact (case-sensitive) matching.
+//! exact (case-sensitive) matching.  Symlinks are followed
+//! transparently during resolution (up to [`MAX_SYMLINK_DEPTH`]
+//! hops to prevent loops).
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -24,7 +27,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, Timestamp};
+use crate::fs::vfs::{
+    normalize_path, DirEntry, EntryType, FileAttr, FileMeta, FileSystem, Timestamp,
+};
+
+/// Maximum number of symlinks followed during a single path resolution.
+///
+/// Matches Linux's `MAXSYMLINKS` (40).  Prevents infinite loops from
+/// circular symlinks like `a → b → a`.
+const MAX_SYMLINK_DEPTH: usize = 40;
 
 // ---------------------------------------------------------------------------
 // Node types
@@ -36,6 +47,12 @@ enum MemFsNodeKind {
     File(Vec<u8>),
     /// A directory containing named children.
     Dir(BTreeMap<String, MemFsNode>),
+    /// A symbolic link storing a target path string.
+    ///
+    /// The target is stored as-is (not resolved).  It can be absolute
+    /// (starts with `/`) or relative (resolved from the symlink's
+    /// parent directory).  Resolution happens during path traversal.
+    Symlink(String),
 }
 
 /// A single node in the memory filesystem tree.
@@ -90,6 +107,23 @@ impl MemFsNode {
         }
     }
 
+    fn new_symlink(target: String) -> Self {
+        let now = crate::hpet::elapsed_ns();
+        Self {
+            kind: MemFsNodeKind::Symlink(target),
+            created_ns: now,
+            modified_ns: now,
+            accessed_ns: now,
+            changed_ns: now,
+            uid: 0,
+            gid: 0,
+            // Symlinks are always 0o777 (permissions are on the target).
+            permissions: 0o777,
+            attributes: FileAttr::NONE,
+            xattrs: Vec::new(),
+        }
+    }
+
     fn is_dir(&self) -> bool {
         matches!(self.kind, MemFsNodeKind::Dir(_))
     }
@@ -98,39 +132,66 @@ impl MemFsNode {
         matches!(self.kind, MemFsNodeKind::File(_))
     }
 
+    #[allow(dead_code)] // Part of the MemFsNode type-query API, used as subsystems mature.
+    fn is_symlink(&self) -> bool {
+        matches!(self.kind, MemFsNodeKind::Symlink(_))
+    }
+
     fn file_data(&self) -> Option<&Vec<u8>> {
         match &self.kind {
             MemFsNodeKind::File(data) => Some(data),
-            MemFsNodeKind::Dir(_) => None,
+            _ => None,
         }
     }
 
     fn file_data_mut(&mut self) -> Option<&mut Vec<u8>> {
         match &mut self.kind {
             MemFsNodeKind::File(data) => Some(data),
-            MemFsNodeKind::Dir(_) => None,
+            _ => None,
         }
     }
 
     fn children(&self) -> Option<&BTreeMap<String, MemFsNode>> {
         match &self.kind {
             MemFsNodeKind::Dir(children) => Some(children),
-            MemFsNodeKind::File(_) => None,
+            _ => None,
         }
     }
 
     fn children_mut(&mut self) -> Option<&mut BTreeMap<String, MemFsNode>> {
         match &mut self.kind {
             MemFsNodeKind::Dir(children) => Some(children),
-            MemFsNodeKind::File(_) => None,
+            _ => None,
         }
     }
 
-    /// Size in bytes: file data length, or 0 for directories.
+    /// Symlink target string, if this is a symlink.
+    fn symlink_target(&self) -> Option<&str> {
+        match &self.kind {
+            MemFsNodeKind::Symlink(target) => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Size in bytes.
+    ///
+    /// - Files: data length.
+    /// - Directories: 0.
+    /// - Symlinks: length of the target path string (like Linux `lstat`).
     fn size(&self) -> u64 {
         match &self.kind {
             MemFsNodeKind::File(data) => data.len() as u64,
             MemFsNodeKind::Dir(_) => 0,
+            MemFsNodeKind::Symlink(target) => target.len() as u64,
+        }
+    }
+
+    /// Entry type for this node.
+    fn entry_type(&self) -> EntryType {
+        match &self.kind {
+            MemFsNodeKind::File(_) => EntryType::File,
+            MemFsNodeKind::Dir(_) => EntryType::Directory,
+            MemFsNodeKind::Symlink(_) => EntryType::Symlink,
         }
     }
 
@@ -138,11 +199,7 @@ impl MemFsNode {
     fn to_dir_entry(&self, name: &str) -> DirEntry {
         DirEntry {
             name: String::from(name),
-            entry_type: if self.is_dir() {
-                EntryType::Directory
-            } else {
-                EntryType::File
-            },
+            entry_type: self.entry_type(),
             size: self.size(),
         }
     }
@@ -151,11 +208,7 @@ impl MemFsNode {
     fn to_file_meta(&self) -> FileMeta {
         FileMeta {
             size: self.size(),
-            entry_type: if self.is_dir() {
-                EntryType::Directory
-            } else {
-                EntryType::File
-            },
+            entry_type: self.entry_type(),
             created_ns: self.created_ns,
             modified_ns: self.modified_ns,
             accessed_ns: self.accessed_ns,
@@ -209,15 +262,140 @@ impl MemFs {
         }
     }
 
-    /// Resolve a path to a reference to the node.
+    // -----------------------------------------------------------------------
+    // Path helpers
+    // -----------------------------------------------------------------------
+
+    /// Split a path into components, filtering out empty parts and ".".
+    fn path_components(path: &str) -> Vec<&str> {
+        path.split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect()
+    }
+
+    /// Build the parent path from a set of components.
     ///
-    /// Returns `None` for the root directory (when path is "/").
-    fn resolve(&self, path: &str) -> KernelResult<&MemFsNode> {
+    /// `["a", "b", "c"]` → `"/a/b"`.  `["a"]` → `"/"`.
+    fn parent_path_of(comps: &[&str]) -> String {
+        if comps.len() <= 1 {
+            return String::from("/");
+        }
+        let mut p = String::new();
+        for c in &comps[..comps.len() - 1] {
+            p.push('/');
+            p.push_str(c);
+        }
+        p
+    }
+
+    // -----------------------------------------------------------------------
+    // Symlink-aware path resolution
+    // -----------------------------------------------------------------------
+
+    /// Resolve a path to its canonical form, following symlinks.
+    ///
+    /// Walks the tree component by component.  When a symlink is
+    /// encountered, substitutes the target and restarts from the
+    /// appropriate point.
+    ///
+    /// `follow_last`: if `true`, follow the final component if it
+    /// is a symlink.  If `false`, follow only intermediate symlinks.
+    ///
+    /// Returns the fully resolved path as an owned `String`.
+    fn resolve_path_str(&self, path: &str, follow_last: bool) -> KernelResult<String> {
+        let mut resolved = normalize_path(path);
+        let mut depth = 0usize;
+
+        loop {
+            let components: Vec<&str> = resolved
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if components.is_empty() {
+                return Ok(String::from("/"));
+            }
+
+            let mut current = &self.root;
+            let mut hit_symlink = false;
+
+            for (i, component) in components.iter().enumerate() {
+                let is_last = i == components.len() - 1;
+                let children = current.children().ok_or(KernelError::NotADirectory)?;
+                let node = children.get(*component).ok_or(KernelError::NotFound)?;
+
+                if let MemFsNodeKind::Symlink(ref target) = node.kind {
+                    if is_last && !follow_last {
+                        // Don't follow the final component.
+                        return Ok(resolved);
+                    }
+
+                    depth = depth.wrapping_add(1);
+                    if depth > MAX_SYMLINK_DEPTH {
+                        return Err(KernelError::TooManyLinks);
+                    }
+
+                    // Build parent path (components before this symlink).
+                    let parent = if i == 0 {
+                        String::from("/")
+                    } else {
+                        let mut p = String::new();
+                        for c in &components[..i] {
+                            p.push('/');
+                            p.push_str(c);
+                        }
+                        p
+                    };
+
+                    // Resolve target: absolute targets are used directly;
+                    // relative targets are resolved from the parent directory.
+                    let new_base = if target.starts_with('/') {
+                        target.clone()
+                    } else if parent == "/" {
+                        let mut s = String::from("/");
+                        s.push_str(target);
+                        s
+                    } else {
+                        let mut s = parent;
+                        s.push('/');
+                        s.push_str(target);
+                        s
+                    };
+
+                    // Append remaining path components after the symlink.
+                    let remaining = &components[i + 1..];
+                    resolved = if remaining.is_empty() {
+                        normalize_path(&new_base)
+                    } else {
+                        let mut full = new_base;
+                        for r in remaining {
+                            full.push('/');
+                            full.push_str(r);
+                        }
+                        normalize_path(&full)
+                    };
+
+                    hit_symlink = true;
+                    break;
+                }
+
+                current = node;
+            }
+
+            if !hit_symlink {
+                return Ok(resolved);
+            }
+        }
+    }
+
+    /// Walk a path WITHOUT following symlinks.
+    ///
+    /// Used after [`resolve_path_str`] has already resolved all symlinks.
+    fn walk(&self, path: &str) -> KernelResult<&MemFsNode> {
         let components = Self::path_components(path);
         if components.is_empty() {
             return Ok(&self.root);
         }
-
         let mut current = &self.root;
         for component in &components {
             let children = current.children().ok_or(KernelError::NotADirectory)?;
@@ -226,13 +404,12 @@ impl MemFs {
         Ok(current)
     }
 
-    /// Resolve a path to a mutable reference to the node.
-    fn resolve_mut(&mut self, path: &str) -> KernelResult<&mut MemFsNode> {
+    /// Walk a path without following symlinks (mutable).
+    fn walk_mut(&mut self, path: &str) -> KernelResult<&mut MemFsNode> {
         let components = Self::path_components(path);
         if components.is_empty() {
             return Ok(&mut self.root);
         }
-
         let mut current = &mut self.root;
         for component in &components {
             let children = current.children_mut().ok_or(KernelError::NotADirectory)?;
@@ -241,39 +418,118 @@ impl MemFs {
         Ok(current)
     }
 
-    /// Resolve the parent directory of a path.
+    // -----------------------------------------------------------------------
+    // Public resolve helpers (used by FileSystem trait impls)
+    // -----------------------------------------------------------------------
+
+    /// Resolve a path, following ALL symlinks (including the final one).
+    fn resolve(&self, path: &str) -> KernelResult<&MemFsNode> {
+        let resolved = self.resolve_path_str(path, true)?;
+        self.walk(&resolved)
+    }
+
+    /// Resolve a path mutably, following ALL symlinks.
+    fn resolve_mut(&mut self, path: &str) -> KernelResult<&mut MemFsNode> {
+        // Phase 1: resolve symlinks immutably → owned String.
+        let resolved = self.resolve_path_str(path, true)?;
+        // Phase 2: walk the resolved path (no symlinks left).
+        self.walk_mut(&resolved)
+    }
+
+    /// Resolve a path, following intermediate symlinks but NOT the
+    /// final component.  Used by `lstat` and `readlink`.
+    fn resolve_no_follow(&self, path: &str) -> KernelResult<&MemFsNode> {
+        let resolved = self.resolve_path_str(path, false)?;
+        self.walk(&resolved)
+    }
+
+    /// Resolve the parent directory of a path (following symlinks in
+    /// intermediate components) and return `(parent_node, filename)`.
     ///
-    /// Returns `(parent_node, filename)`.
+    /// The filename is the last component of the original path (not
+    /// followed if it's a symlink).  The parent path IS fully resolved.
     fn resolve_parent_mut<'a, 'b>(
         &'a mut self,
         path: &'b str,
     ) -> KernelResult<(&'a mut MemFsNode, &'b str)> {
         let components = Self::path_components(path);
         if components.is_empty() {
-            return Err(KernelError::InvalidArgument); // Can't get parent of root.
+            return Err(KernelError::InvalidArgument);
         }
 
         let filename = components[components.len() - 1];
-        let parent_components = &components[..components.len() - 1];
+        let parent_path = Self::parent_path_of(&components);
 
-        let mut current = &mut self.root;
-        for component in parent_components {
-            let children = current.children_mut().ok_or(KernelError::NotADirectory)?;
-            current = children.get_mut(*component).ok_or(KernelError::NotFound)?;
-        }
+        // Resolve the parent (following all symlinks in the parent path).
+        let resolved_parent = self.resolve_path_str(&parent_path, true)?;
 
-        if !current.is_dir() {
+        let parent = self.walk_mut(&resolved_parent)?;
+        if !parent.is_dir() {
             return Err(KernelError::NotADirectory);
         }
 
-        Ok((current, filename))
+        Ok((parent, filename))
     }
 
-    /// Split a path into components, filtering out empty parts and ".".
-    fn path_components(path: &str) -> Vec<&str> {
-        path.split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect()
+    /// Resolve the write target for a file operation.
+    ///
+    /// Follows symlinks on all components (including the final one).
+    /// If the final component doesn't exist, resolves the parent and
+    /// returns the parent's resolved path + the original filename so
+    /// the caller can create a new entry.
+    ///
+    /// Returns `(resolved_parent_path, filename)`.
+    fn resolve_write_path(&self, path: &str) -> KernelResult<(String, String)> {
+        let mut current_path = normalize_path(path);
+        let mut depth = 0usize;
+
+        loop {
+            let comps = Self::path_components(&current_path);
+            if comps.is_empty() {
+                return Err(KernelError::InvalidArgument);
+            }
+
+            let filename = String::from(comps[comps.len() - 1]);
+            let parent_path = Self::parent_path_of(&comps);
+
+            // Resolve the parent path (following all symlinks).
+            let resolved_parent = self.resolve_path_str(&parent_path, true)?;
+
+            // Check if filename exists in the resolved parent.
+            let parent_node = self.walk(&resolved_parent)?;
+            let children = parent_node.children().ok_or(KernelError::NotADirectory)?;
+
+            match children.get(&*filename) {
+                Some(node) => {
+                    if let MemFsNodeKind::Symlink(ref target) = node.kind {
+                        // Follow the symlink.
+                        depth = depth.wrapping_add(1);
+                        if depth > MAX_SYMLINK_DEPTH {
+                            return Err(KernelError::TooManyLinks);
+                        }
+                        current_path = if target.starts_with('/') {
+                            normalize_path(target)
+                        } else if resolved_parent == "/" {
+                            let mut s = String::from("/");
+                            s.push_str(target);
+                            normalize_path(&s)
+                        } else {
+                            let mut s = resolved_parent;
+                            s.push('/');
+                            s.push_str(target);
+                            normalize_path(&s)
+                        };
+                        continue;
+                    }
+                    // Not a symlink — write here.
+                    return Ok((resolved_parent, filename));
+                }
+                None => {
+                    // Doesn't exist — create here.
+                    return Ok((resolved_parent, filename));
+                }
+            }
+        }
     }
 }
 
@@ -325,10 +581,13 @@ impl FileSystem for MemFs {
     }
 
     fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
-        let (parent, filename) = self.resolve_parent_mut(path)?;
+        // Follow symlinks to find the actual write target.
+        let (parent_path, filename) = self.resolve_write_path(path)?;
+
+        let parent = self.walk_mut(&parent_path)?;
         let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
 
-        match children.get_mut(filename) {
+        match children.get_mut(&*filename) {
             Some(existing) => {
                 // Enforce attribute restrictions.
                 if existing.attributes.contains(FileAttr::IMMUTABLE) {
@@ -341,28 +600,26 @@ impl FileSystem for MemFs {
                 if existing.attributes.contains(FileAttr::APPEND_ONLY) {
                     return Err(KernelError::PermissionDenied);
                 }
-                let file_data = existing.file_data_mut()
+                let file_data = existing
+                    .file_data_mut()
                     .ok_or(KernelError::IsADirectory)?;
                 file_data.clear();
                 file_data.extend_from_slice(data);
-                // NLL: file_data's last use is above; existing is free here.
-                drop(file_data);
+                // NLL: file_data borrow ends here (last use above).
                 existing.touch_modified();
             }
             None => {
                 // Create new file (constructor sets timestamps to now).
-                children.insert(
-                    String::from(filename),
-                    MemFsNode::new_file(data.to_vec()),
-                );
+                children.insert(filename, MemFsNode::new_file(data.to_vec()));
             }
         }
-        // NLL: children's last use is inside the match; parent is free here.
         parent.touch_modified();
         Ok(())
     }
 
     fn remove(&mut self, path: &str) -> KernelResult<()> {
+        // remove() does NOT follow the final component — it removes the
+        // entry itself (file or symlink).  Intermediate symlinks ARE followed.
         let (parent, filename) = self.resolve_parent_mut(path)?;
         let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
 
@@ -379,6 +636,8 @@ impl FileSystem for MemFs {
     }
 
     fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+        // mkdir does NOT follow the final component — if the name
+        // already exists (even as a symlink), it returns AlreadyExists.
         let (parent, dirname) = self.resolve_parent_mut(path)?;
         if parent.attributes.contains(FileAttr::IMMUTABLE) {
             return Err(KernelError::PermissionDenied);
@@ -395,6 +654,8 @@ impl FileSystem for MemFs {
     }
 
     fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+        // rmdir does NOT follow the final component — a symlink at the
+        // end returns NotADirectory (like Linux).
         let (parent, dirname) = self.resolve_parent_mut(path)?;
         let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
 
@@ -437,7 +698,7 @@ impl FileSystem for MemFs {
         let node = match self.resolve_mut(path) {
             Ok(n) => n,
             Err(KernelError::NotFound) => {
-                // Create the file first.
+                // Create the file first (follows symlinks for creation target).
                 self.write_file(path, &[])?;
                 self.resolve_mut(path)?
             }
@@ -473,8 +734,7 @@ impl FileSystem for MemFs {
             dest.copy_from_slice(data);
         }
 
-        // Update timestamps (file_data borrow released by NLL here).
-        drop(file_data);
+        // NLL: file_data borrow ends here (last use is the copy above).
         node.touch_modified();
         Ok(())
     }
@@ -482,90 +742,96 @@ impl FileSystem for MemFs {
     fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         // Check attributes before getting mutable data reference.
-        if node.attributes.contains(FileAttr::IMMUTABLE) || node.attributes.contains(FileAttr::APPEND_ONLY) {
+        if node.attributes.contains(FileAttr::IMMUTABLE)
+            || node.attributes.contains(FileAttr::APPEND_ONLY)
+        {
             return Err(KernelError::PermissionDenied);
         }
         let file_data = node.file_data_mut().ok_or(KernelError::IsADirectory)?;
         file_data.resize(size as usize, 0);
-        // Update timestamps (file_data borrow released by NLL here).
-        drop(file_data);
+        // NLL: file_data borrow ends here (last use is the resize above).
         node.touch_modified();
         Ok(())
     }
 
     fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
-        // Strategy: remove the source node, insert at destination.
-        // Must be done in two steps because we can't hold two mutable
-        // references into the tree simultaneously.
+        // rename() does NOT follow the final component for either source
+        // or destination — it moves the entry itself (including symlinks).
+        // Intermediate components ARE resolved through symlinks.
 
-        // Step 1: Remove the source node.
-        let from_components = Self::path_components(from);
-        if from_components.is_empty() {
-            return Err(KernelError::InvalidArgument); // Can't rename root.
-        }
-        let from_name = from_components[from_components.len() - 1];
-
-        let removed_node = {
-            let parent_components = &from_components[..from_components.len() - 1];
-            let mut current = &mut self.root;
-            for component in parent_components {
-                let children = current.children_mut().ok_or(KernelError::NotADirectory)?;
-                current = children.get_mut(*component).ok_or(KernelError::NotFound)?;
-            }
-            let children = current.children_mut().ok_or(KernelError::NotADirectory)?;
-            children.remove(from_name).ok_or(KernelError::NotFound)?
-        };
-
-        // Step 2: Insert at destination.
-        let to_components = Self::path_components(to);
-        if to_components.is_empty() {
-            // Can't rename to root — re-insert the source and fail.
-            // (This would require putting it back, which is complex.
-            // In practice this path is unreachable because rename("/foo", "/")
-            // doesn't make sense.)
+        // Resolve both parents (following intermediate symlinks).
+        let from_comps = Self::path_components(from);
+        let to_comps = Self::path_components(to);
+        if from_comps.is_empty() || to_comps.is_empty() {
             return Err(KernelError::InvalidArgument);
         }
-        let to_name = to_components[to_components.len() - 1];
 
-        let to_parent_components = &to_components[..to_components.len() - 1];
-        let mut current = &mut self.root;
-        for component in to_parent_components {
-            let children = current.children_mut().ok_or(KernelError::NotADirectory)?;
-            current = children.get_mut(*component).ok_or(KernelError::NotFound)?;
+        let from_name = String::from(from_comps[from_comps.len() - 1]);
+        let to_name = String::from(to_comps[to_comps.len() - 1]);
+
+        let from_parent_path = Self::parent_path_of(&from_comps);
+        let to_parent_path = Self::parent_path_of(&to_comps);
+
+        let resolved_from_parent = self.resolve_path_str(&from_parent_path, true)?;
+        let resolved_to_parent = self.resolve_path_str(&to_parent_path, true)?;
+
+        // Check that destination doesn't already exist (before removing source).
+        {
+            let to_parent = self.walk(&resolved_to_parent)?;
+            let to_children = to_parent.children().ok_or(KernelError::NotADirectory)?;
+            if to_children.contains_key(&*to_name) {
+                return Err(KernelError::AlreadyExists);
+            }
         }
-        let children = current.children_mut().ok_or(KernelError::NotADirectory)?;
 
-        if children.contains_key(to_name) {
-            return Err(KernelError::AlreadyExists);
-        }
+        // Remove source node.
+        let removed_node = {
+            let from_parent = self.walk_mut(&resolved_from_parent)?;
+            let children = from_parent
+                .children_mut()
+                .ok_or(KernelError::NotADirectory)?;
+            children.remove(&*from_name).ok_or(KernelError::NotFound)?
+        };
 
-        children.insert(String::from(to_name), removed_node);
+        // Insert at destination.
+        let to_parent = self.walk_mut(&resolved_to_parent)?;
+        let children = to_parent
+            .children_mut()
+            .ok_or(KernelError::NotADirectory)?;
+        children.insert(to_name, removed_node);
         Ok(())
     }
 
     fn debug_stats(&self) -> String {
-        fn count_nodes(node: &MemFsNode) -> (usize, usize, u64) {
+        fn count_nodes(node: &MemFsNode) -> (usize, usize, usize, u64) {
             match &node.kind {
-                MemFsNodeKind::File(data) => (1, 0, data.len() as u64),
+                MemFsNodeKind::File(data) => (1, 0, 0, data.len() as u64),
                 MemFsNodeKind::Dir(children) => {
                     let mut files = 0usize;
                     let mut dirs = 1usize; // Count this dir.
+                    let mut links = 0usize;
                     let mut bytes = 0u64;
                     for child in children.values() {
-                        let (f, d, b) = count_nodes(child);
+                        let (f, d, l, b) = count_nodes(child);
                         files = files.wrapping_add(f);
                         dirs = dirs.wrapping_add(d);
+                        links = links.wrapping_add(l);
                         bytes = bytes.wrapping_add(b);
                     }
-                    (files, dirs, bytes)
+                    (files, dirs, links, bytes)
                 }
+                MemFsNodeKind::Symlink(_) => (0, 0, 1, 0),
             }
         }
 
-        let (files, dirs, bytes) = count_nodes(&self.root);
+        let (files, dirs, links, bytes) = count_nodes(&self.root);
         use core::fmt::Write;
         let mut s = String::new();
-        let _ = write!(s, "memfs: {} files, {} dirs, {} bytes", files, dirs, bytes);
+        let _ = write!(
+            s,
+            "memfs: {} files, {} dirs, {} symlinks, {} bytes",
+            files, dirs, links, bytes
+        );
         s
     }
 
@@ -665,6 +931,60 @@ impl FileSystem for MemFs {
         let node = self.resolve(path)?;
         Ok(node.xattrs.iter().map(|(k, _)| k.clone()).collect())
     }
+
+    // --- Symlink operations ---
+
+    fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {
+        if target.is_empty() {
+            return Err(KernelError::InvalidArgument);
+        }
+        // Validate target length (symlink targets use the same limit as
+        // path components).
+        if target.len() > 4096 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let (parent, linkname) = self.resolve_parent_mut(path)?;
+        if parent.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+        let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+
+        if children.contains_key(linkname) {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        children.insert(
+            String::from(linkname),
+            MemFsNode::new_symlink(String::from(target)),
+        );
+        parent.touch_modified();
+        Ok(())
+    }
+
+    fn readlink(&mut self, path: &str) -> KernelResult<String> {
+        // readlink does NOT follow the final component.
+        let node = self.resolve_no_follow(path)?;
+        match node.symlink_target() {
+            Some(target) => Ok(String::from(target)),
+            None => Err(KernelError::InvalidArgument), // Not a symlink.
+        }
+    }
+
+    fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
+        let components = Self::path_components(path);
+        if components.is_empty() {
+            return Ok(DirEntry {
+                name: String::from("/"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            });
+        }
+
+        let name = components[components.len() - 1];
+        let node = self.resolve_no_follow(path)?;
+        Ok(node.to_dir_entry(name))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -678,7 +998,7 @@ pub fn mount(mount_path: &str) -> KernelResult<()> {
     Ok(())
 }
 
-/// Self-test: verify basic MemFs operations.
+/// Self-test: verify basic MemFs operations including symlinks.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs] Running self-test...");
@@ -690,7 +1010,9 @@ pub fn self_test() -> KernelResult<()> {
     // Test mkdir.
     fs.mkdir("/testdir")?;
     let entries = fs.readdir("/")?;
-    let has_testdir = entries.iter().any(|e| e.name == "testdir" && e.entry_type == EntryType::Directory);
+    let has_testdir = entries
+        .iter()
+        .any(|e| e.name == "testdir" && e.entry_type == EntryType::Directory);
     if !has_testdir {
         crate::serial_println!("[memfs]   FAILED: testdir not in root");
         return Err(KernelError::IoError);
@@ -717,7 +1039,7 @@ pub fn self_test() -> KernelResult<()> {
     // Test case sensitivity: "Hello.txt" should NOT find "hello.txt".
     match fs.read_file("/testdir/Hello.txt") {
         Err(KernelError::NotFound) => {
-            crate::serial_println!("[memfs]   Case sensitivity: OK (Hello.txt ≠ hello.txt)");
+            crate::serial_println!("[memfs]   Case sensitivity: OK (Hello.txt != hello.txt)");
         }
         Ok(_) => {
             crate::serial_println!("[memfs]   FAILED: case-insensitive match");
@@ -912,6 +1234,182 @@ pub fn self_test() -> KernelResult<()> {
     // Clean up.
     fs.remove("/meta.txt")?;
 
+    // --- Symlink tests ---
+    test_symlinks(&mut fs)?;
+
     crate::serial_println!("[memfs] Self-test PASSED");
+    Ok(())
+}
+
+/// Symlink-specific tests.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
+    // Create a file and a symlink to it.
+    fs.write_file("/target.txt", b"symlink target data")?;
+    fs.symlink("/link.txt", "target.txt")?;
+
+    // readlink returns the stored target.
+    let target = fs.readlink("/link.txt")?;
+    if target != "target.txt" {
+        crate::serial_println!("[memfs]   FAILED: readlink got '{}'", target);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   symlink + readlink: OK");
+
+    // stat follows the symlink (returns the target's info).
+    let st = fs.stat("/link.txt")?;
+    if st.entry_type != EntryType::File || st.size != 19 {
+        crate::serial_println!("[memfs]   FAILED: stat through symlink");
+        return Err(KernelError::IoError);
+    }
+
+    // lstat does NOT follow (returns the symlink's own info).
+    let lst = fs.lstat("/link.txt")?;
+    if lst.entry_type != EntryType::Symlink {
+        crate::serial_println!("[memfs]   FAILED: lstat type not Symlink");
+        return Err(KernelError::IoError);
+    }
+    // Symlink size = target string length.
+    if lst.size != 10 {
+        crate::serial_println!("[memfs]   FAILED: lstat size {} != 10", lst.size);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   stat vs lstat: OK");
+
+    // read_file through symlink.
+    let data = fs.read_file("/link.txt")?;
+    if data.as_slice() != b"symlink target data" {
+        crate::serial_println!("[memfs]   FAILED: read through symlink");
+        return Err(KernelError::IoError);
+    }
+
+    // write_file through symlink overwrites the target.
+    fs.write_file("/link.txt", b"overwritten")?;
+    let data2 = fs.read_file("/target.txt")?;
+    if data2.as_slice() != b"overwritten" {
+        crate::serial_println!("[memfs]   FAILED: write through symlink");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   read/write through symlink: OK");
+
+    // remove on the symlink removes the link, not the target.
+    fs.remove("/link.txt")?;
+    let target_data = fs.read_file("/target.txt")?;
+    if target_data.as_slice() != b"overwritten" {
+        crate::serial_println!("[memfs]   FAILED: remove symlink deleted target");
+        return Err(KernelError::IoError);
+    }
+    match fs.read_file("/link.txt") {
+        Err(KernelError::NotFound) => {}
+        _ => {
+            crate::serial_println!("[memfs]   FAILED: symlink still exists after remove");
+            return Err(KernelError::IoError);
+        }
+    }
+    crate::serial_println!("[memfs]   remove symlink (not target): OK");
+
+    // Symlink to a directory.
+    fs.mkdir("/realdir")?;
+    fs.write_file("/realdir/file.txt", b"in realdir")?;
+    fs.symlink("/dirlink", "realdir")?;
+    let entries = fs.readdir("/dirlink")?;
+    let has_file = entries.iter().any(|e| e.name == "file.txt");
+    if !has_file {
+        crate::serial_println!("[memfs]   FAILED: readdir through dir symlink");
+        return Err(KernelError::IoError);
+    }
+    // Access file through the dir symlink.
+    let nested = fs.read_file("/dirlink/file.txt")?;
+    if nested.as_slice() != b"in realdir" {
+        crate::serial_println!("[memfs]   FAILED: read file through dir symlink");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   directory symlink traversal: OK");
+
+    // Symlink chain: a → b → target.txt
+    fs.symlink("/chain_b", "target.txt")?;
+    fs.symlink("/chain_a", "chain_b")?;
+    let chain_data = fs.read_file("/chain_a")?;
+    if chain_data.as_slice() != b"overwritten" {
+        crate::serial_println!("[memfs]   FAILED: symlink chain");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   symlink chain (a->b->file): OK");
+
+    // Circular symlink detection.
+    fs.symlink("/circ_a", "circ_b")?;
+    fs.symlink("/circ_b", "circ_a")?;
+    match fs.read_file("/circ_a") {
+        Err(KernelError::TooManyLinks) => {
+            crate::serial_println!("[memfs]   circular symlink detected: OK");
+        }
+        Ok(_) => {
+            crate::serial_println!("[memfs]   FAILED: circular symlink not detected");
+            return Err(KernelError::IoError);
+        }
+        Err(e) => {
+            crate::serial_println!("[memfs]   FAILED: circular symlink got {:?}", e);
+            return Err(KernelError::IoError);
+        }
+    }
+
+    // Dangling symlink.
+    fs.symlink("/dangling", "nonexistent.txt")?;
+    match fs.read_file("/dangling") {
+        Err(KernelError::NotFound) => {
+            crate::serial_println!("[memfs]   dangling symlink -> NotFound: OK");
+        }
+        _ => {
+            crate::serial_println!("[memfs]   FAILED: dangling symlink should be NotFound");
+            return Err(KernelError::IoError);
+        }
+    }
+
+    // Absolute symlink within the filesystem.
+    fs.symlink("/abs_link", "/target.txt")?;
+    let abs_data = fs.read_file("/abs_link")?;
+    if abs_data.as_slice() != b"overwritten" {
+        crate::serial_println!("[memfs]   FAILED: absolute symlink");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   absolute symlink: OK");
+
+    // Relative symlink with .. traversal.
+    fs.mkdir("/subdir")?;
+    fs.symlink("/subdir/up_link", "../target.txt")?;
+    let up_data = fs.read_file("/subdir/up_link")?;
+    if up_data.as_slice() != b"overwritten" {
+        crate::serial_println!("[memfs]   FAILED: relative symlink with ..");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   relative symlink (..): OK");
+
+    // Symlinks appear as Symlink type in readdir.
+    let root_entries = fs.readdir("/")?;
+    let link_entry = root_entries.iter().find(|e| e.name == "abs_link");
+    match link_entry {
+        Some(e) if e.entry_type == EntryType::Symlink => {
+            crate::serial_println!("[memfs]   symlink in readdir: OK");
+        }
+        _ => {
+            crate::serial_println!("[memfs]   FAILED: symlink not listed as Symlink in readdir");
+            return Err(KernelError::IoError);
+        }
+    }
+
+    // Clean up.
+    fs.remove("/target.txt")?;
+    fs.remove("/realdir/file.txt")?;
+    fs.rmdir("/realdir")?;
+    fs.remove("/dirlink")?;
+    fs.remove("/chain_a")?;
+    fs.remove("/chain_b")?;
+    fs.remove("/circ_a")?;
+    fs.remove("/circ_b")?;
+    fs.remove("/dangling")?;
+    fs.remove("/abs_link")?;
+    fs.remove("/subdir/up_link")?;
+    fs.rmdir("/subdir")?;
+
     Ok(())
 }

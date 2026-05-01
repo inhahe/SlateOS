@@ -448,6 +448,41 @@ pub trait FileSystem: Send {
         let _ = path;
         Ok(Vec::new())
     }
+
+    // --- Symlink operations ---
+
+    /// Create a symbolic link at `path` pointing to `target`.
+    ///
+    /// `target` is stored as-is (not resolved).  It can be absolute or
+    /// relative.  The symlink is resolved when it is traversed during
+    /// path resolution.
+    ///
+    /// Default: not supported.
+    fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {
+        let _ = (path, target);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Read the target of a symbolic link.
+    ///
+    /// Does NOT follow the symlink — returns the stored target string.
+    ///
+    /// Default: not supported.
+    fn readlink(&mut self, path: &str) -> KernelResult<String> {
+        let _ = path;
+        Err(KernelError::NotSupported)
+    }
+
+    /// Stat a path without following the final symbolic link.
+    ///
+    /// If `path` ends at a symlink, returns the symlink's own metadata
+    /// (with `entry_type == Symlink`).  Intermediate symlinks in the
+    /// path are still followed.
+    ///
+    /// Default implementation falls back to `stat()`.
+    fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
+        self.stat(path)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +886,45 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.list_xattrs(relative)
+    }
+
+    // --- Symlink VFS methods ---
+
+    /// Create a symbolic link.
+    ///
+    /// `path` is the location of the new symlink.  `target` is the
+    /// string it points to (stored as-is, resolved on traversal).
+    pub fn symlink(path: &str, target: &str) -> KernelResult<()> {
+        validate_path(path)?;
+        let path = normalize_path(path);
+        {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
+            mp.fs.symlink(relative, target)?;
+        }
+        super::notify::emit_created(&path);
+        super::journal::record(super::journal::JournalEventType::Created, &path);
+        Ok(())
+    }
+
+    /// Read a symbolic link's target.
+    ///
+    /// Does NOT follow the symlink — returns the stored target string.
+    pub fn readlink(path: &str) -> KernelResult<String> {
+        validate_path(path)?;
+        let path = normalize_path(path);
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.readlink(relative)
+    }
+
+    /// Stat a path without following the final symbolic link.
+    pub fn lstat(path: &str) -> KernelResult<DirEntry> {
+        validate_path(path)?;
+        let path = normalize_path(path);
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.lstat(relative)
     }
 
     /// Return debug statistics for the filesystem mounted at `path`.

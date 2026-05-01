@@ -78,6 +78,8 @@ pub enum KernelError {
     DiskFull = -504,
     /// The handle refers to a resource that is not of the expected type.
     InvalidHandle = -505,
+    /// Too many symbolic links encountered during path resolution.
+    TooManyLinks = -506,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -120,6 +122,7 @@ impl KernelError {
             Self::IsADirectory => "is a directory",
             Self::DiskFull => "disk full",
             Self::InvalidHandle => "invalid handle",
+            Self::TooManyLinks => "too many symbolic links",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

@@ -3610,6 +3610,158 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Symlink handlers (637–639)
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_SYMLINK` — create a symbolic link.
+///
+/// `arg0`: pointer to link path string.
+/// `arg1`: link path length.
+/// `arg2`: pointer to target string.
+/// `arg3`: target string length.
+pub fn sys_fs_symlink(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::CREATE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    // Read the target string (arg2=ptr, arg3=len).
+    let target_ptr = args.arg2 as *const u8;
+    let target_len = (args.arg3 as usize).min(256);
+    if target_ptr.is_null() || target_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, target_len) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated above — target_ptr is in user space and mapped.
+    let target_bytes = unsafe { core::slice::from_raw_parts(target_ptr, target_len) };
+    let target = match core::str::from_utf8(target_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::symlink(path, target) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_READLINK` — read the target of a symbolic link.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+/// `arg2`: pointer to output buffer.
+/// `arg3`: output buffer capacity.
+///
+/// Returns the number of bytes written to the output buffer (the target
+/// string length, not null-terminated).  If the buffer is too small, the
+/// target is truncated.
+#[allow(clippy::cast_possible_wrap)]
+pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    let out_ptr = args.arg2 as *mut u8;
+    let capacity = args.arg3 as usize;
+    if out_ptr.is_null() || capacity == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
+        return SyscallResult::err(e);
+    }
+
+    let target = match crate::fs::Vfs::readlink(path) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Copy target to user buffer, truncating if necessary.
+    let copy_len = target.len().min(capacity);
+    // SAFETY: out_ptr validated for capacity bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(target.as_ptr(), out_ptr, copy_len);
+    }
+
+    SyscallResult::ok(copy_len as i64)
+}
+
+/// `SYS_FS_LSTAT` — stat a path without following the final symlink.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+/// `arg2`: pointer to output buffer (16-byte `FsStatResult`).
+///
+/// Same output format as `SYS_FS_STAT`:
+/// - bytes 0–7: file size (u64, little-endian).  For symlinks, this is the
+///   length of the target path string (matching Linux lstat behavior).
+/// - byte 8: entry type (0=file, 1=directory, 2=volume label, 3=symlink).
+/// - bytes 9–15: reserved (zeros).
+pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    let out_ptr = args.arg2 as *mut u8;
+    if out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // FsStatResult is 16 bytes.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 16) {
+        return SyscallResult::err(e);
+    }
+
+    let entry = match crate::fs::Vfs::lstat(path) {
+        Ok(e) => e,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Write the 16-byte FsStatResult.
+    // SAFETY: Validated above — out_ptr is in user space, mapped, and writable.
+    unsafe {
+        core::ptr::write_bytes(out_ptr, 0, 16);
+        let size_ptr = out_ptr as *mut u64;
+        core::ptr::write(size_ptr, entry.size);
+        let type_byte = match entry.entry_type {
+            crate::fs::EntryType::File => 0u8,
+            crate::fs::EntryType::Directory => 1u8,
+            crate::fs::EntryType::VolumeLabel => 2u8,
+            crate::fs::EntryType::Symlink => 3u8,
+        };
+        core::ptr::write(out_ptr.add(8), type_byte);
+    }
+
+    SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 

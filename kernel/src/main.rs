@@ -50,6 +50,7 @@ extern crate alloc;
 // Module declarations.
 mod acpi;
 mod apic;
+mod bench;
 mod blkdev;
 mod boot;
 mod cap;
@@ -173,6 +174,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Heap allocator self-test failed: {}", e);
         cpu::halt_loop();
     }
+
+    // Step 6b: Calibrate TSC frequency using PIT for benchmark timing.
+    // Must be after serial (for output) and before subsystem benchmarks.
+    // PIT channel 2 is always available on x86_64 hardware.
+    bench::calibrate_tsc();
 
     // Step 7: Initialize the page table subsystem.
     // This provides map/unmap/translate operations for managing virtual
@@ -522,6 +528,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("WARNING: RTC self-test failed: {}", e);
         // Non-fatal — the system can function without a correct clock.
     }
+
+    // Step 23b: Run benchmark infrastructure self-test and micro-benchmarks.
+    // All subsystems are initialized, so we can measure real performance.
+    bench::self_test();
+    bench::run_all();
 
     // Boot success marker — the boot test script looks for this.
     serial_println!("BOOT_OK");

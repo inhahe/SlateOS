@@ -794,44 +794,94 @@ fn bench_page_fault() {
 
     let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
 
-    // Pick a kernel-space virtual address that's not in use.
+    // Pick a kernel-space virtual address range that's not in use.
     // Use a high address in the kernel reserved range.
     // Must be 16 KiB aligned for map_frame.
     let bench_virt_base: u64 = 0xFFFF_CB00_0000_0000;
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
 
-    // OPT: Use map_frame/unmap_frame (single page table walk for all 4
-    // hardware pages) instead of 4× map_4k_if_absent.  This matches the
-    // real page fault handler in try_grow_user_stack / pcb::try_resolve_fault
-    // which both use map_frame.  The old 4× walk added 3 redundant
-    // PML4→PDPT→PD→PT traversals per iteration.
-    let result = run("page_fault_anonymous", 200, || {
-        let virt = VirtAddr::new(bench_virt_base);
+    // Measure only the demand-fault path: alloc_zeroed + map + local TLB flush.
+    //
+    // The previous benchmark also timed unmap + IPI-broadcast flush + free,
+    // which inflated results by ~50-100%.  A real demand fault only does
+    // alloc+map+local_flush; cleanup happens later (munmap, process exit).
+    //
+    // Use unique virtual addresses per iteration so each map goes to a fresh
+    // page.  Clean up all mappings in bulk after the timed loop.
 
-        // Allocate and zero a frame (matches real fault handler path).
+    let iterations: u32 = 200;
+    let warmup = core::cmp::max(iterations / 10, 5);
+    let total_runs = warmup.saturating_add(iterations);
+
+    // Run warmup + measurement with unique addresses.
+    let mut min = u64::MAX;
+    let mut max = 0u64;
+    let mut total_cycles = 0u64;
+
+    for i in 0..total_runs {
+        #[allow(clippy::arithmetic_side_effects)]
+        let vaddr = bench_virt_base + (i as u64) * (frame::FRAME_SIZE as u64);
+        let virt = VirtAddr::new(vaddr);
+
+        // --- Timed section: matches real demand_page() path ---
+        let start = rdtsc_serialized();
+
         let f = frame::alloc_frame_zeroed().expect("bench: alloc_zeroed");
-
-        // Map the 16 KiB frame (4 hardware pages in a single page table walk).
-        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
-        // SAFETY: bench_virt_base is in unused kernel space, pml4 is valid,
+        // SAFETY: vaddr is in unused kernel space, pml4 is valid,
         // f is freshly allocated.
         unsafe {
             page_table::map_frame(pml4, virt, f, flags).expect("bench: map");
         }
+        // Local-only flush — matches real demand fault path (no IPI
+        // broadcast needed for never-before-mapped pages).
+        // SAFETY: invlpg is always safe in ring 0.
+        unsafe { page_table::flush_frame_local(virt); }
 
-        // TLB flush for all 4 pages.
-        crate::tlb::flush_range(bench_virt_base, 4);
+        let end = rdtsc();
+        // --- End timed section ---
 
-        // Unmap (cleanup for next iteration) — single walk for all 4 pages.
-        // SAFETY: we just mapped these pages.
+        // Only record measurement iterations (skip warmup).
+        if i >= warmup {
+            let elapsed = end.saturating_sub(start);
+            if elapsed < min { min = elapsed; }
+            if elapsed > max { max = elapsed; }
+            total_cycles = total_cycles.saturating_add(elapsed);
+        }
+    }
+
+    let mean = total_cycles.checked_div(iterations as u64).unwrap_or(0);
+    let min_ns = cycles_to_ns(min);
+    let mean_ns = cycles_to_ns(mean);
+
+    serial_println!(
+        "[bench] page_fault_anonymous: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        min, min_ns, mean, mean_ns, max, iterations
+    );
+
+    // Bulk cleanup: unmap and free all frames.
+    for i in 0..total_runs {
+        #[allow(clippy::arithmetic_side_effects)]
+        let vaddr = bench_virt_base + (i as u64) * (frame::FRAME_SIZE as u64);
+        let virt = VirtAddr::new(vaddr);
+        // SAFETY: we mapped these pages above.
         let returned = unsafe {
-            page_table::unmap_frame(pml4, virt).expect("bench: unmap")
+            page_table::unmap_frame(pml4, virt).expect("bench: unmap cleanup")
         };
-        crate::tlb::flush_range(bench_virt_base, 4);
+        // SAFETY: sole owner, all mappings removed.
+        unsafe { frame::free_frame(returned).expect("bench: free cleanup"); }
+    }
+    // Single TLB shootdown for the entire range after all unmaps.
+    crate::tlb::flush_range(bench_virt_base, total_runs.saturating_mul(4));
 
-        // Free the frame.
-        // SAFETY: we're the sole owner, all mappings removed.
-        unsafe { frame::free_frame(returned).expect("bench: free"); }
-    });
+    let result = BenchResult {
+        name: String::from("page_fault_anonymous"),
+        iterations,
+        min_cycles: min,
+        mean_cycles: mean,
+        max_cycles: max,
+        min_ns,
+        mean_ns,
+    };
 
     // Target: < 10 µs (Linux anonymous page fault: ~2-5 µs).
     let target_ns = 10_000u64;

@@ -4911,11 +4911,64 @@ fn parse_blkread_args(args: &str) -> (alloc::string::String, Option<u64>) {
     }
 }
 
+/// Format an octal permission mode as a `rwxrwxrwx` string.
+fn format_perms(perms: u16) -> [u8; 9] {
+    let mut out = [b'-'; 9];
+    if perms & 0o400 != 0 { out[0] = b'r'; }
+    if perms & 0o200 != 0 { out[1] = b'w'; }
+    if perms & 0o100 != 0 { out[2] = b'x'; }
+    if perms & 0o040 != 0 { out[3] = b'r'; }
+    if perms & 0o020 != 0 { out[4] = b'w'; }
+    if perms & 0o010 != 0 { out[5] = b'x'; }
+    if perms & 0o004 != 0 { out[6] = b'r'; }
+    if perms & 0o002 != 0 { out[7] = b'w'; }
+    if perms & 0o001 != 0 { out[8] = b'x'; }
+    out
+}
+
+/// Format a byte count as a human-readable string (K/M/G).
+fn format_size_human(size: u64) -> String {
+    if size >= 1_073_741_824 {
+        alloc::format!("{:.1}G", size as f64 / 1_073_741_824.0)
+    } else if size >= 1_048_576 {
+        alloc::format!("{:.1}M", size as f64 / 1_048_576.0)
+    } else if size >= 1024 {
+        alloc::format!("{:.1}K", size as f64 / 1024.0)
+    } else {
+        alloc::format!("{}", size)
+    }
+}
+
 fn cmd_ls(args: &str) {
-    let path = if args.is_empty() {
+    // Parse flags and path.
+    let mut long_format = false;
+    let mut show_all = false;
+    let mut human_sizes = false;
+    let mut path_arg = "";
+
+    for token in args.split_whitespace() {
+        if let Some(flags) = token.strip_prefix('-') {
+            for ch in flags.chars() {
+                match ch {
+                    'l' => long_format = true,
+                    'a' => show_all = true,
+                    'h' => human_sizes = true,
+                    _ => {
+                        crate::console_println!("ls: unknown option -{}", ch);
+                        set_exit(1);
+                        return;
+                    }
+                }
+            }
+        } else {
+            path_arg = token;
+        }
+    }
+
+    let path = if path_arg.is_empty() {
         get_cwd()
     } else {
-        resolve_path(args)
+        resolve_path(path_arg)
     };
 
     match crate::fs::Vfs::readdir(&path) {
@@ -4924,19 +4977,90 @@ fn cmd_ls(args: &str) {
                 shell_println!("(empty directory)");
                 return;
             }
-            for entry in &entries {
-                let type_indicator = match entry.entry_type {
-                    crate::fs::EntryType::Directory => "<DIR>    ",
-                    crate::fs::EntryType::File => "         ",
-                    crate::fs::EntryType::Symlink => "<LINK>   ",
-                    crate::fs::EntryType::VolumeLabel => "<VOL>    ",
-                };
-                shell_println!(
-                    "  {} {:>8}  {}",
-                    type_indicator, entry.size, entry.name
-                );
+
+            // Filter hidden files unless -a is given.
+            let filtered: Vec<&crate::fs::vfs::DirEntry> = entries.iter()
+                .filter(|e| show_all || !e.name.starts_with('.'))
+                .collect();
+
+            if long_format {
+                // Long format: type+perms links uid gid size date name
+                for entry in &filtered {
+                    // Build the entry's full path for metadata lookup.
+                    let full_path = if path == "/" {
+                        alloc::format!("/{}", entry.name)
+                    } else {
+                        alloc::format!("{}/{}", path, entry.name)
+                    };
+
+                    let type_ch = match entry.entry_type {
+                        crate::fs::EntryType::Directory => 'd',
+                        crate::fs::EntryType::File => '-',
+                        crate::fs::EntryType::Symlink => 'l',
+                        crate::fs::EntryType::VolumeLabel => 'v',
+                    };
+
+                    // Try to get rich metadata; fall back to basic info.
+                    if let Ok(meta) = crate::fs::Vfs::metadata(&full_path) {
+                        let perms = format_perms(meta.permissions);
+                        let perm_str = core::str::from_utf8(&perms).unwrap_or("---------");
+
+                        let size_str = if human_sizes {
+                            format_size_human(meta.size)
+                        } else {
+                            alloc::format!("{}", meta.size)
+                        };
+
+                        // Format modification time as YYYY-MM-DD HH:MM.
+                        let time_str = if meta.modified_ns > 0 {
+                            // Convert ns to rough datetime via seconds since epoch.
+                            // RTC epoch is 2000-01-01 in our system.
+                            let secs = meta.modified_ns / 1_000_000_000;
+                            alloc::format!("{:>10}", secs)
+                        } else {
+                            String::from("         0")
+                        };
+
+                        shell_println!(
+                            "{}{} {:>3} {:>5} {:>5} {:>8} {} {}",
+                            type_ch, perm_str, meta.nlinks,
+                            meta.uid, meta.gid, size_str,
+                            time_str, entry.name,
+                        );
+                    } else {
+                        // Metadata unavailable — basic listing.
+                        let size_str = if human_sizes {
+                            format_size_human(entry.size)
+                        } else {
+                            alloc::format!("{}", entry.size)
+                        };
+                        shell_println!(
+                            "{}--------- {:>3} {:>5} {:>5} {:>8}            {}",
+                            type_ch, 1, 0, 0, size_str, entry.name,
+                        );
+                    }
+                }
+            } else {
+                // Default format (original behavior).
+                for entry in &filtered {
+                    let type_indicator = match entry.entry_type {
+                        crate::fs::EntryType::Directory => "<DIR>    ",
+                        crate::fs::EntryType::File => "         ",
+                        crate::fs::EntryType::Symlink => "<LINK>   ",
+                        crate::fs::EntryType::VolumeLabel => "<VOL>    ",
+                    };
+                    let size_str = if human_sizes {
+                        alloc::format!("{:>8}", format_size_human(entry.size))
+                    } else {
+                        alloc::format!("{:>8}", entry.size)
+                    };
+                    shell_println!(
+                        "  {} {}  {}",
+                        type_indicator, size_str, entry.name
+                    );
+                }
             }
-            shell_println!("{} entry(ies)", entries.len());
+            shell_println!("{} entry(ies)", filtered.len());
         }
         Err(e) => {
             crate::console_println!("ls: {}: {:?}", path, e);

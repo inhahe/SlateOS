@@ -255,6 +255,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Extended attributes (xattr): external block storage, namespace indices (user/trusted/security/system), get/set/remove/list
   - [x] Timestamp management (set_times with nanosecond-to-second conversion)
   - [x] Truncate optimization (zero-size fast path: free blocks + reset extent header)
+  - [x] Directory entry cache (512-entry LRU, (dir_inode, name) → child_inode, avoids O(n) linear scans on repeated lookups)
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
   - [x] Long Filename (LFN/VFAT) support: read/write/delete with UCS-2↔UTF-8 conversion, basis ~N name generation, contiguous slot allocation, checksum validation
@@ -264,7 +265,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Filesystem infrastructure:
   - [x] Buffer cache (2048-sector LRU, 1 MiB, write-back, BTreeMap index for O(log n) sector lookup, O(1) free-slot allocation, sequential read-ahead with 8-sector prefetch)
   - [x] File handle system (open/close/read/write/seek/fstat/ftruncate/dup/handle_path, symlink-resolved at open time, lock-on-close auto-release, handle enumeration for /proc/fdinfo)
-  - [x] Path resolution cache (dcache, 256-entry LRU with prefix invalidation)
+  - [x] Path resolution cache: FAT dcache (256-entry LRU) + VFS-level dcache (256-entry LRU with prefix invalidation, caches resolved paths to skip per-component lstat walk)
   - [x] Efficient partial I/O (FAT read_at/write_at/truncate override default read-all-rewrite-all)
   - [x] Filesystem change notification system (inotify equivalent, async watches with bounded queues)
   - [x] Recycle bin (per-filesystem /_TRASH with _INDEX metadata file, trash/list/restore/empty, recursive directory trash/purge)
@@ -299,6 +300,14 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Recursive remove (Vfs::remove_recursive, depth-first, returns item count)
   - [x] Procfs /proc/fdinfo (open file handles with flags/offset/size/path) and /proc/diskstats (block device info + cache stats)
   - [x] Kshell commands: lsof, grep, cp -r, rm -r
+  - [x] VFS-level path resolution cache (dcache): 256-entry LRU caching (normalized_path, follow_last) → resolved_path, prefix-based invalidation on remove/rmdir/rename/symlink, full invalidation on mount/unmount, stats in /proc/cacheinfo
+  - [x] Paginated directory listing: FileSystem::readdir_at() trait method, Vfs::readdir_at() with submount injection, SYS_FS_READDIR_AT (647) syscall with serialized output buffer
+  - [x] Temporary file creation: SYS_FS_TMPFILE (648) syscall, TSC-based unique naming
+  - [x] Space pre-allocation: FileSystem::fallocate() trait method, Vfs::fallocate(), SYS_FS_FALLOCATE (649) syscall
+  - [x] Sparse file support: SeekFrom::Data and SeekFrom::Hole variants, SYS_FS_SEEK_DATA (650) and SYS_FS_SEEK_HOLE (651) syscalls (non-sparse default: data=offset, hole=EOF)
+  - [x] ext4 directory entry cache: 512-entry LRU keyed by (dir_inode, name) → child_inode, avoids linear O(n) directory scans on repeated lookups, invalidation on add/remove
+  - [x] Kshell commands: lsp (paginated ls), cmp/diff (byte-by-byte file compare), fallocate (space reservation with K/M/G suffixes)
+  - [x] Self-tests: recursive copy/remove (3-level directory tree), cross-mount rename (memfs↔ext4), paginated readdir_at (page boundary, overlap, tail, past-end), VFS dcache (hit verification, invalidation, prefix matching)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

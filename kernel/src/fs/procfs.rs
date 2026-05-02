@@ -96,6 +96,7 @@ const ROOT_FILES: &[&str] = &[
     "swaps",
     "fsstats",
     "heapinfo",
+    "bcache",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -827,6 +828,67 @@ fn gen_heapinfo() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `/proc/bcache` — buffer cache statistics.
+///
+/// Shows hit/miss rates, dirty/clean entries, read-ahead stats,
+/// and overall cache utilization.
+fn gen_bcache() -> Vec<u8> {
+    let stats = super::cache::stats();
+
+    let mut s = String::with_capacity(512);
+    s.push_str("Buffer Cache Statistics\n");
+    s.push_str("----------------------\n");
+
+    // Hit rate calculation.
+    let total_io = stats.reads;
+    let hit_rate = if total_io > 0 {
+        (stats.hits * 100) / total_io
+    } else {
+        0
+    };
+
+    s.push_str(&format!(
+        "reads:        {}\n\
+         hits:         {} ({}%)\n\
+         misses:       {}\n\
+         writes:       {}\n\
+         writebacks:   {}\n\
+         readaheads:   {}\n",
+        stats.reads,
+        stats.hits, hit_rate,
+        stats.misses,
+        stats.writes,
+        stats.writebacks,
+        stats.readaheads,
+    ));
+
+    s.push_str(&format!(
+        "entries_used: {}/{}\n\
+         entries_dirty:{}/{}\n",
+        stats.entries_used, stats.capacity,
+        stats.entries_dirty, stats.capacity,
+    ));
+
+    // Utilization percentage.
+    let util = if stats.capacity > 0 {
+        (stats.entries_used * 100) / stats.capacity
+    } else {
+        0
+    };
+    let dirty_pct = if stats.capacity > 0 {
+        (stats.entries_dirty * 100) / stats.capacity
+    } else {
+        0
+    };
+    s.push_str(&format!(
+        "utilization:  {}%\n\
+         dirty_pct:    {}%\n",
+        util, dirty_pct,
+    ));
+
+    s.into_bytes()
+}
+
 /// `/proc/swaps` — active swap devices, Linux-compatible format.
 ///
 /// Shows each swap device's type, capacity, usage, and priority.
@@ -1123,6 +1185,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "swaps" => Ok(gen_swaps()),
         "fsstats" => Ok(gen_fsstats()),
         "heapinfo" => Ok(gen_heapinfo()),
+        "bcache" => Ok(gen_bcache()),
         _ => Err(KernelError::NotFound),
     }
 }

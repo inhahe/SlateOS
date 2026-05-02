@@ -878,15 +878,23 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
         return ProcPath::RootFile(first);
     }
 
-    // Try numeric PID directory.
-    if let Ok(pid) = first.parse::<u64>() {
-        if rest.is_empty() {
-            return ProcPath::PidDir(pid);
-        }
-        // File inside PID directory (no nested subdirs).
-        if !rest.contains('/') && PID_FILES.contains(&rest) {
-            return ProcPath::PidFile(pid, rest);
-        }
+    // "self" is a magic alias for the current task's PID.
+    // Linux provides /proc/self as a symlink → /proc/<current_pid>.
+    // We resolve it inline since procfs is a virtual filesystem.
+    let pid = if first == "self" {
+        crate::sched::current_task_id()
+    } else if let Ok(p) = first.parse::<u64>() {
+        p
+    } else {
+        return ProcPath::NotFound;
+    };
+
+    if rest.is_empty() {
+        return ProcPath::PidDir(pid);
+    }
+    // File inside PID directory (no nested subdirs).
+    if !rest.contains('/') && PID_FILES.contains(&rest) {
+        return ProcPath::PidFile(pid, rest);
     }
 
     ProcPath::NotFound
@@ -918,6 +926,13 @@ impl FileSystem for ProcFs {
                         }
                     })
                     .collect();
+
+                // "self" — magic symlink to the current task's PID directory.
+                entries.push(DirEntry {
+                    name: String::from("self"),
+                    entry_type: EntryType::Symlink,
+                    size: 0,
+                });
 
                 // Add per-PID directories for all live tasks.
                 for task in &crate::sched::task_list() {

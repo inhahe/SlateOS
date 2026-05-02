@@ -3098,7 +3098,7 @@ const COMMANDS: &[&str] = &[
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
-    "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
+    "watch", "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4212,6 +4212,7 @@ fn dispatch(line: &str) {
         "readlink" => cmd_readlink(args),
         "symlink" | "mklink" => cmd_symlink(args),
         "xattr" => cmd_xattr(args),
+        "watch" => cmd_watch(args),
         "trash" => cmd_trash(args),
         "basename" => cmd_basename(args),
         "dirname" => cmd_dirname(args),
@@ -4366,6 +4367,7 @@ fn cmd_help() {
     crate::console_println!("  readlink P Show symlink target");
     crate::console_println!("  symlink T P Create symlink at P pointing to T");
     crate::console_println!("  xattr F .. Extended attributes (list/get/set/rm)");
+    crate::console_println!("  watch P [-r] Monitor filesystem changes (press key to stop)");
     crate::console_println!("  basename P Extract filename from path");
     crate::console_println!("  dirname P  Extract directory from path");
     crate::console_println!("  realpath P Resolve path (follow symlinks)");
@@ -9366,7 +9368,7 @@ fn is_builtin(name: &str) -> bool {
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "lsblk" | "blkdev" | "glob"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "trash" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -9803,6 +9805,109 @@ fn cmd_xattr(args: &str) {
 ///
 /// Manage the recycle bin.  Without arguments, shows usage.
 /// - `trash FILE` — move FILE to the recycle bin
+/// Monitor filesystem changes on a directory (or file) in real time.
+///
+/// Usage: `watch <path> [-r]`
+///
+/// Creates a filesystem watch on the specified path and prints events
+/// as they occur. Press any key to stop monitoring.
+///
+/// Options:
+///   -r — recursive: watch subdirectories too
+///
+/// Events shown: Created, Deleted, Modified, Renamed, MetadataChanged.
+fn cmd_watch(args: &str) {
+    let args = args.trim();
+    if args.is_empty() {
+        crate::console_println!("Usage: watch <path> [-r]");
+        crate::console_println!("  Monitor filesystem changes. Press any key to stop.");
+        return;
+    }
+
+    // Parse arguments: path and optional -r flag.
+    let mut recursive = false;
+    let mut path_arg = args;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() >= 2 {
+        for &p in &parts[1..] {
+            if p == "-r" || p == "--recursive" {
+                recursive = true;
+            }
+        }
+        if let Some(&first) = parts.first() {
+            path_arg = first;
+        }
+    }
+
+    let path = resolve_path(path_arg);
+
+    // Verify the path exists.
+    if crate::fs::Vfs::stat(&path).is_err() {
+        crate::console_println!("watch: {}: not found", path);
+        return;
+    }
+
+    // Create the watch with all change event types.
+    let mask = crate::fs::notify::FsEventMask::ALL_CHANGES;
+    let watch_id = match crate::fs::notify::create_watch(&path, mask, recursive) {
+        Ok(id) => id,
+        Err(e) => {
+            crate::console_println!("watch: failed to create watch: {:?}", e);
+            return;
+        }
+    };
+
+    crate::console_println!(
+        "Watching {} {}(press any key to stop)",
+        path,
+        if recursive { "[recursive] " } else { "" },
+    );
+
+    // Poll loop: check for events and keyboard input.
+    let mut event_count = 0u64;
+    loop {
+        // Check for keyboard input to stop.
+        if crate::keyboard::try_read_char().is_some() {
+            break;
+        }
+
+        // Read pending events (up to 16 per poll).
+        match crate::fs::notify::read_events(watch_id, 16) {
+            Ok(events) if !events.is_empty() => {
+                for ev in &events {
+                    let type_str = match ev.event_type {
+                        crate::fs::notify::FsEventType::Created => "CREATE",
+                        crate::fs::notify::FsEventType::Deleted => "DELETE",
+                        crate::fs::notify::FsEventType::Modified => "MODIFY",
+                        crate::fs::notify::FsEventType::Renamed => "RENAME",
+                        crate::fs::notify::FsEventType::MetadataChanged => "META  ",
+                        crate::fs::notify::FsEventType::Accessed => "ACCESS",
+                        crate::fs::notify::FsEventType::Overflow => "OVERFLOW",
+                    };
+
+                    if let Some(ref new_path) = ev.new_path {
+                        crate::console_println!(
+                            "[{}] {} -> {}", type_str, ev.path, new_path
+                        );
+                    } else {
+                        crate::console_println!("[{}] {}", type_str, ev.path);
+                    }
+                    event_count = event_count.saturating_add(1);
+                }
+            }
+            _ => {
+                // No events — sleep briefly to avoid busy-spinning.
+                crate::cpu::hlt();
+            }
+        }
+    }
+
+    // Clean up the watch.
+    let _ = crate::fs::notify::close_watch(watch_id);
+
+    crate::console_println!("\nStopped. {} events captured.", event_count);
+}
+
 /// - `trash --list` / `trash -l` — list trash contents
 /// - `trash --restore NAME` — restore a trashed file to its original location
 /// - `trash --empty` — permanently delete all trash items

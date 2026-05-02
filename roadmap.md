@@ -407,6 +407,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell `grep` enhancements: -r recursive directory search (depth 16), -v invert, -c count-only, -w whole-word, -l files-only, -I case-sensitive, multi-file output with filename prefix
   - [x] VFS mount options: MountOptions struct (ro/noatime/noexec/nosuid), mount_with_options(), remount(), read-only enforcement on all write-path VFS methods, ReadOnlyFilesystem error
   - [x] Kshell `mount -o` options: mount -o ro,noatime, mount -o remount,ro, bare mount shows options column, /proc/mounts shows Linux-compatible format
+  - [x] Kshell `du` enhancements: -s summary-only, -dN max depth flags
+  - [x] Kshell `date` with strftime-like +FORMAT (%Y %m %d %H %M %S %a %A %b %B %j %u %Z %F %T %D %s), `time CMD` for command timing with HPET nanosecond clock
+  - [x] Kshell utilities: `strings [-n N]` (extract ASCII from binary files), `nproc` (CPU count), `column [-t]` (tabular formatting with pipe support), `cpuinfo` (per-CPU APIC IDs)
+  - [x] Kshell `comm [-123]` (compare sorted files, 3-column output), `od [-A radix] [-t type] [-N count]` (octal/hex/decimal dump with POSIX-style options)
+  - [x] Buffer cache O(1) dirty/valid counting: pre-maintained counters instead of O(n) scan in stats(), maintained on all state transitions
+  - [x] FAT clean-shutdown bit: read/clear on mount (warn if unclean), set on sync; FAT16 bit 15, FAT32 bit 27 of cluster 1 entry; per-spec dirty tracking across both FAT copies
+  - [x] FAT volume label write: set_volume_label() updates BPB boot sector + root directory ATTR_VOLUME_ID entry; kshell `label PATH [NAME]` command; FileSystem trait method with default NotSupported
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -3083,11 +3083,11 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
-    "cd", "chmod", "chown", "clear", "cls", "cmp", "command", "copy", "cp",
+    "cd", "chattr", "chmod", "chown", "clear", "cls", "cmp", "command", "copy", "cp",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount", "mv",
     "move", "net", "nl", "nslookup", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
@@ -4180,6 +4180,8 @@ fn dispatch(line: &str) {
         "mv" | "move" | "ren" => cmd_mv(args),
         "chmod" => cmd_chmod(args),
         "chown" => cmd_chown(args),
+        "chattr" => cmd_chattr(args),
+        "lsattr" => cmd_lsattr(args),
         "touch" => cmd_touch(args),
         "append" => cmd_append(args),
         "tree" => cmd_tree(args),
@@ -4335,6 +4337,8 @@ fn cmd_help() {
     crate::console_println!("  mv S D    Move/rename file or directory");
     crate::console_println!("  chmod M F Set permissions (octal, e.g., chmod 755 file)");
     crate::console_println!("  chown U F Set owner (uid:gid, e.g., chown 1000:1000 file)");
+    crate::console_println!("  chattr +/-FLAGS F  Set/clear attributes (i=immutable a=append h=hidden s=system)");
+    crate::console_println!("  lsattr F  Show file attributes (iahs flags)");
     crate::console_println!("  touch F   Create file or update timestamps");
     crate::console_println!("  append F T Append text T to file F");
     crate::console_println!("  tree [D]  Show directory tree recursively");
@@ -5865,6 +5869,138 @@ fn cmd_chown(args: &str) {
         }
         Err(e) => {
             crate::console_println!("chown: {:?}", e);
+        }
+    }
+}
+
+/// Change file attributes (immutable, hidden, system, append-only).
+///
+/// Usage:
+///   `chattr +i file`  — set immutable
+///   `chattr -i file`  — clear immutable
+///   `chattr +iha file` — set immutable, hidden, append-only
+///   `chattr = file`   — clear all attributes
+///
+/// Flags: `i` = immutable, `a` = append-only, `h` = hidden, `s` = system.
+///
+/// On FAT: immutable maps to read-only, hidden/system map directly;
+/// append-only is silently ignored.  On ext4: immutable and append-only
+/// map to EXT4_IMMUTABLE_FL / EXT4_APPEND_FL.
+fn cmd_chattr(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: chattr [+|-]FLAGS FILE");
+        crate::console_println!("  +FLAGS  set attributes    -FLAGS  clear attributes");
+        crate::console_println!("  =       clear all attributes");
+        crate::console_println!("  Flags: i=immutable a=append-only h=hidden s=system");
+        set_exit(1);
+        return;
+    }
+
+    let flag_str = parts[0];
+    let file = parts[1].trim();
+    let path = resolve_path(file);
+
+    // Parse the operation: +, -, or =
+    let (op, flags) = if flag_str == "=" {
+        ('=', "")
+    } else if let Some(f) = flag_str.strip_prefix('+') {
+        ('+', f)
+    } else if let Some(f) = flag_str.strip_prefix('-') {
+        ('-', f)
+    } else {
+        crate::console_println!("chattr: expected +FLAGS, -FLAGS, or =");
+        set_exit(1);
+        return;
+    };
+
+    // Parse flag characters into a FileAttr mask.
+    let mut mask = crate::fs::FileAttr::NONE;
+    for ch in flags.chars() {
+        match ch {
+            'i' => mask = mask.union(crate::fs::FileAttr::IMMUTABLE),
+            'a' => mask = mask.union(crate::fs::FileAttr::APPEND_ONLY),
+            'h' => mask = mask.union(crate::fs::FileAttr::HIDDEN),
+            's' => mask = mask.union(crate::fs::FileAttr::SYSTEM),
+            _ => {
+                crate::console_println!("chattr: unknown flag '{}'", ch);
+                set_exit(1);
+                return;
+            }
+        }
+    }
+
+    // Get current attributes.
+    let current_attrs = match crate::fs::Vfs::metadata(&path) {
+        Ok(meta) => meta.attributes,
+        Err(e) => {
+            crate::console_println!("chattr: {}: {:?}", path, e);
+            set_exit(1);
+            return;
+        }
+    };
+
+    // Compute new attributes based on the operation.
+    let new_attrs = match op {
+        '+' => current_attrs.union(mask),
+        '-' => crate::fs::FileAttr::from_bits(current_attrs.bits() & !mask.bits()),
+        '=' => crate::fs::FileAttr::NONE,
+        _ => current_attrs,
+    };
+
+    match crate::fs::Vfs::set_attributes(&path, new_attrs) {
+        Ok(()) => {
+            // Show the resulting attributes.
+            let mut desc = alloc::string::String::new();
+            if new_attrs.contains(crate::fs::FileAttr::IMMUTABLE) {
+                desc.push('i');
+            }
+            if new_attrs.contains(crate::fs::FileAttr::APPEND_ONLY) {
+                desc.push('a');
+            }
+            if new_attrs.contains(crate::fs::FileAttr::HIDDEN) {
+                desc.push('h');
+            }
+            if new_attrs.contains(crate::fs::FileAttr::SYSTEM) {
+                desc.push('s');
+            }
+            if desc.is_empty() {
+                desc.push_str("(none)");
+            }
+            crate::console_println!("{}: attributes = {}", path, desc);
+        }
+        Err(e) => {
+            crate::console_println!("chattr: {:?}", e);
+            set_exit(1);
+        }
+    }
+}
+
+/// Show file attributes (complement to chattr).
+///
+/// Usage: `lsattr FILE`
+fn cmd_lsattr(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: lsattr <path>");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(args.trim());
+
+    match crate::fs::Vfs::metadata(&path) {
+        Ok(meta) => {
+            let attrs = meta.attributes;
+            let mut flags = alloc::string::String::new();
+            flags.push(if attrs.contains(crate::fs::FileAttr::IMMUTABLE) { 'i' } else { '-' });
+            flags.push(if attrs.contains(crate::fs::FileAttr::APPEND_ONLY) { 'a' } else { '-' });
+            flags.push(if attrs.contains(crate::fs::FileAttr::HIDDEN) { 'h' } else { '-' });
+            flags.push(if attrs.contains(crate::fs::FileAttr::SYSTEM) { 's' } else { '-' });
+            crate::console_println!("{} {}", flags, path);
+        }
+        Err(e) => {
+            crate::console_println!("lsattr: {}: {:?}", path, e);
+            set_exit(1);
         }
     }
 }

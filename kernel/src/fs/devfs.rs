@@ -336,6 +336,7 @@ impl FileSystem for DevFs {
                 entry_type: EntryType::Directory,
                 permissions: 0o755,
                 nlinks: 1,
+                blocks: 0,
                 ..FileMeta::minimal(EntryType::Directory, 0)
             });
         }
@@ -355,6 +356,7 @@ impl FileSystem for DevFs {
                 permissions: perms,
                 attributes: FileAttr::NONE,
                 nlinks: 1,
+                blocks: 0,
                 ..FileMeta::minimal(EntryType::File, 0)
             })
         } else {

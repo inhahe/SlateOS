@@ -1281,6 +1281,7 @@ impl FileSystem for ProcFs {
             entry_type: entry.entry_type,
             permissions: perms,
             nlinks: 1,
+            blocks: 0,
             ..FileMeta::minimal(entry.entry_type, entry.size)
         })
     }

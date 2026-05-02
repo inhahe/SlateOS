@@ -1640,7 +1640,7 @@ impl Ext4Driver {
             // Empty file: no blocks needed.
             inode.i_size_lo = 0;
             inode.i_size_high = 0;
-            inode.i_blocks_lo = 0;
+            set_inode_blocks_48(inode, 0);
             // Initialize extent header with 0 entries.
             self.init_extent_header(inode, 0);
             return Ok(());
@@ -1695,10 +1695,10 @@ impl Ext4Driver {
         inode.i_size_lo = file_size as u32;
         inode.i_size_high = (file_size >> 32) as u32;
 
-        // i_blocks_lo counts in 512-byte units.
-        let sectors = (blocks_needed as u32)
-            .saturating_mul(self.sb.block_size / 512);
-        inode.i_blocks_lo = sectors;
+        // Block count in 512-byte units (48-bit field).
+        let sectors = (blocks_needed as u64)
+            .saturating_mul(u64::from(self.sb.block_size / 512));
+        set_inode_blocks_48(inode, sectors);
 
         Ok(())
     }
@@ -1915,9 +1915,9 @@ impl Ext4Driver {
         let total_blocks = new_size
             .saturating_add(block_size_u64.saturating_sub(1))
             / block_size_u64;
-        let sectors = (total_blocks as u32)
-            .saturating_mul(self.sb.block_size / 512);
-        inode.i_blocks_lo = sectors;
+        let sectors = total_blocks
+            .saturating_mul(u64::from(self.sb.block_size / 512));
+        set_inode_blocks_48(inode, sectors);
 
         Ok(())
     }
@@ -3328,7 +3328,7 @@ impl Ext4Driver {
     /// - There must be room for one more extent entry
     ///
     /// Returns `NotSupported` if the tree is depth>0 or full.
-    /// Does NOT update file size — caller must update i_blocks_lo.
+    /// Does NOT update file size — caller must update block count via set_inode_blocks_48.
     pub fn append_unwritten_extent(
         &mut self,
         inode: &mut Ext4Inode,
@@ -4343,6 +4343,27 @@ pub fn inode_block_as_bytes_mut(inode: &mut Ext4Inode) -> &mut [u8] {
     // SAFETY: Same as inode_block_as_bytes, but mutable.
     // The mutable borrow of `inode` ensures exclusive access.
     unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+}
+
+/// Read the 48-bit block count from an inode (in 512-byte sectors).
+///
+/// Combines `i_blocks_lo` (32 bits) with `i_osd2[0..2]` (high 16 bits).
+#[allow(dead_code)]
+fn inode_blocks_48(inode: &Ext4Inode) -> u64 {
+    let lo = u64::from(inode.i_blocks_lo);
+    let hi = u64::from(u16::from_le_bytes([
+        *inode.i_osd2.get(0).unwrap_or(&0),
+        *inode.i_osd2.get(1).unwrap_or(&0),
+    ]));
+    lo | (hi << 32)
+}
+
+/// Write the 48-bit block count into an inode (in 512-byte sectors).
+fn set_inode_blocks_48(inode: &mut Ext4Inode, sectors: u64) {
+    inode.i_blocks_lo = sectors as u32;
+    let hi = ((sectors >> 32) as u16).to_le_bytes();
+    if let Some(slot) = inode.i_osd2.get_mut(0) { *slot = hi[0]; }
+    if let Some(slot) = inode.i_osd2.get_mut(1) { *slot = hi[1]; }
 }
 
 /// Binary search a sorted list of (logical_start, phys_start, length)

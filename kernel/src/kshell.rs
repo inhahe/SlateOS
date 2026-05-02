@@ -5353,7 +5353,7 @@ fn cmd_stat(args: &str) {
                 crate::fs::EntryType::VolumeLabel => "volume label",
             };
             crate::console_println!("  File: {}", path);
-            crate::console_println!("  Size: {}  Type: {}", meta.size, type_str);
+            crate::console_println!("  Size: {}  Blocks: {}  Type: {}", meta.size, meta.blocks, type_str);
             crate::console_println!("  Links: {}", meta.nlinks);
             if meta.permissions != 0 {
                 crate::console_println!("  Perms: {:04o}  Uid: {}  Gid: {}",

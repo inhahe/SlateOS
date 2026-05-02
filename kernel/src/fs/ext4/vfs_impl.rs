@@ -239,7 +239,7 @@ impl FileSystem for Ext4Fs {
 
             inode.i_size_lo = 0;
             inode.i_size_high = 0;
-            inode.i_blocks_lo = 0;
+            set_inode_blocks_48(&mut inode, 0);
             inode.i_file_acl_lo = 0;
 
             // Write the zeroed inode first, then free the inode number.
@@ -346,7 +346,7 @@ impl FileSystem for Ext4Fs {
         inode.i_links_count = 0;
         inode.i_size_lo = 0;
         inode.i_size_high = 0;
-        inode.i_blocks_lo = 0;
+        set_inode_blocks_48(&mut inode, 0);
         inode.i_file_acl_lo = 0;
         self.driver.write_inode(ino, &inode)?;
 
@@ -633,10 +633,9 @@ impl FileSystem for Ext4Fs {
                 Ok(_first_block) => {
                     // Update block count (not file size — that's the point
                     // of fallocate).
-                    #[allow(clippy::cast_possible_truncation)]
-                    let total_sectors = (needed_blocks as u32)
-                        .saturating_mul(self.driver.superblock().block_size / 512);
-                    new_inode.i_blocks_lo = total_sectors;
+                    let total_sectors = u64::from(needed_blocks)
+                        .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
+                    set_inode_blocks_48(&mut new_inode, total_sectors);
 
                     self.driver.write_inode(ino, &new_inode)?;
                     self.driver.invalidate_extent_cache(ino);
@@ -681,11 +680,9 @@ impl FileSystem for Ext4Fs {
 
         // Update block count (in 512-byte sectors) but NOT file size.
         // File size stays 0 — reads past logical EOF return zeros.
-        #[allow(clippy::cast_possible_truncation)]
-        let sectors = blocks_u32.saturating_mul(
-            self.driver.superblock().block_size / 512
-        );
-        new_inode.i_blocks_lo = sectors;
+        let sectors = u64::from(blocks_u32)
+            .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
+        set_inode_blocks_48(&mut new_inode, sectors);
 
         self.driver.write_inode(ino, &new_inode)?;
         self.driver.invalidate_extent_cache(ino);
@@ -719,7 +716,7 @@ impl FileSystem for Ext4Fs {
             // Clear size.
             new_inode.i_size_lo = 0;
             new_inode.i_size_high = 0;
-            new_inode.i_blocks_lo = 0;
+            set_inode_blocks_48(&mut new_inode, 0);
 
             // Initialize an empty extent header.
             self.driver.init_extent_header_pub(&mut new_inode, 0);
@@ -876,6 +873,7 @@ impl FileSystem for Ext4Fs {
             permissions,
             attributes: attrs,
             nlinks: u32::from(inode.i_links_count),
+            blocks: inode_blocks_48(&inode),
             xattrs: self.driver.read_all_xattrs(ino, &inode).unwrap_or_default(),
             hash: Vec::new(),
         })
@@ -1481,6 +1479,28 @@ fn set_inode_gid_32(inode: &mut super::ondisk::Ext4Inode, gid: u32) {
     let hi_bytes = hi.to_le_bytes();
     if let Some(slot) = inode.i_osd2.get_mut(6) { *slot = hi_bytes[0]; }
     if let Some(slot) = inode.i_osd2.get_mut(7) { *slot = hi_bytes[1]; }
+}
+
+/// Read the 48-bit block count from an inode (in 512-byte sectors).
+///
+/// Combines `i_blocks_lo` (32 bits) with `i_osd2[0..2]` (high 16 bits)
+/// for a total 48-bit sector count.  This matters for files larger than
+/// ~2 TB on 4K-block filesystems (or ~32 TB on our 16K pages).
+fn inode_blocks_48(inode: &super::ondisk::Ext4Inode) -> u64 {
+    let lo = u64::from(inode.i_blocks_lo);
+    let hi = u64::from(u16::from_le_bytes([
+        *inode.i_osd2.get(0).unwrap_or(&0),
+        *inode.i_osd2.get(1).unwrap_or(&0),
+    ]));
+    lo | (hi << 32)
+}
+
+/// Write the 48-bit block count into an inode (in 512-byte sectors).
+fn set_inode_blocks_48(inode: &mut super::ondisk::Ext4Inode, sectors: u64) {
+    inode.i_blocks_lo = sectors as u32;
+    let hi = ((sectors >> 32) as u16).to_le_bytes();
+    if let Some(slot) = inode.i_osd2.get_mut(0) { *slot = hi[0]; }
+    if let Some(slot) = inode.i_osd2.get_mut(1) { *slot = hi[1]; }
 }
 
 /// Split a path into parent directory and final name component.

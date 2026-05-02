@@ -242,6 +242,7 @@ impl FileSystem for Iso9660Fs {
             entry_type,
             permissions: perms,
             nlinks: 1,
+            blocks: 0,
             ..FileMeta::minimal(entry_type, u64::from(size))
         })
     }

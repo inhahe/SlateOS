@@ -191,6 +191,11 @@ pub struct FileMeta {
     /// Always 1 for filesystems that don't support hard links (FAT, memfs).
     pub nlinks: u32,
 
+    // --- Block count ---
+    /// Number of 512-byte sectors allocated to this file.
+    /// Used by `stat` and `du`.  0 if not applicable.
+    pub blocks: u64,
+
     // --- Content hash ---
     /// Optional content hash (e.g., SHA-256).
     /// Empty if not computed or not supported.
@@ -215,6 +220,7 @@ impl FileMeta {
             permissions: 0,
             attributes: FileAttr::NONE,
             nlinks: 1,
+            blocks: 0,
             xattrs: Vec::new(),
             hash: Vec::new(),
         }
@@ -239,6 +245,7 @@ impl FileMeta {
             },
             attributes: FileAttr::NONE,
             nlinks: 1,
+            blocks: 0,
             xattrs: Vec::new(),
             hash: Vec::new(),
         }

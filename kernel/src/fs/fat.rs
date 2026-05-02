@@ -2493,6 +2493,7 @@ impl FileSystem for FatFs {
                     attributes: attrs,
                     // FAT has no hard link support; always 1.
                     nlinks: 1,
+                    blocks: 0,
                     xattrs: Vec::new(),
                     hash: Vec::new(),
                 })

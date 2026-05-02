@@ -250,8 +250,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Crash-safe overwrite (allocate new → update inode → free old)
   - [x] Rename/move (files and directories, cross-directory with ".." update)
   - [x] Rich metadata (permissions, ownership, timestamps, immutable/append-only flags)
-  - [x] Symlink create/read (fast symlinks ≤60 bytes in inode, slow via data blocks)
+  - [x] Symlink create/read (fast symlinks ≤60 bytes in inode, slow via data blocks), symlink-following path resolution with depth limit
   - [x] Efficient partial I/O (extent-aware read_at, in-place write_at via block lookup)
+  - [x] Extended attributes (xattr): external block storage, namespace indices (user/trusted/security/system), get/set/remove/list
+  - [x] Timestamp management (set_times with nanosecond-to-second conversion)
+  - [x] Truncate optimization (zero-size fast path: free blocks + reset extent header)
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
@@ -267,8 +270,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Change journal (persistent across reboots, JSON-lines /_JOURNAL file, 1024-entry ring buffer, 3 syscalls)
   - [x] In-memory filesystem (memfs/ramfs) for /tmp and pseudo-FS foundation, mounted at /tmp during boot
   - [x] Multi-mount VFS with longest-prefix path-boundary matching, mount-point synthesis in readdir
-  - [x] Procfs virtual filesystem at /proc (version, uptime, meminfo, cpuinfo, mounts, task stats, per-PID status)
-  - [x] Devfs virtual filesystem at /dev (null, zero, random, console)
+  - [x] Procfs virtual filesystem at /proc (version, uptime, meminfo, cpuinfo, mounts, task stats, per-PID status, filesystems, cmdline, loadavg)
+  - [x] Devfs virtual filesystem at /dev (null, zero, full, random, urandom, console) with streaming read_at/write_at
 - [x] Filesystem features:
   - [x] Case-sensitive paths, forward slash separator (VFS is case-sensitive; FAT case-insensitive by nature)
   - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths

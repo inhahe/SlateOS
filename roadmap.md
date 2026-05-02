@@ -336,6 +336,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell if/then/elif/else/fi: stack-based control flow (16 nesting levels), condition evaluation via exit status
   - [x] Kshell while/do/done: line-buffering loop body, nested while tracking, 1000-iteration safety limit
   - [x] Kshell arithmetic: $((expr)) expansion and expr command, recursive-descent parser (+ - * / % parentheses, i64 wrapping)
+  - [x] ext4 inline data: read support for small files/dirs with INLINE_DATA flag (up to 60 bytes in i_block[]), SUPPORTED_INCOMPAT updated for INLINE_DATA and CSUM_SEED
+  - [x] Kshell for/in/do/done loops: unified LoopCollector for while+for, variable expansion in word lists, quote-aware word splitting, 1000-word safety limit
+  - [x] Kshell user-defined functions: name() { body }, function name { body }, positional params ($1-$9, $#, $@), return, declare -f, unset -f, 32-level recursion limit
+  - [x] Kshell case/esac: glob-style pattern matching (*, ?, [abc]), pipe-separated alternatives, nested case/esac, multi-line clauses
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

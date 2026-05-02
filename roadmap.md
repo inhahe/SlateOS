@@ -364,6 +364,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell C-style for loops: `for ((i=0; i<10; i=i+1)); do ... done` with enhanced arithmetic (comparisons, logical ops, variable names)
   - [x] Kshell brace expansion: `{a,b,c}` alternatives, `{1..10}` and `{1..10..2}` numeric ranges
   - [x] Kshell here-strings: `cmd <<< word`, `(( expr ))` arithmetic command, inline `VAR=value command`, bare `VAR=value` assignment
+  - [x] Kshell until loops, trap handlers (EXIT/ERR/INT), command builtin (bypass aliases/functions)
+  - [x] Kshell text processing: cut (-d/-f/-c), tr (translate/delete with ranges), tac (reverse cat), fold (-w), paste, yes, xargs (-n)
+  - [x] Kshell echo -n/-e (no newline, escape sequences), select menus (interactive numbered choice)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

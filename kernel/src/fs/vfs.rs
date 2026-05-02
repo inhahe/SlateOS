@@ -1110,23 +1110,48 @@ impl Vfs {
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
         let from = Self::resolve_no_follow(from)?;
         let to = Self::resolve_no_follow(to)?;
-        {
+
+        // Check if both paths are on the same mount point.
+        let same_mount = {
             let mut vfs = VFS.lock();
+            let (mp_from, _) = find_mount(&mut vfs, &from)?;
+            let from_path = mp_from.path.clone();
+            let (mp_to, _) = find_mount(&mut vfs, &to)?;
+            mp_to.path == from_path
+        };
 
-            // Both paths must resolve to the same mount point.
-            let (mp_from, rel_from) = find_mount(&mut vfs, &from)?;
-            let from_mount_path = mp_from.path.clone();
+        if same_mount {
+            // Same mount — delegate to the filesystem's native rename.
+            let mut vfs = VFS.lock();
+            let (_mp_from, rel_from) = find_mount(&mut vfs, &from)?;
             let rel_from_owned = String::from(rel_from);
-
-            // Find mount for `to` — must be the same filesystem.
             let (mp_to, rel_to) = find_mount(&mut vfs, &to)?;
-            if mp_to.path != from_mount_path {
-                return Err(KernelError::InvalidArgument);
+            mp_to.fs.rename(&rel_from_owned, rel_to)?;
+        } else {
+            // Cross-mount rename: copy + delete.  This is the only way to
+            // "move" files between different filesystems (like Linux's mv).
+            // We first stat the source to verify it exists and check type.
+            let stat = Self::stat(&from)?;
+
+            if stat.entry_type == EntryType::Directory {
+                // Cross-mount directory rename is not supported (would need
+                // recursive copy).  Use cp -r + rm -r manually.
+                return Err(KernelError::NotSupported);
             }
 
-            // Delegate to the filesystem (using the `from` mount).
-            mp_to.fs.rename(&rel_from_owned, rel_to)?;
+            // Copy file data from source to destination.
+            Self::copy(&from, &to)?;
+
+            // Copy metadata if the source filesystem supports it.
+            if let Ok(meta) = Self::metadata(&from) {
+                let _ = Self::set_permissions(&to, meta.permissions);
+                let _ = Self::set_owner(&to, meta.uid, meta.gid);
+            }
+
+            // Remove the original file.
+            Self::remove(&from)?;
         }
+
         super::notify::emit_renamed(&from, &to);
         super::journal::record_rename(&from, &to);
         Ok(())

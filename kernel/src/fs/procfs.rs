@@ -70,6 +70,7 @@ const ROOT_FILES: &[&str] = &[
     "cacheinfo",
     "locks",
     "fdinfo",
+    "diskstats",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -364,6 +365,57 @@ fn gen_locks() -> Vec<u8> {
     text.into_bytes()
 }
 
+/// `/proc/diskstats` — block device statistics.
+fn gen_diskstats() -> Vec<u8> {
+    let devices = crate::blkdev::list_devices_full();
+    let cache_stats = super::cache::stats();
+
+    let mut text = String::from("DEVICE     SECTORS      SIZE         RO    CACHE\n");
+
+    if devices.is_empty() {
+        text.push_str("(no block devices)\n");
+    } else {
+        for dev in &devices {
+            // Calculate size from sector count.
+            let bytes = dev.sector_count.saturating_mul(dev.sector_size as u64);
+            let size_str = if bytes >= 1_073_741_824 {
+                format!("{} GiB", bytes / 1_073_741_824)
+            } else if bytes >= 1_048_576 {
+                format!("{} MiB", bytes / 1_048_576)
+            } else if bytes >= 1024 {
+                format!("{} KiB", bytes / 1024)
+            } else {
+                format!("{} B", bytes)
+            };
+
+            let ro_str = if dev.read_only { "yes" } else { "no" };
+
+            text.push_str(&format!(
+                "{:<10} {:<12} {:<12} {:<5} {}/{}\n",
+                dev.name,
+                dev.sector_count,
+                size_str,
+                ro_str,
+                cache_stats.entries_used,
+                cache_stats.capacity,
+            ));
+        }
+    }
+
+    // Cache summary.
+    let hit_rate = if cache_stats.reads > 0 {
+        cache_stats.hits.saturating_mul(100) / cache_stats.reads
+    } else {
+        0
+    };
+    text.push_str(&format!(
+        "\nBuffer cache: {} hits / {} reads ({}% hit rate), {} readaheads\n",
+        cache_stats.hits, cache_stats.reads, hit_rate, cache_stats.readaheads,
+    ));
+
+    text.into_bytes()
+}
+
 /// `/proc/fdinfo` — open file handle information.
 fn gen_fdinfo() -> Vec<u8> {
     let handles = super::handle::list_handles();
@@ -463,6 +515,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cacheinfo" => Ok(gen_cacheinfo()),
         "locks" => Ok(gen_locks()),
         "fdinfo" => Ok(gen_fdinfo()),
+        "diskstats" => Ok(gen_diskstats()),
         _ => Err(KernelError::NotFound),
     }
 }

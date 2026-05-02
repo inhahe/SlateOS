@@ -2635,6 +2635,136 @@ impl FileSystem for FatFs {
         Ok(())
     }
 
+    /// Pre-allocate clusters for a file without changing its size.
+    ///
+    /// If `size` requires more clusters than the file currently has,
+    /// allocates extra clusters and chains them to the file's cluster
+    /// chain.  The file size is not changed — only disk space is
+    /// reserved.  On FAT this reduces fragmentation for files that
+    /// will be written incrementally.
+    ///
+    /// If the file doesn't exist yet, it is created as a zero-length
+    /// file with the requested cluster pre-allocation.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn fallocate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        if size == 0 {
+            return Ok(());
+        }
+        // FAT file size limit.
+        if size > u64::from(u32::MAX) {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let (parent_path, filename) = split_path(path);
+        let name83 = Self::to_83_name(filename)
+            .ok_or(KernelError::InvalidArgument)?;
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
+
+        let cluster_bytes = u64::from(self.bpb.sectors_per_cluster)
+            * u64::from(self.bpb.bytes_per_sector);
+        if cluster_bytes == 0 {
+            return Err(KernelError::IoError);
+        }
+        let needed_clusters = (size + cluster_bytes - 1) / cluster_bytes;
+
+        // Find the file entry (or create it if it doesn't exist).
+        let (dir_lba, dir_offset, exists) =
+            self.find_or_create_slot_in(parent_cluster, &name83)?;
+
+        // Read existing first cluster and file size.
+        let (mut first_cluster, old_size) = if exists {
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            self.read_sector(dir_lba, &mut sector_buf)?;
+            let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
+            if attr & ATTR_DIRECTORY != 0 {
+                return Err(KernelError::IsADirectory);
+            }
+            let clo = u32::from(read_u16(&sector_buf, dir_offset + 26));
+            let chi = u32::from(read_u16(&sector_buf, dir_offset + 20));
+            let cluster = (chi << 16) | clo;
+            let sz = read_u32(&sector_buf, dir_offset + 28);
+            (cluster, sz)
+        } else {
+            (0u32, 0u32)
+        };
+
+        // Count existing clusters.
+        let mut existing_count: u64 = 0;
+        let mut last_cluster = 0u32;
+        {
+            let mut c = first_cluster;
+            while self.is_valid_cluster(c) {
+                existing_count += 1;
+                last_cluster = c;
+                match self.fat_entry(c)? {
+                    Some(next) => c = next,
+                    None => break,
+                }
+            }
+        }
+
+        if needed_clusters <= existing_count {
+            // Already have enough.
+            return Ok(());
+        }
+
+        // Allocate extra clusters.
+        let eoc = match self.bpb.fat_type {
+            FatType::Fat16 => 0xFFFF,
+            FatType::Fat32 => 0x0FFF_FFFF,
+        };
+        let extra = needed_clusters - existing_count;
+        for _ in 0..extra {
+            let new_c = self.alloc_cluster()?;
+            self.set_fat_entry(new_c, eoc)?;
+
+            // Zero-fill the new cluster.
+            let new_lba = self.bpb.cluster_to_lba(new_c);
+            let zero = [0u8; SECTOR_SIZE];
+            for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                self.write_sector(u64::from(new_lba + s), &zero)?;
+            }
+
+            if first_cluster < 2 {
+                first_cluster = new_c;
+            } else {
+                self.set_fat_entry(last_cluster, new_c)?;
+            }
+            last_cluster = new_c;
+        }
+
+        // Update the directory entry's first cluster (size stays the same).
+        if !exists {
+            // Create a new zero-length entry with the allocated chain.
+            self.write_dir_entry(
+                dir_lba, dir_offset, &name83,
+                first_cluster, 0, ATTR_ARCHIVE,
+            )?;
+        } else {
+            // Update the existing entry's first cluster if it changed
+            // (only if the file was previously empty).
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            self.read_sector(dir_lba, &mut sector_buf)?;
+            if let Some(entry) = sector_buf.get_mut(dir_offset..dir_offset + 32) {
+                entry[20] = (first_cluster >> 16) as u8;
+                entry[21] = (first_cluster >> 24) as u8;
+                entry[26] = first_cluster as u8;
+                entry[27] = (first_cluster >> 8) as u8;
+                // Size stays the same.
+            }
+            self.write_sector(dir_lba, &sector_buf)?;
+        }
+
+        self.dcache_invalidate_prefix(path);
+
+        crate::serial_println!(
+            "[fat] fallocate '{}': {} clusters allocated (needed {})",
+            path, extra, needed_clusters,
+        );
+
+        Ok(())
+    }
+
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
         let (parent_path, filename) = split_path(path);

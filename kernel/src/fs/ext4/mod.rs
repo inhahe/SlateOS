@@ -139,6 +139,184 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
 
+    // --- Extended attribute (xattr) tests ---
+    serial_println!("[ext4]   Testing extended attributes...");
+    {
+        // Create a temporary test file for xattr tests.
+        let xattr_path = if root == "/" {
+            alloc::string::String::from("/_ext4_xattr_test")
+        } else {
+            format!("{}/_ext4_xattr_test", root)
+        };
+        crate::fs::Vfs::write_file(&xattr_path, b"xattr test data")?;
+
+        // Initially, no xattrs should be set.
+        let keys = crate::fs::Vfs::list_xattrs(&xattr_path)?;
+        if !keys.is_empty() {
+            serial_println!("[ext4]   FAIL: new file should have no xattrs, got {}", keys.len());
+            let _ = crate::fs::Vfs::remove(&xattr_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     list_xattrs on new file: empty OK");
+
+        // Set an xattr.
+        crate::fs::Vfs::set_xattr(&xattr_path, "user.test_key", b"test_value")?;
+        serial_println!("[ext4]     set_xattr user.test_key OK");
+
+        // Read it back.
+        let val = crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key")?;
+        if val != b"test_value" {
+            serial_println!("[ext4]   FAIL: get_xattr returned {:?}, expected 'test_value'", val);
+            let _ = crate::fs::Vfs::remove(&xattr_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     get_xattr user.test_key: {:?} OK", core::str::from_utf8(&val).unwrap_or("?"));
+
+        // Set a second xattr.
+        crate::fs::Vfs::set_xattr(&xattr_path, "user.another", b"second value")?;
+        let keys = crate::fs::Vfs::list_xattrs(&xattr_path)?;
+        if keys.len() != 2 {
+            serial_println!("[ext4]   FAIL: expected 2 xattrs, got {}", keys.len());
+            let _ = crate::fs::Vfs::remove(&xattr_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     list_xattrs after 2 sets: {} keys OK", keys.len());
+
+        // Overwrite the first xattr with a new value.
+        crate::fs::Vfs::set_xattr(&xattr_path, "user.test_key", b"updated")?;
+        let val = crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key")?;
+        if val != b"updated" {
+            serial_println!("[ext4]   FAIL: overwritten xattr = {:?}, expected 'updated'", val);
+            let _ = crate::fs::Vfs::remove(&xattr_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     overwrite xattr value OK");
+
+        // Remove one xattr.
+        crate::fs::Vfs::remove_xattr(&xattr_path, "user.test_key")?;
+        let keys = crate::fs::Vfs::list_xattrs(&xattr_path)?;
+        if keys.len() != 1 || keys.first().map(|s| s.as_str()) != Some("user.another") {
+            serial_println!("[ext4]   FAIL: after remove, expected ['user.another'], got {:?}", keys);
+            let _ = crate::fs::Vfs::remove(&xattr_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     remove_xattr + verify remaining OK");
+
+        // Getting a removed xattr should fail.
+        match crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key") {
+            Err(crate::error::KernelError::NotFound) => {
+                serial_println!("[ext4]     get removed xattr: NotFound OK");
+            }
+            other => {
+                serial_println!("[ext4]   FAIL: get removed xattr should be NotFound, got {:?}", other);
+                let _ = crate::fs::Vfs::remove(&xattr_path);
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+
+        // Delete the test file — xattr block should be freed.
+        crate::fs::Vfs::remove(&xattr_path)?;
+        serial_println!("[ext4]     xattr test file cleaned up OK");
+    }
+
+    // --- Symlink tests ---
+    serial_println!("[ext4]   Testing symlinks...");
+    {
+        let target_path = if root == "/" {
+            alloc::string::String::from("/_ext4_symlink_target")
+        } else {
+            format!("{}/_ext4_symlink_target", root)
+        };
+        let link_path = if root == "/" {
+            alloc::string::String::from("/_ext4_symlink_link")
+        } else {
+            format!("{}/_ext4_symlink_link", root)
+        };
+
+        // Create a target file and a symlink to it.
+        crate::fs::Vfs::write_file(&target_path, b"symlink target content")?;
+        crate::fs::Vfs::symlink(&link_path, &target_path)?;
+
+        // readlink should return the target path.
+        let target_read = crate::fs::Vfs::readlink(&link_path)?;
+        if target_read != target_path {
+            serial_println!("[ext4]   FAIL: readlink = '{}', expected '{}'", target_read, target_path);
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&target_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     readlink OK: {}", target_read);
+
+        // lstat on the symlink should return Symlink type.
+        let link_stat = crate::fs::Vfs::lstat(&link_path)?;
+        if link_stat.entry_type != crate::fs::EntryType::Symlink {
+            serial_println!("[ext4]   FAIL: lstat on symlink should be Symlink, got {:?}", link_stat.entry_type);
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&target_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     lstat type=Symlink OK");
+
+        // stat (follow) on the symlink should return File type.
+        let target_stat = crate::fs::Vfs::stat(&link_path)?;
+        if target_stat.entry_type != crate::fs::EntryType::File {
+            serial_println!("[ext4]   FAIL: stat on symlink should follow to File, got {:?}", target_stat.entry_type);
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&target_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     stat follows symlink to File OK");
+
+        // Read through the symlink should return the target's content.
+        let content = crate::fs::Vfs::read_file(&link_path)?;
+        if content != b"symlink target content" {
+            serial_println!("[ext4]   FAIL: read through symlink returned wrong data");
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&target_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     read through symlink OK ({} bytes)", content.len());
+
+        // Clean up.
+        crate::fs::Vfs::remove(&link_path)?;
+        crate::fs::Vfs::remove(&target_path)?;
+        serial_println!("[ext4]     symlink test files cleaned up OK");
+    }
+
+    // --- Timestamp (set_times) test ---
+    serial_println!("[ext4]   Testing set_times...");
+    {
+        let ts_path = if root == "/" {
+            alloc::string::String::from("/_ext4_timestamp_test")
+        } else {
+            format!("{}/_ext4_timestamp_test", root)
+        };
+        crate::fs::Vfs::write_file(&ts_path, b"timestamp test")?;
+
+        // Set specific timestamps (1_700_000_000 seconds = 2023-11-14).
+        let ts_ns: u64 = 1_700_000_000_000_000_000;
+        crate::fs::Vfs::set_times(&ts_path, ts_ns, ts_ns)?;
+
+        // Read back via metadata and verify (ext4 stores seconds, so
+        // we lose sub-second precision).
+        let meta = crate::fs::Vfs::metadata(&ts_path)?;
+        let expected_sec = 1_700_000_000_u64;
+        let actual_atime_sec = meta.accessed_ns / 1_000_000_000;
+        let actual_mtime_sec = meta.modified_ns / 1_000_000_000;
+        if actual_atime_sec != expected_sec || actual_mtime_sec != expected_sec {
+            serial_println!(
+                "[ext4]   FAIL: set_times atime_sec={}, mtime_sec={}, expected {}",
+                actual_atime_sec, actual_mtime_sec, expected_sec
+            );
+            let _ = crate::fs::Vfs::remove(&ts_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     set_times: atime/mtime match expected epoch OK");
+
+        crate::fs::Vfs::remove(&ts_path)?;
+        serial_println!("[ext4]     timestamp test file cleaned up OK");
+    }
+
     serial_println!("[ext4] Self-test passed.");
     Ok(())
 }

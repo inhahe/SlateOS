@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "split", "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
+    "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
     "watch", "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
@@ -4237,6 +4237,7 @@ fn dispatch(line: &str) {
         "mktemp" => cmd_mktemp(args),
         "mkfs.fat" | "mkfs" => cmd_mkfs_fat(args),
         "fsck.fat" | "fsck" => cmd_fsck_fat(args),
+        "tar" => cmd_tar(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -4403,6 +4404,7 @@ fn cmd_help() {
     crate::console_println!("  mktemp [D] Create temporary file (default /tmp)");
     crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
     crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
+    crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -12741,4 +12743,573 @@ fn cmd_cpuinfo() {
             crate::smp::cpu_apic_id(cpu).unwrap_or(0),
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// tar — archive creation, extraction, and listing (USTAR format)
+// ---------------------------------------------------------------------------
+
+/// USTAR header constants.
+const TAR_BLOCK_SIZE: usize = 512;
+const TAR_MAGIC: &[u8; 6] = b"ustar\0";
+const TAR_VERSION: &[u8; 2] = b"00";
+
+/// File type flags for tar headers.
+const TAR_REGTYPE: u8 = b'0';       // Regular file
+const TAR_DIRTYPE: u8 = b'5';       // Directory
+const TAR_SYMTYPE: u8 = b'2';       // Symbolic link
+
+/// Build a USTAR header block for a file or directory.
+///
+/// Returns a 512-byte header with checksum computed.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn tar_build_header(
+    path: &str,
+    size: u64,
+    mtime_ns: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    typeflag: u8,
+    linkname: &str,
+) -> [u8; TAR_BLOCK_SIZE] {
+    let mut header = [0u8; TAR_BLOCK_SIZE];
+
+    // Split path into prefix (155 bytes) + name (100 bytes) if needed.
+    let path_bytes = path.as_bytes();
+    if path_bytes.len() <= 100 {
+        let copy_len = path_bytes.len().min(100);
+        header[..copy_len].copy_from_slice(&path_bytes[..copy_len]);
+    } else {
+        // Try to split at a '/' boundary for USTAR prefix support.
+        let mut split_at = None;
+        for i in (0..path_bytes.len().saturating_sub(100)).rev() {
+            if path_bytes[i] == b'/' {
+                split_at = Some(i);
+                break;
+            }
+        }
+        if let Some(s) = split_at {
+            // prefix = path[..s], name = path[s+1..]
+            let prefix = &path_bytes[..s];
+            let name = &path_bytes[s + 1..];
+            let plen = prefix.len().min(155);
+            let nlen = name.len().min(100);
+            header[..nlen].copy_from_slice(&name[..nlen]);
+            header[345..345 + plen].copy_from_slice(&prefix[..plen]);
+        } else {
+            // Can't split — truncate to 100 bytes.
+            header[..100].copy_from_slice(&path_bytes[..100]);
+        }
+    }
+
+    // Mode (octal, 8 bytes including NUL).
+    let mode_str = alloc::format!("{:07o}\0", mode & 0o7777);
+    let mode_bytes = mode_str.as_bytes();
+    let mlen = mode_bytes.len().min(8);
+    header[100..100 + mlen].copy_from_slice(&mode_bytes[..mlen]);
+
+    // UID.
+    let uid_str = alloc::format!("{:07o}\0", uid);
+    let uid_bytes = uid_str.as_bytes();
+    let ulen = uid_bytes.len().min(8);
+    header[108..108 + ulen].copy_from_slice(&uid_bytes[..ulen]);
+
+    // GID.
+    let gid_str = alloc::format!("{:07o}\0", gid);
+    let gid_bytes = gid_str.as_bytes();
+    let glen = gid_bytes.len().min(8);
+    header[116..116 + glen].copy_from_slice(&gid_bytes[..glen]);
+
+    // Size (octal, 12 bytes including NUL).
+    let size_str = alloc::format!("{:011o}\0", size);
+    let size_bytes = size_str.as_bytes();
+    let slen = size_bytes.len().min(12);
+    header[124..124 + slen].copy_from_slice(&size_bytes[..slen]);
+
+    // Mtime (seconds since Unix epoch, octal).
+    let mtime_sec = mtime_ns / 1_000_000_000;
+    let mtime_str = alloc::format!("{:011o}\0", mtime_sec);
+    let mtime_bytes = mtime_str.as_bytes();
+    let mtlen = mtime_bytes.len().min(12);
+    header[136..136 + mtlen].copy_from_slice(&mtime_bytes[..mtlen]);
+
+    // Typeflag.
+    header[156] = typeflag;
+
+    // Linkname (100 bytes).
+    if !linkname.is_empty() {
+        let lbytes = linkname.as_bytes();
+        let llen = lbytes.len().min(100);
+        header[157..157 + llen].copy_from_slice(&lbytes[..llen]);
+    }
+
+    // Magic + version.
+    header[257..263].copy_from_slice(TAR_MAGIC);
+    header[263..265].copy_from_slice(TAR_VERSION);
+
+    // Checksum: fill with spaces first, then compute.
+    header[148..156].copy_from_slice(b"        ");
+
+    let mut cksum: u32 = 0;
+    for &b in header.iter() {
+        cksum = cksum.wrapping_add(u32::from(b));
+    }
+    let cksum_str = alloc::format!("{:06o}\0 ", cksum);
+    let cksum_bytes = cksum_str.as_bytes();
+    let clen = cksum_bytes.len().min(8);
+    header[148..148 + clen].copy_from_slice(&cksum_bytes[..clen]);
+
+    header
+}
+
+/// Parse a USTAR header. Returns (name, size, mtime_sec, typeflag, linkname)
+/// or None if the block is all zeros (end-of-archive).
+#[allow(clippy::arithmetic_side_effects)]
+fn tar_parse_header(header: &[u8; TAR_BLOCK_SIZE]) -> Option<(alloc::string::String, u64, u64, u8, alloc::string::String)> {
+    // Check for end-of-archive (all zeros).
+    if header.iter().all(|&b| b == 0) {
+        return None;
+    }
+
+    // Verify checksum.
+    let stored_cksum = tar_parse_octal(&header[148..156]);
+    let mut computed: u32 = 0;
+    for (i, &b) in header.iter().enumerate() {
+        if (148..156).contains(&i) {
+            computed = computed.wrapping_add(u32::from(b' '));
+        } else {
+            computed = computed.wrapping_add(u32::from(b));
+        }
+    }
+    if stored_cksum != u64::from(computed) {
+        return None; // Invalid checksum.
+    }
+
+    // Name: prefix (345..500) + "/" + name (0..100).
+    let name_raw = &header[..100];
+    let name_end = name_raw.iter().position(|&b| b == 0).unwrap_or(100);
+    let name_part = core::str::from_utf8(&name_raw[..name_end]).unwrap_or("");
+
+    let prefix_raw = &header[345..500];
+    let prefix_end = prefix_raw.iter().position(|&b| b == 0).unwrap_or(155);
+    let prefix_part = core::str::from_utf8(&prefix_raw[..prefix_end]).unwrap_or("");
+
+    let full_name = if prefix_part.is_empty() {
+        alloc::string::String::from(name_part)
+    } else {
+        alloc::format!("{}/{}", prefix_part, name_part)
+    };
+
+    let size = tar_parse_octal(&header[124..136]);
+    let mtime = tar_parse_octal(&header[136..148]);
+    let typeflag = header[156];
+
+    let link_raw = &header[157..257];
+    let link_end = link_raw.iter().position(|&b| b == 0).unwrap_or(100);
+    let linkname = core::str::from_utf8(&link_raw[..link_end]).unwrap_or("").into();
+
+    Some((full_name, size, mtime, typeflag, linkname))
+}
+
+/// Parse an octal ASCII field (NUL/space terminated) into u64.
+#[allow(clippy::arithmetic_side_effects)]
+fn tar_parse_octal(field: &[u8]) -> u64 {
+    let mut val: u64 = 0;
+    for &b in field {
+        if b == 0 || b == b' ' {
+            break;
+        }
+        if b >= b'0' && b <= b'7' {
+            val = val.wrapping_mul(8).wrapping_add(u64::from(b - b'0'));
+        }
+    }
+    val
+}
+
+/// `tar` command — create, extract, or list USTAR archives.
+///
+/// Usage:
+///   tar -cf archive.tar file1 [file2 ...]   Create archive
+///   tar -xf archive.tar [-C dir]            Extract archive
+///   tar -tf archive.tar                     List contents
+///   tar -xvf / -tvf / -cvf                  Verbose mode
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn cmd_tar(args: &str) {
+    use crate::fs::Vfs;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!("Usage: tar [-c|-x|-t][v]f archive.tar [files...]");
+        crate::console_println!("  -cf  Create archive from files/directories");
+        crate::console_println!("  -xf  Extract archive (-C dir to set target)");
+        crate::console_println!("  -tf  List archive contents");
+        crate::console_println!("  -v   Verbose output");
+        return;
+    }
+
+    let flags = parts[0];
+    let create = flags.contains('c');
+    let extract = flags.contains('x');
+    let list = flags.contains('t');
+    let verbose = flags.contains('v');
+
+    // Exactly one mode required.
+    let mode_count = u8::from(create) + u8::from(extract) + u8::from(list);
+    if mode_count != 1 {
+        crate::console_println!("tar: specify exactly one of -c, -x, -t");
+        return;
+    }
+
+    if !flags.contains('f') {
+        crate::console_println!("tar: -f flag required (no stdin/stdout tar)");
+        return;
+    }
+
+    if parts.len() < 2 {
+        crate::console_println!("tar: missing archive filename after -f");
+        return;
+    }
+
+    let archive_path = resolve_path(parts[1]);
+
+    if create {
+        // tar -cf archive.tar file1 dir1 ...
+        if parts.len() < 3 {
+            crate::console_println!("tar: no files specified for archiving");
+            return;
+        }
+
+        let mut archive_data: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut file_count: u32 = 0;
+
+        for &source in &parts[2..] {
+            let source_path = resolve_path(source);
+            if let Err(e) = tar_add_recursive(
+                &source_path,
+                &source_path,
+                &mut archive_data,
+                &mut file_count,
+                verbose,
+            ) {
+                crate::console_println!("tar: {}: {:?}", source, e);
+                return;
+            }
+        }
+
+        // Two zero blocks to mark end of archive.
+        archive_data.extend_from_slice(&[0u8; TAR_BLOCK_SIZE]);
+        archive_data.extend_from_slice(&[0u8; TAR_BLOCK_SIZE]);
+
+        match Vfs::write_file(&archive_path, &archive_data) {
+            Ok(()) => {
+                crate::console_println!(
+                    "tar: created '{}' ({} files, {} bytes)",
+                    archive_path, file_count, archive_data.len()
+                );
+            }
+            Err(e) => {
+                crate::console_println!("tar: write '{}': {:?}", archive_path, e);
+            }
+        }
+    } else if extract || list {
+        // Parse -C dir option for extract.
+        let mut target_dir = alloc::string::String::from("/");
+        let mut i = 2;
+        while i < parts.len() {
+            if parts[i] == "-C" && i + 1 < parts.len() {
+                target_dir = resolve_path(parts[i + 1]);
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+
+        let data = match Vfs::read_file(&archive_path) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::console_println!("tar: read '{}': {:?}", archive_path, e);
+                return;
+            }
+        };
+
+        let mut offset: usize = 0;
+        let mut file_count: u32 = 0;
+
+        while offset + TAR_BLOCK_SIZE <= data.len() {
+            let mut header_buf = [0u8; TAR_BLOCK_SIZE];
+            header_buf.copy_from_slice(&data[offset..offset + TAR_BLOCK_SIZE]);
+            offset += TAR_BLOCK_SIZE;
+
+            let (name, size, _mtime, typeflag, _linkname) = match tar_parse_header(&header_buf) {
+                Some(h) => h,
+                None => break, // End of archive.
+            };
+
+            // Data blocks follow the header.
+            let data_blocks = if size > 0 {
+                ((size as usize) + TAR_BLOCK_SIZE - 1) / TAR_BLOCK_SIZE
+            } else {
+                0
+            };
+            let data_start = offset;
+            let data_end = (offset + data_blocks * TAR_BLOCK_SIZE).min(data.len());
+            offset = data_end;
+
+            if list {
+                // List mode: print entry info.
+                let type_ch = match typeflag {
+                    TAR_DIRTYPE => 'd',
+                    TAR_SYMTYPE => 'l',
+                    _ => '-',
+                };
+                if verbose {
+                    crate::console_println!(
+                        "{} {:>8} {}",
+                        type_ch, size, name
+                    );
+                } else {
+                    crate::console_println!("{}", name);
+                }
+            } else {
+                // Extract mode.
+                // Build full output path.
+                let clean_name = name.trim_start_matches('/');
+                let out_path = if target_dir == "/" {
+                    alloc::format!("/{}", clean_name)
+                } else {
+                    alloc::format!("{}/{}", target_dir.trim_end_matches('/'), clean_name)
+                };
+
+                match typeflag {
+                    TAR_DIRTYPE => {
+                        // Create directory (ignore AlreadyExists).
+                        match Vfs::mkdir(&out_path) {
+                            Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
+                            Err(e) => {
+                                crate::console_println!("tar: mkdir '{}': {:?}", out_path, e);
+                            }
+                        }
+                        if verbose {
+                            crate::console_println!("x {}", out_path);
+                        }
+                    }
+                    TAR_REGTYPE | b'\0' => {
+                        // Extract regular file.
+                        // Ensure parent directory exists.
+                        if let Some(slash) = out_path.rfind('/') {
+                            if slash > 0 {
+                                let parent = &out_path[..slash];
+                                let _ = tar_mkdir_p(parent);
+                            }
+                        }
+
+                        let file_data = if size > 0 && data_start + (size as usize) <= data.len() {
+                            &data[data_start..data_start + size as usize]
+                        } else {
+                            &[]
+                        };
+
+                        match Vfs::write_file(&out_path, file_data) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                crate::console_println!("tar: write '{}': {:?}", out_path, e);
+                            }
+                        }
+                        if verbose {
+                            crate::console_println!("x {} ({} bytes)", out_path, size);
+                        }
+                    }
+                    TAR_SYMTYPE => {
+                        // Symlink — create if VFS supports it.
+                        if verbose {
+                            crate::console_println!(
+                                "x {} -> {} (symlink, skipped)",
+                                out_path, _linkname
+                            );
+                        }
+                    }
+                    _ => {
+                        if verbose {
+                            crate::console_println!(
+                                "x {} (type '{}', skipped)",
+                                out_path, typeflag as char
+                            );
+                        }
+                    }
+                }
+            }
+
+            file_count = file_count.saturating_add(1);
+        }
+
+        if extract {
+            crate::console_println!(
+                "tar: extracted {} entries from '{}'",
+                file_count, archive_path
+            );
+        }
+    }
+}
+
+/// Recursively add files/directories to a tar archive buffer.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn tar_add_recursive(
+    path: &str,
+    base: &str,
+    archive: &mut alloc::vec::Vec<u8>,
+    count: &mut u32,
+    verbose: bool,
+) -> crate::error::KernelResult<()> {
+    use crate::fs::{vfs::EntryType, Vfs};
+
+    let meta = Vfs::metadata(path)?;
+
+    // Compute the archive-internal path: relative to the base's parent.
+    // E.g., if base="/data" and path="/data/sub/file.txt", archive name = "data/sub/file.txt"
+    let archive_name = if path == base {
+        // Top-level item: use just the last component.
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if meta.entry_type == EntryType::Directory {
+            alloc::format!("{}/", name)
+        } else {
+            alloc::string::String::from(name)
+        }
+    } else {
+        // Descendent: compute relative path from base's parent.
+        let base_parent = if let Some(slash) = base.rfind('/') {
+            if slash == 0 { "/" } else { &base[..slash] }
+        } else {
+            "/"
+        };
+        let rel = if base_parent == "/" {
+            path.trim_start_matches('/')
+        } else if let Some(rest) = path.strip_prefix(base_parent) {
+            rest.trim_start_matches('/')
+        } else {
+            path.trim_start_matches('/')
+        };
+        if meta.entry_type == EntryType::Directory {
+            alloc::format!("{}/", rel)
+        } else {
+            alloc::string::String::from(rel)
+        }
+    };
+
+    match meta.entry_type {
+        EntryType::Directory => {
+            // Add directory header (size 0).
+            let header = tar_build_header(
+                &archive_name,
+                0,
+                meta.modified_ns,
+                u32::from(meta.permissions),
+                meta.uid,
+                meta.gid,
+                TAR_DIRTYPE,
+                "",
+            );
+            archive.extend_from_slice(&header);
+            *count = count.saturating_add(1);
+            if verbose {
+                crate::console_println!("a {}", archive_name);
+            }
+
+            // Recurse into children.
+            let entries = Vfs::readdir(path)?;
+            for entry in &entries {
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                let child = if path == "/" {
+                    alloc::format!("/{}", entry.name)
+                } else {
+                    alloc::format!("{}/{}", path, entry.name)
+                };
+                tar_add_recursive(&child, base, archive, count, verbose)?;
+            }
+        }
+        EntryType::File => {
+            let data = Vfs::read_file(path)?;
+            let file_size = data.len() as u64;
+
+            let header = tar_build_header(
+                &archive_name,
+                file_size,
+                meta.modified_ns,
+                u32::from(meta.permissions),
+                meta.uid,
+                meta.gid,
+                TAR_REGTYPE,
+                "",
+            );
+            archive.extend_from_slice(&header);
+
+            // Write file data.
+            archive.extend_from_slice(&data);
+
+            // Pad to 512-byte boundary.
+            let remainder = data.len() % TAR_BLOCK_SIZE;
+            if remainder != 0 {
+                let padding = TAR_BLOCK_SIZE - remainder;
+                archive.extend_from_slice(&alloc::vec![0u8; padding]);
+            }
+
+            *count = count.saturating_add(1);
+            if verbose {
+                crate::console_println!("a {} ({} bytes)", archive_name, file_size);
+            }
+        }
+        EntryType::Symlink => {
+            // Read symlink target.
+            let target = match Vfs::readlink(path) {
+                Ok(t) => t,
+                Err(_) => alloc::string::String::new(),
+            };
+
+            let header = tar_build_header(
+                &archive_name,
+                0,
+                meta.modified_ns,
+                u32::from(meta.permissions),
+                meta.uid,
+                meta.gid,
+                TAR_SYMTYPE,
+                &target,
+            );
+            archive.extend_from_slice(&header);
+            *count = count.saturating_add(1);
+            if verbose {
+                crate::console_println!("a {} -> {}", archive_name, target);
+            }
+        }
+        _ => {
+            // Skip unsupported types.
+        }
+    }
+
+    Ok(())
+}
+
+/// Create directories recursively (mkdir -p equivalent for tar extraction).
+fn tar_mkdir_p(path: &str) -> crate::error::KernelResult<()> {
+    use crate::fs::Vfs;
+
+    // Walk each component and create if missing.
+    let mut current = alloc::string::String::new();
+    for component in path.split('/') {
+        if component.is_empty() {
+            current.push('/');
+            continue;
+        }
+        if current.len() > 1 {
+            current.push('/');
+        }
+        current.push_str(component);
+        match Vfs::mkdir(&current) {
+            Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }

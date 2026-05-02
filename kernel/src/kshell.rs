@@ -4325,7 +4325,7 @@ fn cmd_help() {
     crate::console_println!("  disk      Show block device info");
     crate::console_println!("  blkread N Hex-dump sector N from disk");
     crate::console_println!("  cd [dir]  Change working directory");
-    crate::console_println!("  ls [path] List files in directory");
+    crate::console_println!("  ls [-lahRStr] [path] List files (-l long, -a all, -h human, -R recurse, -S size-sort, -t time-sort, -r reverse)");
     crate::console_println!("  cat FILE  Print file contents");
     crate::console_println!("  write F T Write text T to file F");
     crate::console_println!("  rm [-r] F Delete a file (or directory tree with -r)");
@@ -5213,6 +5213,10 @@ fn cmd_ls(args: &str) {
     let mut long_format = false;
     let mut show_all = false;
     let mut human_sizes = false;
+    let mut recursive = false;
+    let mut sort_by_size = false;
+    let mut sort_by_time = false;
+    let mut reverse_sort = false;
     let mut path_arg = "";
 
     for token in args.split_whitespace() {
@@ -5222,6 +5226,10 @@ fn cmd_ls(args: &str) {
                     'l' => long_format = true,
                     'a' => show_all = true,
                     'h' => human_sizes = true,
+                    'R' => recursive = true,
+                    'S' => sort_by_size = true,
+                    't' => sort_by_time = true,
+                    'r' => reverse_sort = true,
                     _ => {
                         crate::console_println!("ls: unknown option -{}", ch);
                         set_exit(1);
@@ -5240,125 +5248,209 @@ fn cmd_ls(args: &str) {
         resolve_path(path_arg)
     };
 
-    match crate::fs::Vfs::readdir(&path) {
-        Ok(entries) => {
-            if entries.is_empty() {
-                shell_println!("(empty directory)");
-                return;
+    ls_list_dir(
+        &path, long_format, show_all, human_sizes,
+        sort_by_size, sort_by_time, reverse_sort,
+        recursive, 0,
+    );
+}
+
+/// Internal helper for ls: list one directory and optionally recurse.
+///
+/// `depth` guards against infinite recursion (e.g., symlink loops);
+/// maximum depth is 32.
+#[allow(clippy::too_many_arguments)]
+fn ls_list_dir(
+    path: &str,
+    long_format: bool,
+    show_all: bool,
+    human_sizes: bool,
+    sort_by_size: bool,
+    sort_by_time: bool,
+    reverse_sort: bool,
+    recursive: bool,
+    depth: u32,
+) {
+    if depth > 32 {
+        crate::console_println!("ls: recursion limit reached");
+        return;
+    }
+
+    // When recursing, print the directory name as a header.
+    if recursive && depth > 0 {
+        shell_println!("");
+        shell_println!("{}:", path);
+    }
+
+    let entries = match crate::fs::Vfs::readdir(path) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("ls: {}: {:?}", path, e);
+            set_exit(1);
+            return;
+        }
+    };
+
+    if entries.is_empty() {
+        shell_println!("(empty directory)");
+        if !recursive { return; }
+    }
+
+    // Filter hidden files unless -a is given.
+    let mut filtered: Vec<crate::fs::vfs::DirEntry> = entries
+        .into_iter()
+        .filter(|e| show_all || !e.name.starts_with('.'))
+        .collect();
+
+    // Apply sorting.  Sorting requires metadata lookups.
+    if sort_by_size {
+        filtered.sort_by(|a, b| b.size.cmp(&a.size));
+    } else if sort_by_time {
+        // Sort by modification time (most recent first).
+        // We need to look up metadata for each entry.
+        let mut with_mtime: Vec<(crate::fs::vfs::DirEntry, u64)> = filtered
+            .into_iter()
+            .map(|e| {
+                let fp = if path == "/" {
+                    alloc::format!("/{}", e.name)
+                } else {
+                    alloc::format!("{}/{}", path, e.name)
+                };
+                let mtime = crate::fs::Vfs::metadata(&fp)
+                    .map(|m| m.modified_ns)
+                    .unwrap_or(0);
+                (e, mtime)
+            })
+            .collect();
+        with_mtime.sort_by(|a, b| b.1.cmp(&a.1));
+        filtered = with_mtime.into_iter().map(|(e, _)| e).collect();
+    }
+
+    if reverse_sort {
+        filtered.reverse();
+    }
+
+    if long_format {
+        // Long format: type+perms links uid gid size date name
+        // First pass: gather metadata and compute total blocks.
+        let mut total_blocks: u64 = 0;
+        let mut metas: Vec<Option<crate::fs::vfs::FileMeta>> =
+            Vec::with_capacity(filtered.len());
+
+        for entry in &filtered {
+            let full_path = if path == "/" {
+                alloc::format!("/{}", entry.name)
+            } else {
+                alloc::format!("{}/{}", path, entry.name)
+            };
+            if let Ok(meta) = crate::fs::Vfs::metadata(&full_path) {
+                total_blocks = total_blocks.saturating_add(meta.blocks);
+                metas.push(Some(meta));
+            } else {
+                metas.push(None);
             }
+        }
 
-            // Filter hidden files unless -a is given.
-            let filtered: Vec<&crate::fs::vfs::DirEntry> = entries.iter()
-                .filter(|e| show_all || !e.name.starts_with('.'))
-                .collect();
+        shell_println!("total {}", total_blocks);
 
-            if long_format {
-                // Long format: type+perms links uid gid size date name
-                // First pass: gather metadata and compute total blocks.
-                let mut total_blocks: u64 = 0;
-                let mut metas: Vec<Option<crate::fs::vfs::FileMeta>> =
-                    Vec::with_capacity(filtered.len());
+        for (i, entry) in filtered.iter().enumerate() {
+            let type_ch = match entry.entry_type {
+                crate::fs::EntryType::Directory => 'd',
+                crate::fs::EntryType::File => '-',
+                crate::fs::EntryType::Symlink => 'l',
+                crate::fs::EntryType::VolumeLabel => 'v',
+            };
 
-                for entry in &filtered {
+            if let Some(Some(meta)) = metas.get(i) {
+                let perms = format_perms(meta.permissions);
+                let perm_str = core::str::from_utf8(&perms).unwrap_or("---------");
+
+                let size_str = if human_sizes {
+                    format_size_human(meta.size)
+                } else {
+                    alloc::format!("{}", meta.size)
+                };
+
+                // Format modification time as YYYY-MM-DD HH:MM:SS.
+                let time_str = if meta.modified_ns > 0 {
+                    format_epoch_ns(meta.modified_ns)
+                } else {
+                    String::from("-")
+                };
+
+                // For symlinks, show " -> target".
+                let suffix = if entry.entry_type == crate::fs::EntryType::Symlink {
                     let full_path = if path == "/" {
                         alloc::format!("/{}", entry.name)
                     } else {
                         alloc::format!("{}/{}", path, entry.name)
                     };
-                    if let Ok(meta) = crate::fs::Vfs::metadata(&full_path) {
-                        total_blocks = total_blocks.saturating_add(meta.blocks);
-                        metas.push(Some(meta));
-                    } else {
-                        metas.push(None);
+                    match crate::fs::Vfs::readlink(&full_path) {
+                        Ok(target) => alloc::format!(" -> {}", target),
+                        Err(_) => String::new(),
                     }
-                }
+                } else {
+                    String::new()
+                };
 
-                shell_println!("total {}", total_blocks);
-
-                for (i, entry) in filtered.iter().enumerate() {
-                    let type_ch = match entry.entry_type {
-                        crate::fs::EntryType::Directory => 'd',
-                        crate::fs::EntryType::File => '-',
-                        crate::fs::EntryType::Symlink => 'l',
-                        crate::fs::EntryType::VolumeLabel => 'v',
-                    };
-
-                    if let Some(Some(meta)) = metas.get(i) {
-                        let perms = format_perms(meta.permissions);
-                        let perm_str = core::str::from_utf8(&perms).unwrap_or("---------");
-
-                        let size_str = if human_sizes {
-                            format_size_human(meta.size)
-                        } else {
-                            alloc::format!("{}", meta.size)
-                        };
-
-                        // Format modification time as YYYY-MM-DD HH:MM:SS.
-                        let time_str = if meta.modified_ns > 0 {
-                            format_epoch_ns(meta.modified_ns)
-                        } else {
-                            String::from("-")
-                        };
-
-                        // For symlinks, show " -> target".
-                        let suffix = if entry.entry_type == crate::fs::EntryType::Symlink {
-                            let full_path = if path == "/" {
-                                alloc::format!("/{}", entry.name)
-                            } else {
-                                alloc::format!("{}/{}", path, entry.name)
-                            };
-                            match crate::fs::Vfs::readlink(&full_path) {
-                                Ok(target) => alloc::format!(" -> {}", target),
-                                Err(_) => String::new(),
-                            }
-                        } else {
-                            String::new()
-                        };
-
-                        shell_println!(
-                            "{}{} {:>3} {:>5} {:>5} {:>8} {} {}{}",
-                            type_ch, perm_str, meta.nlinks,
-                            meta.uid, meta.gid, size_str,
-                            time_str, entry.name, suffix,
-                        );
-                    } else {
-                        // Metadata unavailable — basic listing.
-                        let size_str = if human_sizes {
-                            format_size_human(entry.size)
-                        } else {
-                            alloc::format!("{}", entry.size)
-                        };
-                        shell_println!(
-                            "{}--------- {:>3} {:>5} {:>5} {:>8}            {}",
-                            type_ch, 1, 0, 0, size_str, entry.name,
-                        );
-                    }
-                }
+                shell_println!(
+                    "{}{} {:>3} {:>5} {:>5} {:>8} {} {}{}",
+                    type_ch, perm_str, meta.nlinks,
+                    meta.uid, meta.gid, size_str,
+                    time_str, entry.name, suffix,
+                );
             } else {
-                // Default format (original behavior).
-                for entry in &filtered {
-                    let type_indicator = match entry.entry_type {
-                        crate::fs::EntryType::Directory => "<DIR>    ",
-                        crate::fs::EntryType::File => "         ",
-                        crate::fs::EntryType::Symlink => "<LINK>   ",
-                        crate::fs::EntryType::VolumeLabel => "<VOL>    ",
-                    };
-                    let size_str = if human_sizes {
-                        alloc::format!("{:>8}", format_size_human(entry.size))
-                    } else {
-                        alloc::format!("{:>8}", entry.size)
-                    };
-                    shell_println!(
-                        "  {} {}  {}",
-                        type_indicator, size_str, entry.name
-                    );
-                }
+                // Metadata unavailable — basic listing.
+                let size_str = if human_sizes {
+                    format_size_human(entry.size)
+                } else {
+                    alloc::format!("{}", entry.size)
+                };
+                shell_println!(
+                    "{}--------- {:>3} {:>5} {:>5} {:>8}            {}",
+                    type_ch, 1, 0, 0, size_str, entry.name,
+                );
             }
-            shell_println!("{} entry(ies)", filtered.len());
         }
-        Err(e) => {
-            crate::console_println!("ls: {}: {:?}", path, e);
-            set_exit(1);
+    } else {
+        // Default format (original behavior).
+        for entry in &filtered {
+            let type_indicator = match entry.entry_type {
+                crate::fs::EntryType::Directory => "<DIR>    ",
+                crate::fs::EntryType::File => "         ",
+                crate::fs::EntryType::Symlink => "<LINK>   ",
+                crate::fs::EntryType::VolumeLabel => "<VOL>    ",
+            };
+            let size_str = if human_sizes {
+                alloc::format!("{:>8}", format_size_human(entry.size))
+            } else {
+                alloc::format!("{:>8}", entry.size)
+            };
+            shell_println!(
+                "  {} {}  {}",
+                type_indicator, size_str, entry.name
+            );
+        }
+    }
+    shell_println!("{} entry(ies)", filtered.len());
+
+    // Recurse into subdirectories for -R.
+    if recursive {
+        for entry in &filtered {
+            if entry.entry_type == crate::fs::EntryType::Directory
+                && entry.name != "." && entry.name != ".."
+            {
+                let child_path = if path == "/" {
+                    alloc::format!("/{}", entry.name)
+                } else {
+                    alloc::format!("{}/{}", path, entry.name)
+                };
+                ls_list_dir(
+                    &child_path, long_format, show_all, human_sizes,
+                    sort_by_size, sort_by_time, reverse_sort,
+                    recursive, depth + 1,
+                );
+            }
         }
     }
 }

@@ -47,6 +47,27 @@ fn capture_stop() -> String {
     SHELL_OUTPUT.lock().take().unwrap_or_default()
 }
 
+/// Execute a command and capture its output as a string.
+///
+/// Used for `$(command)` substitution.  Handles recursive capture by
+/// saving and restoring the previous capture state (since a command
+/// substitution can appear inside a pipeline or redirect that's already
+/// capturing).
+fn capture_command(cmd: &str) -> String {
+    // Save any existing capture state (supports nesting).
+    let prev = SHELL_OUTPUT.lock().take();
+
+    // Start fresh capture.
+    capture_start();
+    execute(cmd);
+    let output = capture_stop();
+
+    // Restore previous capture state.
+    *SHELL_OUTPUT.lock() = prev;
+
+    output
+}
+
 /// Write a string to the shell output destination.
 ///
 /// If capture mode is active, appends to the capture buffer.
@@ -281,6 +302,32 @@ fn expand_vars(input: &str) -> String {
                 if i < len && bytes[i] == b')' {
                     i = i.saturating_add(1);
                 }
+                if i < len && bytes[i] == b')' {
+                    i = i.saturating_add(1);
+                }
+            } else if next == b'(' {
+                // `$(command)` — command substitution.
+                // Find the matching `)`, tracking parenthesis nesting.
+                let start = i;
+                let mut depth: u32 = 1;
+                while i < len && depth > 0 {
+                    if bytes[i] == b'(' {
+                        depth = depth.saturating_add(1);
+                    } else if bytes[i] == b')' {
+                        depth = depth.saturating_sub(1);
+                    }
+                    if depth > 0 {
+                        i = i.saturating_add(1);
+                    }
+                }
+                if let Some(cmd_bytes) = bytes.get(start..i) {
+                    if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
+                        let output = capture_command(cmd);
+                        // POSIX: strip trailing newlines from substitution.
+                        result.push_str(output.trim_end_matches('\n'));
+                    }
+                }
+                // Skip past `)`.
                 if i < len && bytes[i] == b')' {
                     i = i.saturating_add(1);
                 }
@@ -2494,6 +2541,9 @@ fn cmd_help() {
     crate::console_println!("  cmd1 | cmd2  Pipe output of cmd1 into cmd2");
     crate::console_println!("Variable expansion:");
     crate::console_println!("  $NAME / ${{NAME}}  Expand environment variable");
+    crate::console_println!("  $(command)       Command substitution (capture output)");
+    crate::console_println!("  $((expr))        Arithmetic expansion");
+    crate::console_println!("  $1..$9 $# $@     Positional params (in functions)");
     crate::console_println!("  $$               Literal dollar sign");
     crate::console_println!("Control flow:");
     crate::console_println!("  if COND; then ... elif COND; then ... else ... fi");

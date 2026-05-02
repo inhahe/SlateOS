@@ -945,7 +945,8 @@ impl Ext4Driver {
 
     /// Read the contents of a file given its inode.
     ///
-    /// Currently supports extent-based files only (the standard ext4 format).
+    /// Supports both extent-based (modern ext4) and indirect-block-based
+    /// (ext2/ext3 compatibility) inodes.
     pub fn read_file_data(&self, inode: &Ext4Inode) -> KernelResult<Vec<u8>> {
         let file_size = self.inode_size(inode);
 
@@ -953,14 +954,13 @@ impl Ext4Driver {
             return Ok(Vec::new());
         }
 
-        // Check if the inode uses extents.
-        if (inode.i_flags & inode_flags::EXTENTS) == 0 {
-            // Indirect block mapping — not yet supported.
-            return Err(KernelError::NotSupported);
+        if (inode.i_flags & inode_flags::EXTENTS) != 0 {
+            // Extent-based file.
+            self.read_extent_data(inode, file_size)
+        } else {
+            // Indirect-block-based file (ext2/ext3 compat).
+            self.read_indirect_data(inode, file_size)
         }
-
-        // Read data via extent tree.
-        self.read_extent_data(inode, file_size)
     }
 
     /// Read a byte range from a file's extent tree.
@@ -985,38 +985,74 @@ impl Ext4Driver {
             return Ok(Vec::new());
         }
 
-        if (inode.i_flags & inode_flags::EXTENTS) == 0 {
-            return Err(KernelError::NotSupported);
-        }
-
         let block_size = u64::from(self.sb.block_size);
+        let block_size_usize = self.sb.block_size as usize;
 
-        // Determine which logical blocks we need.
-        let first_logical = offset / block_size;
-        let last_logical = (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
+        if (inode.i_flags & inode_flags::EXTENTS) != 0 {
+            // Extent-based: efficient tree walk.
+            let first_logical = offset / block_size;
+            let last_logical = (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
 
-        // Walk the extent tree and read only blocks in our range.
-        let block_bytes = inode_block_as_bytes(inode);
-        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
-        if header.eh_magic != EXT4_EXTENT_MAGIC {
-            return Err(KernelError::IoError);
+            let block_bytes = inode_block_as_bytes(inode);
+            let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+            if header.eh_magic != EXT4_EXTENT_MAGIC {
+                return Err(KernelError::IoError);
+            }
+
+            let mut result = Vec::with_capacity(actual_len);
+            self.read_range_from_tree(
+                block_bytes,
+                &header,
+                first_logical,
+                last_logical,
+                offset,
+                actual_len,
+                &mut result,
+            )?;
+
+            result.truncate(actual_len);
+            Ok(result)
+        } else {
+            // Indirect-block-based: read each logical block via lookup.
+            let first_logical = offset / block_size;
+            let last_logical = (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
+
+            let mut result = Vec::with_capacity(actual_len);
+            let mut block_buf = vec![0u8; block_size_usize];
+
+            for logical in first_logical..=last_logical {
+                let phys = self.lookup_indirect_block(inode, logical)?;
+                match phys {
+                    Some(p) => {
+                        self.reader.read_block(p, &mut block_buf)?;
+                    }
+                    None => {
+                        // Sparse hole — zero block.
+                        for b in block_buf.iter_mut() {
+                            *b = 0;
+                        }
+                    }
+                }
+
+                // Determine which portion of this block is relevant.
+                let block_start_byte = logical * block_size;
+                let copy_start = if block_start_byte < offset {
+                    (offset - block_start_byte) as usize
+                } else {
+                    0
+                };
+                let copy_end = block_size_usize.min(
+                    (offset.saturating_add(actual_len as u64) - block_start_byte) as usize,
+                );
+
+                if let Some(slice) = block_buf.get(copy_start..copy_end) {
+                    result.extend_from_slice(slice);
+                }
+            }
+
+            result.truncate(actual_len);
+            Ok(result)
         }
-
-        let mut result = Vec::with_capacity(actual_len);
-
-        // Walk the extent tree and read only blocks in our range.
-        self.read_range_from_tree(
-            block_bytes,
-            &header,
-            first_logical,
-            last_logical,
-            offset,
-            actual_len,
-            &mut result,
-        )?;
-
-        result.truncate(actual_len);
-        Ok(result)
     }
 
     /// Read directory entries from a directory inode.
@@ -1683,33 +1719,36 @@ impl Ext4Driver {
 
     /// Look up the physical block number for a given logical block.
     ///
-    /// Checks the extent cache first for a zero-I/O hit.  On miss,
-    /// walks the extent tree and caches the discovered extent range
-    /// so that subsequent lookups within the same extent are instant.
+    /// Supports both extent-based and indirect-block-based inodes:
+    /// - **Extents** (modern ext4): walks the extent tree with LRU caching.
+    /// - **Indirect blocks** (ext2/ext3 compat): follows the classic
+    ///   12 direct + single/double/triple indirect block pointer scheme.
     ///
-    /// `inode_nr` is the inode number (cache key, not stored in `Ext4Inode`).
+    /// `inode_nr` is the inode number (cache key for extent-based lookups).
     pub fn lookup_physical_block(
         &self,
         inode_nr: u32,
         inode: &Ext4Inode,
         logical_block: u64,
     ) -> KernelResult<Option<u64>> {
-        if (inode.i_flags & inode_flags::EXTENTS) == 0 {
-            return Err(KernelError::NotSupported);
-        }
+        if (inode.i_flags & inode_flags::EXTENTS) != 0 {
+            // Extent-based inode.
+            // Fast path: check the extent cache.
+            if let Some(phys) = self.extent_cache.lookup(inode_nr, logical_block) {
+                return Ok(Some(phys));
+            }
 
-        // Fast path: check the extent cache.
-        if let Some(phys) = self.extent_cache.lookup(inode_nr, logical_block) {
-            return Ok(Some(phys));
-        }
+            let block_bytes = inode_block_as_bytes(inode);
+            let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+            if header.eh_magic != EXT4_EXTENT_MAGIC || header.eh_entries == 0 {
+                return Ok(None);
+            }
 
-        let block_bytes = inode_block_as_bytes(inode);
-        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
-        if header.eh_magic != EXT4_EXTENT_MAGIC || header.eh_entries == 0 {
-            return Ok(None);
+            self.lookup_in_tree(inode_nr, block_bytes, &header, logical_block)
+        } else {
+            // Indirect-block-based inode (ext2/ext3 compatibility).
+            self.lookup_indirect_block(inode, logical_block)
         }
-
-        self.lookup_in_tree(inode_nr, block_bytes, &header, logical_block)
     }
 
     /// Recursively look up a logical block in an extent tree node.
@@ -1800,6 +1839,129 @@ impl Ext4Driver {
                 Ok(None)
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Indirect block mapping (ext2/ext3 compatibility)
+    // -----------------------------------------------------------------------
+
+    /// Look up a logical block via the classic indirect block scheme.
+    ///
+    /// The 15 `i_block` entries in the inode are:
+    /// - `[0..12]`  — 12 direct block pointers
+    /// - `[12]`     — single indirect (points to a block of `u32` pointers)
+    /// - `[13]`     — double indirect (points to a block of single-indirect blocks)
+    /// - `[14]`     — triple indirect (points to a block of double-indirect blocks)
+    ///
+    /// A pointer value of 0 means "not allocated" (sparse hole).
+    ///
+    /// Based on Linux `fs/ext4/indirect.c`.
+    fn lookup_indirect_block(
+        &self,
+        inode: &Ext4Inode,
+        logical_block: u64,
+    ) -> KernelResult<Option<u64>> {
+        // Number of u32 pointers that fit in one block.
+        let ptrs_per_block = u64::from(self.sb.block_size) / 4;
+        if ptrs_per_block == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Direct blocks: logical 0..11.
+        if logical_block < 12 {
+            let ptr = inode.i_block[logical_block as usize];
+            return Ok(if ptr == 0 { None } else { Some(u64::from(ptr)) });
+        }
+
+        // Single indirect: logical 12 .. (12 + ptrs_per_block - 1).
+        let single_max = 12 + ptrs_per_block;
+        if logical_block < single_max {
+            let indirect_block = u64::from(inode.i_block[12]);
+            if indirect_block == 0 {
+                return Ok(None);
+            }
+            let index = logical_block - 12;
+            return self.read_indirect_ptr(indirect_block, index);
+        }
+
+        // Double indirect: logical single_max .. (single_max + ptrs_per_block^2 - 1).
+        let double_max = single_max + ptrs_per_block * ptrs_per_block;
+        if logical_block < double_max {
+            let dind_block = u64::from(inode.i_block[13]);
+            if dind_block == 0 {
+                return Ok(None);
+            }
+            let offset = logical_block - single_max;
+            let dind_index = offset / ptrs_per_block;
+            let sind_index = offset % ptrs_per_block;
+
+            // Read the double-indirect block to get the single-indirect ptr.
+            let sind_block = match self.read_indirect_ptr(dind_block, dind_index)? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            return self.read_indirect_ptr(sind_block, sind_index);
+        }
+
+        // Triple indirect: logical double_max .. (double_max + ptrs_per_block^3 - 1).
+        let triple_max = double_max + ptrs_per_block * ptrs_per_block * ptrs_per_block;
+        if logical_block < triple_max {
+            let tind_block = u64::from(inode.i_block[14]);
+            if tind_block == 0 {
+                return Ok(None);
+            }
+            let offset = logical_block - double_max;
+            let tind_index = offset / (ptrs_per_block * ptrs_per_block);
+            let remainder = offset % (ptrs_per_block * ptrs_per_block);
+            let dind_index = remainder / ptrs_per_block;
+            let sind_index = remainder % ptrs_per_block;
+
+            // Triple → double → single → data.
+            let dind_block = match self.read_indirect_ptr(tind_block, tind_index)? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            let sind_block = match self.read_indirect_ptr(dind_block, dind_index)? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            return self.read_indirect_ptr(sind_block, sind_index);
+        }
+
+        // Logical block exceeds the maximum addressable by the indirect scheme.
+        Ok(None)
+    }
+
+    /// Read a single `u32` block pointer from an indirect block on disk.
+    ///
+    /// `indirect_block` is the physical block number of the indirect block.
+    /// `index` is the 0-based index into the array of `u32` pointers.
+    ///
+    /// Returns `Ok(None)` if the pointer is 0 (sparse hole).
+    fn read_indirect_ptr(
+        &self,
+        indirect_block: u64,
+        index: u64,
+    ) -> KernelResult<Option<u64>> {
+        let byte_offset = index.saturating_mul(4);
+        let block_size = u64::from(self.sb.block_size);
+        if byte_offset.saturating_add(4) > block_size {
+            return Err(KernelError::IoError);
+        }
+
+        // Read the indirect block.
+        let bs = self.sb.block_size as usize;
+        let mut buf = vec![0u8; bs];
+        self.reader.read_block(indirect_block, &mut buf)?;
+
+        // Extract the u32 pointer at the given index.
+        let off = byte_offset as usize;
+        let ptr_bytes = buf.get(off..off + 4).ok_or(KernelError::IoError)?;
+        let ptr = u32::from_le_bytes([
+            ptr_bytes[0], ptr_bytes[1], ptr_bytes[2], ptr_bytes[3],
+        ]);
+
+        Ok(if ptr == 0 { None } else { Some(u64::from(ptr)) })
     }
 
     /// Write data at a byte offset within an existing file, in place.
@@ -2421,6 +2583,48 @@ impl Ext4Driver {
         }
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Indirect block data reading
+    // -----------------------------------------------------------------------
+
+    /// Read the full contents of a file using indirect block mapping.
+    ///
+    /// Walks logical blocks 0..N, looking up each physical block via
+    /// the direct/single/double/triple indirect scheme, and assembles
+    /// the file data.
+    fn read_indirect_data(&self, inode: &Ext4Inode, file_size: u64) -> KernelResult<Vec<u8>> {
+        let block_size = u64::from(self.sb.block_size);
+        let block_size_usize = self.sb.block_size as usize;
+        let total_blocks = file_size.saturating_add(block_size - 1) / block_size;
+
+        let mut result = Vec::with_capacity(file_size as usize);
+        let mut block_buf = vec![0u8; block_size_usize];
+
+        for logical in 0..total_blocks {
+            let phys = self.lookup_indirect_block(inode, logical)?;
+            match phys {
+                Some(p) => {
+                    self.reader.read_block(p, &mut block_buf)?;
+                }
+                None => {
+                    // Sparse hole — zero fill.
+                    for b in block_buf.iter_mut() {
+                        *b = 0;
+                    }
+                }
+            }
+
+            let remaining = file_size.saturating_sub(result.len() as u64);
+            let copy_len = block_size.min(remaining) as usize;
+            if let Some(data) = block_buf.get(..copy_len) {
+                result.extend_from_slice(data);
+            }
+        }
+
+        result.truncate(file_size as usize);
+        Ok(result)
     }
 }
 

@@ -95,6 +95,7 @@ const ROOT_FILES: &[&str] = &[
     "buddyinfo",
     "swaps",
     "fsstats",
+    "heapinfo",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -779,6 +780,51 @@ fn gen_fsstats() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `/proc/heapinfo` — kernel heap allocator statistics.
+///
+/// Shows slab allocator and large-allocation counters, refill
+/// count, and failure count.  Useful for diagnosing memory
+/// allocation patterns and detecting heap pressure.
+#[allow(clippy::arithmetic_side_effects)]
+fn gen_heapinfo() -> Vec<u8> {
+    let stats = crate::mm::heap::stats();
+    let mut s = String::with_capacity(512);
+
+    s.push_str("Kernel Heap Statistics\n");
+    s.push_str("---------------------\n");
+
+    // Slab allocator stats (small allocations, per-CPU fast path).
+    let slab_active = stats.slab_allocs.saturating_sub(stats.slab_frees);
+    s.push_str(&format!(
+        "slab_allocs:    {}\n\
+         slab_frees:     {}\n\
+         slab_active:    {} (allocs - frees)\n\
+         slab_refills:   {}\n",
+        stats.slab_allocs, stats.slab_frees, slab_active, stats.slab_refills,
+    ));
+
+    // Large allocation stats (buddy allocator path, >512 bytes).
+    let large_active = stats.large_allocs.saturating_sub(stats.large_frees);
+    s.push_str(&format!(
+        "large_allocs:   {}\n\
+         large_frees:    {}\n\
+         large_active:   {} (allocs - frees)\n",
+        stats.large_allocs, stats.large_frees, large_active,
+    ));
+
+    // Failure and total stats.
+    let total_allocs = stats.slab_allocs.saturating_add(stats.large_allocs);
+    let total_frees = stats.slab_frees.saturating_add(stats.large_frees);
+    s.push_str(&format!(
+        "total_allocs:   {}\n\
+         total_frees:    {}\n\
+         alloc_failures: {}\n",
+        total_allocs, total_frees, stats.alloc_failures,
+    ));
+
+    s.into_bytes()
+}
+
 /// `/proc/swaps` — active swap devices, Linux-compatible format.
 ///
 /// Shows each swap device's type, capacity, usage, and priority.
@@ -1074,6 +1120,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "buddyinfo" => Ok(gen_buddyinfo()),
         "swaps" => Ok(gen_swaps()),
         "fsstats" => Ok(gen_fsstats()),
+        "heapinfo" => Ok(gen_heapinfo()),
         _ => Err(KernelError::NotFound),
     }
 }

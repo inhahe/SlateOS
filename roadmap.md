@@ -308,6 +308,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Sparse file support: SeekFrom::Data and SeekFrom::Hole variants, SYS_FS_SEEK_DATA (650) and SYS_FS_SEEK_HOLE (651) syscalls (non-sparse default: data=offset, hole=EOF)
   - [x] ext4 directory entry cache: 512-entry LRU keyed by (dir_inode, name) → child_inode, avoids linear O(n) directory scans on repeated lookups, invalidation on add/remove
   - [x] ext4 htree (hash-tree) directory index: half_md4/TEA/legacy hash functions, dx_root/dx_node parsing, binary search, O(1) amortized lookups for INDEX directories (read-only; write-side node splitting deferred)
+  - [x] ext4 extent range cache: 256-entry LRU keyed by (inode, logical_block_range) → physical_block, interior-mutable via spin::Mutex for use through &self references, invalidation on all write paths (write_file, truncate, remove, rmdir, rename), stats in debug_stats
   - [x] Procfs expansion: /proc/interrupts (APIC timer, ISR latency, IRQ state), /proc/devices (PCI bus scan), /proc/net (interface config snapshot)
   - [x] Kshell commands: lsp (paginated ls), cmp/diff (byte-by-byte file compare), fallocate (space reservation with K/M/G suffixes)
   - [x] Kshell commands: sort, uniq, tee, truncate, sha256 (text processing and file ops)

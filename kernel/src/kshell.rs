@@ -24,6 +24,57 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use spin::Mutex;
+
+// ---------------------------------------------------------------------------
+// Output capture for redirection and piping
+// ---------------------------------------------------------------------------
+
+/// When `Some`, shell output is captured into this buffer instead of being
+/// printed to the console.  Used for `> file`, `>> file`, and `|` piping.
+///
+/// Only one capture is active at a time (the kshell is single-threaded).
+static SHELL_OUTPUT: Mutex<Option<String>> = Mutex::new(None);
+
+/// Begin capturing shell output to an internal buffer.
+fn capture_start() {
+    *SHELL_OUTPUT.lock() = Some(String::with_capacity(4096));
+}
+
+/// Stop capturing and return the captured text.
+fn capture_stop() -> String {
+    SHELL_OUTPUT.lock().take().unwrap_or_default()
+}
+
+/// Write a string to the shell output destination.
+///
+/// If capture mode is active, appends to the capture buffer.
+/// Otherwise, writes to the console as normal.
+fn shell_write(s: &str) {
+    let mut guard = SHELL_OUTPUT.lock();
+    if let Some(ref mut buf) = *guard {
+        buf.push_str(s);
+    } else {
+        drop(guard);
+        crate::console::write_str(s);
+    }
+}
+
+/// Print to the shell output destination (no newline).
+macro_rules! shell_print {
+    ($($arg:tt)*) => {
+        $crate::kshell::shell_write(&alloc::format!($($arg)*))
+    };
+}
+
+/// Print a line to the shell output destination.
+macro_rules! shell_println {
+    () => { $crate::kshell::shell_write("\n") };
+    ($($arg:tt)*) => {{
+        $crate::kshell::shell_write(&alloc::format!($($arg)*));
+        $crate::kshell::shell_write("\n");
+    }};
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -128,8 +179,181 @@ fn read_line(buf: &mut String) {
 // ---------------------------------------------------------------------------
 
 /// Parse a command line and execute the matching command.
+///
+/// Supports output redirection (`> file`, `>> file`) and piping
+/// (`cmd1 | cmd2`).  Redirection writes the command's output to a
+/// file via the VFS.  Piping captures the left side's output and
+/// feeds it as virtual input to the right side (for commands that
+/// accept piped input: sort, grep, uniq, head, tail, wc, cat).
 fn execute(line: &str) {
-    // Split into command and arguments.
+    // Check for pipe first (highest-level operator).
+    if let Some(pipe_pos) = find_pipe(line) {
+        let left = line.get(..pipe_pos).unwrap_or("").trim();
+        let right = line.get(pipe_pos.saturating_add(1)..).unwrap_or("").trim();
+        if left.is_empty() || right.is_empty() {
+            crate::console_println!("Syntax error: empty pipe operand");
+            return;
+        }
+        execute_pipe(left, right);
+        return;
+    }
+
+    // Check for output redirection (> file, >> file).
+    if let Some(redir) = parse_redirect(line) {
+        execute_redirect(&redir.command, &redir.path, redir.append);
+        return;
+    }
+
+    dispatch(line);
+}
+
+/// Output redirection descriptor.
+struct Redirect<'a> {
+    /// The command to execute (everything before `>` / `>>`).
+    command: &'a str,
+    /// The file path to redirect output to.
+    path: &'a str,
+    /// If true, append (`>>`); if false, overwrite (`>`).
+    append: bool,
+}
+
+/// Parse a command line for `>` or `>>` redirection.
+///
+/// Returns `None` if there is no redirection operator (or it's inside quotes).
+fn parse_redirect(line: &str) -> Option<Redirect<'_>> {
+    // Scan for `>>` first (longer match), then `>`.
+    // Ignore `>` inside quoted strings.
+    let bytes = line.as_bytes();
+    let mut in_quote = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' || b == b'\'' {
+            in_quote = !in_quote;
+        } else if !in_quote && b == b'>' {
+            let append = bytes.get(i.saturating_add(1)) == Some(&b'>');
+            let skip = if append { 2 } else { 1 };
+            let command = line.get(..i).unwrap_or("").trim();
+            let path = line.get(i.saturating_add(skip)..).unwrap_or("").trim();
+            if command.is_empty() || path.is_empty() {
+                return None;
+            }
+            return Some(Redirect { command, path, append });
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
+/// Find the position of the first un-quoted `|` character.
+fn find_pipe(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut in_quote = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'"' || b == b'\'' {
+            in_quote = !in_quote;
+        } else if !in_quote && b == b'|' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Execute a command with its output redirected to a file.
+fn execute_redirect(command: &str, path: &str, append: bool) {
+    capture_start();
+    dispatch(command);
+    let output = capture_stop();
+
+    if output.is_empty() {
+        return;
+    }
+
+    use crate::fs::vfs::Vfs;
+    let result = if append {
+        // Read existing file contents and append.
+        let existing = Vfs::read_file(path).unwrap_or_default();
+        let mut combined = match core::str::from_utf8(&existing) {
+            Ok(s) => String::from(s),
+            Err(_) => String::new(),
+        };
+        combined.push_str(&output);
+        Vfs::write_file(path, combined.as_bytes())
+    } else {
+        Vfs::write_file(path, output.as_bytes())
+    };
+
+    if let Err(e) = result {
+        crate::console_println!("Redirect error: {:?}", e);
+    }
+}
+
+/// Execute a pipe: capture left side's output, feed to right side.
+fn execute_pipe(left: &str, right: &str) {
+    // Capture left side output.
+    capture_start();
+    dispatch(left);
+    let piped_input = capture_stop();
+
+    // The right side may itself have redirection.
+    if let Some(redir) = parse_redirect(right) {
+        // pipe | cmd > file
+        capture_start();
+        dispatch_with_input(&redir.command, &piped_input);
+        let output = capture_stop();
+        if !output.is_empty() {
+            use crate::fs::vfs::Vfs;
+            let result = if redir.append {
+                let existing = Vfs::read_file(redir.path).unwrap_or_default();
+                let mut combined = match core::str::from_utf8(&existing) {
+                    Ok(s) => String::from(s),
+                    Err(_) => String::new(),
+                };
+                combined.push_str(&output);
+                Vfs::write_file(redir.path, combined.as_bytes())
+            } else {
+                Vfs::write_file(redir.path, output.as_bytes())
+            };
+            if let Err(e) = result {
+                crate::console_println!("Redirect error: {:?}", e);
+            }
+        }
+    } else {
+        dispatch_with_input(right, &piped_input);
+    }
+}
+
+/// Execute a command with optional piped input.
+///
+/// Commands that support piped input will read from the input string
+/// when no file argument is provided.  Commands that don't support
+/// piped input ignore the input and execute normally.
+fn dispatch_with_input(line: &str, input: &str) {
+    let mut parts = line.splitn(2, ' ');
+    let cmd = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("").trim();
+
+    // Commands that support reading from piped input.
+    match cmd {
+        "sort" => cmd_sort_input(args, input),
+        "uniq" => cmd_uniq_input(args, input),
+        "grep" => cmd_grep_input(args, input),
+        "head" => cmd_head_input(args, input),
+        "tail" => cmd_tail_input(args, input),
+        "wc" => cmd_wc_input(args, input),
+        "cat" if args.is_empty() => {
+            // `cat` with no args reads from pipe.
+            shell_print!("{}", input);
+        }
+        _ => {
+            // Command doesn't support piped input — just run normally.
+            dispatch(line);
+        }
+    }
+}
+
+/// Core command dispatch (no redirection/pipe parsing).
+fn dispatch(line: &str) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("").trim();
@@ -367,19 +591,19 @@ fn cmd_meminfo() {
 fn cmd_ps() {
     let task_list = crate::sched::task_list();
     if task_list.is_empty() {
-        crate::console_println!("No tasks.");
+        shell_println!("No tasks.");
         return;
     }
 
-    crate::console_println!(
+    shell_println!(
         "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
         "TID", "NAME", "STATE", "PRI", "TICKS", "SCHED", "CPU"
     );
-    crate::console_println!("------------------------------------------------------");
+    shell_println!("------------------------------------------------------");
     for info in &task_list {
         let name = core::str::from_utf8(&info.name[..info.name_len])
             .unwrap_or("?");
-        crate::console_println!(
+        shell_println!(
             "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
             info.id,
             name,
@@ -390,7 +614,7 @@ fn cmd_ps() {
             info.last_cpu,
         );
     }
-    crate::console_println!("{} task(s) total", task_list.len());
+    shell_println!("{} task(s) total", task_list.len());
 }
 
 fn cmd_clear() {
@@ -403,7 +627,7 @@ fn cmd_uptime() {
     let seconds = ticks / 100;
     let minutes = seconds / 60;
     let hours = minutes / 60;
-    crate::console_println!(
+    shell_println!(
         "Uptime: {} ticks ({:02}:{:02}:{:02})",
         ticks,
         hours,
@@ -413,12 +637,12 @@ fn cmd_uptime() {
 }
 
 fn cmd_echo(args: &str) {
-    crate::console_println!("{}", args);
+    shell_println!("{}", args);
 }
 
 fn cmd_time() {
     let dt = crate::rtc::read_datetime();
-    crate::console_println!("{}", dt);
+    shell_println!("{}", dt);
 }
 
 // PCI device class/subclass descriptions and bar formatting use simple
@@ -552,7 +776,7 @@ fn cmd_ls(args: &str) {
     match crate::fs::Vfs::readdir(path) {
         Ok(entries) => {
             if entries.is_empty() {
-                crate::console_println!("(empty directory)");
+                shell_println!("(empty directory)");
                 return;
             }
             for entry in &entries {
@@ -562,12 +786,12 @@ fn cmd_ls(args: &str) {
                     crate::fs::EntryType::Symlink => "<LINK>   ",
                     crate::fs::EntryType::VolumeLabel => "<VOL>    ",
                 };
-                crate::console_println!(
+                shell_println!(
                     "  {} {:>8}  {}",
                     type_indicator, entry.size, entry.name
                 );
             }
-            crate::console_println!("{} entry(ies)", entries.len());
+            shell_println!("{} entry(ies)", entries.len());
         }
         Err(e) => {
             crate::console_println!("ls: {}: {:?}", path, e);
@@ -595,14 +819,14 @@ fn cmd_cat(args: &str) {
             // Try to display as UTF-8 text.
             match core::str::from_utf8(&data) {
                 Ok(text) => {
-                    crate::console_print!("{}", text);
+                    shell_print!("{}", text);
                     // Ensure there's a newline at the end.
                     if !text.ends_with('\n') {
-                        crate::console_println!();
+                        shell_println!();
                     }
                 }
                 Err(_) => {
-                    crate::console_println!(
+                    shell_println!(
                         "(binary file, {} bytes — use blkread for hex dump)",
                         data.len()
                     );
@@ -1321,7 +1545,7 @@ fn cmd_find(args: &str) {
 
     let mut count: u64 = 0;
     find_recurse(&root, pattern, is_glob, &mut count, 0);
-    crate::console_println!("\n{} matches found", count);
+    shell_println!("\n{} matches found", count);
 }
 
 /// Recursive helper for find — search directory tree for name matches.
@@ -1364,7 +1588,7 @@ fn find_recurse(path: &str, pattern: &str, is_glob: bool, count: &mut u64, depth
                 crate::fs::EntryType::Symlink => "@",
                 crate::fs::EntryType::VolumeLabel => "*",
             };
-            crate::console_println!("{}{}", child_path, type_str);
+            shell_println!("{}{}", child_path, type_str);
             *count = count.saturating_add(1);
         }
 
@@ -1416,7 +1640,7 @@ fn cmd_wc(args: &str) {
         }
     }
 
-    crate::console_println!("  {} lines  {} words  {} bytes  {}", lines, words, bytes, path);
+    shell_println!("  {} lines  {} words  {} bytes  {}", lines, words, bytes, path);
 }
 
 /// Show the first N lines of a file (like Unix `head`).
@@ -1454,7 +1678,7 @@ fn cmd_head(args: &str) {
         if printed >= count {
             break;
         }
-        crate::console_println!("{}", line);
+        shell_println!("{}", line);
         printed += 1;
     }
 }
@@ -1492,7 +1716,7 @@ fn cmd_tail(args: &str) {
     let lines: alloc::vec::Vec<&str> = text.lines().collect();
     let start = if lines.len() > count { lines.len() - count } else { 0 };
     for line in &lines[start..] {
-        crate::console_println!("{}", line);
+        shell_println!("{}", line);
     }
 }
 
@@ -1555,13 +1779,13 @@ fn cmd_hexdump(args: &str) {
         }
         line.push('|');
 
-        crate::console_println!("{}", line);
+        shell_println!("{}", line);
     }
 
     if data.len() < limit {
-        crate::console_println!("{:08x}", data.len());
+        shell_println!("{:08x}", data.len());
     } else {
-        crate::console_println!("... ({} bytes total, showing first {})", data.len(), limit);
+        shell_println!("... ({} bytes total, showing first {})", data.len(), limit);
     }
 }
 
@@ -1626,7 +1850,7 @@ fn cmd_grep(args: &str) {
         };
 
         if line_lower.contains(pattern_lower.as_str()) {
-            crate::console_println!(
+            shell_println!(
                 "{}:{}: {}",
                 line_num.saturating_add(1),
                 path,
@@ -1636,7 +1860,7 @@ fn cmd_grep(args: &str) {
 
             // Limit output to prevent flooding.
             if match_count >= 50 {
-                crate::console_println!("... (showing first 50 matches)");
+                shell_println!("... (showing first 50 matches)");
                 break;
             }
         }
@@ -1645,7 +1869,7 @@ fn cmd_grep(args: &str) {
     if match_count == 0 {
         crate::console_println!("grep: no matches for '{}' in {}", pattern, path);
     } else {
-        crate::console_println!("{} matches", match_count);
+        shell_println!("{} matches", match_count);
     }
 }
 
@@ -2289,8 +2513,8 @@ fn cmd_reboot() {
 }
 
 fn cmd_version() {
-    crate::console_println!("Kernel v0.1.0 (x86_64, microkernel)");
-    crate::console_println!("Built with Rust, AI-developed");
+    shell_println!("Kernel v0.1.0 (x86_64, microkernel)");
+    shell_println!("Built with Rust, AI-developed");
 }
 
 // ---------------------------------------------------------------------------
@@ -2335,7 +2559,7 @@ fn cmd_sort(args: &str) {
     }
 
     for line in &lines {
-        crate::console_println!("{}", line);
+        shell_println!("{}", line);
     }
 }
 
@@ -2383,9 +2607,9 @@ fn cmd_uniq(args: &str) {
             count = count.wrapping_add(1);
         } else {
             if count_mode {
-                crate::console_println!("{:7} {}", count, prev);
+                shell_println!("{:7} {}", count, prev);
             } else {
-                crate::console_println!("{}", prev);
+                shell_println!("{}", prev);
             }
             prev = line;
             count = 1;
@@ -2393,10 +2617,198 @@ fn cmd_uniq(args: &str) {
     }
     // Print the last run.
     if count_mode {
-        crate::console_println!("{:7} {}", count, prev);
+        shell_println!("{:7} {}", count, prev);
     } else {
-        crate::console_println!("{}", prev);
+        shell_println!("{}", prev);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pipe-input variants
+//
+// These accept piped text as a second argument.  When `args` is non-empty
+// (e.g. a filename), the piped input is ignored and the file-based command
+// runs instead.  When `args` is empty, the piped text is processed directly.
+// ---------------------------------------------------------------------------
+
+/// Sort piped input lines.  If `args` is non-empty it is treated as a
+/// filename (delegates to `cmd_sort`).
+fn cmd_sort_input(args: &str, input: &str) {
+    if !args.is_empty() {
+        cmd_sort(args);
+        return;
+    }
+    let mut lines: Vec<&str> = input.lines().collect();
+    lines.sort_unstable();
+    for line in &lines {
+        shell_println!("{}", line);
+    }
+}
+
+/// Remove adjacent duplicate lines from piped input.  If `args` is
+/// non-empty it is treated as a filename (delegates to `cmd_uniq`).
+fn cmd_uniq_input(args: &str, input: &str) {
+    if !args.is_empty() {
+        cmd_uniq(args);
+        return;
+    }
+    let lines: Vec<&str> = input.lines().collect();
+    if lines.is_empty() {
+        return;
+    }
+
+    let mut prev = lines[0];
+    shell_println!("{}", prev);
+    for &line in lines.iter().skip(1) {
+        if line != prev {
+            shell_println!("{}", line);
+            prev = line;
+        }
+    }
+}
+
+/// Grep piped input for a pattern.  `args` is the search pattern (no file
+/// argument).  If `args` contains a space it is interpreted as
+/// `<pattern> <file>` and delegates to `cmd_grep`.
+fn cmd_grep_input(args: &str, input: &str) {
+    // If args contains a space, it looks like "pattern file" — delegate.
+    if args.contains(' ') {
+        cmd_grep(args);
+        return;
+    }
+
+    let pattern = args.trim();
+    if pattern.is_empty() {
+        crate::console_println!("grep: no pattern specified");
+        return;
+    }
+
+    // Build a lowercase version of the pattern for case-insensitive search.
+    let pattern_lower = {
+        let mut p = String::with_capacity(pattern.len());
+        for c in pattern.chars() {
+            for lc in c.to_lowercase() {
+                p.push(lc);
+            }
+        }
+        p
+    };
+
+    let mut match_count = 0usize;
+    for (line_num, line) in input.lines().enumerate() {
+        let line_lower = {
+            let mut l = String::with_capacity(line.len());
+            for c in line.chars() {
+                for lc in c.to_lowercase() {
+                    l.push(lc);
+                }
+            }
+            l
+        };
+
+        if line_lower.contains(pattern_lower.as_str()) {
+            shell_println!("{}: {}", line_num.saturating_add(1), line);
+            match_count = match_count.saturating_add(1);
+
+            if match_count >= 50 {
+                shell_println!("... (showing first 50 matches)");
+                break;
+            }
+        }
+    }
+
+    if match_count == 0 {
+        crate::console_println!("grep: no matches for '{}'", pattern);
+    } else {
+        shell_println!("{} matches", match_count);
+    }
+}
+
+/// Show the first N lines of piped input.  `args` is an optional line
+/// count (default 10).  If `args` looks like a filename (non-numeric),
+/// delegates to `cmd_head`.
+fn cmd_head_input(args: &str, input: &str) {
+    let trimmed = args.trim();
+
+    // If args is non-empty and not purely numeric, treat as "N file" or
+    // just "file" — delegate to the file-based command.
+    if !trimmed.is_empty() {
+        if trimmed.parse::<usize>().is_err() {
+            cmd_head(args);
+            return;
+        }
+    }
+
+    let count: usize = if trimmed.is_empty() {
+        10
+    } else {
+        trimmed.parse::<usize>().unwrap_or(10)
+    };
+
+    let mut printed = 0usize;
+    for line in input.lines() {
+        if printed >= count {
+            break;
+        }
+        shell_println!("{}", line);
+        printed += 1;
+    }
+}
+
+/// Show the last N lines of piped input.  `args` is an optional line
+/// count (default 10).  If `args` looks like a filename (non-numeric),
+/// delegates to `cmd_tail`.
+fn cmd_tail_input(args: &str, input: &str) {
+    let trimmed = args.trim();
+
+    if !trimmed.is_empty() {
+        if trimmed.parse::<usize>().is_err() {
+            cmd_tail(args);
+            return;
+        }
+    }
+
+    let count: usize = if trimmed.is_empty() {
+        10
+    } else {
+        trimmed.parse::<usize>().unwrap_or(10)
+    };
+
+    let lines: Vec<&str> = input.lines().collect();
+    let start = if lines.len() > count { lines.len() - count } else { 0 };
+    for line in &lines[start..] {
+        shell_println!("{}", line);
+    }
+}
+
+/// Count lines, words, and bytes of piped input.  `args` is ignored
+/// (if non-empty, delegates to `cmd_wc` with a filename).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_wc_input(args: &str, input: &str) {
+    if !args.is_empty() {
+        cmd_wc(args);
+        return;
+    }
+
+    let bytes = input.len();
+    let mut lines: usize = 0;
+    let mut words: usize = 0;
+    let mut in_word = false;
+
+    for b in input.bytes() {
+        if b == b'\n' {
+            lines += 1;
+        }
+        let is_ws = b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
+        if is_ws {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            words += 1;
+        }
+    }
+
+    shell_println!("  {} lines  {} words  {} bytes", lines, words, bytes);
 }
 
 /// `tee FILE TEXT` — write TEXT to FILE and also display it.

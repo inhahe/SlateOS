@@ -601,14 +601,24 @@ impl Ext4Driver {
             group_descs.len()
         );
 
-        Ok(Self {
+        let mut driver = Self {
             sb,
             reader,
             group_descs,
             dcache: Ext4Dcache::new(),
             extent_cache: ExtentCache::new(),
             inode_cache: InodeCache::new(),
-        })
+        };
+
+        // Step 5: Journal recovery.
+        //
+        // If the filesystem has a journal and the RECOVER incompat flag is
+        // set, committed transactions may not have been written to their
+        // final locations before the previous unmount (crash, power loss).
+        // Replay them now to restore consistency before allowing access.
+        driver.recover_journal_if_needed()?;
+
+        Ok(driver)
     }
 
     /// Access the parsed superblock.
@@ -634,6 +644,223 @@ impl Ext4Driver {
     /// Return inode cache statistics: (hits, misses, valid_entries).
     pub(super) fn inode_cache_stats(&self) -> (u64, u64, usize) {
         self.inode_cache.stats()
+    }
+
+    // -----------------------------------------------------------------------
+    // Journal recovery
+    // -----------------------------------------------------------------------
+
+    /// Check if the filesystem needs journal recovery and perform it.
+    ///
+    /// Called during `open()` after the driver is constructed but before
+    /// it's returned to callers.  If the RECOVER incompat flag is set,
+    /// the filesystem was not cleanly unmounted and the journal may
+    /// contain committed transactions that need replaying.
+    ///
+    /// After successful replay, clears the RECOVER flag and writes the
+    /// superblock back to disk so subsequent mounts don't re-replay.
+    fn recover_journal_if_needed(&mut self) -> KernelResult<()> {
+        use super::ondisk::incompat;
+
+        // No journal → nothing to do.
+        if !self.sb.has_journal {
+            return Ok(());
+        }
+
+        let needs_recovery =
+            (self.sb.raw.s_feature_incompat & incompat::RECOVER) != 0;
+
+        if !needs_recovery {
+            serial_println!("[ext4] Journal present, no recovery needed.");
+            return Ok(());
+        }
+
+        serial_println!("[ext4] RECOVER flag set — replaying journal...");
+
+        // Read the journal inode.
+        let journal_ino = self.sb.raw.s_journal_inum;
+        if journal_ino == 0 {
+            serial_println!("[ext4] Warning: RECOVER set but s_journal_inum=0, skipping.");
+            return Ok(());
+        }
+
+        let journal_inode = self.read_inode(journal_ino)?;
+
+        // Resolve the journal inode's extent tree to a flat list of
+        // physical block numbers.  The journal module needs this to
+        // map journal-relative offsets to device blocks.
+        let journal_blocks = self.resolve_inode_block_list(&journal_inode)?;
+        if journal_blocks.is_empty() {
+            serial_println!("[ext4] Warning: journal inode has no blocks, skipping recovery.");
+            return Ok(());
+        }
+
+        serial_println!(
+            "[ext4] Journal inode {}: {} blocks",
+            journal_ino, journal_blocks.len()
+        );
+
+        // Open the journal and replay any committed transactions.
+        let mut journal = super::journal::Journal::open(
+            &self.reader,
+            journal_ino,
+            journal_blocks,
+            self.sb.block_size,
+        )?;
+
+        let replayed = journal.replay()?;
+
+        if replayed > 0 {
+            serial_println!(
+                "[ext4] Journal recovery complete: {} blocks replayed.",
+                replayed
+            );
+
+            // Re-read the block group descriptors — journal replay may
+            // have updated them.
+            self.group_descs = read_group_descs(&self.sb, &self.reader)?;
+        } else {
+            serial_println!("[ext4] Journal was clean, no blocks to replay.");
+        }
+
+        // Clear the RECOVER flag so subsequent mounts skip replay.
+        self.sb.raw.s_feature_incompat &= !incompat::RECOVER;
+        self.write_superblock()?;
+        self.reader.flush()?;
+
+        serial_println!("[ext4] RECOVER flag cleared.");
+        Ok(())
+    }
+
+    /// Resolve an inode's extent tree to a flat, ordered list of physical
+    /// block numbers.
+    ///
+    /// Used to map the journal inode's logical blocks to physical device
+    /// blocks.  Walks the extent tree and expands each extent into
+    /// individual block numbers in logical order.
+    fn resolve_inode_block_list(&self, inode: &Ext4Inode) -> KernelResult<Vec<u64>> {
+        let file_size = self.inode_size(inode);
+        let block_size = u64::from(self.sb.block_size);
+        if file_size == 0 || block_size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let total_blocks = file_size.saturating_add(block_size - 1) / block_size;
+        let mut blocks = Vec::with_capacity(total_blocks as usize);
+
+        // We can't use lookup_physical_block here because it requires
+        // an inode_nr for caching, and we don't want to pollute the
+        // extent cache with journal inode entries.  Walk the tree directly
+        // using collect_extent_blocks ranges instead.
+        //
+        // Build a sorted list of (logical_start, phys_start, len) from
+        // the extent tree leaves.
+        let leaf_extents = self.collect_leaf_extents(inode)?;
+
+        for logical_block in 0..total_blocks {
+            // Binary search in the sorted leaf extents for the range
+            // containing this logical block.
+            let phys = find_in_leaf_extents(&leaf_extents, logical_block);
+            match phys {
+                Some(p) => blocks.push(p),
+                None => {
+                    // Sparse hole in the journal — shouldn't happen but
+                    // use 0 as a sentinel (journal code will error if
+                    // it tries to read block 0).
+                    blocks.push(0);
+                }
+            }
+        }
+
+        Ok(blocks)
+    }
+
+    /// Collect leaf extents from an inode's extent tree, returning
+    /// (logical_start, physical_start, length) tuples sorted by logical
+    /// block number.
+    ///
+    /// Unlike `collect_extent_blocks`, this only returns data extents
+    /// (not index node blocks) and preserves the logical block mapping.
+    fn collect_leaf_extents(
+        &self,
+        inode: &Ext4Inode,
+    ) -> KernelResult<Vec<(u64, u64, u64)>> {
+        let mut result = Vec::new();
+
+        if (inode.i_flags & inode_flags::EXTENTS) == 0 {
+            return Ok(result);
+        }
+
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+        if header.eh_magic != EXT4_EXTENT_MAGIC || header.eh_entries == 0 {
+            return Ok(result);
+        }
+
+        self.collect_leaf_extents_recursive(block_bytes, &header, &mut result)?;
+
+        // Sort by logical start block for binary search.
+        result.sort_by_key(|&(logical, _, _)| logical);
+        Ok(result)
+    }
+
+    /// Recursively walk extent tree nodes, collecting only leaf extents
+    /// with their logical block mappings.
+    fn collect_leaf_extents_recursive(
+        &self,
+        node_data: &[u8],
+        header: &Ext4ExtentHeader,
+        result: &mut Vec<(u64, u64, u64)>,
+    ) -> KernelResult<()> {
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+
+        if header.eh_depth == 0 {
+            // Leaf — collect (logical, physical, length) tuples.
+            let extent_size = core::mem::size_of::<Ext4Extent>();
+            for i in 0..header.eh_entries as usize {
+                let offset = header_size.saturating_add(i.saturating_mul(extent_size));
+                let ext_bytes = node_data
+                    .get(offset..offset.saturating_add(extent_size))
+                    .ok_or(KernelError::IoError)?;
+                let extent = read_struct::<Ext4Extent>(ext_bytes)?;
+
+                let logical = u64::from(extent.ee_block);
+                let phys = u64::from(extent.ee_start_lo)
+                    | (u64::from(extent.ee_start_hi) << 32);
+                let len = u64::from(extent.ee_len & 0x7FFF);
+
+                if phys != 0 && len > 0 {
+                    result.push((logical, phys, len));
+                }
+            }
+        } else {
+            // Internal node — recurse into children.
+            let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
+            let block_size = self.sb.block_size as usize;
+
+            for i in 0..header.eh_entries as usize {
+                let offset = header_size.saturating_add(i.saturating_mul(idx_size));
+                let idx_bytes = node_data
+                    .get(offset..offset.saturating_add(idx_size))
+                    .ok_or(KernelError::IoError)?;
+                let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
+
+                let child_block = u64::from(idx.ei_leaf_lo)
+                    | (u64::from(idx.ei_leaf_hi) << 16);
+
+                let mut child_data = vec![0u8; block_size];
+                self.reader.read_block(child_block, &mut child_data)?;
+
+                let child_header = read_struct::<Ext4ExtentHeader>(&child_data)?;
+                if child_header.eh_magic != EXT4_EXTENT_MAGIC {
+                    continue;
+                }
+
+                self.collect_leaf_extents_recursive(&child_data, &child_header, result)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Read a single ext4 block by physical block number.
@@ -2396,6 +2623,27 @@ pub fn inode_block_as_bytes_mut(inode: &mut Ext4Inode) -> &mut [u8] {
     // SAFETY: Same as inode_block_as_bytes, but mutable.
     // The mutable borrow of `inode` ensures exclusive access.
     unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+}
+
+/// Binary search a sorted list of (logical_start, phys_start, length)
+/// extent tuples for the physical block corresponding to `logical_block`.
+///
+/// Returns `Some(physical_block)` if the logical block falls within an
+/// extent, or `None` if it's in a sparse hole.
+fn find_in_leaf_extents(extents: &[(u64, u64, u64)], logical_block: u64) -> Option<u64> {
+    // Binary search for the extent containing logical_block.
+    // Extents are sorted by logical_start.
+    let idx = extents.partition_point(|&(start, _, _)| start <= logical_block);
+    if idx == 0 {
+        return None;
+    }
+    let (start, phys, len) = extents[idx - 1];
+    let offset = logical_block.checked_sub(start)?;
+    if offset < len {
+        Some(phys.saturating_add(offset))
+    } else {
+        None
+    }
 }
 
 /// Reinterpret a `#[repr(C)]` struct as a byte slice.

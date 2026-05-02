@@ -287,7 +287,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Advisory file locking (flock: per-path shared/exclusive locks, owner tracking, upgrade/downgrade, process cleanup, 3 syscalls)
   - [x] Filesystem sync (VFS sync/sync_path, ext4 driver flush, FAT cache flush, SYS_FS_SYNC syscall, kshell `sync` command)
   - [x] Syscalls: SYS_FS_LINK (607), SYS_FS_STATVFS (608), SYS_FS_FLOCK (609), SYS_FS_FUNLOCK (640), SYS_FS_SYNC (641)
-  - [x] Kshell filesystem commands: stat, ln, cp, mv, chmod, chown, touch, tree, du, find, df, sync
+  - [x] Kshell filesystem commands: stat, ln, cp, mv, chmod, chown, touch, tree, du, find, df, sync, mount, umount, wc, head, tail, hexdump
+  - [x] VFS unmount with sync + sub-mount safety + advisory lock cleanup
+  - [x] Vfs::copy() for cross-mount file copying
+  - [x] Rich metadata for all filesystems (devfs: device perms, iso9660: read-only perms + volume stats, procfs: read-only perms + inode counts)
+  - [x] Procfs /proc/cacheinfo (buffer cache hit/miss/writeback stats) and /proc/locks (advisory lock dump)
+  - [x] fstat nlinks: file handles now report hard link count via metadata()
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

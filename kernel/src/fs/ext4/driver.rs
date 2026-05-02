@@ -964,6 +964,180 @@ impl Ext4Driver {
         Ok(inode)
     }
 
+    /// Read the raw on-disk bytes for an inode (all `sb.inode_size` bytes).
+    ///
+    /// This is used to access the inline xattr area that lives after the
+    /// 128-byte core + i_extra_isize extra fields, up to the full inode
+    /// size on disk.  The parsed [`Ext4Inode`] only covers the first 128
+    /// bytes; this returns everything.
+    fn read_inode_raw(&self, inode_nr: u32) -> KernelResult<Vec<u8>> {
+        if inode_nr == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let group = self.sb.inode_group(inode_nr);
+        let index = self.sb.inode_index_in_group(inode_nr);
+
+        let gd = self.group_descs.get(group as usize)
+            .ok_or(KernelError::InvalidArgument)?;
+
+        let inode_table_block = if self.sb.is_64bit {
+            u64::from(gd.bg_inode_table_lo)
+                | (u64::from(gd.bg_inode_table_hi) << 32)
+        } else {
+            u64::from(gd.bg_inode_table_lo)
+        };
+
+        let inode_byte_offset = inode_table_block
+            .saturating_mul(u64::from(self.sb.block_size))
+            .saturating_add(
+                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
+            );
+
+        self.reader.read_bytes(inode_byte_offset, self.sb.inode_size as usize)
+    }
+
+    /// Parse inline xattrs from raw inode bytes.
+    ///
+    /// In ext4, xattrs can be stored in the inode body between
+    /// `128 + i_extra_isize` and `inode_size`.  The inline area has a
+    /// 4-byte magic header (`EXT4_XATTR_MAGIC`), followed by the same
+    /// entry format as external xattr blocks.  Values grow backward from
+    /// the end of the inline area.
+    ///
+    /// Returns an empty Vec if the inode has no inline xattr area or the
+    /// magic doesn't match.
+    ///
+    /// Based on Linux `fs/ext4/xattr.c:ext4_xattr_ibody_list()`.
+    fn parse_inline_xattrs(&self, raw: &[u8]) -> Vec<(String, Vec<u8>)> {
+        // Inline xattrs require inode_size > 128 (need space for the area).
+        let inode_size = self.sb.inode_size as usize;
+        if inode_size <= 128 {
+            return Vec::new();
+        }
+
+        // Read i_extra_isize from the raw bytes at offset 0x80 (2 bytes, LE).
+        let i_extra_isize = raw.get(0x80..0x82)
+            .and_then(|s| <[u8; 2]>::try_from(s).ok())
+            .map_or(0u16, u16::from_le_bytes) as usize;
+
+        // The inline xattr area starts at 128 + i_extra_isize.
+        let ibody_start = 128usize.saturating_add(i_extra_isize);
+
+        // Need at least 4 bytes for the magic header.
+        if ibody_start.saturating_add(4) > inode_size || ibody_start.saturating_add(4) > raw.len() {
+            return Vec::new();
+        }
+
+        // Check the magic number.
+        let magic = raw.get(ibody_start..ibody_start.saturating_add(4))
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+            .map_or(0u32, u32::from_le_bytes);
+
+        if magic != super::ondisk::EXT4_XATTR_MAGIC {
+            return Vec::new(); // No inline xattrs.
+        }
+
+        let entry_header_size = core::mem::size_of::<super::ondisk::Ext4XattrEntry>();
+        let entries_start = ibody_start.saturating_add(4); // After magic.
+        let area_end = inode_size.min(raw.len());
+
+        let mut result = Vec::new();
+        let mut offset = entries_start;
+
+        loop {
+            // Check for end sentinel (4 zero bytes).
+            if offset.saturating_add(4) > area_end {
+                break;
+            }
+            if raw.get(offset..offset.saturating_add(4)) == Some(&[0, 0, 0, 0]) {
+                break;
+            }
+
+            // Parse entry header.
+            if offset.saturating_add(entry_header_size) > area_end {
+                break;
+            }
+            let entry_bytes = match raw.get(offset..offset.saturating_add(entry_header_size)) {
+                Some(b) => b,
+                None => break,
+            };
+            let entry = match read_struct::<super::ondisk::Ext4XattrEntry>(entry_bytes) {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+
+            // Read the name.
+            let name_start = offset.saturating_add(entry_header_size);
+            let name_end = name_start.saturating_add(entry.e_name_len as usize);
+            let name = match raw.get(name_start..name_end) {
+                Some(bytes) => match core::str::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                },
+                None => break,
+            };
+
+            let full_key = xattr_full_key(entry.e_name_index, name);
+
+            // For inline xattrs, e_value_offs is relative to the first
+            // entry position (entries_start), not the block start.
+            let val_start = entries_start.saturating_add(entry.e_value_offs as usize);
+            let val_end = val_start.saturating_add(entry.e_value_size as usize);
+            let value = if entry.e_value_size > 0 && val_end <= area_end {
+                raw.get(val_start..val_end)
+                    .unwrap_or(&[])
+                    .to_vec()
+            } else {
+                Vec::new()
+            };
+
+            result.push((full_key, value));
+
+            // Advance past entry header + name, aligned to 4 bytes.
+            let entry_total = entry_header_size.saturating_add(entry.e_name_len as usize);
+            let aligned = (entry_total.saturating_add(3)) & !3;
+            offset = offset.saturating_add(aligned);
+        }
+
+        result
+    }
+
+    /// Read all xattrs for an inode: both inline (in-inode) and external block.
+    ///
+    /// Linux ext4 stores xattrs in two places:
+    /// 1. **Inline** — in the inode body after `128 + i_extra_isize`, up to
+    ///    `inode_size`.  Used for small attrs (e.g., security.selinux).
+    /// 2. **External** — in a separate block pointed to by `i_file_acl`.
+    ///    Used when the inline area is full.
+    ///
+    /// This method reads from both locations and merges them.  External
+    /// attrs take precedence if the same key appears in both (shouldn't
+    /// happen in practice, but defensive).
+    pub fn read_all_xattrs(&self, inode_nr: u32, inode: &Ext4Inode) -> KernelResult<Vec<(String, Vec<u8>)>> {
+        // Read inline xattrs first.
+        let mut attrs = match self.read_inode_raw(inode_nr) {
+            Ok(raw) => self.parse_inline_xattrs(&raw),
+            Err(_) => Vec::new(),
+        };
+
+        // Read external xattr block.
+        let block_nr = self.xattr_block(inode);
+        if block_nr != 0 {
+            let external = self.read_xattrs(inode)?;
+            // Merge: external attrs override any inline attrs with the same key.
+            for (key, value) in external {
+                if let Some(existing) = attrs.iter_mut().find(|(k, _)| *k == key) {
+                    existing.1 = value;
+                } else {
+                    attrs.push((key, value));
+                }
+            }
+        }
+
+        Ok(attrs)
+    }
+
     /// Read the contents of a file given its inode.
     ///
     /// Supports both extent-based (modern ext4) and indirect-block-based
@@ -2724,17 +2898,6 @@ impl Ext4Driver {
         }
 
         Ok(result)
-    }
-
-    /// Get a single xattr value by full key (e.g., "user.myattr").
-    pub fn get_xattr(&self, inode: &Ext4Inode, key: &str) -> KernelResult<Vec<u8>> {
-        let attrs = self.read_xattrs(inode)?;
-        for (k, v) in &attrs {
-            if k == key {
-                return Ok(v.clone());
-            }
-        }
-        Err(KernelError::NotFound)
     }
 
     /// Write the xattr block for an inode with the given set of attributes.

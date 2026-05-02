@@ -819,7 +819,7 @@ impl FileSystem for Ext4Fs {
             permissions,
             attributes: attrs,
             nlinks: u32::from(inode.i_links_count),
-            xattrs: self.driver.read_xattrs(&inode).unwrap_or_default(),
+            xattrs: self.driver.read_all_xattrs(ino, &inode).unwrap_or_default(),
             hash: Vec::new(),
         })
     }
@@ -907,15 +907,25 @@ impl FileSystem for Ext4Fs {
     fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
-        self.driver.get_xattr(&inode, key)
+        // Search both inline and external xattrs.
+        let attrs = self.driver.read_all_xattrs(ino, &inode)?;
+        for (k, v) in &attrs {
+            if k == key {
+                return Ok(v.clone());
+            }
+        }
+        Err(KernelError::NotFound)
     }
 
     fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         let mut inode = self.driver.read_inode(ino)?;
 
-        // Read existing xattrs, update or add the new one.
-        let mut attrs = self.driver.read_xattrs(&inode)?;
+        // Read all xattrs (inline + external), then write back to external block.
+        // We always write to the external block because modifying inline xattrs
+        // requires careful inode body manipulation that risks corrupting the
+        // extra inode fields.
+        let mut attrs = self.driver.read_all_xattrs(ino, &inode)?;
 
         // Check key length (255 bytes max per design spec).
         if key.len() > 255 {
@@ -950,7 +960,7 @@ impl FileSystem for Ext4Fs {
         let ino = self.driver.resolve_path(path)?;
         let mut inode = self.driver.read_inode(ino)?;
 
-        let mut attrs = self.driver.read_xattrs(&inode)?;
+        let mut attrs = self.driver.read_all_xattrs(ino, &inode)?;
         let original_len = attrs.len();
         attrs.retain(|(k, _)| k != key);
 
@@ -969,7 +979,7 @@ impl FileSystem for Ext4Fs {
     fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
-        let attrs = self.driver.read_xattrs(&inode)?;
+        let attrs = self.driver.read_all_xattrs(ino, &inode)?;
         Ok(attrs.into_iter().map(|(k, _)| k).collect())
     }
 

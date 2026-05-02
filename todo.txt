@@ -67,6 +67,13 @@
   After acquiring: `sched::set_blocked_on_pi_addr(caller_task, None)`.
   Self-test already passes for the sched-side; needs futex-side integration test.
 
+- kernel-core: Hook fs::cache::flush_expired() into the timer softirq
+  (softirq.rs handle_timer).  Call it every ~5 seconds (use a counter
+  to avoid calling every tick).  This enables automatic background
+  writeback of dirty cache entries, bounding the data-loss window on
+  crash to DIRTY_EXPIRE_NS (5 seconds).  The function is already
+  written and tested — just needs periodic invocation.
+
 - fs: (RESOLVED) Root mount now uses FAT on virtio-blk device.
   The FAT driver auto-mounts at "/" on boot, init deploys binaries fine.
 

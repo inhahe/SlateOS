@@ -414,6 +414,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Buffer cache O(1) dirty/valid counting: pre-maintained counters instead of O(n) scan in stats(), maintained on all state transitions
   - [x] FAT clean-shutdown bit: read/clear on mount (warn if unclean), set on sync; FAT16 bit 15, FAT32 bit 27 of cluster 1 entry; per-spec dirty tracking across both FAT copies
   - [x] FAT volume label write: set_volume_label() updates BPB boot sector + root directory ATTR_VOLUME_ID entry; kshell `label PATH [NAME]` command; FileSystem trait method with default NotSupported
+  - [x] FAT mkfs: format block devices as FAT16 (≤32 MiB) or FAT32 with BPB, dual FATs, FSInfo, backup boot sector, root directory with volume label
+  - [x] FAT fsck: 5-phase consistency checker — clean-shutdown bit, FAT copy comparison, directory tree walk with cluster ownership map, cross-link and lost cluster detection, file size vs chain validation; -a flag for repair (copies FAT1→FAT2, frees lost clusters, sets clean bit)
+  - [x] Kshell `dd` enhancements: skip=N (input offset), seek=N (output offset via write_at), HPET-timed throughput display (KiB/s)
+  - [x] Kshell `flock` command: query/acquire/release advisory file locks (-s shared, -x exclusive, -u unlock, -q query)
+  - [x] Kshell `split` command: split files by line count (-l N, default 1000) or byte size (-b SIZE with K/M/G); xaa/xab/... output naming
+  - [x] Procfs `/proc/bcache`: buffer cache statistics (hit rate, dirty count, utilization, read-ahead, expired flush counts)
+  - [x] Buffer cache age-based writeback: dirty_since_ns timestamps, flush_expired() writes back entries >5s old, expired_flushes counter; wired into `sync` command
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

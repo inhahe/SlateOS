@@ -105,6 +105,11 @@ const DEV_FILES: &[&str] = &[
     "random",
     "urandom",
     "console",
+    "stdin",
+    "stdout",
+    "stderr",
+    "kmsg",
+    "uptime",
 ];
 
 // ---------------------------------------------------------------------------
@@ -183,9 +188,35 @@ impl FileSystem for DevFs {
                 fill_random(&mut buf);
                 Ok(buf)
             }
-            "console" => {
+            "console" | "stdin" => {
+                // Reading from console/stdin returns empty (no interactive input).
                 let _ = offset;
                 Ok(Vec::new())
+            }
+            "stdout" | "stderr" => {
+                // Reading from stdout/stderr returns empty.
+                let _ = offset;
+                Ok(Vec::new())
+            }
+            "kmsg" => {
+                // /dev/kmsg: kernel log ring buffer.
+                // For now, return a synthetic summary since we don't
+                // have a formal kernel log ring buffer yet.
+                let ns = crate::hpet::elapsed_ns();
+                let secs = ns / 1_000_000_000;
+                let msg = alloc::format!(
+                    "[{}.000000] kernel: kmsg device read (log buffer not yet implemented)\n",
+                    secs
+                );
+                Ok(msg.into_bytes())
+            }
+            "uptime" => {
+                // /dev/uptime: system uptime as a simple decimal string.
+                let ns = crate::hpet::elapsed_ns();
+                let secs = ns / 1_000_000_000;
+                let frac = ns % 1_000_000_000;
+                let text = alloc::format!("{secs}.{frac:09}\n");
+                Ok(text.into_bytes())
             }
             _ => Err(KernelError::NotFound),
         }
@@ -237,8 +268,8 @@ impl FileSystem for DevFs {
                 }
                 Ok(())
             }
-            "console" => {
-                // /dev/console: write to kernel console output.
+            "console" | "stdout" | "stderr" => {
+                // /dev/console, stdout, stderr: write to kernel console output.
                 if let Ok(text) = core::str::from_utf8(data) {
                     crate::console_print!("{}", text);
                 } else {
@@ -246,6 +277,22 @@ impl FileSystem for DevFs {
                     crate::console_print!("[binary: {} bytes]", data.len());
                 }
                 Ok(())
+            }
+            "stdin" => {
+                // Writing to stdin is a no-op (no input buffer to push into).
+                let _ = data;
+                Ok(())
+            }
+            "kmsg" => {
+                // Writing to kmsg logs a message (print to serial for now).
+                if let Ok(text) = core::str::from_utf8(data) {
+                    crate::serial_println!("[kmsg] {}", text.trim_end());
+                }
+                Ok(())
+            }
+            "uptime" => {
+                // /dev/uptime is read-only.
+                Err(KernelError::NotSupported)
             }
             _ => Err(KernelError::NotFound),
         }

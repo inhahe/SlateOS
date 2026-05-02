@@ -27,6 +27,7 @@
 
 pub mod cache;
 pub mod devfs;
+pub mod ext4;
 pub mod fat;
 pub mod handle;
 pub mod journal;

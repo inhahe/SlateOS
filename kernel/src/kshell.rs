@@ -760,6 +760,147 @@ fn positional_all() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Here-documents (<<DELIMITER ... DELIMITER)
+// ---------------------------------------------------------------------------
+
+/// Here-document collector: buffers lines between `<<DELIMITER` and the
+/// matching `DELIMITER` line.
+///
+/// The collected body is fed as piped input to the command prefix.
+/// Supports tab stripping (`<<-DELIM`) and literal mode (quoted delimiter
+/// like `<<'DELIM'` or `<<"DELIM"` — suppresses variable expansion).
+struct HeredocCollector {
+    /// The command to receive the heredoc body as input (before `<<`).
+    command: String,
+    /// Additional command context after the delimiter on the start line
+    /// (pipes, redirects).  E.g. for `sort <<EOF | head 5`, suffix = "| head 5".
+    suffix: String,
+    /// The delimiter that ends the here-document.
+    delimiter: String,
+    /// If true, strip leading tabs from each body line (`<<-` variant).
+    strip_tabs: bool,
+    /// If true, expand `$VAR` / `${VAR}` in the body. If false (quoted
+    /// delimiter), body lines are taken literally.
+    expand: bool,
+    /// Buffered body lines.
+    body: Vec<String>,
+}
+
+/// Active here-document collector (only one at a time).
+static HEREDOC_COLLECTOR: Mutex<Option<HeredocCollector>> = Mutex::new(None);
+
+/// Try to parse a heredoc start from a command line.
+///
+/// Looks for `<<[-]DELIMITER` (not inside quotes).
+/// Returns `Some((command_prefix, suffix, delimiter, strip_tabs, expand))`.
+/// `suffix` contains any pipe/redirect text after the delimiter word.
+fn parse_heredoc_start(line: &str) -> Option<(String, String, String, bool, bool)> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut i = 0;
+
+    // Scan for `<<` not inside quotes and not part of `$((`.
+    while i < len {
+        let b = bytes[i];
+
+        if b == b'\'' && !in_dq {
+            in_sq = !in_sq;
+            i = i.saturating_add(1);
+            continue;
+        }
+        if b == b'"' && !in_sq {
+            in_dq = !in_dq;
+            i = i.saturating_add(1);
+            continue;
+        }
+        if in_sq || in_dq {
+            i = i.saturating_add(1);
+            continue;
+        }
+
+        // Skip `$((` — arithmetic expansion, not heredoc.
+        if b == b'$'
+            && bytes.get(i.saturating_add(1)) == Some(&b'(')
+            && bytes.get(i.saturating_add(2)) == Some(&b'(')
+        {
+            i = i.saturating_add(3);
+            continue;
+        }
+
+        if b == b'<' && bytes.get(i.saturating_add(1)) == Some(&b'<') {
+            // Make sure this isn't `<<<` (herestring — not supported).
+            if bytes.get(i.saturating_add(2)) == Some(&b'<') {
+                i = i.saturating_add(3);
+                continue;
+            }
+
+            let cmd_part = line.get(..i).unwrap_or("").trim();
+            let after_arrows = line.get(i.saturating_add(2)..).unwrap_or("").trim();
+
+            if after_arrows.is_empty() {
+                return None; // No delimiter specified.
+            }
+
+            // Check for tab-stripping variant: <<-DELIM
+            let (strip_tabs, delim_part) = if let Some(rest) = after_arrows.strip_prefix('-') {
+                (true, rest.trim_start())
+            } else {
+                (false, after_arrows)
+            };
+
+            if delim_part.is_empty() {
+                return None;
+            }
+
+            // The delimiter is the first word; anything after it is
+            // additional command context (pipes, redirects) that gets
+            // appended to the command prefix.
+            // E.g. `sort <<EOF | head 5` → cmd="sort | head 5", delim="EOF"
+            let (raw_delim, suffix) = match delim_part.find(char::is_whitespace) {
+                Some(sp) => {
+                    let d = delim_part.get(..sp).unwrap_or("");
+                    let s = delim_part.get(sp..).unwrap_or("").trim();
+                    (d, s)
+                }
+                None => (delim_part, ""),
+            };
+
+            if raw_delim.is_empty() {
+                return None;
+            }
+
+            // Check for quoted delimiter (suppresses expansion).
+            let (expand, delimiter) = if (raw_delim.starts_with('\'') && raw_delim.ends_with('\''))
+                || (raw_delim.starts_with('"') && raw_delim.ends_with('"'))
+            {
+                // Quoted — strip quotes, no expansion.
+                let inner = raw_delim.get(1..raw_delim.len().saturating_sub(1)).unwrap_or("");
+                if inner.is_empty() {
+                    return None;
+                }
+                (false, inner)
+            } else {
+                (true, raw_delim)
+            };
+
+            return Some((
+                String::from(cmd_part),
+                String::from(suffix),
+                String::from(delimiter),
+                strip_tabs,
+                expand,
+            ));
+        }
+
+        i = i.saturating_add(1);
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Case/esac pattern matching
 // ---------------------------------------------------------------------------
 
@@ -794,6 +935,63 @@ fn control_should_execute() -> bool {
 fn handle_control_flow(line: &str) -> bool {
     let trimmed = line.trim();
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
+
+    // If we're collecting here-document body lines, buffer them.
+    // This check comes first because heredoc body can contain anything
+    // (keywords, braces, etc.) that would confuse other collectors.
+    {
+        let mut hc = HEREDOC_COLLECTOR.lock();
+        if let Some(ref mut state) = *hc {
+            // Check if this line matches the delimiter (possibly after
+            // stripping leading tabs for the <<- variant).
+            let check_line = if state.strip_tabs {
+                trimmed.trim_start_matches('\t')
+            } else {
+                trimmed
+            };
+
+            if check_line == state.delimiter {
+                // End of here-document — execute the command with the
+                // collected body as piped input.
+                let command = state.command.clone();
+                let suffix = state.suffix.clone();
+                let expand = state.expand;
+                let strip_tabs = state.strip_tabs;
+
+                // Assemble the body.
+                let mut body_text = String::new();
+                for (i, bline) in state.body.iter().enumerate() {
+                    if i > 0 {
+                        body_text.push('\n');
+                    }
+                    let processed = if strip_tabs {
+                        bline.trim_start_matches('\t')
+                    } else {
+                        bline.as_str()
+                    };
+                    body_text.push_str(processed);
+                }
+
+                *hc = None;
+                drop(hc);
+
+                // Optionally expand variables in the body.
+                let final_body = if expand {
+                    expand_vars(&body_text)
+                } else {
+                    body_text
+                };
+
+                // Execute the heredoc command with body as piped input.
+                execute_heredoc(&command, &suffix, &final_body);
+                return true;
+            }
+
+            // Not the delimiter — buffer the line (raw, no expansion yet).
+            state.body.push(String::from(trimmed));
+            return true;
+        }
+    }
 
     // If we're collecting function body lines, buffer them.
     {
@@ -1149,7 +1347,22 @@ fn handle_control_flow(line: &str) -> bool {
             }
             true
         }
-        _ => false,
+        _ => {
+            // Not a control-flow keyword — check for here-document start.
+            // `cmd <<DELIM` starts collecting body lines until DELIM.
+            if let Some((command, suffix, delimiter, strip_tabs, expand)) = parse_heredoc_start(trimmed) {
+                *HEREDOC_COLLECTOR.lock() = Some(HeredocCollector {
+                    command,
+                    suffix,
+                    delimiter,
+                    strip_tabs,
+                    expand,
+                    body: Vec::new(),
+                });
+                return true;
+            }
+            false
+        }
     }
 }
 
@@ -1692,9 +1905,18 @@ pub fn run() -> ! {
     let mut history = History::new();
 
     loop {
-        // Print prompt with current working directory.
-        let cwd = get_cwd();
-        crate::console_print!("{}> ", cwd);
+        // Print prompt: show continuation prompt during multi-line
+        // constructs (heredoc, loop body, function body, case body).
+        let collecting = HEREDOC_COLLECTOR.lock().is_some()
+            || LOOP_COLLECTOR.lock().is_some()
+            || FUNC_COLLECTOR.lock().is_some()
+            || CASE_COLLECTOR.lock().is_some();
+        if collecting {
+            crate::console_print!("> ");
+        } else {
+            let cwd = get_cwd();
+            crate::console_print!("{}> ", cwd);
+        }
 
         // Read a line (blocking on keyboard).
         line_buf.clear();
@@ -1702,13 +1924,19 @@ pub fn run() -> ! {
 
         // Parse and execute.
         let trimmed = line_buf.trim();
-        if trimmed.is_empty() {
+
+        // Empty lines are normally skipped, but during here-document
+        // collection they are meaningful content (blank lines in the body).
+        let in_heredoc = HEREDOC_COLLECTOR.lock().is_some();
+        if trimmed.is_empty() && !in_heredoc {
             continue;
         }
 
         // Add to history before executing (so even failed commands
-        // are recallable).
-        history.push(trimmed);
+        // are recallable).  Don't add heredoc body lines to history.
+        if !in_heredoc {
+            history.push(trimmed);
+        }
         execute(trimmed);
     }
 }
@@ -2469,6 +2697,85 @@ fn execute_redirect(command: &str, path: &str, append: bool) {
     }
 }
 
+/// Execute a here-document: feed the body as piped input to the command,
+/// then apply any suffix (pipes, redirects) to the output.
+///
+/// Examples:
+/// - `sort <<EOF` → dispatch_with_input("sort", body)
+/// - `sort <<EOF | head 5` → capture sort's output, pipe to head 5
+/// - `cat <<EOF > /tmp/out` → capture cat's output, redirect to file
+fn execute_heredoc(command: &str, suffix: &str, body: &str) {
+    if command.is_empty() && suffix.is_empty() {
+        // Bare heredoc with no command — just print the body.
+        shell_println!("{}", body);
+        return;
+    }
+
+    if suffix.is_empty() {
+        // Simple case: just feed body to command.
+        dispatch_with_input(command, body);
+        return;
+    }
+
+    // Complex case: command has a suffix (pipe or redirect).
+    // Capture the command's output with the heredoc body as input,
+    // then feed that output through the suffix.
+    capture_start();
+    dispatch_with_input(command, body);
+    let output = capture_stop();
+
+    // Now execute the suffix with the captured output.
+    // The suffix might be "| cmd2" or "> file" or ">> file".
+    let suffix = suffix.trim();
+    if let Some(rest) = suffix.strip_prefix('|') {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            dispatch_with_input(rest, &output);
+        }
+    } else if let Some((path, append)) = parse_bare_redirect(suffix) {
+        // Suffix is a bare redirect (e.g., "> /tmp/out" or ">> /tmp/out").
+        if !output.is_empty() {
+            use crate::fs::vfs::Vfs;
+            let result = if append {
+                let existing = Vfs::read_file(path).unwrap_or_default();
+                let mut combined = match core::str::from_utf8(&existing) {
+                    Ok(s) => String::from(s),
+                    Err(_) => String::new(),
+                };
+                combined.push_str(&output);
+                Vfs::write_file(path, combined.as_bytes())
+            } else {
+                Vfs::write_file(path, output.as_bytes())
+            };
+            if let Err(e) = result {
+                crate::console_println!("Redirect error: {:?}", e);
+            }
+        }
+    } else {
+        // Suffix doesn't look like a pipe or redirect — just print.
+        shell_print!("{}", output);
+    }
+}
+
+/// Parse a bare redirect like `> /tmp/file` or `>> /tmp/file`.
+///
+/// Unlike `parse_redirect()`, this allows an empty command prefix
+/// (used for heredoc suffixes where the "command" output is already captured).
+fn parse_bare_redirect(s: &str) -> Option<(&str, bool)> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix(">>") {
+        let path = rest.trim();
+        if path.is_empty() { return None; }
+        Some((path, true))
+    } else if let Some(rest) = s.strip_prefix('>') {
+        let path = rest.trim();
+        if path.is_empty() { return None; }
+        Some((path, false))
+    } else {
+        None
+    }
+}
+
 /// Execute a pipe: capture left side's output, feed to right side.
 fn execute_pipe(left: &str, right: &str) {
     // Capture left side output.
@@ -2777,6 +3084,9 @@ fn cmd_help() {
     crate::console_println!("  cmd > file   Write output to file (overwrite)");
     crate::console_println!("  cmd >> file  Append output to file");
     crate::console_println!("  cmd1 | cmd2  Pipe output of cmd1 into cmd2");
+    crate::console_println!("  cmd <<DELIM  Here-document (multi-line input to cmd)");
+    crate::console_println!("  cmd <<-DELIM Here-doc with leading tab stripping");
+    crate::console_println!("  cmd <<'D'    Here-doc without variable expansion");
     crate::console_println!("Variable expansion:");
     crate::console_println!("  $NAME / ${{NAME}}  Expand environment variable");
     crate::console_println!("  $(command)       Command substitution (capture output)");
@@ -5146,8 +5456,10 @@ fn cmd_source(args: &str) {
     // Execute each line.
     for (line_num, line) in text.lines().enumerate() {
         let trimmed = line.trim();
-        // Skip empty lines and comments.
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        // Skip empty lines and comments — but NOT while we're collecting
+        // a here-document body (where #-lines are literal content).
+        let in_heredoc = HEREDOC_COLLECTOR.lock().is_some();
+        if !in_heredoc && (trimmed.is_empty() || trimmed.starts_with('#')) {
             continue;
         }
         crate::serial_println!("[source] {}:{}: {}", path, line_num.saturating_add(1), trimmed);

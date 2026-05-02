@@ -4354,7 +4354,7 @@ fn cmd_help() {
     crate::console_println!("  hexdump F Hex dump of file contents");
     crate::console_println!("  lsof      List open file handles");
     crate::console_println!("  lsp [N] D Paginated ls: show N entries at a time");
-    crate::console_println!("  grep P F  Search for pattern P in file F");
+    crate::console_println!("  grep [-ivclnwrI] PATTERN FILE  Search for pattern in files (-r recursive, -v invert, -c count, -w whole-word, -l files-only, -I case-sensitive)");
     crate::console_println!("  cmp F1 F2 Compare two files byte-by-byte");
     crate::console_println!("  diff F1 F2 Line-level diff (unified format)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
@@ -6655,19 +6655,163 @@ fn cmd_hexdump(args: &str) {
 }
 
 /// Search for a pattern in a file (simple substring grep).
+/// Grep flags parsed from command-line arguments.
+struct GrepFlags {
+    case_insensitive: bool,
+    invert: bool,
+    count_only: bool,
+    show_line_numbers: bool,
+    files_only: bool,
+    whole_word: bool,
+    recursive: bool,
+    max_matches: usize,
+}
+
+impl GrepFlags {
+    fn new() -> Self {
+        Self {
+            case_insensitive: true, // default: case-insensitive (like original)
+            invert: false,
+            count_only: false,
+            show_line_numbers: true,
+            files_only: false,
+            whole_word: false,
+            recursive: false,
+            max_matches: 200,
+        }
+    }
+}
+
+/// Check if a character is a word boundary (not alphanumeric or underscore).
+fn is_word_boundary(c: char) -> bool {
+    !c.is_alphanumeric() && c != '_'
+}
+
+/// Test if `line` contains `pattern` with optional whole-word matching.
+///
+/// Both `line` and `pattern` should already be case-folded if case-insensitive.
+fn grep_matches(line: &str, pattern: &str, whole_word: bool) -> bool {
+    if !whole_word {
+        return line.contains(pattern);
+    }
+    // Whole-word: pattern must be bounded by non-word chars (or string edges).
+    let pat_len = pattern.len();
+    if pat_len == 0 {
+        return true;
+    }
+    let mut start = 0usize;
+    while start + pat_len <= line.len() {
+        if let Some(pos) = line[start..].find(pattern) {
+            let abs = start + pos;
+            let before_ok = abs == 0
+                || line[..abs].chars().next_back().map_or(true, is_word_boundary);
+            let after_ok = abs + pat_len >= line.len()
+                || line[abs + pat_len..].chars().next().map_or(true, is_word_boundary);
+            if before_ok && after_ok {
+                return true;
+            }
+            start = abs + 1;
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+/// Lowercase a string into a new allocation (for case-insensitive matching).
+fn to_lower(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        for lc in c.to_lowercase() {
+            out.push(lc);
+        }
+    }
+    out
+}
+
 fn cmd_grep(args: &str) {
-    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
-    if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: grep <pattern> <file>");
+    let mut flags = GrepFlags::new();
+    let mut words: alloc::vec::Vec<&str> = Vec::new();
+
+    // Parse flags and positional arguments.
+    for word in args.split_whitespace() {
+        if word.starts_with('-') && word.len() > 1 && !word.starts_with("--") {
+            for ch in word[1..].chars() {
+                match ch {
+                    'i' => flags.case_insensitive = true,
+                    'I' => flags.case_insensitive = false, // explicit case-sensitive
+                    'v' => flags.invert = true,
+                    'c' => flags.count_only = true,
+                    'n' => flags.show_line_numbers = true,
+                    'l' => flags.files_only = true,
+                    'w' => flags.whole_word = true,
+                    'r' | 'R' => flags.recursive = true,
+                    _ => {
+                        crate::console_println!("grep: unknown flag '-{}'", ch);
+                        return;
+                    }
+                }
+            }
+        } else {
+            words.push(word);
+        }
+    }
+
+    if words.is_empty() {
+        crate::console_println!(
+            "Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]"
+        );
         return;
     }
 
-    let pattern = parts[0];
-    let file_arg = parts[1];
+    let pattern = words[0];
+    let targets = if words.len() > 1 { &words[1..] } else {
+        crate::console_println!(
+            "Usage: grep [-ivclnwrI] <pattern> <file|dir> [file2 ...]"
+        );
+        return;
+    };
 
-    let path = resolve_path(file_arg);
+    let pattern_cmp = if flags.case_insensitive {
+        to_lower(pattern)
+    } else {
+        String::from(pattern)
+    };
 
-    let data = match crate::fs::Vfs::read_file(&path) {
+    let multi_file = targets.len() > 1 || flags.recursive;
+    let mut total_matches = 0usize;
+
+    for &target in targets {
+        let path = resolve_path(target);
+        if flags.recursive {
+            grep_recursive(
+                &path, &pattern_cmp, &flags, multi_file,
+                &mut total_matches, 0,
+            );
+        } else {
+            grep_file(&path, &pattern_cmp, &flags, multi_file, &mut total_matches);
+        }
+        if total_matches >= flags.max_matches {
+            break;
+        }
+    }
+
+    if flags.count_only && !multi_file {
+        shell_println!("{}", total_matches);
+    } else if total_matches == 0 && !flags.count_only && !flags.files_only {
+        crate::console_println!("grep: no matches for '{}'", pattern);
+    }
+}
+
+/// Search a single file for grep matches.
+fn grep_file(
+    path: &str,
+    pattern: &str,
+    flags: &GrepFlags,
+    multi_file: bool,
+    total: &mut usize,
+) {
+    let data = match crate::fs::Vfs::read_file(path) {
         Ok(d) => d,
         Err(e) => {
             crate::console_println!("grep: {}: {:?}", path, e);
@@ -6675,60 +6819,126 @@ fn cmd_grep(args: &str) {
         }
     };
 
-    // Try to interpret as UTF-8 text.
     let text = match core::str::from_utf8(&data) {
         Ok(s) => s,
         Err(_) => {
-            crate::console_println!("grep: {}: binary file (not UTF-8)", path);
+            // Skip binary files silently in recursive mode.
+            if !flags.recursive {
+                crate::console_println!("grep: {}: binary file", path);
+            }
             return;
         }
     };
 
-    // Case-insensitive substring search across lines.
-    let pattern_lower = {
-        let mut p = alloc::string::String::with_capacity(pattern.len());
-        for c in pattern.chars() {
-            for lc in c.to_lowercase() {
-                p.push(lc);
-            }
-        }
-        p
-    };
+    let mut file_matches = 0usize;
 
-    let mut match_count = 0usize;
     for (line_num, line) in text.lines().enumerate() {
-        // Build lowercase version of line for comparison.
-        let line_lower = {
-            let mut l = alloc::string::String::with_capacity(line.len());
-            for c in line.chars() {
-                for lc in c.to_lowercase() {
-                    l.push(lc);
-                }
-            }
-            l
+        let line_cmp = if flags.case_insensitive {
+            to_lower(line)
+        } else {
+            String::from(line)
         };
 
-        if line_lower.contains(pattern_lower.as_str()) {
-            shell_println!(
-                "{}:{}: {}",
-                line_num.saturating_add(1),
-                path,
-                line,
-            );
-            match_count = match_count.saturating_add(1);
+        let matched = grep_matches(&line_cmp, pattern, flags.whole_word);
+        let show = if flags.invert { !matched } else { matched };
 
-            // Limit output to prevent flooding.
-            if match_count >= 50 {
-                shell_println!("... (showing first 50 matches)");
-                break;
+        if show {
+            file_matches = file_matches.saturating_add(1);
+            *total = total.saturating_add(1);
+
+            if flags.files_only {
+                shell_println!("{}", path);
+                return; // One match is enough for -l.
+            }
+
+            if !flags.count_only {
+                if multi_file && flags.show_line_numbers {
+                    shell_println!("{}:{}:{}", path, line_num.saturating_add(1), line);
+                } else if multi_file {
+                    shell_println!("{}:{}", path, line);
+                } else if flags.show_line_numbers {
+                    shell_println!("{}:{}", line_num.saturating_add(1), line);
+                } else {
+                    shell_println!("{}", line);
+                }
+            }
+
+            if *total >= flags.max_matches {
+                shell_println!("... (showing first {} matches)", flags.max_matches);
+                return;
             }
         }
     }
 
-    if match_count == 0 {
-        crate::console_println!("grep: no matches for '{}' in {}", pattern, path);
-    } else {
-        shell_println!("{} matches", match_count);
+    if flags.count_only && multi_file {
+        shell_println!("{}:{}", path, file_matches);
+    }
+}
+
+/// Recursively search a directory for grep matches (depth limit 16).
+fn grep_recursive(
+    path: &str,
+    pattern: &str,
+    flags: &GrepFlags,
+    multi_file: bool,
+    total: &mut usize,
+    depth: usize,
+) {
+    if depth > 16 || *total >= flags.max_matches {
+        return;
+    }
+
+    // Check if path is a directory or file.
+    let entry = match crate::fs::Vfs::stat(path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    if entry.entry_type == crate::fs::vfs::EntryType::File {
+        grep_file(path, pattern, flags, multi_file, total);
+        return;
+    }
+
+    if entry.entry_type != crate::fs::vfs::EntryType::Directory {
+        return;
+    }
+
+    let entries = match crate::fs::Vfs::readdir(path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for child in &entries {
+        if child.name == "." || child.name == ".." {
+            continue;
+        }
+        // Skip hidden directories/files starting with '.' in recursive mode.
+        if child.name.starts_with('.') {
+            continue;
+        }
+
+        let child_path = if path == "/" {
+            alloc::format!("/{}", child.name)
+        } else {
+            alloc::format!("{}/{}", path, child.name)
+        };
+
+        match child.entry_type {
+            crate::fs::vfs::EntryType::File => {
+                grep_file(&child_path, pattern, flags, multi_file, total);
+            }
+            crate::fs::vfs::EntryType::Directory => {
+                grep_recursive(
+                    &child_path, pattern, flags, multi_file, total,
+                    depth.saturating_add(1),
+                );
+            }
+            _ => {}
+        }
+
+        if *total >= flags.max_matches {
+            return;
+        }
     }
 }
 
@@ -7868,56 +8078,81 @@ fn cmd_uniq_input(args: &str, input: &str) {
 /// argument).  If `args` contains a space it is interpreted as
 /// `<pattern> <file>` and delegates to `cmd_grep`.
 fn cmd_grep_input(args: &str, input: &str) {
-    // If args contains a space, it looks like "pattern file" — delegate.
-    if args.contains(' ') {
+    // Parse flags and find the pattern.
+    let mut flags = GrepFlags::new();
+    let mut positional: alloc::vec::Vec<&str> = Vec::new();
+
+    for word in args.split_whitespace() {
+        if word.starts_with('-') && word.len() > 1 && !word.starts_with("--") {
+            for ch in word[1..].chars() {
+                match ch {
+                    'i' => flags.case_insensitive = true,
+                    'I' => flags.case_insensitive = false,
+                    'v' => flags.invert = true,
+                    'c' => flags.count_only = true,
+                    'n' => flags.show_line_numbers = true,
+                    'w' => flags.whole_word = true,
+                    _ => {}
+                }
+            }
+        } else {
+            positional.push(word);
+        }
+    }
+
+    // If there are 2+ positional args, it looks like "pattern file" — delegate.
+    if positional.len() >= 2 {
         cmd_grep(args);
         return;
     }
 
-    let pattern = args.trim();
-    if pattern.is_empty() {
-        crate::console_println!("grep: no pattern specified");
-        return;
-    }
-
-    // Build a lowercase version of the pattern for case-insensitive search.
-    let pattern_lower = {
-        let mut p = String::with_capacity(pattern.len());
-        for c in pattern.chars() {
-            for lc in c.to_lowercase() {
-                p.push(lc);
-            }
+    let pattern = match positional.first() {
+        Some(p) => *p,
+        None => {
+            crate::console_println!("grep: no pattern specified");
+            return;
         }
-        p
+    };
+
+    let pattern_cmp = if flags.case_insensitive {
+        to_lower(pattern)
+    } else {
+        String::from(pattern)
     };
 
     let mut match_count = 0usize;
     for (line_num, line) in input.lines().enumerate() {
-        let line_lower = {
-            let mut l = String::with_capacity(line.len());
-            for c in line.chars() {
-                for lc in c.to_lowercase() {
-                    l.push(lc);
-                }
-            }
-            l
+        let line_cmp = if flags.case_insensitive {
+            to_lower(line)
+        } else {
+            String::from(line)
         };
 
-        if line_lower.contains(pattern_lower.as_str()) {
-            shell_println!("{}: {}", line_num.saturating_add(1), line);
+        let matched = grep_matches(&line_cmp, &pattern_cmp, flags.whole_word);
+        let show = if flags.invert { !matched } else { matched };
+
+        if show {
             match_count = match_count.saturating_add(1);
 
-            if match_count >= 50 {
-                shell_println!("... (showing first 50 matches)");
+            if !flags.count_only {
+                if flags.show_line_numbers {
+                    shell_println!("{}: {}", line_num.saturating_add(1), line);
+                } else {
+                    shell_println!("{}", line);
+                }
+            }
+
+            if match_count >= flags.max_matches {
+                shell_println!("... (showing first {} matches)", flags.max_matches);
                 break;
             }
         }
     }
 
-    if match_count == 0 {
+    if flags.count_only {
+        shell_println!("{}", match_count);
+    } else if match_count == 0 {
         crate::console_println!("grep: no matches for '{}'", pattern);
-    } else {
-        shell_println!("{} matches", match_count);
     }
 }
 

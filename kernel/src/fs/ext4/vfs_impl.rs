@@ -807,10 +807,25 @@ impl FileSystem for Ext4Fs {
         // Our FileMeta uses nanoseconds — convert.
         let sec_to_ns = |s: u32| u64::from(s).saturating_mul(1_000_000_000);
 
+        // Read creation time from the extra inode area (i_crtime at offset 0x90).
+        // Only available if inode_size > 128 and i_extra_isize covers offset 0x90.
+        let created_ns = if self.driver.ondisk_inode_size() > 128 {
+            self.driver.read_inode_raw(ino).ok()
+                .and_then(|raw| {
+                    // i_crtime is at byte 0x90 (4 bytes, LE).
+                    raw.get(0x90..0x94)
+                        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                        .map(u32::from_le_bytes)
+                })
+                .map_or(0, sec_to_ns)
+        } else {
+            0
+        };
+
         Ok(FileMeta {
             size,
             entry_type,
-            created_ns: 0, // ext4 core inode doesn't have crtime (it's in extra)
+            created_ns,
             modified_ns: sec_to_ns(inode.i_mtime),
             accessed_ns: sec_to_ns(inode.i_atime),
             changed_ns: sec_to_ns(inode.i_ctime),

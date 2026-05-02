@@ -970,7 +970,7 @@ impl Ext4Driver {
     /// 128-byte core + i_extra_isize extra fields, up to the full inode
     /// size on disk.  The parsed [`Ext4Inode`] only covers the first 128
     /// bytes; this returns everything.
-    fn read_inode_raw(&self, inode_nr: u32) -> KernelResult<Vec<u8>> {
+    pub fn read_inode_raw(&self, inode_nr: u32) -> KernelResult<Vec<u8>> {
         if inode_nr == 0 {
             return Err(KernelError::InvalidArgument);
         }
@@ -3237,6 +3237,14 @@ impl Ext4Driver {
         }
 
         Ok(first_block)
+    }
+
+    /// Get the on-disk inode size in bytes (from superblock).
+    ///
+    /// This is the total space allocated for each inode on disk, including
+    /// the 128-byte core, extra fields, and inline xattr area.
+    pub fn ondisk_inode_size(&self) -> u32 {
+        self.sb.inode_size
     }
 
     /// Get the full 64-bit size of an inode.

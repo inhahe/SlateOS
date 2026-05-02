@@ -5116,14 +5116,11 @@ fn cmd_ls(args: &str) {
                             alloc::format!("{}", meta.size)
                         };
 
-                        // Format modification time as YYYY-MM-DD HH:MM.
+                        // Format modification time as YYYY-MM-DD HH:MM:SS.
                         let time_str = if meta.modified_ns > 0 {
-                            // Convert ns to rough datetime via seconds since epoch.
-                            // RTC epoch is 2000-01-01 in our system.
-                            let secs = meta.modified_ns / 1_000_000_000;
-                            alloc::format!("{:>10}", secs)
+                            format_epoch_ns(meta.modified_ns)
                         } else {
-                            String::from("         0")
+                            String::from("-")
                         };
 
                         shell_println!(
@@ -5362,15 +5359,11 @@ fn cmd_stat(args: &str) {
                 crate::console_println!("  Attrs: {:?}", meta.attributes);
             }
 
-            // Format timestamps (nanoseconds to seconds for readability).
             let ns_to_display = |ns: u64| -> alloc::string::String {
                 if ns == 0 {
                     alloc::string::String::from("-")
                 } else {
-                    // Show as seconds since epoch (or boot, depending on source).
-                    let secs = ns / 1_000_000_000;
-                    let frac = (ns % 1_000_000_000) / 1_000_000;
-                    alloc::format!("{}.{:03}s", secs, frac)
+                    format_epoch_ns(ns)
                 }
             };
             crate::console_println!("  Created:  {}", ns_to_display(meta.created_ns));
@@ -5499,6 +5492,38 @@ fn format_bytes(bytes: u64) -> alloc::string::String {
     } else {
         alloc::format!("{}G", bytes / (1024 * 1024 * 1024))
     }
+}
+
+/// Format a Unix epoch timestamp (nanoseconds) as YYYY-MM-DD HH:MM:SS.
+///
+/// Uses the civil-from-days algorithm to convert days since epoch to
+/// year/month/day.  Based on Howard Hinnant's `civil_from_days()`.
+#[allow(clippy::arithmetic_side_effects)]
+fn format_epoch_ns(ns: u64) -> alloc::string::String {
+    let total_secs = ns / 1_000_000_000;
+    let days_since_epoch = (total_secs / 86400) as i64;
+    let time_of_day = total_secs % 86400;
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    // Howard Hinnant's civil_from_days algorithm.
+    // Converts days since 1970-01-01 to (year, month, day).
+    let z = days_since_epoch + 719468; // shift epoch to 0000-03-01
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+
+    alloc::format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, m, d, hour, minute, second
+    )
 }
 
 /// Copy a file.

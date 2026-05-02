@@ -5383,7 +5383,14 @@ fn cmd_ln(args: &str) {
 /// Show filesystem disk usage (like Unix `df`).
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_df(args: &str) {
-    if args.is_empty() {
+    let mut verbose = false;
+    let mut path_arg = args;
+    if args.starts_with("-v") {
+        verbose = true;
+        path_arg = args.get(2..).unwrap_or("").trim();
+    }
+
+    if path_arg.is_empty() {
         // Show all mounts.
         match crate::fs::Vfs::mount_info() {
             Ok(mounts) => {
@@ -5405,6 +5412,15 @@ fn cmd_df(args: &str) {
                         pct,
                         mount_path
                     );
+                    if verbose {
+                        if let Ok(stats) = crate::fs::Vfs::debug_stats(mount_path) {
+                            if !stats.is_empty() {
+                                for line in stats.lines() {
+                                    shell_println!("  {}", line);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {

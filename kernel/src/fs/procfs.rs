@@ -28,6 +28,7 @@
 //! ├── vmstat         Virtual memory statistics (frames, swap, zram, OOM)
 //! ├── buddyinfo      Buddy allocator free blocks per order
 //! ├── swaps          Active swap devices with usage and priority
+//! ├── fsstats        Per-filesystem debug statistics
 //! └── <pid>/         Per-process directories
 //!     ├── status     Process name, state, priority, credentials
 //!     ├── cmdline    Process command name (null-terminated)
@@ -93,6 +94,7 @@ const ROOT_FILES: &[&str] = &[
     "vmstat",
     "buddyinfo",
     "swaps",
+    "fsstats",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -743,6 +745,40 @@ fn gen_buddyinfo() -> Vec<u8> {
     }
 }
 
+/// `/proc/fsstats` — per-filesystem debug statistics.
+///
+/// Iterates all mounted filesystems and calls their `debug_stats()` method,
+/// concatenating the results.  Useful for monitoring filesystem internals
+/// (extent counts, inode usage, cache states, etc.) in a single read.
+fn gen_fsstats() -> Vec<u8> {
+    let mounts = crate::fs::Vfs::mounts();
+    let mut s = String::with_capacity(512);
+
+    for (mount_path, fs_type) in &mounts {
+        s.push_str(&format!("--- {} ({}) ---\n", mount_path, fs_type));
+        match crate::fs::Vfs::debug_stats(mount_path) {
+            Ok(stats) if !stats.is_empty() => {
+                s.push_str(&stats);
+                if !stats.ends_with('\n') {
+                    s.push('\n');
+                }
+            }
+            Ok(_) => {
+                s.push_str("(no stats)\n");
+            }
+            Err(_) => {
+                s.push_str("(unavailable)\n");
+            }
+        }
+    }
+
+    if mounts.is_empty() {
+        s.push_str("(no filesystems mounted)\n");
+    }
+
+    s.into_bytes()
+}
+
 /// `/proc/swaps` — active swap devices, Linux-compatible format.
 ///
 /// Shows each swap device's type, capacity, usage, and priority.
@@ -1037,6 +1073,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "vmstat" => Ok(gen_vmstat()),
         "buddyinfo" => Ok(gen_buddyinfo()),
         "swaps" => Ok(gen_swaps()),
+        "fsstats" => Ok(gen_fsstats()),
         _ => Err(KernelError::NotFound),
     }
 }

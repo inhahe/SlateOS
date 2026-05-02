@@ -413,6 +413,67 @@ pub fn count() -> usize {
     REGISTRY.lock().count
 }
 
+/// List all registered parameters with their current values.
+///
+/// Returns a snapshot of every active parameter.  Used by sysfs to
+/// expose kernel tunables via the virtual filesystem.
+pub fn list_all() -> alloc::vec::Vec<ParamInfo> {
+    let reg = REGISTRY.lock();
+    let mut result = alloc::vec::Vec::with_capacity(reg.count);
+    for p in reg.params.iter().take(reg.count) {
+        if p.active {
+            result.push(ParamInfo {
+                id: p.id,
+                name: p.name,
+                value: p.value,
+                default: p.default,
+                min: p.min,
+                max: p.max,
+            });
+        }
+    }
+    result
+}
+
+/// Look up a parameter by its dotted name (e.g., "mm.swappiness").
+///
+/// Returns the parameter info if found.  Used by sysfs for
+/// name-based lookups.
+pub fn find_by_name(name: &str) -> Option<ParamInfo> {
+    let reg = REGISTRY.lock();
+    for p in reg.params.iter().take(reg.count) {
+        if p.active && p.name == name {
+            return Some(ParamInfo {
+                id: p.id,
+                name: p.name,
+                value: p.value,
+                default: p.default,
+                min: p.min,
+                max: p.max,
+            });
+        }
+    }
+    None
+}
+
+/// Set a parameter by its dotted name (e.g., "mm.swappiness").
+///
+/// Returns the old value on success, `None` if not found or out of range.
+pub fn set_by_name(name: &str, value: u64) -> Option<u64> {
+    let id = {
+        let reg = REGISTRY.lock();
+        let mut found_id = None;
+        for p in reg.params.iter().take(reg.count) {
+            if p.active && p.name == name {
+                found_id = Some(p.id);
+                break;
+            }
+        }
+        found_id
+    };
+    id.and_then(|id| set(id, value))
+}
+
 // ---------------------------------------------------------------------------
 // Memory workload profiles
 // ---------------------------------------------------------------------------

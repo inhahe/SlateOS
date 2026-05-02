@@ -273,6 +273,7 @@ fn gen_filesystems() -> Vec<u8> {
     s.push_str("nodev\tmemfs\n");
     s.push_str("nodev\tprocfs\n");
     s.push_str("nodev\tdevfs\n");
+    s.push_str("nodev\tsysfs\n");
 
     // Disk-backed filesystems.
     s.push_str("\text4\n");

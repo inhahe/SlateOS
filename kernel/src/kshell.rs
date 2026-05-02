@@ -182,6 +182,8 @@ fn execute(line: &str) {
         "tee" => cmd_tee(args),
         "truncate" => cmd_truncate(args),
         "sha256" | "hash" => cmd_sha256(args),
+        "sysctl" => cmd_sysctl(args),
+        "hostname" => cmd_hostname(args),
         "readlink" => cmd_readlink(args),
         "symlink" | "mklink" => cmd_symlink(args),
         "xattr" => cmd_xattr(args),
@@ -257,6 +259,8 @@ fn cmd_help() {
     crate::console_println!("  tee F T   Write text T to file F and display it");
     crate::console_println!("  truncate N F Truncate file F to N bytes");
     crate::console_println!("  sha256 F  Compute SHA-256 hash of file contents");
+    crate::console_println!("  sysctl .. List/get/set kernel parameters");
+    crate::console_println!("  hostname  Show or set system hostname");
     crate::console_println!("  readlink P Show symlink target");
     crate::console_println!("  symlink T P Create symlink at P pointing to T");
     crate::console_println!("  xattr F .. Extended attributes (list/get/set/rm)");
@@ -2745,6 +2749,94 @@ fn cmd_mktemp(args: &str) {
         }
         Err(e) => {
             crate::console_println!("mktemp: cannot create temp file in '{}': {:?}", dir, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sysctl / hostname commands
+// ---------------------------------------------------------------------------
+
+/// `sysctl [name [value]]` — list, get, or set kernel parameters.
+///
+/// - `sysctl`          — list all parameters with current values
+/// - `sysctl name`     — show a specific parameter
+/// - `sysctl name val` — set a parameter to a new value
+fn cmd_sysctl(args: &str) {
+    let args = args.trim();
+
+    if args.is_empty() {
+        // List all parameters.
+        let params = crate::sysctl::list_all();
+        if params.is_empty() {
+            crate::console_println!("(no parameters registered)");
+            return;
+        }
+        for p in &params {
+            crate::console_println!(
+                "  {:<30} = {:<8} (default: {}, range: {}..{})",
+                p.name, p.value, p.default, p.min, p.max
+            );
+        }
+        return;
+    }
+
+    let mut parts = args.splitn(2, ' ');
+    let name = parts.next().unwrap_or("");
+    let value_str = parts.next().unwrap_or("").trim();
+
+    if value_str.is_empty() {
+        // Read a single parameter.
+        match crate::sysctl::find_by_name(name) {
+            Some(info) => {
+                crate::console_println!(
+                    "{} = {} (default: {}, range: {}..{})",
+                    info.name, info.value, info.default, info.min, info.max
+                );
+            }
+            None => {
+                crate::console_println!("sysctl: unknown parameter '{}'", name);
+            }
+        }
+    } else {
+        // Set a parameter.
+        match value_str.parse::<u64>() {
+            Ok(value) => {
+                match crate::sysctl::set_by_name(name, value) {
+                    Some(old) => {
+                        crate::console_println!("{} = {} (was {})", name, value, old);
+                    }
+                    None => {
+                        crate::console_println!(
+                            "sysctl: cannot set '{}' to {} (out of range or unknown)",
+                            name, value
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                crate::console_println!("sysctl: invalid value '{}'", value_str);
+            }
+        }
+    }
+}
+
+/// `hostname [name]` — show or set the system hostname.
+fn cmd_hostname(args: &str) {
+    let name = args.trim();
+
+    if name.is_empty() {
+        // Show current hostname.
+        crate::console_println!("{}", crate::fs::sysfs::get_hostname());
+    } else {
+        // Set hostname.
+        match crate::fs::Vfs::write_file("/sys/kernel/hostname", name.as_bytes()) {
+            Ok(()) => {
+                crate::console_println!("{}", name);
+            }
+            Err(e) => {
+                crate::console_println!("hostname: cannot set hostname: {:?}", e);
+            }
         }
     }
 }

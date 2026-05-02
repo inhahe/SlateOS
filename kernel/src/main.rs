@@ -543,6 +543,13 @@ extern "C" fn kmain() -> ! {
                 serial_println!("[boot] WARNING: failed to mount devfs at /dev: {:?}", e);
             }
 
+            // Mount sysfs at /sys for kernel configuration and hardware info.
+            // Writable for tunables (hostname, sysctl params), read-only for
+            // system info (kernel version, PCI devices, cache stats).
+            if let Err(e) = fs::sysfs::mount("/sys") {
+                serial_println!("[boot] WARNING: failed to mount sysfs at /sys: {:?}", e);
+            }
+
             // Probe secondary block devices for ext4 filesystems.
             // Try common virtio-blk device names.  The first ext4 partition
             // found is mounted at /mnt.  Non-fatal if none found.
@@ -615,6 +622,10 @@ extern "C" fn kmain() -> ! {
             // Run devfs self-test (validates device file operations).
             if let Err(e) = fs::devfs::self_test() {
                 serial_println!("WARNING: DevFs self-test failed: {:?}", e);
+            }
+            // Run sysfs self-test (validates kernel tunables, hostname, PCI).
+            if let Err(e) = fs::sysfs::self_test() {
+                serial_println!("WARNING: SysFs self-test failed: {:?}", e);
             }
             // Run ext4 self-test (reads directory listing and files if mounted).
             if let Err(e) = fs::ext4::self_test() {

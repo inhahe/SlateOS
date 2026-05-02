@@ -35,6 +35,7 @@ pub mod journal;
 pub mod memfs;
 pub mod notify;
 pub mod procfs;
+pub mod sysfs;
 pub mod trash;
 pub mod vfs;
 

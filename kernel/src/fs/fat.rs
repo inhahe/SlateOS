@@ -273,6 +273,345 @@ struct FatDirEntry {
     create_date: u16,
     /// Last-access date (DOS packed, date only — no time component).
     access_date: u16,
+    /// Long filename (from LFN directory entries), or `None` for 8.3-only.
+    long_name: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Long Filename (LFN) support
+// ---------------------------------------------------------------------------
+
+/// Maximum characters in a FAT long filename (255 UCS-2 chars).
+const LFN_MAX_CHARS: usize = 255;
+
+/// Number of UCS-2 characters stored per LFN entry.
+const LFN_CHARS_PER_ENTRY: usize = 13;
+
+/// Bit flag on the sequence byte of the last LFN entry.
+const LFN_LAST_ENTRY: u8 = 0x40;
+
+/// Compute the short-name checksum used by LFN entries.
+///
+/// The checksum ties LFN entries to their corresponding 8.3 entry.
+/// Algorithm from Microsoft FAT specification (fatgen103).
+#[allow(clippy::arithmetic_side_effects)]
+fn lfn_checksum(name83: &[u8; 11]) -> u8 {
+    let mut sum: u8 = 0;
+    for &b in name83.iter() {
+        // Rotate right 1 bit, then add.
+        sum = ((sum & 1) << 7)
+            .wrapping_add(sum >> 1)
+            .wrapping_add(b);
+    }
+    sum
+}
+
+/// Extract the 13 UCS-2 characters from a raw LFN directory entry.
+///
+/// Characters are stored at offsets 1-10 (5 chars), 14-25 (6 chars),
+/// 28-31 (2 chars) within the 32-byte entry.
+fn lfn_extract_chars(raw: &[u8]) -> [u16; LFN_CHARS_PER_ENTRY] {
+    let mut chars = [0xFFFFu16; LFN_CHARS_PER_ENTRY];
+
+    // Chars 1-5 at offsets 1, 3, 5, 7, 9.
+    for i in 0..5 {
+        let off = 1 + i * 2;
+        chars[i] = read_u16(raw, off);
+    }
+    // Chars 6-11 at offsets 14, 16, 18, 20, 22, 24.
+    for i in 0..6 {
+        let off = 14 + i * 2;
+        chars[5 + i] = read_u16(raw, off);
+    }
+    // Chars 12-13 at offsets 28, 30.
+    for i in 0..2 {
+        let off = 28 + i * 2;
+        chars[11 + i] = read_u16(raw, off);
+    }
+
+    chars
+}
+
+/// Assemble a long filename from collected LFN character arrays.
+///
+/// `lfn_parts` is ordered from lowest sequence number (1) to highest.
+/// Each part is a 13-char UCS-2 array.  We concatenate, strip 0xFFFF
+/// padding and the null terminator.
+fn assemble_lfn(lfn_parts: &[[u16; LFN_CHARS_PER_ENTRY]]) -> Option<String> {
+    let mut chars: Vec<u16> = Vec::with_capacity(lfn_parts.len() * LFN_CHARS_PER_ENTRY);
+
+    for part in lfn_parts {
+        for &ch in part.iter() {
+            // 0x0000 is the null terminator, 0xFFFF is padding.
+            if ch == 0x0000 || ch == 0xFFFF {
+                // Convert collected UCS-2 to UTF-8.
+                let s: String = chars.iter().filter_map(|&c| {
+                    char::from_u32(u32::from(c))
+                }).collect();
+                return if s.is_empty() { None } else { Some(s) };
+            }
+            chars.push(ch);
+        }
+    }
+
+    // No null terminator found — convert what we have.
+    let s: String = chars.iter().filter_map(|&c| {
+        char::from_u32(u32::from(c))
+    }).collect();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Encode a filename into UCS-2 for LFN entries.
+///
+/// Returns the UCS-2 characters with null terminator and 0xFFFF padding.
+/// Returns `None` if the name exceeds 255 characters.
+fn encode_lfn(name: &str) -> Option<Vec<u16>> {
+    if name.len() > LFN_MAX_CHARS {
+        return None;
+    }
+
+    let mut ucs2: Vec<u16> = Vec::with_capacity(name.len() + 1);
+    for ch in name.chars() {
+        let cp = ch as u32;
+        if cp > 0xFFFF {
+            // BMP only — surrogate pairs not supported in FAT LFN.
+            return None;
+        }
+        ucs2.push(cp as u16);
+    }
+    // Add null terminator.
+    ucs2.push(0x0000);
+    // Pad to multiple of 13 with 0xFFFF.
+    while ucs2.len() % LFN_CHARS_PER_ENTRY != 0 {
+        ucs2.push(0xFFFF);
+    }
+    Some(ucs2)
+}
+
+/// Build the raw 32-byte LFN directory entries for a filename.
+///
+/// Returns the entries in on-disk order (highest sequence number first,
+/// lowest last — they precede the short entry on disk).
+#[allow(clippy::arithmetic_side_effects)]
+fn build_lfn_entries(name: &str, name83: &[u8; 11]) -> Option<Vec<[u8; 32]>> {
+    let ucs2 = encode_lfn(name)?;
+    let num_entries = ucs2.len() / LFN_CHARS_PER_ENTRY;
+    let checksum = lfn_checksum(name83);
+
+    let mut entries: Vec<[u8; 32]> = Vec::with_capacity(num_entries);
+
+    // Build entries from first (seq 1) to last (seq N).
+    for seq_idx in 0..num_entries {
+        let mut raw = [0u8; 32];
+        // Sequence number (1-based).  Last entry has bit 6 set.
+        let seq_num = (seq_idx + 1) as u8;
+        raw[0] = if seq_idx == num_entries - 1 {
+            seq_num | LFN_LAST_ENTRY
+        } else {
+            seq_num
+        };
+        // Attribute: long name.
+        raw[11] = ATTR_LONG_NAME;
+        // Type: 0 (sub-component of a long name).
+        raw[12] = 0;
+        // Checksum.
+        raw[13] = checksum;
+        // Cluster: always 0.
+        raw[26] = 0;
+        raw[27] = 0;
+
+        // Fill in the 13 UCS-2 characters for this entry.
+        let base = seq_idx * LFN_CHARS_PER_ENTRY;
+
+        // Chars 1-5 at offsets 1,3,5,7,9.
+        for i in 0..5 {
+            let ch = ucs2.get(base + i).copied().unwrap_or(0xFFFF);
+            raw[1 + i * 2] = ch as u8;
+            raw[2 + i * 2] = (ch >> 8) as u8;
+        }
+        // Chars 6-11 at offsets 14,16,18,20,22,24.
+        for i in 0..6 {
+            let ch = ucs2.get(base + 5 + i).copied().unwrap_or(0xFFFF);
+            raw[14 + i * 2] = ch as u8;
+            raw[15 + i * 2] = (ch >> 8) as u8;
+        }
+        // Chars 12-13 at offsets 28,30.
+        for i in 0..2 {
+            let ch = ucs2.get(base + 11 + i).copied().unwrap_or(0xFFFF);
+            raw[28 + i * 2] = ch as u8;
+            raw[29 + i * 2] = (ch >> 8) as u8;
+        }
+
+        entries.push(raw);
+    }
+
+    // On-disk order: highest sequence number first.
+    entries.reverse();
+    Some(entries)
+}
+
+/// Generate an 8.3 basis name from a long filename.
+///
+/// Follows the Microsoft algorithm:
+/// 1. Take the first 6 bytes of the base (uppercase, strip invalid chars)
+/// 2. Append `~1` (incrementing if collision)
+/// 3. Take first 3 bytes of the extension
+///
+/// Returns the basis name. The caller must check for uniqueness and
+/// increment the tail number.
+fn generate_basis_name(name: &str) -> [u8; 11] {
+    let mut result = [b' '; 11];
+
+    let upper = name.to_uppercase();
+    let (base_part, ext_part) = if let Some(dot_pos) = upper.rfind('.') {
+        (&upper[..dot_pos], &upper[dot_pos + 1..])
+    } else {
+        (upper.as_str(), "")
+    };
+
+    // Strip leading/embedded spaces and dots, keep only valid 8.3 chars.
+    let mut base_clean = Vec::with_capacity(8);
+    for ch in base_part.bytes() {
+        match ch {
+            b' ' | b'.' => {} // Skip.
+            b'A'..=b'Z' | b'0'..=b'9' | b'!' | b'#' | b'$' | b'%'
+            | b'&' | b'\'' | b'(' | b')' | b'-' | b'@' | b'^'
+            | b'_' | b'`' | b'{' | b'}' | b'~' => {
+                if base_clean.len() < 6 {
+                    base_clean.push(ch);
+                }
+            }
+            _ => {
+                // Replace other chars with underscore.
+                if base_clean.len() < 6 {
+                    base_clean.push(b'_');
+                }
+            }
+        }
+    }
+
+    // If base is empty, use a fallback.
+    if base_clean.is_empty() {
+        base_clean.extend_from_slice(b"FILE");
+    }
+
+    // Copy base (max 6 chars to leave room for ~N).
+    for (i, &b) in base_clean.iter().enumerate().take(6) {
+        result[i] = b;
+    }
+    // Append ~1 (caller increments if needed).
+    let tail_pos = base_clean.len().min(6);
+    result[tail_pos] = b'~';
+    if tail_pos + 1 < 8 {
+        result[tail_pos + 1] = b'1';
+    }
+
+    // Extension (max 3 chars).
+    let ext_clean: Vec<u8> = ext_part.bytes().filter(|b| {
+        matches!(b, b'A'..=b'Z' | b'0'..=b'9' | b'!' | b'#' | b'$'
+            | b'%' | b'&' | b'\'' | b'(' | b')' | b'-' | b'@'
+            | b'^' | b'_' | b'`' | b'{' | b'}' | b'~')
+    }).take(3).collect();
+
+    for (i, &b) in ext_clean.iter().enumerate() {
+        result[8 + i] = b;
+    }
+
+    result
+}
+
+/// Set the numeric tail (~N) on a basis name.
+///
+/// Writes the `~N` suffix starting at position `tail_pos` in the name.
+#[allow(clippy::arithmetic_side_effects)]
+fn set_basis_tail(basis: &mut [u8; 11], n: u32) {
+    // Format the tail: ~1, ~2, ..., ~9999.
+    let tail_str = {
+        let mut buf = [0u8; 6]; // ~NNNNN max
+        let mut len = 0;
+        buf[0] = b'~';
+        len += 1;
+
+        // Convert number to decimal digits.
+        let mut digits = [0u8; 5];
+        let mut num = n;
+        let mut dlen = 0;
+        loop {
+            digits[dlen] = b'0' + (num % 10) as u8;
+            dlen += 1;
+            num /= 10;
+            if num == 0 || dlen >= 5 {
+                break;
+            }
+        }
+        // Reverse digits into buf.
+        for i in 0..dlen {
+            buf[len] = digits[dlen - 1 - i];
+            len += 1;
+        }
+        (buf, len)
+    };
+
+    let (tail_buf, tail_len) = tail_str;
+
+    // Find the rightmost non-space character in the first 8 bytes.
+    // Place the tail so it fits within 8 chars.
+    let max_base = 8usize.saturating_sub(tail_len);
+    let mut base_end = 0;
+    for i in 0..8 {
+        if basis[i] != b' ' && basis[i] != b'~' {
+            base_end = i + 1;
+        }
+    }
+    // Trim base to make room for tail.
+    let base_end = base_end.min(max_base);
+
+    // Clear the base area from base_end to 8.
+    for i in base_end..8 {
+        basis[i] = b' ';
+    }
+
+    // Write the tail.
+    for i in 0..tail_len {
+        if base_end + i < 8 {
+            basis[base_end + i] = tail_buf[i];
+        }
+    }
+}
+
+/// Check if a filename needs LFN entries (doesn't fit 8.3 format).
+fn needs_lfn(name: &str) -> bool {
+    // If to_83_name succeeds, check if the round-trip is lossy.
+    // Names with lowercase, spaces (in wrong positions), multiple dots,
+    // or length > 8+3 need LFN.
+    if name.len() > 12 {
+        return true;
+    }
+    // Check for characters that can't be represented in 8.3.
+    for ch in name.chars() {
+        if ch.is_ascii_lowercase() {
+            return true;
+        }
+        match ch {
+            ' ' | '+' | ',' | ';' | '=' | '[' | ']' => return true,
+            _ => {}
+        }
+    }
+    // Check if the name has multiple dots.
+    if name.matches('.').count() > 1 {
+        return true;
+    }
+    // Check base/extension length.
+    if let Some(dot_pos) = name.rfind('.') {
+        let base = &name[..dot_pos];
+        let ext = &name[dot_pos + 1..];
+        if base.len() > 8 || ext.len() > 3 || base.is_empty() {
+            return true;
+        }
+    } else if name.len() > 8 {
+        return true;
+    }
+    false
 }
 
 impl FatDirEntry {
@@ -326,6 +665,7 @@ impl FatDirEntry {
             create_time,
             create_date,
             access_date,
+            long_name: None, // Set later by directory reader from LFN entries.
         })
     }
 
@@ -339,10 +679,35 @@ impl FatDirEntry {
         self.attr & ATTR_VOLUME_ID != 0
     }
 
-    /// Convert the 8.3 name to a human-readable string.
+    /// Return the display name, preferring the long filename if available.
     ///
-    /// `"HELLO   TXT"` → `"HELLO.TXT"`
+    /// Falls back to the 8.3 short name: `"HELLO   TXT"` → `"HELLO.TXT"`.
     fn display_name(&self) -> String {
+        // Prefer long filename if present.
+        if let Some(ref lfn) = self.long_name {
+            return lfn.clone();
+        }
+
+        // Fall back to 8.3 short name.
+        let base = core::str::from_utf8(&self.name[..8])
+            .unwrap_or("????????")
+            .trim_end();
+        let ext = core::str::from_utf8(&self.name[8..11])
+            .unwrap_or("???")
+            .trim_end();
+
+        if self.is_volume_label() || self.is_directory() || ext.is_empty() {
+            String::from(base)
+        } else {
+            let mut s = String::from(base);
+            s.push('.');
+            s.push_str(ext);
+            s
+        }
+    }
+
+    /// Return the 8.3 short name as a string (for matching purposes).
+    fn short_name(&self) -> String {
         let base = core::str::from_utf8(&self.name[..8])
             .unwrap_or("????????")
             .trim_end();
@@ -509,6 +874,7 @@ impl DcacheEntry {
                 create_time: 0,
                 create_date: 0,
                 access_date: 0,
+                long_name: None,
             },
             last_access: 0,
             valid: false,
@@ -680,6 +1046,9 @@ impl FatFs {
     ///
     /// FAT16: reads the fixed-size root directory area.
     /// FAT32: reads the cluster chain starting at `bpb.root_cluster`.
+    ///
+    /// Collects LFN (long filename) entries and attaches them to the
+    /// following short (8.3) entry.
     fn read_root_dir(&mut self) -> KernelResult<Vec<FatDirEntry>> {
         // FAT32 root directory is a cluster chain.
         if self.bpb.fat_type == FatType::Fat32 {
@@ -694,6 +1063,9 @@ impl FatFs {
         let mut entries = Vec::new();
         let mut sector_buf = [0u8; SECTOR_SIZE];
         let mut entry_index: u16 = 0;
+        // Buffer for collecting LFN parts (indexed by seq number - 1).
+        let mut lfn_buf: Vec<[u16; LFN_CHARS_PER_ENTRY]> = Vec::new();
+        let mut lfn_checksum_expected: u8 = 0;
 
         'outer: for sec in 0..root_sectors {
             let lba = u64::from(root_lba.checked_add(sec)
@@ -710,13 +1082,52 @@ impl FatFs {
 
                 let offset = i * 32;
                 if let Some(raw) = sector_buf.get(offset..offset + 32) {
-                    // Check for end-of-directory marker.
-                    if raw.first().copied() == Some(0x00) {
+                    let first_byte = raw.first().copied().unwrap_or(0);
+
+                    // End-of-directory marker.
+                    if first_byte == 0x00 {
                         break 'outer;
                     }
 
-                    if let Some(entry) = FatDirEntry::parse(raw) {
+                    // Deleted entry — reset LFN buffer.
+                    if first_byte == 0xE5 {
+                        lfn_buf.clear();
+                        entry_index = entry_index.wrapping_add(1);
+                        continue;
+                    }
+
+                    let attr = raw.get(11).copied().unwrap_or(0);
+
+                    if attr == ATTR_LONG_NAME {
+                        // LFN entry — collect it.
+                        let seq = first_byte & 0x3F;
+                        let chksum = raw.get(13).copied().unwrap_or(0);
+
+                        if first_byte & LFN_LAST_ENTRY != 0 {
+                            // First LFN entry we encounter (highest seq number).
+                            lfn_buf.clear();
+                            lfn_buf.resize(seq as usize, [0xFFFF; LFN_CHARS_PER_ENTRY]);
+                            lfn_checksum_expected = chksum;
+                        }
+
+                        if chksum == lfn_checksum_expected && seq >= 1 {
+                            let idx = (seq as usize).saturating_sub(1);
+                            if idx < lfn_buf.len() {
+                                lfn_buf[idx] = lfn_extract_chars(raw);
+                            }
+                        }
+                    } else if let Some(mut entry) = FatDirEntry::parse(raw) {
+                        // Short entry — attach LFN if available.
+                        if !lfn_buf.is_empty() {
+                            let actual_checksum = lfn_checksum(&entry.name);
+                            if actual_checksum == lfn_checksum_expected {
+                                entry.long_name = assemble_lfn(&lfn_buf);
+                            }
+                            lfn_buf.clear();
+                        }
                         entries.push(entry);
+                    } else {
+                        lfn_buf.clear();
                     }
                 }
 
@@ -730,13 +1141,17 @@ impl FatFs {
     /// Read directory entries from a cluster chain (for subdirectories).
     ///
     /// Subdirectories are stored as files: their data is a chain of clusters
-    /// containing 32-byte directory entries.
+    /// containing 32-byte directory entries.  Collects LFN entries and
+    /// attaches them to the following short entry.
     #[allow(clippy::arithmetic_side_effects)]
     fn read_dir_cluster(&mut self, first_cluster: u32) -> KernelResult<Vec<FatDirEntry>> {
         let mut entries = Vec::new();
         let mut cluster = first_cluster;
         let mut iterations = 0u32;
         let max_iterations = 65536u32;
+        // Buffer for collecting LFN parts.
+        let mut lfn_buf: Vec<[u16; LFN_CHARS_PER_ENTRY]> = Vec::new();
+        let mut lfn_checksum_expected: u8 = 0;
 
         while self.is_valid_cluster(cluster) {
             iterations = iterations.wrapping_add(1);
@@ -754,14 +1169,51 @@ impl FatFs {
                 for i in 0..entries_per_sector {
                     let offset = i * 32;
                     if let Some(raw) = sector_buf.get(offset..offset + 32) {
-                        if raw.first().copied() == Some(0x00) {
+                        let first_byte = raw.first().copied().unwrap_or(0);
+
+                        if first_byte == 0x00 {
                             return Ok(entries); // End of directory.
                         }
-                        if let Some(entry) = FatDirEntry::parse(raw) {
+
+                        if first_byte == 0xE5 {
+                            lfn_buf.clear();
+                            continue;
+                        }
+
+                        let attr = raw.get(11).copied().unwrap_or(0);
+
+                        if attr == ATTR_LONG_NAME {
+                            // LFN entry — collect it.
+                            let seq = first_byte & 0x3F;
+                            let chksum = raw.get(13).copied().unwrap_or(0);
+
+                            if first_byte & LFN_LAST_ENTRY != 0 {
+                                lfn_buf.clear();
+                                lfn_buf.resize(seq as usize, [0xFFFF; LFN_CHARS_PER_ENTRY]);
+                                lfn_checksum_expected = chksum;
+                            }
+
+                            if chksum == lfn_checksum_expected && seq >= 1 {
+                                let idx = (seq as usize).saturating_sub(1);
+                                if idx < lfn_buf.len() {
+                                    lfn_buf[idx] = lfn_extract_chars(raw);
+                                }
+                            }
+                        } else if let Some(mut entry) = FatDirEntry::parse(raw) {
+                            // Short entry — attach LFN if available.
+                            if !lfn_buf.is_empty() {
+                                let actual_checksum = lfn_checksum(&entry.name);
+                                if actual_checksum == lfn_checksum_expected {
+                                    entry.long_name = assemble_lfn(&lfn_buf);
+                                }
+                                lfn_buf.clear();
+                            }
                             // Skip . and .. entries.
                             if entry.name[0] != b'.' {
                                 entries.push(entry);
                             }
+                        } else {
+                            lfn_buf.clear();
                         }
                     }
                 }
@@ -818,9 +1270,22 @@ impl FatFs {
                 self.read_dir_cluster(current_cluster)?
             };
 
-            // Find the component.
+            // Find the component — match against long name (preferred),
+            // short name, and the raw component (for case-sensitive lookup).
             let found = entries.iter().find(|e| {
-                !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(&target)
+                if e.is_volume_label() {
+                    return false;
+                }
+                // Match against display name (long name if present, else 8.3).
+                if e.display_name().eq_ignore_ascii_case(&target) {
+                    return true;
+                }
+                // Also match against the short name if a long name was used
+                // for display — callers may use either form.
+                if e.long_name.is_some() {
+                    return e.short_name().eq_ignore_ascii_case(&target);
+                }
+                false
             });
 
             match found {
@@ -1443,6 +1908,301 @@ impl FatFs {
 
         self.write_sector(lba, &sector_buf)
     }
+
+    /// Delete LFN entries preceding a short entry at (lba, offset).
+    ///
+    /// Scans backward from the given slot looking for LFN entries with
+    /// matching checksum.  Marks each one as deleted (0xE5).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn delete_lfn_entries(&mut self, lba: u64, offset: usize, name83: &[u8; 11]) -> KernelResult<()> {
+        let checksum = lfn_checksum(name83);
+        let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
+        let mut cur_lba = lba;
+        let mut cur_slot = offset / 32;
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        self.read_sector(cur_lba, &mut sector_buf)?;
+        let mut sector_dirty = false;
+
+        // Walk backward through directory entries.
+        for _ in 0..20 {
+            // Move to previous slot.
+            if cur_slot == 0 {
+                // Need to move to the previous sector.
+                // For simplicity, skip cross-sector backward scan on FAT16 root.
+                // This handles the common case where LFN entries are in the same sector.
+                if sector_dirty {
+                    self.write_sector(cur_lba, &sector_buf)?;
+                }
+                // Try previous sector.
+                if cur_lba == 0 {
+                    break;
+                }
+                cur_lba = cur_lba.saturating_sub(1);
+                self.read_sector(cur_lba, &mut sector_buf)?;
+                sector_dirty = false;
+                cur_slot = entries_per_sector.saturating_sub(1);
+            } else {
+                cur_slot = cur_slot.saturating_sub(1);
+            }
+
+            let slot_offset = cur_slot * 32;
+            let first_byte = sector_buf.get(slot_offset).copied().unwrap_or(0);
+            let attr = sector_buf.get(slot_offset + 11).copied().unwrap_or(0);
+
+            // Check if this is an LFN entry with matching checksum.
+            if attr != ATTR_LONG_NAME || first_byte == 0xE5 || first_byte == 0x00 {
+                break;
+            }
+
+            let entry_checksum = sector_buf.get(slot_offset + 13).copied().unwrap_or(0);
+            if entry_checksum != checksum {
+                break;
+            }
+
+            // Mark as deleted.
+            if let Some(byte) = sector_buf.get_mut(slot_offset) {
+                *byte = 0xE5;
+                sector_dirty = true;
+            }
+
+            // If this was the last (first written) LFN entry, we're done.
+            if first_byte & LFN_LAST_ENTRY != 0 {
+                break;
+            }
+        }
+
+        if sector_dirty {
+            self.write_sector(cur_lba, &sector_buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// Create a file or directory with LFN support.
+    ///
+    /// If the filename fits 8.3 format, writes a single short entry.
+    /// Otherwise, generates LFN entries and a corresponding short entry.
+    ///
+    /// Returns `(dir_lba, dir_offset, already_exists)` for the short entry.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn create_entry_with_lfn(
+        &mut self,
+        parent_cluster: u32,
+        filename: &str,
+        first_cluster: u32,
+        file_size: u32,
+        attr: u8,
+    ) -> KernelResult<(u64, usize, bool)> {
+        // Check if we need LFN.
+        if !needs_lfn(filename) {
+            // Simple 8.3 path.
+            let name83 = Self::to_83_name(filename)
+                .ok_or(KernelError::InvalidArgument)?;
+            let (lba, offset, exists) = self.find_or_create_slot_in(
+                parent_cluster, &name83,
+            )?;
+            self.write_dir_entry(lba, offset, &name83, first_cluster, file_size, attr)?;
+            return Ok((lba, offset, exists));
+        }
+
+        // Generate basis name for the short entry.
+        let mut basis = generate_basis_name(filename);
+
+        // Check for uniqueness of the short name.  Read the parent
+        // directory to find collisions and iterate the tail.
+        let dir_entries = if parent_cluster == 0 {
+            self.read_root_dir()?
+        } else {
+            self.read_dir_cluster(parent_cluster)?
+        };
+
+        for tail_num in 1..10000u32 {
+            set_basis_tail(&mut basis, tail_num);
+            let has_collision = dir_entries.iter().any(|e| {
+                !e.is_volume_label() && e.name == basis
+            });
+            if !has_collision {
+                break;
+            }
+        }
+
+        // Build LFN entries.
+        let lfn_entries = build_lfn_entries(filename, &basis)
+            .ok_or(KernelError::InvalidArgument)?;
+        let total_slots = lfn_entries.len() + 1; // LFN + short.
+
+        // Find contiguous free slots.  We need `total_slots` adjacent
+        // free entries (0x00 or 0xE5) in the parent directory.
+        let slots = self.find_contiguous_free_slots(parent_cluster, total_slots)?;
+
+        // Write LFN entries (they come first, in reverse sequence order).
+        let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
+        for (i, lfn_raw) in lfn_entries.iter().enumerate() {
+            let (slot_lba, slot_idx) = slots[i];
+            let slot_offset = slot_idx * 32;
+
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            self.read_sector(slot_lba, &mut sector_buf)?;
+
+            if let Some(dest) = sector_buf.get_mut(slot_offset..slot_offset + 32) {
+                dest.copy_from_slice(lfn_raw);
+            }
+
+            self.write_sector(slot_lba, &sector_buf)?;
+        }
+
+        // Write the short entry in the last slot.
+        let (short_lba, short_idx) = slots[lfn_entries.len()];
+        let short_offset = short_idx * 32;
+        self.write_dir_entry(short_lba, short_offset, &basis, first_cluster, file_size, attr)?;
+
+        // Suppress unused variable warning.
+        let _ = entries_per_sector;
+
+        Ok((short_lba, short_offset, false))
+    }
+
+    /// Find `n` contiguous free slots in a directory.
+    ///
+    /// Returns a vector of `(lba, slot_index_within_sector)` for each slot.
+    /// Slots are ordered sequentially (first slot first).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn find_contiguous_free_slots(
+        &mut self,
+        parent_cluster: u32,
+        n: usize,
+    ) -> KernelResult<Vec<(u64, usize)>> {
+        let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
+        let mut run: Vec<(u64, usize)> = Vec::with_capacity(n);
+
+        if parent_cluster == 0 && self.bpb.fat_type == FatType::Fat16 {
+            // FAT16 root directory: fixed area.
+            let root_lba = self.bpb.root_dir_start_lba();
+            let root_sectors = self.bpb.root_dir_sectors();
+            let max_entries = usize::from(self.bpb.root_entry_count);
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            let mut entry_count = 0usize;
+
+            for sec in 0..root_sectors {
+                let lba = u64::from(root_lba + sec);
+                self.read_sector(lba, &mut sector_buf)?;
+
+                for i in 0..entries_per_sector {
+                    if entry_count >= max_entries {
+                        return Err(KernelError::DiskFull);
+                    }
+                    let offset = i * 32;
+                    let first_byte = sector_buf.get(offset).copied().unwrap_or(0xFF);
+
+                    if first_byte == 0x00 || first_byte == 0xE5 {
+                        run.push((lba, i));
+                        if run.len() >= n {
+                            return Ok(run);
+                        }
+                    } else {
+                        run.clear(); // Break in the run.
+                    }
+                    entry_count += 1;
+                }
+            }
+        } else {
+            // Cluster-chain directory (FAT32 root or any subdirectory).
+            let first_cluster = if parent_cluster == 0 {
+                self.bpb.root_cluster
+            } else {
+                parent_cluster
+            };
+            let mut cluster = first_cluster;
+            let mut iterations = 0u32;
+
+            while self.is_valid_cluster(cluster) {
+                iterations += 1;
+                if iterations > 65536 {
+                    return Err(KernelError::IoError);
+                }
+
+                let lba = self.bpb.cluster_to_lba(cluster);
+                let mut sector_buf = [0u8; SECTOR_SIZE];
+
+                for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                    let sector_lba = u64::from(lba + s);
+                    self.read_sector(sector_lba, &mut sector_buf)?;
+
+                    for i in 0..entries_per_sector {
+                        let offset = i * 32;
+                        let first_byte = sector_buf.get(offset).copied().unwrap_or(0xFF);
+
+                        if first_byte == 0x00 || first_byte == 0xE5 {
+                            run.push((sector_lba, i));
+                            if run.len() >= n {
+                                return Ok(run);
+                            }
+                        } else {
+                            run.clear();
+                        }
+                    }
+                }
+
+                match self.fat_entry(cluster)? {
+                    Some(next) => cluster = next,
+                    None => break,
+                }
+            }
+
+            // Directory is full — extend it with a new cluster.
+            let eoc = match self.bpb.fat_type {
+                FatType::Fat16 => 0xFFFF,
+                FatType::Fat32 => 0x0FFF_FFFF,
+            };
+            // Find the last cluster in the chain to append to.
+            let mut last = first_cluster;
+            let mut c = first_cluster;
+            while self.is_valid_cluster(c) {
+                last = c;
+                match self.fat_entry(c)? {
+                    Some(next) => c = next,
+                    None => break,
+                }
+            }
+
+            // Allocate enough new clusters to hold the remaining slots.
+            let remaining = n - run.len();
+            let slots_per_cluster = entries_per_sector * usize::from(self.bpb.sectors_per_cluster);
+            let clusters_needed = (remaining + slots_per_cluster - 1) / slots_per_cluster;
+
+            for _ in 0..clusters_needed {
+                let new_c = self.alloc_cluster()?;
+                self.set_fat_entry(new_c, eoc)?;
+                self.set_fat_entry(last, new_c)?;
+
+                // Zero-fill the new cluster.
+                let new_lba = self.bpb.cluster_to_lba(new_c);
+                let zero = [0u8; SECTOR_SIZE];
+                for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                    self.write_sector(u64::from(new_lba + s), &zero)?;
+                }
+
+                // Add slots from the new cluster.
+                for s in 0..u32::from(self.bpb.sectors_per_cluster) {
+                    let sector_lba = u64::from(new_lba + s);
+                    for i in 0..entries_per_sector {
+                        run.push((sector_lba, i));
+                        if run.len() >= n {
+                            return Ok(run);
+                        }
+                    }
+                }
+
+                last = new_c;
+            }
+        }
+
+        if run.len() >= n {
+            Ok(run)
+        } else {
+            Err(KernelError::DiskFull)
+        }
+    }
 }
 
 impl FileSystem for FatFs {
@@ -1612,7 +2372,6 @@ impl FileSystem for FatFs {
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
         let (parent_path, filename) = split_path(path);
-        let name83 = Self::to_83_name(filename).ok_or(KernelError::InvalidArgument)?;
 
         // Check file size limit (FAT16 max: 2 GiB, but u32 field caps at ~4 GiB).
         if data.len() > u32::MAX as usize {
@@ -1622,44 +2381,62 @@ impl FileSystem for FatFs {
         // Resolve the parent directory.
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
-        // Find or create the directory entry in the parent.
-        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
-            parent_cluster, &name83,
-        )?;
+        // Try to find the file by its display name first (handles both
+        // 8.3 and LFN names).  If it exists, update in place.
+        let existing = {
+            let entries = if parent_cluster == 0 {
+                self.read_root_dir()?
+            } else {
+                self.read_dir_cluster(parent_cluster)?
+            };
+            entries.into_iter().find(|e| {
+                !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(filename)
+            })
+        };
 
-        // If overwriting, check we're not clobbering a directory and free old data.
-        if exists {
-            let mut sector_buf = [0u8; SECTOR_SIZE];
-            self.read_sector(dir_lba, &mut sector_buf)?;
-            let old_attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
-            if old_attr & ATTR_DIRECTORY != 0 {
+        if let Some(existing_entry) = existing {
+            // Overwriting an existing file.
+            if existing_entry.is_directory() {
                 return Err(KernelError::IsADirectory);
             }
-            let cluster_lo = u32::from(read_u16(&sector_buf, dir_offset + 26));
-            let cluster_hi = u32::from(read_u16(&sector_buf, dir_offset + 20));
-            let old_cluster = (cluster_hi << 16) | cluster_lo;
-            if old_cluster >= 2 {
-                self.free_chain(old_cluster)?;
+
+            // Free old cluster chain.
+            if existing_entry.first_cluster >= 2 {
+                self.free_chain(existing_entry.first_cluster)?;
             }
+
+            // Write new data.
+            let first_cluster = self.write_file_data(data)?;
+
+            // Find the existing short entry's slot and update it.
+            let name83 = existing_entry.name;
+            let (dir_lba, dir_offset, _) = self.find_or_create_slot_in(
+                parent_cluster, &name83,
+            )?;
+            self.write_dir_entry(
+                dir_lba, dir_offset, &name83,
+                first_cluster, data.len() as u32, 0x20,
+            )?;
+
+            crate::serial_println!(
+                "[fat] Overwrote '{}' ({} bytes, cluster {})",
+                path, data.len(), first_cluster
+            );
+        } else {
+            // New file — write data first, then create entry.
+            let first_cluster = self.write_file_data(data)?;
+
+            // Create entry with LFN if needed.
+            self.create_entry_with_lfn(
+                parent_cluster, filename,
+                first_cluster, data.len() as u32, 0x20,
+            )?;
+
+            crate::serial_println!(
+                "[fat] Created '{}' ({} bytes, cluster {})",
+                path, data.len(), first_cluster
+            );
         }
-
-        // Write new data to clusters.
-        let first_cluster = self.write_file_data(data)?;
-
-        // Update the directory entry (archive attribute for regular files).
-        self.write_dir_entry(
-            dir_lba,
-            dir_offset,
-            &name83,
-            first_cluster,
-            data.len() as u32,
-            0x20, // Archive attribute.
-        )?;
-
-        crate::serial_println!(
-            "[fat] Wrote '{}' ({} bytes, cluster {})",
-            path, data.len(), first_cluster
-        );
 
         // Invalidate dcache: file metadata (size, cluster) changed.
         self.dcache_invalidate_prefix(path);
@@ -1668,12 +2445,21 @@ impl FileSystem for FatFs {
     }
 
     fn remove(&mut self, path: &str) -> KernelResult<()> {
-        let (parent_path, filename) = split_path(path);
-        let name83 = Self::to_83_name(filename).ok_or(KernelError::InvalidArgument)?;
+        let (parent_path, _filename) = split_path(path);
 
         // Resolve the parent directory.
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
+        // Resolve by path to find the entry (handles both LFN and 8.3).
+        let (_pc, entry_opt) = self.resolve_path(path)?;
+        let entry = entry_opt.ok_or(KernelError::NotFound)?;
+
+        if entry.is_directory() {
+            return Err(KernelError::IsADirectory);
+        }
+
+        // Find the short entry slot using the 8.3 name.
+        let name83 = entry.name;
         let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
             parent_cluster, &name83,
         )?;
@@ -1682,23 +2468,17 @@ impl FileSystem for FatFs {
             return Err(KernelError::NotFound);
         }
 
-        // Read the directory entry to check type and get the first cluster.
-        let mut sector_buf = [0u8; SECTOR_SIZE];
-        self.read_sector(dir_lba, &mut sector_buf)?;
-        let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
-        if attr & ATTR_DIRECTORY != 0 {
-            return Err(KernelError::IsADirectory);
-        }
-        let cluster_lo = u32::from(read_u16(&sector_buf, dir_offset + 26));
-        let cluster_hi = u32::from(read_u16(&sector_buf, dir_offset + 20));
-        let first_cluster = (cluster_hi << 16) | cluster_lo;
-
         // Free the cluster chain.
-        if first_cluster >= 2 {
-            self.free_chain(first_cluster)?;
+        if entry.first_cluster >= 2 {
+            self.free_chain(entry.first_cluster)?;
         }
 
-        // Mark directory entry as deleted.
+        // Delete LFN entries first (must happen before short entry deletion).
+        if entry.long_name.is_some() {
+            self.delete_lfn_entries(dir_lba, dir_offset, &name83)?;
+        }
+
+        // Mark the short directory entry as deleted.
         self.delete_dir_entry(dir_lba, dir_offset)?;
 
         // Invalidate dcache: entry no longer exists.
@@ -2603,6 +3383,111 @@ pub fn self_test() -> KernelResult<()> {
     // Clean up.
     crate::fs::Vfs::rmdir("/METADIR")?;
     crate::fs::Vfs::remove("/METATST.TXT")?;
+
+    // ---------------------------------------------------------------
+    // Long Filename (LFN) tests
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing LFN support...");
+
+    // Unit test: lfn_checksum
+    let test_name83: [u8; 11] = *b"HELLO   TXT";
+    let cksum = lfn_checksum(&test_name83);
+    crate::serial_println!("[fat]   lfn_checksum(\"HELLO   TXT\") = 0x{:02X}", cksum);
+
+    // Unit test: needs_lfn
+    assert!(!needs_lfn("HELLO.TXT"));
+    assert!(!needs_lfn("FILE"));
+    assert!(needs_lfn("Hello.txt"));      // lowercase
+    assert!(needs_lfn("long filename.txt")); // spaces + lowercase
+    assert!(needs_lfn("document.docx"));   // lowercase
+    assert!(needs_lfn("a.b.c"));           // multiple dots
+    assert!(needs_lfn("verylongbasename.txt")); // base > 8
+    crate::serial_println!("[fat]   needs_lfn checks passed");
+
+    // Unit test: encode/decode round-trip
+    let test_name = "Hello World.txt";
+    let encoded = encode_lfn(test_name);
+    if let Some(ref _ucs2) = encoded {
+        // Build LFN entries and decode.
+        let mut test83 = generate_basis_name(test_name);
+        set_basis_tail(&mut test83, 1);
+        if let Some(lfn_entries) = build_lfn_entries(test_name, &test83) {
+            crate::serial_println!(
+                "[fat]   LFN encode/build: '{}' → {} LFN entries",
+                test_name, lfn_entries.len()
+            );
+
+            // Verify checksum in entries matches.
+            let expected_cksum = lfn_checksum(&test83);
+            for raw in &lfn_entries {
+                let entry_cksum = raw[13];
+                if entry_cksum != expected_cksum {
+                    crate::serial_println!(
+                        "[fat]   LFN checksum FAILED: entry has 0x{:02X}, expected 0x{:02X}",
+                        entry_cksum, expected_cksum
+                    );
+                    return Err(KernelError::IoError);
+                }
+            }
+            crate::serial_println!("[fat]   LFN checksum consistency verified");
+        }
+    }
+
+    // Integration test: write and read a file with a long filename.
+    let lfn_test_data = b"Long filename test content.\n";
+    let lfn_path = "/Hello World.txt";
+    // Clean up any leftover from previous runs.
+    let _ = crate::fs::Vfs::remove(lfn_path);
+
+    crate::fs::Vfs::write_file(lfn_path, lfn_test_data)?;
+
+    // Read it back.
+    let lfn_readback = crate::fs::Vfs::read_file(lfn_path)?;
+    if lfn_readback.as_slice() != lfn_test_data.as_slice() {
+        crate::serial_println!(
+            "[fat]   LFN write FAILED: expected {} bytes, got {}",
+            lfn_test_data.len(), lfn_readback.len()
+        );
+        let _ = crate::fs::Vfs::remove(lfn_path);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!(
+        "[fat]   LFN write+read verified: '{}' ({} bytes)",
+        lfn_path, lfn_readback.len()
+    );
+
+    // Verify the long name appears in directory listing.
+    let root_entries = crate::fs::Vfs::readdir("/")?;
+    let has_lfn = root_entries.iter().any(|e| {
+        e.name == "Hello World.txt"
+    });
+    if !has_lfn {
+        crate::serial_println!("[fat]   LFN listing FAILED: 'Hello World.txt' not in root");
+        // Check if it appears under the short name instead.
+        for e in &root_entries {
+            crate::serial_println!("[fat]     found: '{}'", e.name);
+        }
+        let _ = crate::fs::Vfs::remove(lfn_path);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   LFN directory listing verified");
+
+    // Clean up.
+    crate::fs::Vfs::remove(lfn_path)?;
+
+    // Verify it's gone.
+    match crate::fs::Vfs::read_file(lfn_path) {
+        Err(KernelError::NotFound) => {
+            crate::serial_println!("[fat]   LFN delete verified");
+        }
+        Ok(_) => {
+            crate::serial_println!("[fat]   LFN delete FAILED: file still exists");
+            return Err(KernelError::IoError);
+        }
+        Err(e) => return Err(e),
+    }
+
+    crate::serial_println!("[fat]   LFN tests passed");
 
     // Report dcache statistics.
     match crate::fs::Vfs::debug_stats("/") {

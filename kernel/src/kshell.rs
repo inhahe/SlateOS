@@ -3324,6 +3324,19 @@ fn execute_single(line: &str) {
         return;
     }
 
+    // `(( EXPR ))` arithmetic command — evaluates expression, sets exit
+    // status to 1 if result is 0, 0 if non-zero (like bash).
+    if line.starts_with("((") && line.ends_with("))") {
+        let inner = line.get(2..line.len().saturating_sub(2)).unwrap_or("").trim();
+        if !inner.is_empty() {
+            // Check for assignment: VAR = EXPR.
+            eval_cfor_expr(inner);
+            let val = eval_arithmetic(inner);
+            set_exit(if val == 0 { 1 } else { 0 });
+        }
+        return;
+    }
+
     // `eval` re-parses its arguments as a command line — must be handled
     // before pipe/redirect parsing since the eval'd string may itself
     // contain pipes, redirects, or any other syntax.
@@ -3332,6 +3345,30 @@ fn execute_single(line: &str) {
         if !eval_args.is_empty() {
             execute(eval_args);
         }
+        return;
+    }
+
+    // Inline variable assignment: `VAR=value command args...`
+    // Sets VAR for the duration of the command, then restores it.
+    // Must come before export/unset check since `NAME=VALUE` looks like
+    // a simple assignment, but if followed by a command it's an inline env.
+    if let Some(inline) = parse_inline_assignment(line) {
+        let prev = env_get(&inline.name);
+        env_set(&inline.name, &inline.value);
+        execute_single(&inline.command);
+        // Restore the variable.
+        match prev {
+            Some(val) => { env_set(&inline.name, &val); }
+            None => { env_remove(&inline.name); }
+        }
+        return;
+    }
+
+    // Bare variable assignment: `VAR=value` (no command follows).
+    // Handled after inline check so `VAR=value cmd` takes priority.
+    if let Some((name, value)) = parse_bare_assignment(line) {
+        env_set(&name, &value);
+        set_exit(0);
         return;
     }
 
@@ -3460,6 +3497,81 @@ fn parse_here_string(line: &str) -> Option<(&str, String)> {
         i = i.saturating_add(1);
     }
     None
+}
+
+/// Parsed inline variable assignment: `VAR=value command args...`
+struct InlineAssignment {
+    name: String,
+    value: String,
+    command: String,
+}
+
+/// Parse `VAR=value command args...` where the first word is a VAR=value
+/// assignment and the rest is a command to run with that env.
+///
+/// Returns `None` if:
+/// - There's no `=` in the first word
+/// - The variable name is invalid
+/// - There's no command after the assignment (bare assignment)
+fn parse_inline_assignment(line: &str) -> Option<InlineAssignment> {
+    // The first word (up to first whitespace) must contain `=`.
+    let first_space = line.find(|c: char| c == ' ' || c == '\t')?;
+    let first_word = line.get(..first_space)?;
+    let rest = line.get(first_space.saturating_add(1)..)?.trim();
+
+    // The rest must be non-empty (there's a command to run).
+    if rest.is_empty() {
+        return None;
+    }
+
+    let eq_pos = first_word.find('=')?;
+    let name = first_word.get(..eq_pos)?;
+    let value = first_word.get(eq_pos.saturating_add(1)..)?;
+
+    // Validate variable name: must start with letter/underscore,
+    // contain only alphanumeric/underscore.
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    // Make sure the "command" part doesn't start with `=` (which would
+    // indicate something like `a=b=c` which isn't an inline assignment).
+    if rest.starts_with('=') {
+        return None;
+    }
+
+    Some(InlineAssignment {
+        name: String::from(name),
+        value: String::from(strip_quotes(value)),
+        command: String::from(rest),
+    })
+}
+
+/// Parse a bare variable assignment: `VAR=value` with no command following.
+fn parse_bare_assignment(line: &str) -> Option<(String, String)> {
+    // Must be a single word (no spaces, or only quoted spaces in the value).
+    // Simple check: first word contains `=`, no other words follow.
+    let eq_pos = line.find('=')?;
+    let name = line.get(..eq_pos)?;
+
+    // Validate variable name.
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let value = line.get(eq_pos.saturating_add(1)..)?;
+
+    // If there's a space in the value that's not inside quotes, it's not
+    // a bare assignment (it could be `VAR=value command` which is handled
+    // by parse_inline_assignment).  For simplicity, allow any value here
+    // since inline assignment already ran first.
+    Some((String::from(name), String::from(strip_quotes(value))))
 }
 
 fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
@@ -6792,9 +6904,30 @@ enum ArithToken {
     Percent,
     LParen,
     RParen,
+    /// Comparison: <
+    Lt,
+    /// Comparison: <=
+    Le,
+    /// Comparison: >
+    Gt,
+    /// Comparison: >=
+    Ge,
+    /// Comparison: ==
+    Eq,
+    /// Comparison: !=
+    Ne,
+    /// Logical AND: &&
+    And,
+    /// Logical OR: ||
+    Or,
+    /// Logical NOT: !
+    Not,
 }
 
 /// Tokenize an arithmetic expression string.
+///
+/// Supports: numbers, +, -, *, /, %, (, ), <, <=, >, >=, ==, !=, &&, ||, !
+/// Also recognizes bare variable names (resolved to their integer value).
 fn tokenize_arith(s: &str) -> Vec<ArithToken> {
     let bytes = s.as_bytes();
     let len = bytes.len();
@@ -6812,6 +6945,59 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
             b'%' => { tokens.push(ArithToken::Percent); i = i.saturating_add(1); }
             b'(' => { tokens.push(ArithToken::LParen); i = i.saturating_add(1); }
             b')' => { tokens.push(ArithToken::RParen); i = i.saturating_add(1); }
+            b'<' => {
+                if bytes.get(i.saturating_add(1)) == Some(&b'=') {
+                    tokens.push(ArithToken::Le);
+                    i = i.saturating_add(2);
+                } else {
+                    tokens.push(ArithToken::Lt);
+                    i = i.saturating_add(1);
+                }
+            }
+            b'>' => {
+                if bytes.get(i.saturating_add(1)) == Some(&b'=') {
+                    tokens.push(ArithToken::Ge);
+                    i = i.saturating_add(2);
+                } else {
+                    tokens.push(ArithToken::Gt);
+                    i = i.saturating_add(1);
+                }
+            }
+            b'=' => {
+                if bytes.get(i.saturating_add(1)) == Some(&b'=') {
+                    tokens.push(ArithToken::Eq);
+                    i = i.saturating_add(2);
+                } else {
+                    // Lone `=` in arithmetic context — skip (assignment handled
+                    // separately in eval_cfor_expr).
+                    i = i.saturating_add(1);
+                }
+            }
+            b'!' => {
+                if bytes.get(i.saturating_add(1)) == Some(&b'=') {
+                    tokens.push(ArithToken::Ne);
+                    i = i.saturating_add(2);
+                } else {
+                    tokens.push(ArithToken::Not);
+                    i = i.saturating_add(1);
+                }
+            }
+            b'&' => {
+                if bytes.get(i.saturating_add(1)) == Some(&b'&') {
+                    tokens.push(ArithToken::And);
+                    i = i.saturating_add(2);
+                } else {
+                    i = i.saturating_add(1); // Skip lone &.
+                }
+            }
+            b'|' => {
+                if bytes.get(i.saturating_add(1)) == Some(&b'|') {
+                    tokens.push(ArithToken::Or);
+                    i = i.saturating_add(2);
+                } else {
+                    i = i.saturating_add(1); // Skip lone |.
+                }
+            }
             b'0'..=b'9' => {
                 let start = i;
                 while i < len && bytes[i].is_ascii_digit() {
@@ -6820,6 +7006,21 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                 if let Some(num_bytes) = bytes.get(start..i) {
                     if let Ok(num_str) = core::str::from_utf8(num_bytes) {
                         let val = num_str.parse::<i64>().unwrap_or(0);
+                        tokens.push(ArithToken::Num(val));
+                    }
+                }
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                // Variable name — resolve to integer value.
+                let start = i;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i = i.saturating_add(1);
+                }
+                if let Some(name_bytes) = bytes.get(start..i) {
+                    if let Ok(name) = core::str::from_utf8(name_bytes) {
+                        let val = env_get(name)
+                            .and_then(|v| v.parse::<i64>().ok())
+                            .unwrap_or(0);
                         tokens.push(ArithToken::Num(val));
                     }
                 }
@@ -6834,8 +7035,79 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
     tokens
 }
 
-/// Parse an additive expression: term (('+' | '-') term)*
+/// Parse a logical OR expression: and_expr ('||' and_expr)*
 fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+    let mut val = parse_and_expr(tokens, pos);
+    loop {
+        if let Some(ArithToken::Or) = tokens.get(*pos) {
+            *pos = pos.saturating_add(1);
+            let rhs = parse_and_expr(tokens, pos);
+            val = if val != 0 || rhs != 0 { 1 } else { 0 };
+        } else {
+            break;
+        }
+    }
+    val
+}
+
+/// Parse a logical AND expression: cmp_expr ('&&' cmp_expr)*
+fn parse_and_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+    let mut val = parse_cmp_expr(tokens, pos);
+    loop {
+        if let Some(ArithToken::And) = tokens.get(*pos) {
+            *pos = pos.saturating_add(1);
+            let rhs = parse_cmp_expr(tokens, pos);
+            val = if val != 0 && rhs != 0 { 1 } else { 0 };
+        } else {
+            break;
+        }
+    }
+    val
+}
+
+/// Parse a comparison expression: add_expr (('<' | '<=' | '>' | '>=' | '==' | '!=') add_expr)*
+fn parse_cmp_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+    let mut val = parse_add_expr(tokens, pos);
+    loop {
+        match tokens.get(*pos) {
+            Some(ArithToken::Lt) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_add_expr(tokens, pos);
+                val = if val < rhs { 1 } else { 0 };
+            }
+            Some(ArithToken::Le) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_add_expr(tokens, pos);
+                val = if val <= rhs { 1 } else { 0 };
+            }
+            Some(ArithToken::Gt) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_add_expr(tokens, pos);
+                val = if val > rhs { 1 } else { 0 };
+            }
+            Some(ArithToken::Ge) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_add_expr(tokens, pos);
+                val = if val >= rhs { 1 } else { 0 };
+            }
+            Some(ArithToken::Eq) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_add_expr(tokens, pos);
+                val = if val == rhs { 1 } else { 0 };
+            }
+            Some(ArithToken::Ne) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_add_expr(tokens, pos);
+                val = if val != rhs { 1 } else { 0 };
+            }
+            _ => break,
+        }
+    }
+    val
+}
+
+/// Parse an additive expression: term (('+' | '-') term)*
+fn parse_add_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
     let mut val = parse_term(tokens, pos);
     loop {
         match tokens.get(*pos) {
@@ -6878,13 +7150,16 @@ fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> i64 {
     val
 }
 
-/// Parse a unary expression: '-' unary | atom
+/// Parse a unary expression: '-' unary | '!' unary | atom
 fn parse_unary(tokens: &[ArithToken], pos: &mut usize) -> i64 {
     if let Some(ArithToken::Minus) = tokens.get(*pos) {
-        // Check if this is unary minus (not binary minus).
-        // Unary if at start or after an operator/lparen.
         *pos = pos.saturating_add(1);
         return parse_unary(tokens, pos).wrapping_neg();
+    }
+    if let Some(ArithToken::Not) = tokens.get(*pos) {
+        *pos = pos.saturating_add(1);
+        let val = parse_unary(tokens, pos);
+        return if val == 0 { 1 } else { 0 };
     }
     parse_atom(tokens, pos)
 }

@@ -2929,16 +2929,17 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cat",
-    "cd", "chmod", "chown", "clear", "cls", "cmp", "copy", "cp", "date",
-    "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dns", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "find", "free",
+    "cd", "chmod", "chown", "clear", "cls", "cmp", "command", "copy", "cp",
+    "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dns", "du",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsblk", "lsof", "lsp",
-    "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount",
-    "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
+    "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount", "mv",
+    "move", "net", "nl", "nslookup", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "rev", "rm",
     "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
+    "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "tree", "true", "truncate", "type", "umount",
@@ -2946,7 +2947,7 @@ const COMMANDS: &[&str] = &[
     "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
-    "local", "read", "return", "shift", "trap", "typeof", "until",
+    "local", "read", "return", "shift", "trap", "typeof", "until", "yes",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -3970,6 +3971,11 @@ fn dispatch_with_input(line: &str, input: &str) {
         }
         "mapfile" | "readarray" => cmd_mapfile_input(args, input),
         "tee" => cmd_tee_input(args, input),
+        "cut" => cmd_cut_input(args, input),
+        "tr" => cmd_tr_input(args, input),
+        "tac" => cmd_tac_input(args, input),
+        "fold" => cmd_fold_input(args, input),
+        "paste" => cmd_paste_input(args, input),
         _ => {
             // Command doesn't support piped input — just run normally.
             dispatch(line);
@@ -4066,6 +4072,12 @@ fn dispatch(line: &str) {
         "seq" => cmd_seq(args),
         "nl" => cmd_nl(args),
         "rev" => cmd_rev(args),
+        "cut" => cmd_cut(args),
+        "tr" => cmd_tr(args),
+        "yes" => cmd_yes(args),
+        "tac" => cmd_tac(args),
+        "fold" => cmd_fold(args),
+        "paste" => cmd_paste(args),
         "sleep" => cmd_sleep(args),
         "true" => { set_exit(0); }
         "false" => { set_exit(1); }
@@ -6751,6 +6763,430 @@ fn cmd_rev_input(args: &str, input: &str) {
     }
 }
 
+/// `cut -d DELIM -f N [FILE]` — extract fields from each line.
+///
+/// Supports:
+/// - `-d C`: delimiter character (default tab)
+/// - `-f N` or `-f N,M,...`: field numbers (1-based)
+/// - `-c N-M`: character ranges
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_cut(args: &str) {
+    let (delim, fields, chars_range, file_path) = parse_cut_args(args);
+
+    if let Some(path) = file_path {
+        let resolved = resolve_path(&path);
+        match crate::fs::Vfs::read_file(&resolved) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                cut_process(text, delim, &fields, chars_range);
+            }
+            Err(e) => {
+                crate::console_println!("cut: {}: {:?}", path, e);
+                set_exit(1);
+            }
+        }
+    } else {
+        crate::console_println!("Usage: cut -d DELIM -f FIELDS [file]  or  cut -c RANGE [file]");
+        set_exit(1);
+    }
+}
+
+fn cmd_cut_input(args: &str, input: &str) {
+    let (delim, fields, chars_range, _) = parse_cut_args(args);
+    cut_process(input, delim, &fields, chars_range);
+}
+
+/// Parse cut command arguments.
+///
+/// Returns (delimiter, field_numbers, char_range, file_path).
+fn parse_cut_args(args: &str) -> (char, Vec<usize>, Option<(usize, usize)>, Option<String>) {
+    let mut delim = '\t';
+    let mut fields: Vec<usize> = Vec::new();
+    let mut chars_range: Option<(usize, usize)> = None;
+    let mut file_path: Option<String> = None;
+    let mut rest = args;
+
+    loop {
+        rest = rest.trim_start();
+        if rest.starts_with("-d") {
+            rest = rest.get(2..).unwrap_or("").trim_start();
+            if let Some(c) = rest.chars().next() {
+                delim = c;
+                rest = rest.get(c.len_utf8()..).unwrap_or("");
+            }
+        } else if rest.starts_with("-f") {
+            rest = rest.get(2..).unwrap_or("").trim_start();
+            // Parse field list: N or N,M,...
+            let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+            let spec = rest.get(..end).unwrap_or("");
+            for part in spec.split(',') {
+                if let Ok(n) = part.trim().parse::<usize>() {
+                    if n > 0 { fields.push(n); }
+                }
+            }
+            rest = rest.get(end..).unwrap_or("");
+        } else if rest.starts_with("-c") {
+            rest = rest.get(2..).unwrap_or("").trim_start();
+            let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+            let spec = rest.get(..end).unwrap_or("");
+            if let Some(dash) = spec.find('-') {
+                let start = spec.get(..dash).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                let end_val = spec.get(dash + 1..).and_then(|s| s.parse::<usize>().ok()).unwrap_or(usize::MAX);
+                chars_range = Some((start.max(1), end_val));
+            } else if let Ok(n) = spec.parse::<usize>() {
+                chars_range = Some((n.max(1), n.max(1)));
+            }
+            rest = rest.get(end..).unwrap_or("");
+        } else if !rest.is_empty() {
+            file_path = Some(String::from(rest.split_whitespace().next().unwrap_or("")));
+            break;
+        } else {
+            break;
+        }
+    }
+
+    (delim, fields, chars_range, file_path)
+}
+
+/// Process text with cut (field or character extraction).
+#[allow(clippy::arithmetic_side_effects)]
+fn cut_process(text: &str, delim: char, fields: &[usize], chars_range: Option<(usize, usize)>) {
+    for line in text.lines() {
+        if let Some((start, end)) = chars_range {
+            // Character range mode.
+            let chars: Vec<char> = line.chars().collect();
+            let s = start.saturating_sub(1); // 1-based to 0-based
+            let e = end.min(chars.len());
+            let slice: String = chars.get(s..e).unwrap_or(&[]).iter().collect();
+            shell_println!("{}", slice);
+        } else if !fields.is_empty() {
+            // Field mode.
+            let parts: Vec<&str> = line.split(delim).collect();
+            let mut first = true;
+            for &f in fields {
+                if !first { shell_print!("{}", delim); }
+                first = false;
+                if let Some(part) = parts.get(f.saturating_sub(1)) {
+                    shell_print!("{}", part);
+                }
+            }
+            shell_println!();
+        } else {
+            shell_println!("{}", line);
+        }
+    }
+}
+
+/// `tr SET1 SET2` — translate characters.
+///
+/// Replaces each character in SET1 with the corresponding character in SET2.
+/// `tr -d SET1` deletes characters in SET1.
+fn cmd_tr(args: &str) {
+    // tr needs piped input; standalone usage reads a file.
+    let mut parts = args.splitn(3, ' ');
+    let set1_or_flag = parts.next().unwrap_or("");
+    let set2_or_file = parts.next().unwrap_or("");
+    let file = parts.next().unwrap_or("").trim();
+
+    if set1_or_flag == "-d" {
+        // Delete mode: tr -d SET1 FILE
+        if set2_or_file.is_empty() {
+            crate::console_println!("Usage: tr -d CHARS [file]  or pipe: cmd | tr -d CHARS");
+            set_exit(1);
+            return;
+        }
+        if !file.is_empty() {
+            let resolved = resolve_path(file);
+            match crate::fs::Vfs::read_file(&resolved) {
+                Ok(data) => {
+                    let text = core::str::from_utf8(&data).unwrap_or("");
+                    tr_delete(text, set2_or_file);
+                }
+                Err(e) => {
+                    crate::console_println!("tr: {}: {:?}", file, e);
+                    set_exit(1);
+                }
+            }
+        } else {
+            crate::console_println!("Usage: tr -d CHARS [file]");
+            set_exit(1);
+        }
+    } else if set1_or_flag.is_empty() || set2_or_file.is_empty() {
+        crate::console_println!("Usage: tr SET1 SET2 [file]  or  tr -d CHARS [file]");
+        set_exit(1);
+    } else if !file.is_empty() {
+        let resolved = resolve_path(file);
+        match crate::fs::Vfs::read_file(&resolved) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                tr_translate(text, set1_or_flag, set2_or_file);
+            }
+            Err(e) => {
+                crate::console_println!("tr: {}: {:?}", file, e);
+                set_exit(1);
+            }
+        }
+    } else {
+        crate::console_println!("Usage: tr SET1 SET2 [file]  or pipe: cmd | tr SET1 SET2");
+        set_exit(1);
+    }
+}
+
+fn cmd_tr_input(args: &str, input: &str) {
+    let mut parts = args.splitn(2, ' ');
+    let set1_or_flag = parts.next().unwrap_or("");
+    let set2 = parts.next().unwrap_or("");
+
+    if set1_or_flag == "-d" {
+        tr_delete(input, set2);
+    } else if !set2.is_empty() {
+        tr_translate(input, set1_or_flag, set2);
+    } else {
+        crate::console_println!("Usage: cmd | tr SET1 SET2  or  cmd | tr -d CHARS");
+    }
+}
+
+fn tr_translate(text: &str, set1: &str, set2: &str) {
+    let s1: Vec<char> = expand_tr_set(set1);
+    let s2: Vec<char> = expand_tr_set(set2);
+
+    let mut result = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if let Some(pos) = s1.iter().position(|&c| c == ch) {
+            // Replace with corresponding char from set2 (or last char if shorter).
+            let replacement = s2.get(pos).or_else(|| s2.last()).copied().unwrap_or(ch);
+            result.push(replacement);
+        } else {
+            result.push(ch);
+        }
+    }
+    shell_print!("{}", result);
+}
+
+fn tr_delete(text: &str, set1: &str) {
+    let s1: Vec<char> = expand_tr_set(set1);
+    let mut result = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if !s1.contains(&ch) {
+            result.push(ch);
+        }
+    }
+    shell_print!("{}", result);
+}
+
+/// Expand a tr character set.  Handles ranges like `a-z` and escapes like `\n`.
+fn expand_tr_set(set: &str) -> Vec<char> {
+    let set = strip_quotes(set);
+    let mut chars = Vec::new();
+    let bytes = set.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'\\' && i.saturating_add(1) < len {
+            let next = bytes[i.saturating_add(1)];
+            match next {
+                b'n' => chars.push('\n'),
+                b't' => chars.push('\t'),
+                b'r' => chars.push('\r'),
+                b'\\' => chars.push('\\'),
+                _ => chars.push(next as char),
+            }
+            i = i.saturating_add(2);
+        } else if i.saturating_add(2) < len && bytes[i.saturating_add(1)] == b'-' {
+            // Range: a-z
+            let start = bytes[i];
+            let end = bytes[i.saturating_add(2)];
+            if start <= end {
+                for c in start..=end {
+                    chars.push(c as char);
+                }
+            }
+            i = i.saturating_add(3);
+        } else {
+            chars.push(bytes[i] as char);
+            i = i.saturating_add(1);
+        }
+    }
+    chars
+}
+
+/// `yes [STRING]` — repeatedly output STRING (default "y").
+///
+/// Limited to 100 lines to prevent infinite loops in the kernel shell.
+fn cmd_yes(args: &str) {
+    let text = if args.is_empty() { "y" } else { args };
+    for _ in 0..100_u32 {
+        shell_println!("{}", text);
+    }
+}
+
+/// `tac [FILE]` — print lines in reverse order (opposite of cat).
+fn cmd_tac(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: tac <file>");
+        return;
+    }
+
+    let path = resolve_path(args);
+    match crate::fs::Vfs::read_file(&path) {
+        Ok(data) => {
+            let text = core::str::from_utf8(&data).unwrap_or("");
+            tac_process(text);
+        }
+        Err(e) => {
+            crate::console_println!("tac: {}: {:?}", args, e);
+            set_exit(1);
+        }
+    }
+}
+
+fn cmd_tac_input(args: &str, input: &str) {
+    if !args.is_empty() {
+        cmd_tac(args);
+        return;
+    }
+    tac_process(input);
+}
+
+fn tac_process(text: &str) {
+    let lines: Vec<&str> = text.lines().collect();
+    for line in lines.iter().rev() {
+        shell_println!("{}", line);
+    }
+}
+
+/// `fold [-w WIDTH] [FILE]` — wrap lines to specified width (default 80).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_fold(args: &str) {
+    let (width, file) = parse_fold_args(args);
+
+    if let Some(path) = file {
+        let resolved = resolve_path(&path);
+        match crate::fs::Vfs::read_file(&resolved) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                fold_process(text, width);
+            }
+            Err(e) => {
+                crate::console_println!("fold: {}: {:?}", path, e);
+                set_exit(1);
+            }
+        }
+    } else {
+        crate::console_println!("Usage: fold [-w WIDTH] <file>");
+        set_exit(1);
+    }
+}
+
+fn cmd_fold_input(args: &str, input: &str) {
+    let (width, _) = parse_fold_args(args);
+    fold_process(input, width);
+}
+
+fn parse_fold_args(args: &str) -> (usize, Option<String>) {
+    let mut width: usize = 80;
+    let mut rest = args.trim();
+
+    if rest.starts_with("-w") {
+        rest = rest.get(2..).unwrap_or("").trim_start();
+        let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+        if let Ok(w) = rest.get(..end).unwrap_or("80").parse::<usize>() {
+            width = w.max(1);
+        }
+        rest = rest.get(end..).unwrap_or("").trim_start();
+    }
+
+    let file = if rest.is_empty() { None } else { Some(String::from(rest)) };
+    (width, file)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn fold_process(text: &str, width: usize) {
+    for line in text.lines() {
+        if line.len() <= width {
+            shell_println!("{}", line);
+        } else {
+            let mut pos = 0;
+            while pos < line.len() {
+                let end = (pos + width).min(line.len());
+                if let Some(chunk) = line.get(pos..end) {
+                    shell_println!("{}", chunk);
+                }
+                pos = end;
+            }
+        }
+    }
+}
+
+/// `paste FILE1 FILE2 ...` — merge lines of files side by side.
+///
+/// With piped input and a file arg, merges piped input with file.
+fn cmd_paste(args: &str) {
+    let files: Vec<&str> = args.split_whitespace().collect();
+    if files.is_empty() {
+        crate::console_println!("Usage: paste FILE1 [FILE2 ...]");
+        set_exit(1);
+        return;
+    }
+
+    // Read all files.
+    let mut columns: Vec<Vec<String>> = Vec::new();
+    for file in &files {
+        let path = resolve_path(file);
+        match crate::fs::Vfs::read_file(&path) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                columns.push(text.lines().map(String::from).collect());
+            }
+            Err(e) => {
+                crate::console_println!("paste: {}: {:?}", file, e);
+                set_exit(1);
+                return;
+            }
+        }
+    }
+
+    paste_output(&columns);
+}
+
+fn cmd_paste_input(args: &str, input: &str) {
+    let mut columns: Vec<Vec<String>> = Vec::new();
+    // Input becomes the first column.
+    columns.push(input.lines().map(String::from).collect());
+
+    // If there's a file argument, add it as additional columns.
+    for file in args.split_whitespace() {
+        let path = resolve_path(file);
+        match crate::fs::Vfs::read_file(&path) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                columns.push(text.lines().map(String::from).collect());
+            }
+            Err(e) => {
+                crate::console_println!("paste: {}: {:?}", file, e);
+                set_exit(1);
+                return;
+            }
+        }
+    }
+
+    paste_output(&columns);
+}
+
+fn paste_output(columns: &[Vec<String>]) {
+    let max_lines = columns.iter().map(|c| c.len()).max().unwrap_or(0);
+    for i in 0..max_lines {
+        for (ci, col) in columns.iter().enumerate() {
+            if ci > 0 { shell_print!("\t"); }
+            if let Some(line) = col.get(i) {
+                shell_print!("{}", line);
+            }
+        }
+        shell_println!();
+    }
+}
+
 /// Pause for N milliseconds (busy-wait using APIC tick counter).
 fn cmd_sleep(args: &str) {
     let ms = match args.parse::<u64>() {
@@ -7901,6 +8337,7 @@ fn is_builtin(name: &str) -> bool {
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"
         | "export" | "set" | "unset" | "alias" | "unalias" | "return"
         | "break" | "continue" | "shift" | "local" | "printf"
+        | "cut" | "tr" | "yes" | "tac" | "fold" | "paste"
     )
 }
 

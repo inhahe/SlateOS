@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "tree", "true", "truncate", "type", "umount",
-    "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
+    "uname", "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
     "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4223,6 +4223,7 @@ fn dispatch(line: &str) {
         "dns" | "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
         "version" | "ver" => cmd_version(),
+        "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
         "seq" => cmd_seq(args),
         "nl" => cmd_nl(args),
@@ -4374,6 +4375,7 @@ fn cmd_help() {
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
     crate::console_println!("  wget URL  Fetch a URL via HTTP GET");
     crate::console_println!("  version   Show kernel version");
+    crate::console_println!("  uname [-asnrvmo] Print system information");
     crate::console_println!("  source F  Execute kshell commands from file F");
     crate::console_println!("  seq N [M] Print numbers from 1..N or N..M");
     crate::console_println!("  nl [F]    Number lines of file (or piped input)");
@@ -6516,6 +6518,99 @@ fn cmd_version() {
     shell_println!("Built with Rust, AI-developed");
 }
 
+/// `uname [-asnrvmo]` — print system information.
+///
+/// Flags:
+/// - `-s`: kernel name ("MintOS")
+/// - `-n`: network hostname
+/// - `-r`: kernel release ("0.1.0")
+/// - `-v`: kernel version string (includes build date from RTC)
+/// - `-m`: machine hardware name ("x86_64")
+/// - `-o`: operating system ("MintOS")
+/// - `-a`: all of the above
+/// - No flags: same as `-s`
+fn cmd_uname(args: &str) {
+    let trimmed = args.trim();
+
+    // Parse which fields to show.
+    let mut show_s = false;
+    let mut show_n = false;
+    let mut show_r = false;
+    let mut show_v = false;
+    let mut show_m = false;
+    let mut show_o = false;
+
+    if trimmed.is_empty() {
+        // No flags → default to -s.
+        show_s = true;
+    } else {
+        for token in trimmed.split_whitespace() {
+            if let Some(flags) = token.strip_prefix('-') {
+                for ch in flags.chars() {
+                    match ch {
+                        'a' => {
+                            show_s = true;
+                            show_n = true;
+                            show_r = true;
+                            show_v = true;
+                            show_m = true;
+                            show_o = true;
+                        }
+                        's' => show_s = true,
+                        'n' => show_n = true,
+                        'r' => show_r = true,
+                        'v' => show_v = true,
+                        'm' => show_m = true,
+                        'o' => show_o = true,
+                        _ => {
+                            crate::console_println!(
+                                "uname: invalid option -- '{}'", ch
+                            );
+                            set_exit(1);
+                            return;
+                        }
+                    }
+                }
+            } else {
+                crate::console_println!(
+                    "uname: extra operand '{}'", token
+                );
+                set_exit(1);
+                return;
+            }
+        }
+    }
+
+    // Collect fields in POSIX order: s n r v m o.
+    let mut parts: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+
+    if show_s {
+        parts.push(alloc::string::String::from("MintOS"));
+    }
+    if show_n {
+        parts.push(crate::fs::sysfs::get_hostname());
+    }
+    if show_r {
+        parts.push(alloc::string::String::from("0.1.0"));
+    }
+    if show_v {
+        let dt = crate::rtc::read_datetime();
+        parts.push(alloc::format!(
+            "#1 SMP {:04}-{:02}-{:02}",
+            dt.year, dt.month, dt.day
+        ));
+    }
+    if show_m {
+        parts.push(alloc::string::String::from("x86_64"));
+    }
+    if show_o {
+        parts.push(alloc::string::String::from("MintOS"));
+    }
+
+    let line: alloc::string::String = parts.join(" ");
+    shell_println!("{}", line);
+}
+
 // ---------------------------------------------------------------------------
 // Text processing utilities
 // ---------------------------------------------------------------------------
@@ -8617,7 +8712,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "version" | "ver" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

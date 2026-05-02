@@ -1570,6 +1570,55 @@ impl Ext4Driver {
         Ok(())
     }
 
+    /// Zero the full on-disk inode (including extra area beyond 128 bytes).
+    ///
+    /// Used when allocating a brand-new inode to prevent stale data from
+    /// a previously deleted inode from persisting in the extra fields.
+    fn zero_ondisk_inode(&self, inode_nr: u32) -> KernelResult<()> {
+        let group = self.sb.inode_group(inode_nr);
+        let index = self.sb.inode_index_in_group(inode_nr);
+        let gd = self.group_descs.get(group as usize)
+            .ok_or(KernelError::InvalidArgument)?;
+        let inode_table_block = if self.sb.is_64bit {
+            u64::from(gd.bg_inode_table_lo)
+                | (u64::from(gd.bg_inode_table_hi) << 32)
+        } else {
+            u64::from(gd.bg_inode_table_lo)
+        };
+        let offset = inode_table_block
+            .saturating_mul(u64::from(self.sb.block_size))
+            .saturating_add(
+                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
+            );
+        let zeros = vec![0u8; self.sb.inode_size as usize];
+        self.reader.write_bytes(offset, &zeros)
+    }
+
+    /// Write the `i_extra_isize` field at offset 0x80 in the on-disk inode.
+    ///
+    /// This field is part of `Ext4InodeExtra` and tells how many bytes of
+    /// extra data follow the 128-byte core.
+    fn write_extra_isize(&self, inode_nr: u32, extra_isize: u16) -> KernelResult<()> {
+        let group = self.sb.inode_group(inode_nr);
+        let index = self.sb.inode_index_in_group(inode_nr);
+        let gd = self.group_descs.get(group as usize)
+            .ok_or(KernelError::InvalidArgument)?;
+        let inode_table_block = if self.sb.is_64bit {
+            u64::from(gd.bg_inode_table_lo)
+                | (u64::from(gd.bg_inode_table_hi) << 32)
+        } else {
+            u64::from(gd.bg_inode_table_lo)
+        };
+        let inode_offset = inode_table_block
+            .saturating_mul(u64::from(self.sb.block_size))
+            .saturating_add(
+                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
+            );
+        // i_extra_isize is at offset 0x80 (u16, little-endian).
+        let field_offset = inode_offset.saturating_add(0x80);
+        self.reader.write_bytes(field_offset, &extra_isize.to_le_bytes())
+    }
+
     /// Write the superblock back to disk.
     ///
     /// If metadata checksumming is enabled, computes and embeds the CRC32C
@@ -2172,6 +2221,20 @@ impl Ext4Driver {
 
         // Initialize the extent header (0 entries).
         self.init_extent_header(&mut inode, 0);
+
+        // Zero the full on-disk inode (including extra area) before writing.
+        // This prevents stale data from a previously deleted inode from
+        // persisting in the extra fields (timestamps, checksums, xattrs).
+        if self.sb.inode_size > 128 {
+            self.zero_ondisk_inode(inode_nr)?;
+
+            // Set i_extra_isize so that inline xattrs and extra fields
+            // (crtime, checksum_hi, etc.) are properly located.
+            let extra_isize = self.sb.want_extra_isize;
+            if extra_isize > 0 {
+                self.write_extra_isize(inode_nr, extra_isize)?;
+            }
+        }
 
         // Write the new inode to disk.
         self.write_inode(inode_nr, &inode)?;

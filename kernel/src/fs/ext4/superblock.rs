@@ -58,6 +58,12 @@ pub struct ParsedSuperblock {
     /// used as the initial value when computing checksums for group
     /// descriptors, inodes, and other metadata.
     pub csum_seed: u32,
+    /// Preferred i_extra_isize for new inodes.
+    ///
+    /// Taken from `s_want_extra_isize` (or `s_min_extra_isize` as fallback).
+    /// Common value on modern Linux: 32 (allows crtime, version, etc.).
+    /// Set to 0 for filesystems with 128-byte inodes.
+    pub want_extra_isize: u16,
 }
 
 /// Read and parse an ext4 superblock from raw bytes.
@@ -188,6 +194,16 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
         validate_superblock_checksum(data)?;
     }
 
+    // Preferred i_extra_isize for new inodes.  Typical Linux default: 32.
+    // Only meaningful if inode_size > 128.
+    let want_extra_isize = if inode_size > 128 {
+        let want = raw.s_want_extra_isize;
+        let min = raw.s_min_extra_isize;
+        if want > 0 { want } else if min > 0 { min } else { 32 }
+    } else {
+        0
+    };
+
     Ok(ParsedSuperblock {
         raw,
         block_size,
@@ -203,6 +219,7 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
         volume_name,
         has_metadata_csum,
         csum_seed,
+        want_extra_isize,
     })
 }
 

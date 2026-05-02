@@ -241,6 +241,9 @@ impl FileSystem for Ext4Fs {
             inode.i_size_high = 0;
             set_inode_blocks_48(&mut inode, 0);
             inode.i_file_acl_lo = 0;
+            // Clear i_file_acl_high in i_osd2[2..4].
+            if let Some(b) = inode.i_osd2.get_mut(2) { *b = 0; }
+            if let Some(b) = inode.i_osd2.get_mut(3) { *b = 0; }
 
             // Write the zeroed inode first, then free the inode number.
             self.driver.write_inode(ino, &inode)?;
@@ -348,6 +351,8 @@ impl FileSystem for Ext4Fs {
         inode.i_size_high = 0;
         set_inode_blocks_48(&mut inode, 0);
         inode.i_file_acl_lo = 0;
+        if let Some(b) = inode.i_osd2.get_mut(2) { *b = 0; }
+        if let Some(b) = inode.i_osd2.get_mut(3) { *b = 0; }
         self.driver.write_inode(ino, &inode)?;
 
         // Free the inode itself (is_directory=true to update used_dirs count).

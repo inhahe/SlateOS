@@ -2965,10 +2965,10 @@ impl Ext4Driver {
     /// Returns 0 if the inode has no external xattr block.
     fn xattr_block(&self, inode: &Ext4Inode) -> u64 {
         let lo = u64::from(inode.i_file_acl_lo);
-        // High 16 bits are in i_osd2 bytes 2..4 on Linux.
+        // i_file_acl_high is in i_osd2 bytes 2..4 on Linux.
         let hi = u64::from(u16::from_le_bytes([
-            *inode.i_osd2.get(4).unwrap_or(&0),
-            *inode.i_osd2.get(5).unwrap_or(&0),
+            *inode.i_osd2.get(2).unwrap_or(&0),
+            *inode.i_osd2.get(3).unwrap_or(&0),
         ]));
         lo | (hi << 32)
     }
@@ -3171,11 +3171,11 @@ impl Ext4Driver {
 
         // Update the inode's i_file_acl field.
         inode.i_file_acl_lo = block_nr as u32;
-        // High bits.
+        // i_file_acl_high is at i_osd2[2..4].
         let hi = (block_nr >> 32) as u16;
         let hi_bytes = hi.to_le_bytes();
-        if let Some(b) = inode.i_osd2.get_mut(4) { *b = hi_bytes[0]; }
-        if let Some(b) = inode.i_osd2.get_mut(5) { *b = hi_bytes[1]; }
+        if let Some(b) = inode.i_osd2.get_mut(2) { *b = hi_bytes[0]; }
+        if let Some(b) = inode.i_osd2.get_mut(3) { *b = hi_bytes[1]; }
 
         self.write_inode(inode_nr, inode)?;
 

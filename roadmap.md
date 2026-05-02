@@ -356,6 +356,14 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell string expansions: ${VAR:N:L} substring, ${VAR/pat/rep} replace first, ${VAR//pat/rep} replace all, ${VAR^}/${VAR^^} uppercase, ${VAR,}/${VAR,,} lowercase
   - [x] Kshell input redirection: `cmd < file` reads file as piped input, combines with output redirection
   - [x] Kshell shell options: `set -e` (errexit: abort scripts/functions on failure), `set -x` (xtrace: print commands before execution), `set +e`/`+x` to disable
+  - [x] Kshell test command extensions: -L/-h (symlink), -r/-w/-x (permissions), -v (variable set), < > (string comparison)
+  - [x] Kshell read -a: split input into array variables
+  - [x] Kshell multi-pipe chains: `cmd1 | cmd2 | cmd3 | ... | cmdN` (was single-pipe only)
+  - [x] Kshell tilde expansion: `~` and `~/path` expand to $HOME
+  - [x] Kshell eval, mapfile/readarray, readonly, let commands
+  - [x] Kshell C-style for loops: `for ((i=0; i<10; i=i+1)); do ... done` with enhanced arithmetic (comparisons, logical ops, variable names)
+  - [x] Kshell brace expansion: `{a,b,c}` alternatives, `{1..10}` and `{1..10..2}` numeric ranges
+  - [x] Kshell here-strings: `cmd <<< word`, `(( expr ))` arithmetic command, inline `VAR=value command`, bare `VAR=value` assignment
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

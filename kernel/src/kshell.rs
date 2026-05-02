@@ -206,12 +206,12 @@ fn cmd_help() {
     crate::console_println!("  ls [path] List files in directory");
     crate::console_println!("  cat FILE  Print file contents");
     crate::console_println!("  write F T Write text T to file F");
-    crate::console_println!("  rm FILE   Delete a file");
+    crate::console_println!("  rm [-r] F Delete a file (or directory tree with -r)");
     crate::console_println!("  mkdir DIR Create a directory");
     crate::console_println!("  rmdir DIR Remove an empty directory");
     crate::console_println!("  stat FILE Show detailed file metadata");
     crate::console_println!("  ln S D    Create hard link D pointing to S");
-    crate::console_println!("  cp S D    Copy file S to D");
+    crate::console_println!("  cp [-r] S D Copy file (or dir tree with -r) S to D");
     crate::console_println!("  mv S D    Move/rename file or directory");
     crate::console_println!("  chmod M F Set permissions (octal, e.g., chmod 755 file)");
     crate::console_println!("  chown U F Set owner (uid:gid, e.g., chown 1000:1000 file)");
@@ -603,8 +603,18 @@ fn cmd_write(args: &str) {
 }
 
 fn cmd_rm(args: &str) {
+    // Support -r/-R flag for recursive removal.
+    let (recursive, args) = if args.starts_with("-r ") || args.starts_with("-R ")
+        || args.starts_with("-rf ") || args.starts_with("-Rf ")
+    {
+        let skip = if args.starts_with("-rf") || args.starts_with("-Rf") { 4 } else { 3 };
+        (true, &args[skip..])
+    } else {
+        (false, args)
+    };
+
     if args.is_empty() {
-        crate::console_println!("Usage: rm <filename>");
+        crate::console_println!("Usage: rm [-r] <filename>");
         return;
     }
 
@@ -616,12 +626,23 @@ fn cmd_rm(args: &str) {
         s
     };
 
-    match crate::fs::Vfs::remove(&path) {
-        Ok(()) => {
-            crate::console_println!("Deleted {}", path);
+    if recursive {
+        match crate::fs::Vfs::remove_recursive(&path) {
+            Ok(count) => {
+                crate::console_println!("Removed {} ({} items)", path, count);
+            }
+            Err(e) => {
+                crate::console_println!("rm: {}: {:?}", path, e);
+            }
         }
-        Err(e) => {
-            crate::console_println!("rm: {}: {:?}", path, e);
+    } else {
+        match crate::fs::Vfs::remove(&path) {
+            Ok(()) => {
+                crate::console_println!("Deleted {}", path);
+            }
+            Err(e) => {
+                crate::console_println!("rm: {}: {:?}", path, e);
+            }
         }
     }
 }
@@ -850,9 +871,16 @@ fn format_bytes(bytes: u64) -> alloc::string::String {
 
 /// Copy a file.
 fn cmd_cp(args: &str) {
+    // Support -r flag for recursive copy.
+    let (recursive, args) = if args.starts_with("-r ") || args.starts_with("-R ") {
+        (true, &args[3..])
+    } else {
+        (false, args)
+    };
+
     let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
-        crate::console_println!("Usage: cp <source> <dest>");
+        crate::console_println!("Usage: cp [-r] <source> <dest>");
         return;
     }
 
@@ -874,12 +902,23 @@ fn cmd_cp(args: &str) {
         s
     };
 
-    match crate::fs::Vfs::copy(&src_path, &dst_path) {
-        Ok(size) => {
-            crate::console_println!("'{}' -> '{}' ({} bytes)", src_path, dst_path, size);
+    if recursive {
+        match crate::fs::Vfs::copy_recursive(&src_path, &dst_path) {
+            Ok(size) => {
+                crate::console_println!("'{}' -> '{}' ({} bytes copied)", src_path, dst_path, size);
+            }
+            Err(e) => {
+                crate::console_println!("cp: {:?}", e);
+            }
         }
-        Err(e) => {
-            crate::console_println!("cp: {:?}", e);
+    } else {
+        match crate::fs::Vfs::copy(&src_path, &dst_path) {
+            Ok(size) => {
+                crate::console_println!("'{}' -> '{}' ({} bytes)", src_path, dst_path, size);
+            }
+            Err(e) => {
+                crate::console_println!("cp: {:?}", e);
+            }
         }
     }
 }

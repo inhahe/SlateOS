@@ -1008,6 +1008,112 @@ impl Vfs {
         Ok(size)
     }
 
+    /// Recursively copy a file or directory tree from `src` to `dst`.
+    ///
+    /// If `src` is a file, behaves like `copy()`.  If `src` is a directory,
+    /// creates `dst` as a directory and recursively copies all contents.
+    /// Works across mount points.  Preserves permissions and ownership.
+    ///
+    /// ## Depth limit
+    ///
+    /// Recursion depth is limited to 64 levels to prevent stack overflow.
+    pub fn copy_recursive(src: &str, dst: &str) -> KernelResult<u64> {
+        Self::copy_recursive_inner(src, dst, 0)
+    }
+
+    fn copy_recursive_inner(src: &str, dst: &str, depth: usize) -> KernelResult<u64> {
+        const MAX_DEPTH: usize = 64;
+        if depth > MAX_DEPTH {
+            return Err(KernelError::TooManyLinks);
+        }
+
+        let entry = Self::stat(src)?;
+
+        if entry.entry_type == EntryType::File {
+            // Simple file copy.
+            let bytes = Self::copy(src, dst)?;
+            // Best-effort metadata preservation.
+            if let Ok(meta) = Self::metadata(src) {
+                let _ = Self::set_permissions(dst, meta.permissions);
+                let _ = Self::set_owner(dst, meta.uid, meta.gid);
+            }
+            return Ok(bytes);
+        }
+
+        if entry.entry_type != EntryType::Directory {
+            return Err(KernelError::NotSupported);
+        }
+
+        // Create the destination directory.
+        Self::mkdir(dst)?;
+
+        // Copy each entry recursively.
+        let entries = Self::readdir(src)?;
+        let mut total_bytes = 0u64;
+
+        for child in &entries {
+            let src_child = format!("{}/{}", src, child.name);
+            let dst_child = format!("{}/{}", dst, child.name);
+            let bytes = Self::copy_recursive_inner(&src_child, &dst_child, depth.saturating_add(1))?;
+            total_bytes = total_bytes.saturating_add(bytes);
+        }
+
+        // Best-effort metadata preservation on the directory.
+        if let Ok(meta) = Self::metadata(src) {
+            let _ = Self::set_permissions(dst, meta.permissions);
+            let _ = Self::set_owner(dst, meta.uid, meta.gid);
+        }
+
+        Ok(total_bytes)
+    }
+
+    /// Recursively remove a file or directory tree.
+    ///
+    /// If `path` is a file, behaves like `remove()`.  If `path` is a
+    /// directory, removes all contents first (depth-first), then removes
+    /// the empty directory.
+    ///
+    /// ## Depth limit
+    ///
+    /// Recursion depth is limited to 64 levels to prevent stack overflow.
+    pub fn remove_recursive(path: &str) -> KernelResult<u64> {
+        Self::remove_recursive_inner(path, 0)
+    }
+
+    fn remove_recursive_inner(path: &str, depth: usize) -> KernelResult<u64> {
+        const MAX_DEPTH: usize = 64;
+        if depth > MAX_DEPTH {
+            return Err(KernelError::TooManyLinks);
+        }
+
+        let entry = Self::stat(path)?;
+
+        if entry.entry_type == EntryType::File || entry.entry_type == EntryType::Symlink {
+            Self::remove(path)?;
+            return Ok(1);
+        }
+
+        if entry.entry_type != EntryType::Directory {
+            return Err(KernelError::NotSupported);
+        }
+
+        // Remove contents depth-first.
+        let entries = Self::readdir(path)?;
+        let mut count = 0u64;
+
+        for child in &entries {
+            let child_path = format!("{}/{}", path, child.name);
+            let removed = Self::remove_recursive_inner(&child_path, depth.saturating_add(1))?;
+            count = count.saturating_add(removed);
+        }
+
+        // Now remove the empty directory.
+        Self::rmdir(path)?;
+        count = count.saturating_add(1);
+
+        Ok(count)
+    }
+
     /// Delete a file.
     ///
     /// Does NOT follow the final symlink — removes the link itself.

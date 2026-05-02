@@ -5,6 +5,7 @@
 //! filesystems and dispatches operations.
 
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -544,14 +545,141 @@ impl Vfs {
         Ok(())
     }
 
+    // -------------------------------------------------------------------
+    // VFS-level path resolution (cross-mount symlink support)
+    // -------------------------------------------------------------------
+
+    /// Maximum symlink traversal depth (matches per-filesystem limits).
+    const MAX_SYMLINK_DEPTH: usize = 40;
+
+    /// Resolve a path following all symlinks, including cross-mount ones.
+    ///
+    /// Walks path components one at a time, checking each for symlink
+    /// status via the underlying filesystem's `lstat()`.  When a symlink
+    /// is found, reads the target and re-resolves through the VFS, which
+    /// correctly handles references to other mount points.
+    ///
+    /// Performance note: O(n) filesystem lookups where n is path depth.
+    /// Redundant for intra-mount paths (filesystem already follows), but
+    /// necessary for correctness when symlinks cross mount boundaries.
+    /// A future optimization: add a single-component `lookup()` to the
+    /// `FileSystem` trait (like Linux's namei) to avoid re-resolving
+    /// parent components.
+    fn resolve_follow(path: &str) -> KernelResult<String> {
+        validate_path(path)?;
+        let norm = normalize_path(path);
+        Self::resolve_inner(&norm, true, 0)
+    }
+
+    /// Like [`resolve_follow`] but does NOT follow the final component.
+    ///
+    /// Used for operations that act on the entry itself: `remove`,
+    /// `rmdir`, `lstat`, `readlink`, `symlink`, `rename`.
+    fn resolve_no_follow(path: &str) -> KernelResult<String> {
+        validate_path(path)?;
+        let norm = normalize_path(path);
+        Self::resolve_inner(&norm, false, 0)
+    }
+
+    /// Core recursive resolver.
+    ///
+    /// `path` must already be normalized (no `.`, `..`, or double slashes).
+    fn resolve_inner(
+        path: &str,
+        follow_last: bool,
+        depth: usize,
+    ) -> KernelResult<String> {
+        if depth > Self::MAX_SYMLINK_DEPTH {
+            return Err(KernelError::TooManyLinks);
+        }
+
+        let components: Vec<&str> = path
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            return Ok(String::from("/"));
+        }
+
+        let mut resolved = String::with_capacity(path.len());
+
+        for (i, comp) in components.iter().enumerate() {
+            let is_last = i == components.len().saturating_sub(1);
+
+            // Build current absolute path.
+            resolved.push('/');
+            resolved.push_str(comp);
+
+            // Only check for symlinks if we should follow at this position.
+            if !is_last || follow_last {
+                let entry_type = {
+                    let mut vfs = VFS.lock();
+                    match find_mount(&mut vfs, &resolved) {
+                        Ok((mp, relative)) => match mp.fs.lstat(relative) {
+                            Ok(e) => Some(e.entry_type),
+                            // Last component may not exist yet (creating a
+                            // new file/dir/symlink).
+                            Err(KernelError::NotFound) if is_last => None,
+                            Err(e) => return Err(e),
+                        },
+                        Err(KernelError::NotFound) if is_last => None,
+                        Err(e) => return Err(e),
+                    }
+                }; // VFS lock released
+
+                if entry_type == Some(EntryType::Symlink) {
+                    // Read the symlink target (separate lock acquisition).
+                    let target = {
+                        let mut vfs = VFS.lock();
+                        let (mp, relative) = find_mount(&mut vfs, &resolved)?;
+                        mp.fs.readlink(relative)?
+                    }; // lock released
+
+                    // Build new path: symlink target + remaining components.
+                    let base = if target.starts_with('/') {
+                        // Absolute target — restart from VFS root.
+                        target
+                    } else {
+                        // Relative target — resolve from symlink's parent.
+                        let parent_end = resolved.rfind('/').unwrap_or(0);
+                        let parent = if parent_end == 0 { "/" } else { &resolved[..parent_end] };
+                        format!("{}/{}", parent, target)
+                    };
+
+                    let remaining = &components[i.saturating_add(1)..];
+                    let full = if remaining.is_empty() {
+                        base
+                    } else {
+                        format!("{}/{}", base, remaining.join("/"))
+                    };
+
+                    // Normalize (resolve `.` and `..` introduced by target)
+                    // and recurse with incremented depth.
+                    let normalized = normalize_path(&full);
+                    return Self::resolve_inner(
+                        &normalized,
+                        follow_last,
+                        depth.saturating_add(1),
+                    );
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    // -------------------------------------------------------------------
+    // VFS operations
+    // -------------------------------------------------------------------
+
     /// List entries in a directory.
     ///
     /// If other filesystems are mounted at sub-paths of `path`, their
     /// mount points appear as directory entries in the listing (even if
     /// the underlying filesystem doesn't have a physical directory there).
     pub fn readdir(path: &str) -> KernelResult<Vec<DirEntry>> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
 
         // Collect mount-point names that are direct children of `path`.
@@ -578,8 +706,7 @@ impl Vfs {
 
     /// Read a file's contents.
     pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.read_file(relative)
@@ -587,8 +714,7 @@ impl Vfs {
 
     /// Get metadata for a path.
     pub fn stat(path: &str) -> KernelResult<DirEntry> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.stat(relative)
@@ -596,8 +722,7 @@ impl Vfs {
 
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -610,9 +735,10 @@ impl Vfs {
     }
 
     /// Delete a file.
+    ///
+    /// Does NOT follow the final symlink — removes the link itself.
     pub fn remove(path: &str) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_no_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -624,9 +750,11 @@ impl Vfs {
     }
 
     /// Create a directory.
+    ///
+    /// Intermediate symlinks are followed; the last component is the
+    /// new directory name (not followed if it happens to exist).
     pub fn mkdir(path: &str) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_no_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -639,8 +767,7 @@ impl Vfs {
 
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_no_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -653,8 +780,7 @@ impl Vfs {
 
     /// Read a range of bytes from a file.
     pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.read_at(relative, offset, len)
@@ -664,8 +790,7 @@ impl Vfs {
 
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -678,8 +803,7 @@ impl Vfs {
 
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -694,10 +818,8 @@ impl Vfs {
     ///
     /// Both paths must be on the same mount point.
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
-        validate_path(from)?;
-        validate_path(to)?;
-        let from = normalize_path(from);
-        let to = normalize_path(to);
+        let from = Self::resolve_no_follow(from)?;
+        let to = Self::resolve_no_follow(to)?;
         {
             let mut vfs = VFS.lock();
 
@@ -779,8 +901,7 @@ impl Vfs {
 
     /// Get rich metadata for a path.
     pub fn metadata(path: &str) -> KernelResult<FileMeta> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.metadata(relative)
@@ -797,8 +918,7 @@ impl Vfs {
 
     /// Set file attributes (immutable, append-only, hidden, system).
     pub fn set_attributes(path: &str, attrs: FileAttr) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -811,8 +931,7 @@ impl Vfs {
 
     /// Set ownership (uid/gid).
     pub fn set_owner(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -825,8 +944,7 @@ impl Vfs {
 
     /// Set Unix-style permission bits.
     pub fn set_permissions(path: &str, permissions: u16) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -843,8 +961,7 @@ impl Vfs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.set_times(relative, accessed_ns, modified_ns)
@@ -853,8 +970,7 @@ impl Vfs {
 
     /// Get an extended attribute value.
     pub fn get_xattr(path: &str, key: &str) -> KernelResult<Vec<u8>> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.get_xattr(relative, key)
@@ -862,8 +978,7 @@ impl Vfs {
 
     /// Set an extended attribute.
     pub fn set_xattr(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -876,8 +991,7 @@ impl Vfs {
 
     /// Remove an extended attribute.
     pub fn remove_xattr(path: &str, key: &str) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -890,8 +1004,7 @@ impl Vfs {
 
     /// List all extended attribute keys.
     pub fn list_xattrs(path: &str) -> KernelResult<Vec<String>> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.list_xattrs(relative)
@@ -904,8 +1017,7 @@ impl Vfs {
     /// `path` is the location of the new symlink.  `target` is the
     /// string it points to (stored as-is, resolved on traversal).
     pub fn symlink(path: &str, target: &str) -> KernelResult<()> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_no_follow(path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -920,8 +1032,7 @@ impl Vfs {
     ///
     /// Does NOT follow the symlink — returns the stored target string.
     pub fn readlink(path: &str) -> KernelResult<String> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_no_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.readlink(relative)
@@ -929,8 +1040,7 @@ impl Vfs {
 
     /// Stat a path without following the final symbolic link.
     pub fn lstat(path: &str) -> KernelResult<DirEntry> {
-        validate_path(path)?;
-        let path = normalize_path(path);
+        let path = Self::resolve_no_follow(path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.lstat(relative)

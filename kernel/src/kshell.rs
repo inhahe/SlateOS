@@ -1061,6 +1061,8 @@ enum LoopKind {
     For { variable: String, words_raw: String },
     /// `for ((INIT; COND; STEP)); do ... done` — C-style arithmetic loop.
     CFor { init: String, cond: String, step: String },
+    /// `select VAR in WORDS...; do ... done` — interactive menu selection.
+    Select { variable: String, words_raw: String },
 }
 
 /// Loop body collector: buffers lines between `do` and `done`.
@@ -1503,9 +1505,9 @@ fn handle_control_flow(line: &str) -> bool {
         let mut lc = LOOP_COLLECTOR.lock();
         if let Some(ref mut state) = *lc {
             match first_word {
-                // while/until/for all open a new do..done block,
+                // while/until/for/select all open a new do..done block,
                 // so all increment nesting when seen inside a loop body.
-                "while" | "until" | "for" => {
+                "while" | "until" | "for" | "select" => {
                     state.nesting = state.nesting.saturating_add(1);
                     state.body.push(String::from(trimmed));
                     return true;
@@ -1538,6 +1540,9 @@ fn handle_control_flow(line: &str) -> bool {
                         }
                         LoopKind::CFor { init, cond, step } => {
                             execute_cfor_loop(&init, &cond, &step, &body);
+                        }
+                        LoopKind::Select { variable, words_raw } => {
+                            execute_select(&variable, &words_raw, &body);
                         }
                     }
                     return true;
@@ -1680,12 +1685,54 @@ fn handle_control_flow(line: &str) -> bool {
             });
             return true;
         }
+        "select" => {
+            // Parse: select VAR in WORD1 WORD2 ...; do
+            let rest = trimmed.get(6..).unwrap_or("").trim();
+
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let variable = parts.next().unwrap_or("").trim();
+            let after_var = parts.next().unwrap_or("").trim();
+
+            if variable.is_empty() {
+                crate::console_println!("Syntax error: select requires a variable name");
+                return true;
+            }
+
+            let words_part = if let Some(stripped) = after_var.strip_prefix("in") {
+                stripped.trim_start()
+            } else {
+                crate::console_println!("Syntax error: select requires 'in' keyword");
+                return true;
+            };
+
+            let words_raw = words_part
+                .strip_suffix("do")
+                .unwrap_or(words_part)
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+
+            if words_raw.is_empty() {
+                crate::console_println!("Syntax error: select requires a word list after 'in'");
+                return true;
+            }
+
+            *LOOP_COLLECTOR.lock() = Some(LoopCollector {
+                kind: LoopKind::Select {
+                    variable: String::from(variable),
+                    words_raw: String::from(words_raw),
+                },
+                body: Vec::new(),
+                nesting: 0,
+            });
+            return true;
+        }
         "do" => {
             // `do` on its own line without a loop — syntax error or no-op.
             return true;
         }
         "done" => {
-            crate::console_println!("Syntax error: done without while/for");
+            crate::console_println!("Syntax error: done without while/for/select");
             return true;
         }
         "case" => {
@@ -1882,6 +1929,113 @@ fn execute_while_loop(condition: &str, body: &[String]) {
         LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
 
         // Execute the body lines.
+        for line in body {
+            execute(line);
+            if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+                || LOOP_CONTINUE.load(core::sync::atomic::Ordering::Relaxed)
+                || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+        }
+
+        if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+            || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            break;
+        }
+    }
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+    LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Execute a select menu: display numbered choices, read user input, execute body.
+///
+/// The menu repeats until `break` is encountered in the body.
+/// REPLY is set to the raw input, VAR is set to the selected word.
+#[allow(clippy::arithmetic_side_effects)]
+fn execute_select(variable: &str, words_raw: &str, body: &[String]) {
+    let expanded = expand_vars(words_raw);
+    let words = split_words(&expanded);
+
+    if words.is_empty() {
+        return;
+    }
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+
+    // Limit iterations to prevent infinite loops.
+    for _ in 0..100_u32 {
+        // Display numbered menu.
+        for (i, word) in words.iter().enumerate() {
+            crate::console_println!("{}) {}", i + 1, word);
+        }
+
+        // Prompt for selection.
+        use crate::keyboard;
+        crate::console_print!("#? ");
+
+        // Read a line of input (reusing the simple line-reading approach).
+        let mut buf = [0u8; 64];
+        let mut len = 0;
+        loop {
+            let byte = keyboard::read_char();
+            if byte == b'\n' || byte == b'\r' {
+                crate::console_print!("\n");
+                break;
+            }
+            if byte == 0x08 || byte == 0x7F {
+                // Backspace.
+                if len > 0 {
+                    len -= 1;
+                    crate::console_print!("\x08 \x08");
+                }
+                continue;
+            }
+            if byte == 3 {
+                // Ctrl+C — cancel.
+                crate::console_println!();
+                LOOP_BREAK.store(true, core::sync::atomic::Ordering::Relaxed);
+                break;
+            }
+            if byte.is_ascii_graphic() || byte == b' ' {
+                if len < buf.len() {
+                    buf[len] = byte;
+                    len += 1;
+                    crate::console_print!("{}", byte as char);
+                }
+            }
+        }
+
+        if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+
+        let input = core::str::from_utf8(buf.get(..len).unwrap_or(&[]))
+            .unwrap_or("");
+
+        // Set REPLY to raw input.
+        env_set("REPLY", input);
+
+        // Parse as number and select the word.
+        if let Ok(n) = input.trim().parse::<usize>() {
+            if n >= 1 && n <= words.len() {
+                if let Some(word) = words.get(n - 1) {
+                    ENV_VARS.lock().insert(String::from(variable), word.clone());
+                }
+            } else {
+                // Out of range — set variable to empty.
+                ENV_VARS.lock().insert(String::from(variable), String::new());
+            }
+        } else {
+            // Non-numeric input — set variable to empty.
+            ENV_VARS.lock().insert(String::from(variable), String::new());
+        }
+
+        LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+
+        // Execute body.
         for line in body {
             execute(line);
             if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
@@ -2938,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nslookup", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "rev", "rm",
-    "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
+    "rmdir", "run", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
@@ -8421,7 +8575,7 @@ fn cmd_type(args: &str) {
 
         // Check keywords.
         if matches!(name, "if" | "then" | "elif" | "else" | "fi" | "while" | "until" | "for"
-            | "do" | "done" | "case" | "esac" | "function" | "in")
+            | "do" | "done" | "case" | "esac" | "function" | "in" | "select")
         {
             crate::console_println!("{} is a shell keyword", name);
             continue;

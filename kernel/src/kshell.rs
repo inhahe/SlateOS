@@ -182,6 +182,15 @@ fn execute(line: &str) {
         "tee" => cmd_tee(args),
         "truncate" => cmd_truncate(args),
         "sha256" | "hash" => cmd_sha256(args),
+        "readlink" => cmd_readlink(args),
+        "symlink" | "mklink" => cmd_symlink(args),
+        "xattr" => cmd_xattr(args),
+        "basename" => cmd_basename(args),
+        "dirname" => cmd_dirname(args),
+        "realpath" => cmd_realpath(args),
+        "pwd" => cmd_pwd(),
+        "id" | "whoami" => cmd_id(),
+        "mktemp" => cmd_mktemp(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -248,6 +257,15 @@ fn cmd_help() {
     crate::console_println!("  tee F T   Write text T to file F and display it");
     crate::console_println!("  truncate N F Truncate file F to N bytes");
     crate::console_println!("  sha256 F  Compute SHA-256 hash of file contents");
+    crate::console_println!("  readlink P Show symlink target");
+    crate::console_println!("  symlink T P Create symlink at P pointing to T");
+    crate::console_println!("  xattr F .. Extended attributes (list/get/set/rm)");
+    crate::console_println!("  basename P Extract filename from path");
+    crate::console_println!("  dirname P  Extract directory from path");
+    crate::console_println!("  realpath P Resolve path (follow symlinks)");
+    crate::console_println!("  pwd        Print working directory");
+    crate::console_println!("  id         Show current task identity");
+    crate::console_println!("  mktemp [D] Create temporary file (default /tmp)");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -2449,6 +2467,284 @@ fn cmd_sha256(args: &str) {
         }
         Err(e) => {
             crate::console_println!("sha256: cannot hash '{}': {:?}", path, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path utility commands
+// ---------------------------------------------------------------------------
+
+/// `readlink PATH` — display the target of a symbolic link.
+fn cmd_readlink(args: &str) {
+    let path = args.trim();
+    if path.is_empty() {
+        crate::console_println!("Usage: readlink <symlink>");
+        return;
+    }
+
+    match crate::fs::Vfs::readlink(path) {
+        Ok(target) => {
+            crate::console_println!("{}", target);
+        }
+        Err(e) => {
+            crate::console_println!("readlink: '{}': {:?}", path, e);
+        }
+    }
+}
+
+/// `symlink TARGET PATH` — create a symbolic link at PATH pointing to TARGET.
+fn cmd_symlink(args: &str) {
+    let mut parts = args.splitn(2, ' ');
+    let target = parts.next().unwrap_or("").trim();
+    let link_path = parts.next().unwrap_or("").trim();
+
+    if target.is_empty() || link_path.is_empty() {
+        crate::console_println!("Usage: symlink <target> <link_path>");
+        return;
+    }
+
+    match crate::fs::Vfs::symlink(link_path, target) {
+        Ok(()) => {
+            crate::console_println!("{} -> {}", link_path, target);
+        }
+        Err(e) => {
+            crate::console_println!("symlink: cannot create '{}': {:?}", link_path, e);
+        }
+    }
+}
+
+/// `xattr FILE [list | get KEY | set KEY VALUE | rm KEY]` — extended attribute ops.
+fn cmd_xattr(args: &str) {
+    let mut parts = args.splitn(2, ' ');
+    let file = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+
+    if file.is_empty() {
+        crate::console_println!("Usage: xattr <file> [list | get <key> | set <key> <value> | rm <key>]");
+        return;
+    }
+
+    // Default subcommand is "list".
+    if rest.is_empty() || rest == "list" {
+        match crate::fs::Vfs::list_xattrs(file) {
+            Ok(keys) => {
+                if keys.is_empty() {
+                    crate::console_println!("(no extended attributes)");
+                } else {
+                    for key in &keys {
+                        crate::console_println!("  {}", key);
+                    }
+                }
+            }
+            Err(e) => {
+                crate::console_println!("xattr: list '{}': {:?}", file, e);
+            }
+        }
+        return;
+    }
+
+    let mut sub_parts = rest.splitn(3, ' ');
+    let subcmd = sub_parts.next().unwrap_or("");
+    let key = sub_parts.next().unwrap_or("").trim();
+
+    match subcmd {
+        "get" => {
+            if key.is_empty() {
+                crate::console_println!("Usage: xattr <file> get <key>");
+                return;
+            }
+            match crate::fs::Vfs::get_xattr(file, key) {
+                Ok(val) => {
+                    // Try to display as UTF-8, fall back to hex.
+                    if let Ok(s) = core::str::from_utf8(&val) {
+                        crate::console_println!("{}", s);
+                    } else {
+                        let mut hex = alloc::string::String::with_capacity(val.len().saturating_mul(3));
+                        for (i, byte) in val.iter().enumerate() {
+                            if i > 0 {
+                                hex.push(' ');
+                            }
+                            hex.push_str(&alloc::format!("{:02x}", byte));
+                        }
+                        crate::console_println!("{}", hex);
+                    }
+                }
+                Err(e) => {
+                    crate::console_println!("xattr: get '{}' from '{}': {:?}", key, file, e);
+                }
+            }
+        }
+        "set" => {
+            let value = sub_parts.next().unwrap_or("").trim();
+            if key.is_empty() {
+                crate::console_println!("Usage: xattr <file> set <key> <value>");
+                return;
+            }
+            match crate::fs::Vfs::set_xattr(file, key, value.as_bytes()) {
+                Ok(()) => {
+                    crate::console_println!("Set {}={} on {}", key, value, file);
+                }
+                Err(e) => {
+                    crate::console_println!("xattr: set '{}' on '{}': {:?}", key, file, e);
+                }
+            }
+        }
+        "rm" | "remove" | "del" => {
+            if key.is_empty() {
+                crate::console_println!("Usage: xattr <file> rm <key>");
+                return;
+            }
+            match crate::fs::Vfs::remove_xattr(file, key) {
+                Ok(()) => {
+                    crate::console_println!("Removed '{}' from {}", key, file);
+                }
+                Err(e) => {
+                    crate::console_println!("xattr: rm '{}' from '{}': {:?}", key, file, e);
+                }
+            }
+        }
+        _ => {
+            crate::console_println!("xattr: unknown subcommand '{}'. Use list/get/set/rm.", subcmd);
+        }
+    }
+}
+
+/// `basename PATH` — extract the filename component from a path.
+fn cmd_basename(args: &str) {
+    let path = args.trim();
+    if path.is_empty() {
+        crate::console_println!("Usage: basename <path>");
+        return;
+    }
+
+    // Strip trailing slashes.
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        crate::console_println!("/");
+        return;
+    }
+
+    // Find last '/' and take everything after it.
+    if let Some(pos) = trimmed.rfind('/') {
+        if let Some(name) = trimmed.get(pos + 1..) {
+            crate::console_println!("{}", name);
+        } else {
+            crate::console_println!("/");
+        }
+    } else {
+        // No slash — the whole thing is the basename.
+        crate::console_println!("{}", trimmed);
+    }
+}
+
+/// `dirname PATH` — extract the directory component from a path.
+fn cmd_dirname(args: &str) {
+    let path = args.trim();
+    if path.is_empty() {
+        crate::console_println!("Usage: dirname <path>");
+        return;
+    }
+
+    // Strip trailing slashes.
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        crate::console_println!("/");
+        return;
+    }
+
+    // Find last '/' and take everything before it.
+    if let Some(pos) = trimmed.rfind('/') {
+        if pos == 0 {
+            crate::console_println!("/");
+        } else if let Some(dir) = trimmed.get(..pos) {
+            crate::console_println!("{}", dir);
+        } else {
+            crate::console_println!(".");
+        }
+    } else {
+        // No slash — dirname is ".".
+        crate::console_println!(".");
+    }
+}
+
+/// `realpath PATH` — resolve a path following all symlinks.
+fn cmd_realpath(args: &str) {
+    let path = args.trim();
+    if path.is_empty() {
+        crate::console_println!("Usage: realpath <path>");
+        return;
+    }
+
+    match crate::fs::Vfs::resolve_path(path) {
+        Ok(resolved) => {
+            crate::console_println!("{}", resolved);
+        }
+        Err(e) => {
+            crate::console_println!("realpath: '{}': {:?}", path, e);
+        }
+    }
+}
+
+/// `pwd` — print working directory (always / in kernel shell).
+fn cmd_pwd() {
+    // The kernel shell has no concept of a current working directory;
+    // all paths are absolute.  Report "/" as the logical cwd.
+    crate::console_println!("/");
+}
+
+/// `id` / `whoami` — show the current task's identity.
+fn cmd_id() {
+    let task_id = crate::sched::current_task_id();
+
+    // Try to look up process credentials.
+    // The kernel shell runs in the kernel's own context (task 0),
+    // which is always uid=0/gid=0 (root).
+    if let Some(creds) = crate::proc::pcb::get_credentials(task_id as u64) {
+        crate::console_println!(
+            "uid={} gid={} groups=[{}] task={}",
+            creds.uid,
+            creds.gid,
+            {
+                let mut g = alloc::string::String::new();
+                for (i, gid) in creds.groups.iter().enumerate() {
+                    if i > 0 {
+                        g.push_str(", ");
+                    }
+                    g.push_str(&alloc::format!("{}", gid));
+                }
+                g
+            },
+            task_id
+        );
+    } else {
+        // Fallback: kernel context, no PCB.
+        crate::console_println!("uid=0(root) gid=0(root) task={}", task_id);
+    }
+}
+
+/// `mktemp [DIR]` — create a temporary file and print its path.
+///
+/// Creates a file with a unique name in DIR (default: `/tmp`).
+fn cmd_mktemp(args: &str) {
+    let dir = if args.trim().is_empty() { "/tmp" } else { args.trim() };
+
+    // Generate unique name from HPET + TSC for entropy.
+    let ns = crate::hpet::elapsed_ns();
+    let tsc = unsafe {
+        // SAFETY: rdtsc is always available on x86_64 and has no side effects.
+        core::arch::x86_64::_rdtsc()
+    };
+    // Combine both sources for uniqueness.
+    let combined = ns ^ tsc;
+    let path = alloc::format!("{}/tmp.{:016x}", dir, combined);
+
+    match crate::fs::Vfs::write_file(&path, &[]) {
+        Ok(()) => {
+            crate::console_println!("{}", path);
+        }
+        Err(e) => {
+            crate::console_println!("mktemp: cannot create temp file in '{}': {:?}", dir, e);
         }
     }
 }

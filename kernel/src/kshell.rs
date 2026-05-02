@@ -5544,11 +5544,24 @@ fn cmd_stat(args: &str) {
             crate::console_println!("  Size: {}  Blocks: {}  Type: {}", meta.size, meta.blocks, type_str);
             crate::console_println!("  Links: {}", meta.nlinks);
             if meta.permissions != 0 {
-                crate::console_println!("  Perms: {:04o}  Uid: {}  Gid: {}",
-                    meta.permissions, meta.uid, meta.gid);
+                let perms = format_perms(meta.permissions);
+                let perm_str = core::str::from_utf8(&perms).unwrap_or("---------");
+                crate::console_println!("  Perms: {:04o} ({})  Uid: {}  Gid: {}",
+                    meta.permissions, perm_str, meta.uid, meta.gid);
             }
             if meta.attributes != crate::fs::FileAttr::NONE {
-                crate::console_println!("  Attrs: {:?}", meta.attributes);
+                let a = meta.attributes;
+                let mut flags = alloc::string::String::new();
+                if a.contains(crate::fs::FileAttr::IMMUTABLE) { flags.push_str("immutable "); }
+                if a.contains(crate::fs::FileAttr::APPEND_ONLY) { flags.push_str("append-only "); }
+                if a.contains(crate::fs::FileAttr::HIDDEN) { flags.push_str("hidden "); }
+                if a.contains(crate::fs::FileAttr::SYSTEM) { flags.push_str("system "); }
+                crate::console_println!("  Attrs: {}", flags.trim_end());
+            }
+
+            // Show filesystem type via VFS mount table.
+            if let Ok(info) = crate::fs::Vfs::statvfs(&path) {
+                crate::console_println!("  FS:   {} (block size: {})", info.fs_type, info.block_size);
             }
 
             let ns_to_display = |ns: u64| -> alloc::string::String {
@@ -5562,6 +5575,25 @@ fn cmd_stat(args: &str) {
             crate::console_println!("  Modified: {}", ns_to_display(meta.modified_ns));
             crate::console_println!("  Accessed: {}", ns_to_display(meta.accessed_ns));
             crate::console_println!("  Changed:  {}", ns_to_display(meta.changed_ns));
+
+            // Show extended attributes if any.
+            if !meta.xattrs.is_empty() {
+                crate::console_println!("  Xattrs:");
+                for (key, value) in &meta.xattrs {
+                    if value.len() <= 64 {
+                        // Short value — display inline.
+                        let display = if value.iter().all(|&b| b >= 0x20 && b < 0x7F) {
+                            alloc::format!("\"{}\"",
+                                core::str::from_utf8(value).unwrap_or("?"))
+                        } else {
+                            alloc::format!("({} bytes, binary)", value.len())
+                        };
+                        crate::console_println!("    {} = {}", key, display);
+                    } else {
+                        crate::console_println!("    {} ({} bytes)", key, value.len());
+                    }
+                }
+            }
         }
         Err(e) => {
             crate::console_println!("stat: {}: {:?}", path, e);

@@ -544,6 +544,26 @@ fn positional_all() -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Case/esac pattern matching
+// ---------------------------------------------------------------------------
+
+/// Case statement body collector.
+///
+/// Buffers lines between `case WORD in` and `esac`.  Tracks nested
+/// case/esac pairs so inner case blocks don't terminate the outer one.
+struct CaseCollector {
+    /// The word being matched (already expanded).
+    word: String,
+    /// Buffered lines between `in` and `esac`.
+    body: Vec<String>,
+    /// Nesting depth for nested case/esac blocks.
+    nesting: u32,
+}
+
+/// Active case statement collector (only one at a time).
+static CASE_COLLECTOR: Mutex<Option<CaseCollector>> = Mutex::new(None);
+
 /// Check whether execution is currently active (not skipped by an
 /// outer control-flow block).
 fn control_should_execute() -> bool {
@@ -596,6 +616,39 @@ fn handle_control_flow(line: &str) -> bool {
     // Check for function definition: `name() {` or `function name {`.
     if is_function_definition(trimmed) {
         return true;
+    }
+
+    // If we're collecting case/esac body lines, buffer them.
+    {
+        let mut cc = CASE_COLLECTOR.lock();
+        if let Some(ref mut state) = *cc {
+            match first_word {
+                "case" => {
+                    // Nested case — increase depth.
+                    state.nesting = state.nesting.saturating_add(1);
+                    state.body.push(String::from(trimmed));
+                    return true;
+                }
+                "esac" => {
+                    if state.nesting > 0 {
+                        state.nesting = state.nesting.saturating_sub(1);
+                        state.body.push(String::from(trimmed));
+                        return true;
+                    }
+                    // Our matching esac — execute the case.
+                    let word = state.word.clone();
+                    let body = state.body.clone();
+                    *cc = None;
+                    drop(cc);
+                    execute_case(&word, &body);
+                    return true;
+                }
+                _ => {
+                    state.body.push(String::from(trimmed));
+                    return true;
+                }
+            }
+        }
     }
 
     // If we're collecting loop body lines (while or for), buffer them.
@@ -726,6 +779,40 @@ fn handle_control_flow(line: &str) -> bool {
         }
         "done" => {
             crate::console_println!("Syntax error: done without while/for");
+            return true;
+        }
+        "case" => {
+            // Parse: `case WORD in` — WORD may contain variables.
+            let rest = trimmed.get(4..).unwrap_or("").trim();
+
+            // Strip trailing "in" (required).
+            let word_part = if rest.ends_with(" in") || rest.ends_with("\tin") {
+                rest.get(..rest.len().saturating_sub(3)).unwrap_or("").trim()
+            } else if rest == "in" {
+                // `case in` — empty word.
+                ""
+            } else {
+                crate::console_println!("Syntax error: case requires 'in' keyword");
+                return true;
+            };
+
+            if word_part.is_empty() {
+                crate::console_println!("Syntax error: case requires a word before 'in'");
+                return true;
+            }
+
+            // Expand the word now (so patterns match the expanded value).
+            let expanded_word = expand_vars(word_part);
+
+            *CASE_COLLECTOR.lock() = Some(CaseCollector {
+                word: expanded_word.trim().into(),
+                body: Vec::new(),
+                nesting: 0,
+            });
+            return true;
+        }
+        "esac" => {
+            crate::console_println!("Syntax error: esac without case");
             return true;
         }
         _ => {}
@@ -958,6 +1045,121 @@ fn split_words(s: &str) -> Vec<String> {
     }
 
     words
+}
+
+/// Execute a case statement: match the word against patterns and run
+/// the commands for the first matching pattern.
+///
+/// The body is the collected lines between `case WORD in` and `esac`.
+/// Patterns use glob-style matching (*, ?, [abc]).  Multiple patterns
+/// can be separated with `|`.
+///
+/// Format of each clause:
+///   `PATTERN[|PATTERN]...) COMMAND; COMMAND; ... ;;`
+///
+/// Commands may span multiple lines; `;;` terminates a clause.
+fn execute_case(word: &str, body: &[String]) {
+    // Join all body lines into one string for easier parsing.
+    // Case clauses are delimited by `;;` and `)`/`esac`.
+    let joined = body.join("\n");
+
+    // Parse into clauses: `PATTERNS) BODY ;;`
+    let clauses = parse_case_clauses(&joined);
+
+    for (patterns, commands) in &clauses {
+        // Check if any pattern matches the word.
+        let matched = patterns.iter().any(|p| case_pattern_match(word, p.trim()));
+        if matched {
+            // Execute the commands for this clause.
+            for cmd in commands {
+                let cmd = cmd.trim();
+                if !cmd.is_empty() {
+                    execute(cmd);
+                }
+            }
+            return; // Only the first matching clause runs.
+        }
+    }
+    // No clause matched — no error, just no-op.
+}
+
+/// Parse case body text into (patterns, commands) clauses.
+///
+/// Returns a vector of (pattern_list, command_list) tuples.
+fn parse_case_clauses(body: &str) -> Vec<(Vec<String>, Vec<String>)> {
+    let mut clauses = Vec::new();
+    let mut remaining = body.trim();
+
+    while !remaining.is_empty() {
+        // Find the `)` that separates patterns from commands.
+        // Skip leading whitespace and any `(` prefix on patterns.
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+
+        // Optional leading `(` before pattern.
+        if remaining.starts_with('(') {
+            remaining = remaining.get(1..).unwrap_or("").trim_start();
+        }
+
+        let paren_pos = match remaining.find(')') {
+            Some(p) => p,
+            None => break, // Malformed — no `)` found.
+        };
+
+        let patterns_str = remaining.get(..paren_pos).unwrap_or("");
+        remaining = remaining.get(paren_pos.saturating_add(1)..).unwrap_or("");
+
+        // Split patterns on `|`.
+        let patterns: Vec<String> = patterns_str
+            .split('|')
+            .map(|s| String::from(s.trim()))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if patterns.is_empty() {
+            break;
+        }
+
+        // Find the `;;` that terminates this clause.
+        let commands_str = if let Some(end) = remaining.find(";;") {
+            let cmds = remaining.get(..end).unwrap_or("");
+            remaining = remaining.get(end.saturating_add(2)..).unwrap_or("");
+            cmds
+        } else {
+            // Last clause may omit `;;` before `esac`.
+            let cmds = remaining;
+            remaining = "";
+            cmds
+        };
+
+        // Split commands on `;` and newlines.
+        let commands: Vec<String> = commands_str
+            .split(|c: char| c == ';' || c == '\n')
+            .map(|s| String::from(s.trim()))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        clauses.push((patterns, commands));
+    }
+
+    clauses
+}
+
+/// Match a word against a case pattern (glob-style).
+///
+/// Supports `*` (match anything), `?` (match one char), and `[abc]`
+/// (character class).  Falls back to the existing VFS glob_match()
+/// for consistency with the rest of the shell.
+fn case_pattern_match(word: &str, pattern: &str) -> bool {
+    // `*` matches everything (common default case).
+    if pattern == "*" {
+        return true;
+    }
+
+    // Use the VFS glob matcher for full glob support.
+    crate::fs::vfs::glob_match(pattern, word, false)
 }
 
 /// Detect and handle function definitions.

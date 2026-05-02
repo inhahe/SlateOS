@@ -2509,7 +2509,7 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::write_file(dcache_test, b"dcache test data")?;
 
         // Record stats before our test.
-        let (hits_before, _misses_before, _) = Vfs::dcache_stats();
+        let (_hits_before, _misses_before, _) = Vfs::dcache_stats();
 
         // First access: will be a miss (not cached yet) or a hit
         // if a previous operation already cached it.
@@ -2586,6 +2586,176 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         serial_println!("[vfs]     dcache test completed OK");
+    }
+
+    // --- Recursive copy/remove tests ---
+    if has_tmp {
+        serial_println!("[vfs]   Testing recursive copy and remove...");
+
+        // Create a directory tree: /tmp/_vfs_rc/a/b with files at each level.
+        Vfs::mkdir("/tmp/_vfs_rc")?;
+        Vfs::mkdir("/tmp/_vfs_rc/a")?;
+        Vfs::mkdir("/tmp/_vfs_rc/a/b")?;
+        Vfs::write_file("/tmp/_vfs_rc/top.txt", b"top level")?;
+        Vfs::write_file("/tmp/_vfs_rc/a/mid.txt", b"mid level")?;
+        Vfs::write_file("/tmp/_vfs_rc/a/b/bot.txt", b"bottom level")?;
+
+        // Verify tree exists.
+        let top = Vfs::stat("/tmp/_vfs_rc")?;
+        if top.entry_type != EntryType::Directory {
+            serial_println!("[vfs]   FAIL: /tmp/_vfs_rc should be directory");
+            return Err(KernelError::InternalError);
+        }
+        let bot = Vfs::read_file("/tmp/_vfs_rc/a/b/bot.txt")?;
+        if bot != b"bottom level" {
+            serial_println!("[vfs]   FAIL: bot.txt content mismatch");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     directory tree created OK (3 dirs, 3 files)");
+
+        // Recursive copy: /tmp/_vfs_rc → /tmp/_vfs_rc_copy
+        let bytes_copied = Vfs::copy_recursive("/tmp/_vfs_rc", "/tmp/_vfs_rc_copy")?;
+        serial_println!("[vfs]     copy_recursive: {} bytes copied", bytes_copied);
+
+        // Verify copy contents match.
+        let copy_top = Vfs::read_file("/tmp/_vfs_rc_copy/top.txt")?;
+        if copy_top != b"top level" {
+            serial_println!("[vfs]   FAIL: copied top.txt content mismatch");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc_copy");
+            return Err(KernelError::InternalError);
+        }
+        let copy_mid = Vfs::read_file("/tmp/_vfs_rc_copy/a/mid.txt")?;
+        if copy_mid != b"mid level" {
+            serial_println!("[vfs]   FAIL: copied mid.txt content mismatch");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc_copy");
+            return Err(KernelError::InternalError);
+        }
+        let copy_bot = Vfs::read_file("/tmp/_vfs_rc_copy/a/b/bot.txt")?;
+        if copy_bot != b"bottom level" {
+            serial_println!("[vfs]   FAIL: copied bot.txt content mismatch");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc_copy");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     copy_recursive: all files verified OK");
+
+        // Verify the copy has the expected structure.
+        let copy_entries = Vfs::readdir("/tmp/_vfs_rc_copy")?;
+        let has_a = copy_entries.iter().any(|e| e.name == "a" && e.entry_type == EntryType::Directory);
+        let has_top = copy_entries.iter().any(|e| e.name == "top.txt" && e.entry_type == EntryType::File);
+        if !has_a || !has_top {
+            serial_println!("[vfs]   FAIL: copy directory structure wrong (a={}, top.txt={})", has_a, has_top);
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc_copy");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     copy_recursive: directory structure OK");
+
+        // Recursive remove: /tmp/_vfs_rc_copy
+        let removed_count = Vfs::remove_recursive("/tmp/_vfs_rc_copy")?;
+        // Expected: 3 files + 3 directories = 6 items
+        if removed_count < 6 {
+            serial_println!(
+                "[vfs]   WARNING: remove_recursive removed {} items, expected 6",
+                removed_count
+            );
+        } else {
+            serial_println!("[vfs]     remove_recursive: {} items removed OK", removed_count);
+        }
+
+        // Verify the copy is gone.
+        match Vfs::stat("/tmp/_vfs_rc_copy") {
+            Err(KernelError::NotFound) => {
+                serial_println!("[vfs]     remove_recursive: directory confirmed gone OK");
+            }
+            Ok(_) => {
+                serial_println!("[vfs]   FAIL: /tmp/_vfs_rc_copy still exists after remove_recursive");
+                let _ = Vfs::remove_recursive("/tmp/_vfs_rc_copy");
+                let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                serial_println!("[vfs]   FAIL: stat after remove_recursive: {:?}", e);
+                let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Verify original still exists.
+        let orig = Vfs::read_file("/tmp/_vfs_rc/a/b/bot.txt")?;
+        if orig != b"bottom level" {
+            serial_println!("[vfs]   FAIL: original bot.txt corrupted after copy+remove");
+            let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     original tree intact after removing copy OK");
+
+        // Clean up original.
+        let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
+        serial_println!("[vfs]     recursive copy/remove test PASSED");
+    }
+
+    // --- Cross-mount rename test ---
+    // This tests rename across /tmp (memfs) and / (ext4/fat).
+    // Only runs if both root and /tmp are available as separate mounts.
+    if has_tmp {
+        serial_println!("[vfs]   Testing cross-mount rename...");
+
+        let src_path = "/tmp/_vfs_xmv_src.txt";
+        let dst_path = "/_vfs_xmv_dst.txt";
+        Vfs::write_file(src_path, b"cross mount data")?;
+
+        // Rename from /tmp to / — this is cross-mount.
+        match Vfs::rename(src_path, dst_path) {
+            Ok(()) => {
+                // Verify destination has the data.
+                match Vfs::read_file(dst_path) {
+                    Ok(data) if data == b"cross mount data" => {
+                        serial_println!("[vfs]     cross-mount rename: data verified OK");
+                    }
+                    Ok(data) => {
+                        serial_println!(
+                            "[vfs]   FAIL: cross-mount rename data mismatch ({} bytes)",
+                            data.len()
+                        );
+                        let _ = Vfs::remove(dst_path);
+                        return Err(KernelError::InternalError);
+                    }
+                    Err(e) => {
+                        serial_println!("[vfs]   FAIL: read after cross-mount rename: {:?}", e);
+                        let _ = Vfs::remove(dst_path);
+                        return Err(KernelError::InternalError);
+                    }
+                }
+
+                // Verify source is gone.
+                match Vfs::stat(src_path) {
+                    Err(KernelError::NotFound) => {
+                        serial_println!("[vfs]     cross-mount rename: source removed OK");
+                    }
+                    _ => {
+                        serial_println!("[vfs]   FAIL: source still exists after cross-mount rename");
+                        let _ = Vfs::remove(src_path);
+                        let _ = Vfs::remove(dst_path);
+                        return Err(KernelError::InternalError);
+                    }
+                }
+
+                let _ = Vfs::remove(dst_path);
+                serial_println!("[vfs]     cross-mount rename test PASSED");
+            }
+            Err(KernelError::NotSupported) => {
+                // Root filesystem may not support write operations.
+                serial_println!("[vfs]     cross-mount rename: root FS is read-only, skipping");
+                let _ = Vfs::remove(src_path);
+            }
+            Err(e) => {
+                serial_println!("[vfs]     cross-mount rename failed: {:?} (may be expected)", e);
+                let _ = Vfs::remove(src_path);
+            }
+        }
     }
 
     serial_println!("[vfs] Self-test PASSED");

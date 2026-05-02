@@ -871,8 +871,8 @@ impl FileSystem for Ext4Fs {
             modified_ns,
             accessed_ns,
             changed_ns,
-            uid: u32::from(inode.i_uid),
-            gid: u32::from(inode.i_gid),
+            uid: inode_uid_32(&inode),
+            gid: inode_gid_32(&inode),
             permissions,
             attributes: attrs,
             nlinks: u32::from(inode.i_links_count),
@@ -898,10 +898,9 @@ impl FileSystem for Ext4Fs {
         let ino = self.driver.resolve_path(path)?;
         let mut inode = self.driver.read_inode(ino)?;
 
-        // Note: ext4 supports 32-bit UIDs via i_uid + i_osd2 high bits.
-        // We only set the low 16 bits for now.
-        inode.i_uid = uid as u16;
-        inode.i_gid = gid as u16;
+        // Write the full 32-bit UID/GID (low 16 in i_uid/i_gid, high 16 in i_osd2).
+        set_inode_uid_32(&mut inode, uid);
+        set_inode_gid_32(&mut inode, gid);
 
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;
@@ -1440,6 +1439,48 @@ fn inode_file_size(inode: &super::ondisk::Ext4Inode) -> u64 {
     } else {
         lo
     }
+}
+
+/// Read the full 32-bit UID from an ext4 inode.
+///
+/// Linux ext4 splits UIDs into `i_uid` (low 16 bits) and `i_osd2[4..6]`
+/// (high 16 bits).  UIDs > 65535 are common on modern systems (container
+/// environments, NFS, etc.).
+fn inode_uid_32(inode: &super::ondisk::Ext4Inode) -> u32 {
+    let lo = u32::from(inode.i_uid);
+    let hi = u32::from(u16::from_le_bytes([
+        *inode.i_osd2.get(4).unwrap_or(&0),
+        *inode.i_osd2.get(5).unwrap_or(&0),
+    ]));
+    lo | (hi << 16)
+}
+
+/// Read the full 32-bit GID from an ext4 inode.
+fn inode_gid_32(inode: &super::ondisk::Ext4Inode) -> u32 {
+    let lo = u32::from(inode.i_gid);
+    let hi = u32::from(u16::from_le_bytes([
+        *inode.i_osd2.get(6).unwrap_or(&0),
+        *inode.i_osd2.get(7).unwrap_or(&0),
+    ]));
+    lo | (hi << 16)
+}
+
+/// Write a 32-bit UID into an ext4 inode (low 16 in `i_uid`, high 16 in `i_osd2`).
+fn set_inode_uid_32(inode: &mut super::ondisk::Ext4Inode, uid: u32) {
+    inode.i_uid = uid as u16;
+    let hi = (uid >> 16) as u16;
+    let hi_bytes = hi.to_le_bytes();
+    if let Some(slot) = inode.i_osd2.get_mut(4) { *slot = hi_bytes[0]; }
+    if let Some(slot) = inode.i_osd2.get_mut(5) { *slot = hi_bytes[1]; }
+}
+
+/// Write a 32-bit GID into an ext4 inode.
+fn set_inode_gid_32(inode: &mut super::ondisk::Ext4Inode, gid: u32) {
+    inode.i_gid = gid as u16;
+    let hi = (gid >> 16) as u16;
+    let hi_bytes = hi.to_le_bytes();
+    if let Some(slot) = inode.i_osd2.get_mut(6) { *slot = hi_bytes[0]; }
+    if let Some(slot) = inode.i_osd2.get_mut(7) { *slot = hi_bytes[1]; }
 }
 
 /// Split a path into parent directory and final name component.

@@ -8,6 +8,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use spin::Mutex;
+
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
@@ -176,13 +178,215 @@ impl Ext4Dcache {
 }
 
 // ---------------------------------------------------------------------------
+// Extent cache — avoids re-walking the extent tree for sequential reads
+// ---------------------------------------------------------------------------
+
+/// Number of entries in the extent range cache.
+///
+/// Caches `(inode, logical_block_start) → (physical_block_start, length)`
+/// so that sequential reads within the same extent range don't need to
+/// walk the extent tree from scratch.  256 entries covers typical workloads
+/// (multiple files being read concurrently, each with several extents).
+pub(super) const EXTENT_CACHE_SIZE: usize = 256;
+
+/// A cached extent range mapping.
+struct ExtentCacheEntry {
+    /// Inode number this extent belongs to.
+    inode: u32,
+    /// Starting logical block of the extent.
+    logical_start: u64,
+    /// Starting physical block of the extent.
+    physical_start: u64,
+    /// Number of contiguous blocks in the extent.
+    length: u64,
+    /// LRU access counter.
+    last_access: u64,
+    /// Whether this entry is valid.
+    valid: bool,
+}
+
+impl ExtentCacheEntry {
+    const fn empty() -> Self {
+        Self {
+            inode: 0,
+            logical_start: 0,
+            physical_start: 0,
+            length: 0,
+            last_access: 0,
+            valid: false,
+        }
+    }
+}
+
+/// Interior-mutable state for the extent range cache.
+struct ExtentCacheInner {
+    entries: Vec<ExtentCacheEntry>,
+    counter: u64,
+    hits: u64,
+    misses: u64,
+}
+
+/// Extent range cache for ext4.
+///
+/// When `lookup_physical_block()` finds a mapping by walking the extent
+/// tree, we cache the full extent range.  Subsequent lookups for the same
+/// inode check the cache first — if the logical block falls within a
+/// cached extent, we compute the physical block with zero disk I/O.
+///
+/// This is especially effective for sequential reads (reading a file from
+/// start to end), where every block in the same extent hits the cache.
+///
+/// Interior-mutable via a spin mutex so that `lookup_physical_block()`
+/// can update the cache even through a `&self` reference (the htree
+/// module calls it via immutable borrows).
+pub(super) struct ExtentCache {
+    inner: Mutex<ExtentCacheInner>,
+}
+
+impl ExtentCache {
+    fn new() -> Self {
+        let mut entries = Vec::with_capacity(EXTENT_CACHE_SIZE);
+        for _ in 0..EXTENT_CACHE_SIZE {
+            entries.push(ExtentCacheEntry::empty());
+        }
+        Self {
+            inner: Mutex::new(ExtentCacheInner {
+                entries,
+                counter: 0,
+                hits: 0,
+                misses: 0,
+            }),
+        }
+    }
+
+    /// Look up a physical block for (inode, logical_block).
+    ///
+    /// Returns `Some(physical_block)` if the logical block falls within
+    /// a cached extent range.  Interior-mutable: safe to call through
+    /// `&self` (acquires spin lock internally).
+    fn lookup(&self, inode: u32, logical_block: u64) -> Option<u64> {
+        let mut inner = self.inner.lock();
+
+        // Phase 1: immutable scan to find matching entry index + result.
+        let found = inner.entries.iter()
+            .enumerate()
+            .find(|(_, e)| {
+                e.valid
+                    && e.inode == inode
+                    && logical_block >= e.logical_start
+                    && logical_block < e.logical_start.saturating_add(e.length)
+            })
+            .map(|(i, e)| {
+                let offset = logical_block.saturating_sub(e.logical_start);
+                (i, e.physical_start.saturating_add(offset))
+            });
+
+        // Phase 2: mutable update of LRU counter and stats.
+        match found {
+            Some((idx, phys)) => {
+                inner.counter = inner.counter.wrapping_add(1);
+                let c = inner.counter;
+                inner.hits = inner.hits.wrapping_add(1);
+                if let Some(e) = inner.entries.get_mut(idx) {
+                    e.last_access = c;
+                }
+                Some(phys)
+            }
+            None => {
+                inner.misses = inner.misses.wrapping_add(1);
+                None
+            }
+        }
+    }
+
+    /// Insert a full extent range into the cache.
+    ///
+    /// Interior-mutable: safe to call through `&self`.
+    fn insert(
+        &self,
+        inode: u32,
+        logical_start: u64,
+        physical_start: u64,
+        length: u64,
+    ) {
+        let mut inner = self.inner.lock();
+        inner.counter = inner.counter.wrapping_add(1);
+        let c = inner.counter;
+
+        // Check for existing entry covering the same range (update).
+        let existing = inner.entries.iter()
+            .position(|e| e.valid && e.inode == inode && e.logical_start == logical_start);
+
+        if let Some(idx) = existing {
+            if let Some(e) = inner.entries.get_mut(idx) {
+                e.physical_start = physical_start;
+                e.length = length;
+                e.last_access = c;
+            }
+            return;
+        }
+
+        // Find empty slot.
+        let empty = inner.entries.iter().position(|e| !e.valid);
+
+        if let Some(idx) = empty {
+            if let Some(e) = inner.entries.get_mut(idx) {
+                e.inode = inode;
+                e.logical_start = logical_start;
+                e.physical_start = physical_start;
+                e.length = length;
+                e.last_access = c;
+                e.valid = true;
+            }
+            return;
+        }
+
+        // Evict LRU: find entry with lowest last_access.
+        let lru_idx = inner.entries.iter()
+            .enumerate()
+            .min_by_key(|(_, e)| e.last_access)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        if let Some(e) = inner.entries.get_mut(lru_idx) {
+            e.inode = inode;
+            e.logical_start = logical_start;
+            e.physical_start = physical_start;
+            e.length = length;
+            e.last_access = c;
+            e.valid = true;
+        }
+    }
+
+    /// Invalidate all cached extents for a given inode.
+    ///
+    /// Called when the inode's extent tree changes (writes, truncate).
+    /// Interior-mutable: safe to call through `&self`.
+    fn invalidate_inode(&self, inode: u32) {
+        let mut inner = self.inner.lock();
+        for entry in inner.entries.iter_mut() {
+            if entry.valid && entry.inode == inode {
+                entry.valid = false;
+            }
+        }
+    }
+
+    /// Return (hits, misses, valid_count).
+    fn stats(&self) -> (u64, u64, usize) {
+        let inner = self.inner.lock();
+        let valid = inner.entries.iter().filter(|e| e.valid).count();
+        (inner.hits, inner.misses, valid)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ext4 driver
 // ---------------------------------------------------------------------------
 
 /// An ext4 filesystem instance.
 ///
 /// Holds the parsed superblock, block reader, cached block group
-/// descriptor table, and directory entry cache.
+/// descriptor table, directory entry cache, and extent range cache.
 pub struct Ext4Driver {
     /// Parsed superblock with derived values.
     sb: ParsedSuperblock,
@@ -192,6 +396,8 @@ pub struct Ext4Driver {
     group_descs: Vec<Ext4GroupDesc>,
     /// Directory entry cache for fast name→inode lookups.
     pub(super) dcache: Ext4Dcache,
+    /// Extent range cache for fast logical→physical block mapping.
+    extent_cache: ExtentCache,
 }
 
 impl Ext4Driver {
@@ -232,6 +438,7 @@ impl Ext4Driver {
             reader,
             group_descs,
             dcache: Ext4Dcache::new(),
+            extent_cache: ExtentCache::new(),
         })
     }
 
@@ -239,6 +446,20 @@ impl Ext4Driver {
     #[must_use]
     pub fn superblock(&self) -> &ParsedSuperblock {
         &self.sb
+    }
+
+    /// Invalidate all cached extent mappings for an inode.
+    ///
+    /// Must be called whenever an inode's extent tree is modified
+    /// (e.g., `write_file_data`, `truncate`, file deletion) so that
+    /// stale physical block mappings are not returned from the cache.
+    pub(super) fn invalidate_extent_cache(&self, inode_nr: u32) {
+        self.extent_cache.invalidate_inode(inode_nr);
+    }
+
+    /// Return extent cache statistics: (hits, misses, valid_entries).
+    pub(super) fn extent_cache_stats(&self) -> (u64, u64, usize) {
+        self.extent_cache.stats()
     }
 
     /// Read a single ext4 block by physical block number.
@@ -255,12 +476,14 @@ impl Ext4Driver {
     /// Map a logical block number to a physical block number for an inode.
     ///
     /// Wrapper around [`lookup_physical_block`] for the htree module.
+    /// `inode_nr` is the inode number (needed for the extent cache key).
     pub(super) fn logical_to_physical(
         &self,
+        inode_nr: u32,
         inode: &Ext4Inode,
         logical_block: u64,
     ) -> KernelResult<Option<u64>> {
-        self.lookup_physical_block(inode, logical_block)
+        self.lookup_physical_block(inode_nr, inode, logical_block)
     }
 
     /// Read an inode by number.
@@ -1039,16 +1262,24 @@ impl Ext4Driver {
 
     /// Look up the physical block number for a given logical block.
     ///
-    /// Walks the extent tree and returns the physical block that
-    /// corresponds to `logical_block`, or `None` if the block is
-    /// sparse (not allocated, e.g., in a file with holes).
+    /// Checks the extent cache first for a zero-I/O hit.  On miss,
+    /// walks the extent tree and caches the discovered extent range
+    /// so that subsequent lookups within the same extent are instant.
+    ///
+    /// `inode_nr` is the inode number (cache key, not stored in `Ext4Inode`).
     pub fn lookup_physical_block(
         &self,
+        inode_nr: u32,
         inode: &Ext4Inode,
         logical_block: u64,
     ) -> KernelResult<Option<u64>> {
         if (inode.i_flags & inode_flags::EXTENTS) == 0 {
             return Err(KernelError::NotSupported);
+        }
+
+        // Fast path: check the extent cache.
+        if let Some(phys) = self.extent_cache.lookup(inode_nr, logical_block) {
+            return Ok(Some(phys));
         }
 
         let block_bytes = inode_block_as_bytes(inode);
@@ -1057,12 +1288,17 @@ impl Ext4Driver {
             return Ok(None);
         }
 
-        self.lookup_in_tree(block_bytes, &header, logical_block)
+        self.lookup_in_tree(inode_nr, block_bytes, &header, logical_block)
     }
 
     /// Recursively look up a logical block in an extent tree node.
+    ///
+    /// When a matching leaf extent is found, it is inserted into the
+    /// extent cache so that subsequent lookups within the same range
+    /// are served from cache without any I/O.
     fn lookup_in_tree(
         &self,
+        inode_nr: u32,
         node_data: &[u8],
         header: &Ext4ExtentHeader,
         logical_block: u64,
@@ -1088,6 +1324,15 @@ impl Ext4Driver {
                 if logical_block >= ext_logical
                     && logical_block < ext_logical.saturating_add(ext_len)
                 {
+                    // Cache the full extent range for future lookups
+                    // within the same contiguous run.
+                    self.extent_cache.insert(
+                        inode_nr,
+                        ext_logical,
+                        ext_phys,
+                        ext_len,
+                    );
+
                     let offset_in_ext = logical_block.saturating_sub(ext_logical);
                     return Ok(Some(ext_phys.saturating_add(offset_in_ext)));
                 }
@@ -1129,7 +1374,7 @@ impl Ext4Driver {
                     return Ok(None);
                 }
 
-                self.lookup_in_tree(&child_data, &child_header, logical_block)
+                self.lookup_in_tree(inode_nr, &child_data, &child_header, logical_block)
             } else {
                 Ok(None)
             }
@@ -1141,8 +1386,12 @@ impl Ext4Driver {
     /// Only modifies the disk blocks that are affected by the write.
     /// Does NOT extend the file — writes past the end are truncated.
     /// Caller should fall back to read-modify-write for extending writes.
+    ///
+    /// `inode_nr` is passed through to `lookup_physical_block` for the
+    /// extent cache.
     pub fn write_at_inplace(
         &self,
+        inode_nr: u32,
         inode: &Ext4Inode,
         offset: u64,
         data: &[u8],
@@ -1164,8 +1413,8 @@ impl Ext4Driver {
             let logical_block = cur_offset / block_size;
             let offset_in_block = (cur_offset % block_size) as usize;
 
-            // Look up the physical block.
-            let phys = self.lookup_physical_block(inode, logical_block)?
+            // Look up the physical block (extent cache accelerated).
+            let phys = self.lookup_physical_block(inode_nr, inode, logical_block)?
                 .ok_or(KernelError::IoError)?;
 
             // Read the existing block.

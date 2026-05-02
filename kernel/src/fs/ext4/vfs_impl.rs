@@ -187,6 +187,9 @@ impl FileSystem for Ext4Fs {
                 let old_inode = inode;
 
                 let mut new_inode = old_inode;
+                // Invalidate cached extent mappings before rebuilding
+                // the extent tree — old ranges become stale.
+                self.driver.invalidate_extent_cache(ino);
                 self.driver.write_file_data(&mut new_inode, data)?;
                 self.driver.write_inode(ino, &new_inode)?;
 
@@ -229,6 +232,7 @@ impl FileSystem for Ext4Fs {
         inode.i_links_count = inode.i_links_count.saturating_sub(1);
         if inode.i_links_count == 0 {
             // Free all data blocks owned by this file.
+            self.driver.invalidate_extent_cache(ino);
             self.driver.free_inode_data(&inode)?;
             // Free the external xattr block if present.
             self.driver.free_xattr_block(&inode)?;
@@ -333,6 +337,7 @@ impl FileSystem for Ext4Fs {
         self.driver.write_inode(parent_ino, &parent_inode)?;
 
         // Free the directory's data blocks and external xattr block.
+        self.driver.invalidate_extent_cache(ino);
         self.driver.free_inode_data(&inode)?;
         self.driver.free_xattr_block(&inode)?;
 
@@ -407,6 +412,7 @@ impl FileSystem for Ext4Fs {
                 dest.copy_from_slice(&dst_parent_ino.to_le_bytes());
             }
             let mut dir_inode_copy = src_inode;
+            self.driver.invalidate_extent_cache(src_ino);
             self.driver.write_file_data(&mut dir_inode_copy, &dir_data)?;
 
             // Old parent loses a link (the moved dir's ".." no longer
@@ -455,7 +461,7 @@ impl FileSystem for Ext4Fs {
         if end <= file_size {
             // Write is within existing file bounds — modify blocks in place.
             // No block allocation needed, no extent tree changes.
-            self.driver.write_at_inplace(&inode, offset, data)?;
+            self.driver.write_at_inplace(ino, &inode, offset, data)?;
             self.driver.flush()?;
             Ok(())
         } else {
@@ -531,6 +537,7 @@ impl FileSystem for Ext4Fs {
             data.truncate(size as usize);
 
             let mut new_inode = inode;
+            self.driver.invalidate_extent_cache(ino);
             self.driver.write_file_data(&mut new_inode, &data)?;
             self.driver.write_inode(ino, &new_inode)?;
 
@@ -551,6 +558,7 @@ impl FileSystem for Ext4Fs {
             data.resize(size as usize, 0);
 
             let mut new_inode = inode;
+            self.driver.invalidate_extent_cache(ino);
             self.driver.write_file_data(&mut new_inode, &data)?;
             self.driver.write_inode(ino, &new_inode)?;
 
@@ -845,6 +853,8 @@ impl FileSystem for Ext4Fs {
 
     fn debug_stats(&self) -> String {
         let mut s = self.driver.superblock().summary();
+
+        // Directory entry cache stats.
         let (hits, misses, valid) = self.driver.dcache.stats();
         let total = hits.saturating_add(misses);
         let rate = if total > 0 {
@@ -856,6 +866,20 @@ impl FileSystem for Ext4Fs {
             "\ndcache: {}/{} slots, {} hits, {} misses ({}% hit rate)",
             valid, super::driver::EXT4_DCACHE_SIZE, hits, misses, rate,
         ));
+
+        // Extent range cache stats.
+        let (ehits, emisses, evalid) = self.driver.extent_cache_stats();
+        let etotal = ehits.saturating_add(emisses);
+        let erate = if etotal > 0 {
+            ehits.saturating_mul(100) / etotal
+        } else {
+            0
+        };
+        s.push_str(&alloc::format!(
+            "\nextent_cache: {}/{} slots, {} hits, {} misses ({}% hit rate)",
+            evalid, super::driver::EXTENT_CACHE_SIZE, ehits, emisses, erate,
+        ));
+
         s
     }
 
@@ -1041,6 +1065,7 @@ impl Ext4Fs {
 
                         // Write modified directory data back.
                         let mut dir_inode_copy = *dir_inode;
+                        self.driver.invalidate_extent_cache(dir_ino);
                         self.driver.write_file_data(
                             &mut dir_inode_copy,
                             &dir_data,

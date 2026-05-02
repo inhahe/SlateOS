@@ -322,7 +322,7 @@ pub fn htree_lookup(
     }
 
     // Map logical block 0 → physical block for the dx_root.
-    let phys_block = match driver.logical_to_physical(&dir_inode, 0) {
+    let phys_block = match driver.logical_to_physical(dir_ino, &dir_inode, 0) {
         Ok(Some(pb)) => pb,
         Ok(None) => return Ok(None), // Empty directory — shouldn't happen with htree.
         Err(_) => return Ok(None),   // Fall back to linear scan on error.
@@ -380,13 +380,13 @@ pub fn htree_lookup(
 
     // If there are indirect levels, we need to descend through dx_nodes.
     let final_block = if info.indirect_levels > 0 {
-        descend_dx_nodes(driver, &dir_inode, leaf_block, target_hash, info.indirect_levels)?
+        descend_dx_nodes(driver, &dir_inode, dir_ino, leaf_block, target_hash, info.indirect_levels)?
     } else {
         leaf_block
     };
 
     // Read the leaf block and linear-scan for the name.
-    let leaf_phys = match driver.logical_to_physical(&dir_inode, u64::from(final_block)) {
+    let leaf_phys = match driver.logical_to_physical(dir_ino, &dir_inode, u64::from(final_block)) {
         Ok(Some(pb)) => pb,
         _ => return Ok(None),
     };
@@ -450,16 +450,18 @@ fn find_leaf_block(
 ///
 /// Each intermediate dx_node contains its own set of (hash, block) entries
 /// that refine the search.  The `dir_inode` is needed to map logical block
-/// numbers to physical blocks via the extent tree.
+/// numbers to physical blocks via the extent tree.  `dir_ino` is the
+/// inode number, passed through for the extent cache.
 fn descend_dx_nodes(
     driver: &Ext4Driver,
     dir_inode: &super::ondisk::Ext4Inode,
+    dir_ino: u32,
     mut block_num: u32,
     target_hash: u32,
     levels: u8,
 ) -> KernelResult<u32> {
     for _ in 0..levels {
-        let phys = match driver.logical_to_physical(dir_inode, block_num as u64) {
+        let phys = match driver.logical_to_physical(dir_ino, dir_inode, block_num as u64) {
             Ok(Some(pb)) => pb,
             _ => return Err(KernelError::IoError),
         };

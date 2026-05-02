@@ -536,6 +536,12 @@ extern "C" fn kmain() -> ! {
                 serial_println!("[boot] WARNING: failed to mount procfs at /proc: {:?}", e);
             }
 
+            // Mount devfs at /dev for standard device files.
+            // Provides /dev/null, /dev/zero, /dev/random, /dev/console.
+            if let Err(e) = fs::devfs::mount("/dev") {
+                serial_println!("[boot] WARNING: failed to mount devfs at /dev: {:?}", e);
+            }
+
             // Initialize the change journal (persistent change tracking).
             // Must happen before self-tests so all VFS operations are captured.
             fs::journal::init();
@@ -571,6 +577,10 @@ extern "C" fn kmain() -> ! {
             // Run procfs self-test (validates virtual file generation).
             if let Err(e) = fs::procfs::self_test() {
                 serial_println!("WARNING: ProcFs self-test failed: {:?}", e);
+            }
+            // Run devfs self-test (validates device file operations).
+            if let Err(e) = fs::devfs::self_test() {
+                serial_println!("WARNING: DevFs self-test failed: {:?}", e);
             }
             // Flush buffer cache to disk so data survives power loss / QEMU kill.
             if let Err(e) = fs::cache::flush_all() {

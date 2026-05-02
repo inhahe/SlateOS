@@ -17,6 +17,13 @@
 //! ├── filesystems    Available filesystem types
 //! ├── cmdline        Kernel command line
 //! ├── loadavg        Instantaneous system load
+//! ├── cacheinfo      Buffer cache and VFS dcache statistics
+//! ├── locks          Advisory file lock information
+//! ├── fdinfo         Open file handle listing
+//! ├── diskstats      Block device statistics
+//! ├── interrupts     APIC timer and IRQ state
+//! ├── devices        PCI device listing
+//! ├── net            Network interface configuration
 //! └── <pid>/         Per-process directories
 //!     ├── status     Process name, state, priority
 //!     └── ...
@@ -71,6 +78,9 @@ const ROOT_FILES: &[&str] = &[
     "locks",
     "fdinfo",
     "diskstats",
+    "interrupts",
+    "devices",
+    "net",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -467,6 +477,99 @@ fn gen_fdinfo() -> Vec<u8> {
     text.into_bytes()
 }
 
+/// `/proc/interrupts` — interrupt statistics and IOAPIC IRQ state.
+///
+/// Reports APIC timer tick count, ISR latency measurements, and
+/// per-IRQ pending state for standard x86 IRQ lines.
+fn gen_interrupts() -> Vec<u8> {
+    let mut text = String::with_capacity(512);
+
+    // APIC timer statistics.
+    let ticks = crate::apic::tick_count();
+    text.push_str(&format!("APIC timer ticks: {ticks}\n"));
+
+    // ISR latency measurements (if sampling was active).
+    if let Some(isr) = crate::apic::isr_measurement_results() {
+        text.push_str(&format!(
+            "ISR latency:  min={} max={} mean={} cycles ({} samples)\n",
+            isr.min_cycles, isr.max_cycles, isr.mean_cycles, isr.count,
+        ));
+    } else {
+        text.push_str("ISR latency:  (no measurements)\n");
+    }
+
+    // Per-IRQ pending state from IOAPIC.
+    text.push_str("\nIRQ  PENDING  DESCRIPTION\n");
+    let irq_descs: &[(u32, &str)] = &[
+        (0, "PIT timer / HPET"),
+        (1, "Keyboard (PS/2)"),
+        (2, "Cascade (PIC2)"),
+        (3, "COM2 / Serial"),
+        (4, "COM1 / Serial"),
+        (6, "Floppy disk"),
+        (8, "RTC / CMOS"),
+        (9, "ACPI SCI"),
+        (11, "PCI / AHCI"),
+        (12, "PS/2 mouse"),
+        (14, "Primary ATA"),
+        (15, "Secondary ATA"),
+    ];
+
+    for &(irq, desc) in irq_descs {
+        let pending = if crate::ioapic::irq_is_pending(irq) { "yes" } else { "no " };
+        text.push_str(&format!("{:<4} {:<8} {}\n", irq, pending, desc));
+    }
+
+    text.into_bytes()
+}
+
+/// `/proc/devices` — PCI device listing.
+///
+/// Scans PCI bus 0 and reports all discovered devices with their
+/// bus/device/function address, class/subclass codes, and vendor:device IDs.
+fn gen_devices() -> Vec<u8> {
+    let mut text = String::from("BUS  DEV  FN   CLASS:SUB  VENDOR:DEVICE\n");
+
+    let devices = crate::pci::scan_bus0();
+    if devices.is_empty() {
+        text.push_str("(no PCI devices found)\n");
+    } else {
+        for dev in &devices {
+            text.push_str(&format!(
+                "{:02x}   {:02x}   {:02x}   {:02x}:{:02x}      {:04x}:{:04x}\n",
+                dev.address.bus, dev.address.device, dev.address.function,
+                dev.class, dev.subclass, dev.vendor_id, dev.device_id,
+            ));
+        }
+        text.push_str(&format!("\n{} devices total\n", devices.len()));
+    }
+
+    text.into_bytes()
+}
+
+/// `/proc/net` — network interface information.
+///
+/// Reports the primary network interface's MAC, IP, netmask, gateway,
+/// and DNS configuration.  Uses `interface::info()` to get all fields
+/// in a single consistent snapshot.
+fn gen_net() -> Vec<u8> {
+    let mut text = String::with_capacity(256);
+
+    // Get a consistent snapshot of all interface state.
+    let ni = crate::net::interface::info();
+
+    let up_str = if ni.up { "UP" } else { "DOWN" };
+    text.push_str(&format!("Interface: eth0  ({})\n", up_str));
+    // MacAddress is a newtype around [u8; 6]; access via .0[i].
+    text.push_str(&format!("  MAC:     {}\n", ni.mac)); // Display impl formats as hex
+    text.push_str(&format!("  IPv4:    {}\n", ni.ip));
+    text.push_str(&format!("  Netmask: {}\n", ni.subnet_mask));
+    text.push_str(&format!("  Gateway: {}\n", ni.gateway));
+    text.push_str(&format!("  DNS:     {}\n", ni.dns));
+
+    text.into_bytes()
+}
+
 /// `/proc/<pid>/status` — per-task status information.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     use crate::sched::task::TaskState;
@@ -538,6 +641,9 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "locks" => Ok(gen_locks()),
         "fdinfo" => Ok(gen_fdinfo()),
         "diskstats" => Ok(gen_diskstats()),
+        "interrupts" => Ok(gen_interrupts()),
+        "devices" => Ok(gen_devices()),
+        "net" => Ok(gen_net()),
         _ => Err(KernelError::NotFound),
     }
 }

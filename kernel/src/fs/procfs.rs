@@ -853,13 +853,15 @@ fn gen_bcache() -> Vec<u8> {
          misses:       {}\n\
          writes:       {}\n\
          writebacks:   {}\n\
-         readaheads:   {}\n",
+         readaheads:   {}\n\
+         exp_flushes:  {}\n",
         stats.reads,
         stats.hits, hit_rate,
         stats.misses,
         stats.writes,
         stats.writebacks,
         stats.readaheads,
+        stats.expired_flushes,
     ));
 
     s.push_str(&format!(

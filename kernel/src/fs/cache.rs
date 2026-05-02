@@ -81,6 +81,14 @@ const READAHEAD_THRESHOLD: u32 = 2;
 // Cache entry
 // ---------------------------------------------------------------------------
 
+/// How long (in nanoseconds) a dirty entry can live before being
+/// considered "expired" and eligible for background writeback.
+///
+/// 5 seconds — matches Linux's default `dirty_expire_centisecs` (3000,
+/// i.e. 30 seconds) but we use a shorter window since our workloads
+/// are lighter and crash resilience matters more on a new OS.
+const DIRTY_EXPIRE_NS: u64 = 5_000_000_000;
+
 /// A single cached sector.
 struct CacheEntry {
     /// Device ID (index into the device name table).
@@ -95,6 +103,10 @@ struct CacheEntry {
     last_access: u64,
     /// Whether this slot contains valid cached data.
     valid: bool,
+    /// HPET timestamp (nanoseconds) when this entry became dirty.
+    /// Zero if not dirty.  Used by `flush_expired()` to identify
+    /// sectors that have been dirty longer than `DIRTY_EXPIRE_NS`.
+    dirty_since_ns: u64,
 }
 
 impl CacheEntry {
@@ -107,6 +119,7 @@ impl CacheEntry {
             dirty: false,
             last_access: 0,
             valid: false,
+            dirty_since_ns: 0,
         }
     }
 }
@@ -130,6 +143,8 @@ pub struct CacheStats {
     pub writebacks: u64,
     /// Number of read-ahead operations triggered.
     pub readaheads: u64,
+    /// Number of expired-dirty flushes (entries flushed by age).
+    pub expired_flushes: u64,
     /// Number of currently valid entries in the cache.
     pub entries_used: usize,
     /// Number of currently dirty entries.
@@ -183,6 +198,8 @@ struct BufferCacheInner {
     writebacks: u64,
     /// Read-ahead operations triggered.
     readaheads: u64,
+    /// Number of entries flushed by age-based expiry.
+    expired_flushes: u64,
     /// Whether the pool has been initialized.
     initialized: bool,
 
@@ -224,6 +241,7 @@ impl BufferCacheInner {
             writes: 0,
             writebacks: 0,
             readaheads: 0,
+            expired_flushes: 0,
             initialized: false,
             index: BTreeMap::new(),
             free_slots: Vec::new(),
@@ -358,6 +376,7 @@ impl BufferCacheInner {
                     self.dirty_count = self.dirty_count.saturating_sub(1);
                 }
                 self.entries[idx].dirty = false;
+                self.entries[idx].dirty_since_ns = 0;
                 self.writebacks = self.writebacks.wrapping_add(1);
                 Ok(())
             }
@@ -417,6 +436,7 @@ impl BufferCacheInner {
             writes: self.writes,
             writebacks: self.writebacks,
             readaheads: self.readaheads,
+            expired_flushes: self.expired_flushes,
             entries_used: self.valid_count,
             entries_dirty: self.dirty_count,
             capacity: MAX_ENTRIES,
@@ -572,11 +592,15 @@ pub fn write_sector(
     let dev_id = cache.device_id(device)
         .ok_or(KernelError::InvalidArgument)?;
 
+    let now_ns = crate::hpet::elapsed_ns();
+
     // Check if already cached — update in place.
     if let Some(idx) = cache.find_index(dev_id, lba) {
         cache.entries[idx].data.copy_from_slice(buf);
         if !cache.entries[idx].dirty {
             cache.dirty_count = cache.dirty_count.wrapping_add(1);
+            // First time becoming dirty — record when.
+            cache.entries[idx].dirty_since_ns = now_ns;
         }
         cache.entries[idx].dirty = true;
         cache.touch(idx);
@@ -589,6 +613,7 @@ pub fn write_sector(
     cache.entries[idx].lba = lba;
     cache.entries[idx].data.copy_from_slice(buf);
     cache.entries[idx].dirty = true;
+    cache.entries[idx].dirty_since_ns = now_ns;
     cache.entries[idx].valid = true;
     cache.valid_count = cache.valid_count.wrapping_add(1);
     cache.dirty_count = cache.dirty_count.wrapping_add(1);
@@ -647,6 +672,44 @@ pub fn flush_all() -> KernelResult<()> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Flush dirty entries that have been dirty for longer than
+/// [`DIRTY_EXPIRE_NS`] (5 seconds by default).
+///
+/// This is the "background writeback" mechanism.  Calling it
+/// periodically (e.g., every few seconds from a timer) ensures that
+/// dirty data reaches disk within a bounded time window, reducing
+/// data loss on crash.  Only entries that have been dirty longer
+/// than the threshold are written back — recently-dirtied entries
+/// are left in cache to allow further coalescing.
+///
+/// Returns the number of entries written back.
+pub fn flush_expired() -> usize {
+    let mut cache = CACHE.lock();
+    cache.ensure_init();
+
+    let now_ns = crate::hpet::elapsed_ns();
+    let mut flushed: usize = 0;
+
+    for i in 0..cache.entries.len() {
+        if cache.entries[i].valid
+            && cache.entries[i].dirty
+            && cache.entries[i].dirty_since_ns > 0
+        {
+            let age = now_ns.saturating_sub(cache.entries[i].dirty_since_ns);
+            if age >= DIRTY_EXPIRE_NS {
+                if cache.writeback_entry(i).is_ok() {
+                    flushed = flushed.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    cache.expired_flushes = cache.expired_flushes
+        .wrapping_add(flushed as u64);
+
+    flushed
 }
 
 /// Invalidate (drop) all cached entries for a specific device.

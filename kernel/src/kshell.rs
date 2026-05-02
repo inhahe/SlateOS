@@ -8299,9 +8299,17 @@ fn cmd_umount(args: &str) {
 
 /// Flush all filesystems to stable storage.
 fn cmd_sync() {
+    // Flush expired dirty cache entries first (age-based writeback).
+    let expired = crate::fs::cache::flush_expired();
     match crate::fs::Vfs::sync() {
         Ok(()) => {
-            crate::console_println!("All filesystems synced.");
+            if expired > 0 {
+                crate::console_println!(
+                    "All filesystems synced ({} expired cache entries flushed).", expired
+                );
+            } else {
+                crate::console_println!("All filesystems synced.");
+            }
         }
         Err(e) => {
             crate::console_println!("sync: {:?}", e);

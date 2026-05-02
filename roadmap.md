@@ -262,9 +262,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
 - [x] ISO 9660 (optical media, read-only, Joliet detection)
 - [x] Filesystem infrastructure:
-  - [x] Buffer cache (512-sector LRU, write-back, BTreeMap index for O(log n) sector lookup, O(1) free-slot allocation)
-  - [x] File handle system (open/close/read/write/seek/fstat/ftruncate/dup/handle_path, symlink-resolved at open time)
-  - [x] Path resolution cache (dcache, 64-entry LRU with prefix invalidation)
+  - [x] Buffer cache (2048-sector LRU, 1 MiB, write-back, BTreeMap index for O(log n) sector lookup, O(1) free-slot allocation, sequential read-ahead with 8-sector prefetch)
+  - [x] File handle system (open/close/read/write/seek/fstat/ftruncate/dup/handle_path, symlink-resolved at open time, lock-on-close auto-release, handle enumeration for /proc/fdinfo)
+  - [x] Path resolution cache (dcache, 256-entry LRU with prefix invalidation)
   - [x] Efficient partial I/O (FAT read_at/write_at/truncate override default read-all-rewrite-all)
   - [x] Filesystem change notification system (inotify equivalent, async watches with bounded queues)
   - [x] Recycle bin (per-filesystem /_TRASH with _INDEX metadata file, trash/list/restore/empty, recursive directory trash/purge)
@@ -293,6 +293,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Rich metadata for all filesystems (devfs: device perms, iso9660: read-only perms + volume stats, procfs: read-only perms + inode counts)
   - [x] Procfs /proc/cacheinfo (buffer cache hit/miss/writeback stats) and /proc/locks (advisory lock dump)
   - [x] fstat nlinks: file handles now report hard link count via metadata()
+  - [x] Syscalls: SYS_FS_COPY (642), SYS_FS_APPEND (643), SYS_FS_FTRUNCATE (644), SYS_FS_DUP (645), SYS_FS_HANDLE_PATH (646)
+  - [x] Cross-mount rename (copy+delete fallback for files across different filesystems)
+  - [x] Recursive copy (Vfs::copy_recursive, depth-limited, preserves permissions)
+  - [x] Recursive remove (Vfs::remove_recursive, depth-first, returns item count)
+  - [x] Procfs /proc/fdinfo (open file handles with flags/offset/size/path) and /proc/diskstats (block device info + cache stats)
+  - [x] Kshell commands: lsof, grep, cp -r, rm -r
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

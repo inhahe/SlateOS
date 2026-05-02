@@ -4350,7 +4350,7 @@ fn cmd_help() {
     crate::console_println!("  chown U F Set owner (uid:gid, e.g., chown 1000:1000 file)");
     crate::console_println!("  chattr +/-FLAGS F  Set/clear attributes (i=immutable a=append h=hidden s=system)");
     crate::console_println!("  lsattr F  Show file attributes (iahs flags)");
-    crate::console_println!("  touch F   Create file or update timestamps");
+    crate::console_println!("  touch [-d DATE | -r REF] F  Create file or set timestamps (-d YYYY-MM-DD, -r reffile)");
     crate::console_println!("  append F T Append text T to file F");
     crate::console_println!("  tree [D]  Show directory tree recursively");
     crate::console_println!("  du [-s] [-dN] [D]  Show disk usage (-s summary, -dN max depth)");
@@ -6550,25 +6550,84 @@ fn cmd_lsattr(args: &str) {
 }
 
 /// Create a file or update timestamps.
+/// Create file or update timestamps.
+///
+/// Usage: `touch <path>` — set timestamps to now
+///        `touch -d DATETIME <path>` — set to specific ISO-8601 date
+///        `touch -r REFFILE <path>` — copy timestamps from reference file
+///
+/// DATETIME format: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, or epoch seconds.
+#[allow(clippy::arithmetic_side_effects)]
 fn cmd_touch(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: touch <path>");
+        crate::console_println!("Usage: touch [-d DATETIME | -r REFFILE] <path>");
         return;
     }
 
-    let path = resolve_path(args);
+    let mut date_str: Option<&str> = None;
+    let mut ref_file: Option<&str> = None;
+    let mut file_path = "";
+
+    let mut words = args.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "-d" {
+            // Collect the date string — it might have spaces (e.g., "2026-01-15 12:30:00").
+            date_str = words.next();
+        } else if w == "-r" {
+            ref_file = words.next();
+        } else {
+            file_path = w;
+        }
+    }
+
+    if file_path.is_empty() {
+        crate::console_println!("touch: missing file operand");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(file_path);
+
+    // Determine the timestamp to use.
+    let timestamp = if let Some(ds) = date_str {
+        // Parse the date string.
+        match parse_datetime_to_ns(ds) {
+            Some(ns) => ns,
+            None => {
+                crate::console_println!(
+                    "touch: invalid date '{}' (use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS or epoch secs)",
+                    ds
+                );
+                set_exit(1);
+                return;
+            }
+        }
+    } else if let Some(rf) = ref_file {
+        // Copy timestamp from reference file.
+        let ref_path = resolve_path(rf);
+        match crate::fs::Vfs::metadata(&ref_path) {
+            Ok(meta) => meta.modified_ns,
+            Err(e) => {
+                crate::console_println!("touch: {}: {:?}", ref_path, e);
+                set_exit(1);
+                return;
+            }
+        }
+    } else {
+        crate::hpet::elapsed_ns()
+    };
 
     // Check if file exists.
     match crate::fs::Vfs::stat(&path) {
         Ok(_) => {
-            // File exists — update timestamps to "now".
-            let now = crate::hpet::elapsed_ns();
-            match crate::fs::Vfs::set_times(&path, now, now) {
+            // File exists — update timestamps.
+            match crate::fs::Vfs::set_times(&path, timestamp, timestamp) {
                 Ok(()) => {
                     crate::console_println!("{}: timestamps updated", path);
                 }
                 Err(e) => {
                     crate::console_println!("touch: {}: {:?}", path, e);
+                    set_exit(1);
                 }
             }
         }
@@ -6580,10 +6639,72 @@ fn cmd_touch(args: &str) {
                 }
                 Err(e) => {
                     crate::console_println!("touch: {}: {:?}", path, e);
+                    set_exit(1);
                 }
             }
         }
     }
+}
+
+/// Parse a datetime string to nanoseconds since epoch.
+///
+/// Accepts:
+/// - `YYYY-MM-DD` (midnight UTC)
+/// - `YYYY-MM-DD HH:MM:SS` (UTC)
+/// - Plain integer (epoch seconds)
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_datetime_to_ns(s: &str) -> Option<u64> {
+    // Try epoch seconds first.
+    if let Ok(secs) = s.parse::<u64>() {
+        return Some(secs.saturating_mul(1_000_000_000));
+    }
+
+    // Try YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.
+    let parts: alloc::vec::Vec<&str> = s.splitn(2, ' ').collect();
+    let date_part = parts.first()?;
+    let time_part = parts.get(1);
+
+    let date_fields: alloc::vec::Vec<&str> = date_part.split('-').collect();
+    if date_fields.len() != 3 {
+        return None;
+    }
+
+    let year = date_fields[0].parse::<i64>().ok()?;
+    let month = date_fields[1].parse::<u32>().ok()?;
+    let day = date_fields[2].parse::<u32>().ok()?;
+
+    if month < 1 || month > 12 || day < 1 || day > 31 {
+        return None;
+    }
+
+    let (hour, minute, second) = if let Some(tp) = time_part {
+        let time_fields: alloc::vec::Vec<&str> = tp.split(':').collect();
+        let h = time_fields.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        let m = time_fields.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        let s = time_fields.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        (h, m, s)
+    } else {
+        (0, 0, 0)
+    };
+
+    // Convert to days since epoch using standard algorithm.
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let mi = if month >= 1 && month <= 12 { (month - 1) as usize } else { 0 };
+    let mut yday = month_days[mi] + day;
+    if is_leap && month > 2 {
+        yday += 1;
+    }
+
+    // Days from 1970-01-01 to start of this year (approximate).
+    let mut days: i64 = (year - 1970) * 365 + (year - 1969) / 4 - (year - 1901) / 100 + (year - 1601) / 400;
+    days += i64::from(yday) - 1;
+
+    let total_secs = days * 86400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
+    if total_secs < 0 {
+        return None;
+    }
+    Some((total_secs as u64).saturating_mul(1_000_000_000))
 }
 
 /// Append text to a file.

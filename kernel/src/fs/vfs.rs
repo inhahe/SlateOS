@@ -3732,6 +3732,56 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[vfs]     access() tests PASSED");
     }
 
+    // ── Mount options / read-only enforcement test ──
+    serial_println!("[vfs]   Testing mount options (read-only enforcement)...");
+    {
+        // Remount /tmp as read-only.
+        let orig_opts = Vfs::mount_options("/tmp").unwrap_or(MountOptions::defaults());
+        let mut ro_opts = orig_opts;
+        ro_opts.read_only = true;
+        Vfs::remount("/tmp", ro_opts)?;
+
+        // Verify writes are rejected.
+        let test_file = "/tmp/_ro_test.txt";
+        match Vfs::write_file(test_file, b"should fail") {
+            Err(KernelError::ReadOnlyFilesystem) => {
+                serial_println!("[vfs]     write_file correctly rejected on ro mount");
+            }
+            Ok(()) => {
+                serial_println!("[vfs]     FAIL: write_file succeeded on ro mount!");
+                let _ = Vfs::remove(test_file);
+                Vfs::remount("/tmp", orig_opts)?;
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                serial_println!("[vfs]     FAIL: write_file returned {:?} instead of ReadOnlyFilesystem", e);
+                Vfs::remount("/tmp", orig_opts)?;
+                return Err(e);
+            }
+        }
+
+        // Verify mkdir is rejected.
+        match Vfs::mkdir("/tmp/_ro_test_dir") {
+            Err(KernelError::ReadOnlyFilesystem) => {
+                serial_println!("[vfs]     mkdir correctly rejected on ro mount");
+            }
+            other => {
+                serial_println!("[vfs]     FAIL: mkdir returned {:?} instead of ReadOnlyFilesystem", other);
+                let _ = Vfs::rmdir("/tmp/_ro_test_dir");
+                Vfs::remount("/tmp", orig_opts)?;
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Restore original options.
+        Vfs::remount("/tmp", orig_opts)?;
+
+        // Verify writes succeed again.
+        Vfs::write_file(test_file, b"should succeed")?;
+        Vfs::remove(test_file)?;
+        serial_println!("[vfs]     read-only enforcement test PASSED");
+    }
+
     // ── Glob pattern matching tests ──
     glob_self_test()?;
 

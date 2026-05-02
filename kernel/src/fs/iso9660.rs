@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -224,6 +224,38 @@ impl FileSystem for Iso9660Fs {
             name: String::from(name),
             entry_type: if is_dir { EntryType::Directory } else { EntryType::File },
             size: u64::from(size),
+        })
+    }
+
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        let (_lba, size, is_dir) = self.resolve_file(path)?;
+
+        let entry_type = if is_dir {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        };
+        let perms = if is_dir { 0o555 } else { 0o444 }; // Read-only filesystem.
+
+        Ok(FileMeta {
+            size: u64::from(size),
+            entry_type,
+            permissions: perms,
+            nlinks: 1,
+            ..FileMeta::minimal(entry_type, u64::from(size))
+        })
+    }
+
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        Ok(FsInfo {
+            fs_type: String::from("iso9660"),
+            block_size: 2048, // ISO 9660 logical block size.
+            total_blocks: u64::from(self.pvd.volume_space_size),
+            free_blocks: 0, // Read-only — nothing free.
+            total_inodes: 0,
+            free_inodes: 0,
+            max_name_len: if self.has_joliet { 64 } else { 31 },
+            read_only: true,
         })
     }
 

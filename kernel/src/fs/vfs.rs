@@ -722,6 +722,68 @@ impl Vfs {
         Ok(())
     }
 
+    /// Unmount the filesystem at the given mount point.
+    ///
+    /// Syncs the filesystem before removing it to ensure all data is
+    /// flushed.  Refuses to unmount if the mount point has sub-mounts
+    /// (to prevent orphaning them).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no file handles are open on this
+    /// filesystem.  Currently we don't track per-mount handle counts,
+    /// so this is the caller's responsibility.
+    pub fn unmount(mount_path: &str) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+
+        let idx = vfs.mounts.iter().position(|mp| mp.path == mount_path)
+            .ok_or(KernelError::NotFound)?;
+
+        // Refuse to unmount root.
+        if mount_path == "/" {
+            return Err(KernelError::PermissionDenied);
+        }
+
+        // Check for sub-mounts that would be orphaned.
+        let has_children = vfs.mounts.iter().enumerate().any(|(i, mp)| {
+            i != idx
+                && mp.path.starts_with(mount_path)
+                && mp.path.len() > mount_path.len()
+                && mp.path.as_bytes().get(mount_path.len()) == Some(&b'/')
+        });
+        if has_children {
+            crate::serial_println!(
+                "[vfs] Cannot unmount '{}': has sub-mounts",
+                mount_path
+            );
+            return Err(KernelError::DeviceBusy);
+        }
+
+        // Sync before removing.
+        if let Err(e) = vfs.mounts[idx].fs.sync() {
+            crate::serial_println!(
+                "[vfs] WARNING: sync failed during unmount of '{}': {:?}",
+                mount_path, e
+            );
+            // Continue with unmount anyway — data loss is better than a
+            // permanently stuck mount.
+        }
+
+        let removed = vfs.mounts.remove(idx);
+        crate::serial_println!(
+            "[vfs] Unmounted {} from '{}'",
+            removed.fs.fs_type(),
+            mount_path
+        );
+
+        // Release any advisory locks on paths under this mount.
+        drop(vfs);
+        let mut table = LOCK_TABLE.lock();
+        table.retain(|entry| !entry.path.starts_with(mount_path));
+
+        Ok(())
+    }
+
     // -------------------------------------------------------------------
     // VFS-level path resolution (cross-mount symlink support)
     // -------------------------------------------------------------------

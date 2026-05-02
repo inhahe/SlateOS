@@ -33,7 +33,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
 use spin::Mutex;
 
@@ -277,6 +277,54 @@ impl FileSystem for DevFs {
         } else {
             Err(KernelError::NotFound)
         }
+    }
+
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        let rel = path.strip_prefix('/').unwrap_or(path);
+
+        if rel.is_empty() {
+            return Ok(FileMeta {
+                size: 0,
+                entry_type: EntryType::Directory,
+                permissions: 0o755,
+                nlinks: 1,
+                ..FileMeta::minimal(EntryType::Directory, 0)
+            });
+        }
+
+        if DEV_FILES.contains(&rel) {
+            // Device files have special permissions:
+            // - null/zero/full/urandom: world read+write (0o666)
+            // - random: world read+write (0o666)
+            // - console: owner read+write (0o600)
+            let perms = match rel {
+                "console" => 0o600,
+                _ => 0o666,
+            };
+            Ok(FileMeta {
+                size: 0,
+                entry_type: EntryType::File,
+                permissions: perms,
+                attributes: FileAttr::NONE,
+                nlinks: 1,
+                ..FileMeta::minimal(EntryType::File, 0)
+            })
+        } else {
+            Err(KernelError::NotFound)
+        }
+    }
+
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        Ok(FsInfo {
+            fs_type: String::from("devfs"),
+            block_size: 0,
+            total_blocks: 0,
+            free_blocks: 0,
+            total_inodes: DEV_FILES.len() as u64,
+            free_inodes: 0,
+            max_name_len: 255,
+            read_only: false,
+        })
     }
 
     fn debug_stats(&self) -> String {

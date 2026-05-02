@@ -164,6 +164,8 @@ fn execute(line: &str) {
         "du" => cmd_du(args),
         "find" => cmd_find(args),
         "sync" => cmd_sync(),
+        "mount" => cmd_mount(args),
+        "umount" | "unmount" => cmd_umount(args),
         "wc" => cmd_wc(args),
         "head" => cmd_head(args),
         "tail" => cmd_tail(args),
@@ -217,6 +219,8 @@ fn cmd_help() {
     crate::console_println!("  find [D]P Search for files matching pattern");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
+    crate::console_println!("  mount     List all mounted filesystems");
+    crate::console_println!("  umount P  Unmount filesystem at path P");
     crate::console_println!("  wc FILE   Count lines, words, and bytes");
     crate::console_println!("  head N F  Show first N lines of file");
     crate::console_println!("  tail N F  Show last N lines of file");
@@ -1427,6 +1431,50 @@ fn cmd_hexdump(args: &str) {
         crate::console_println!("{:08x}", data.len());
     } else {
         crate::console_println!("... ({} bytes total, showing first {})", data.len(), limit);
+    }
+}
+
+/// List mounted filesystems or mount a new one.
+fn cmd_mount(args: &str) {
+    if args.is_empty() {
+        // List all mounts.
+        let mounts = crate::fs::Vfs::mounts();
+        if mounts.is_empty() {
+            crate::console_println!("No filesystems mounted.");
+        } else {
+            crate::console_println!("{:<12} {}", "Type", "Mount point");
+            for (path, fs_type) in &mounts {
+                crate::console_println!("{:<12} {}", fs_type, path);
+            }
+        }
+    } else {
+        crate::console_println!("mount: mounting from kshell not yet supported.");
+        crate::console_println!("Use 'mount' with no args to list mounts.");
+    }
+}
+
+/// Unmount a filesystem.
+fn cmd_umount(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: umount <mount-path>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    match crate::fs::Vfs::unmount(&path) {
+        Ok(()) => {
+            crate::console_println!("{}: unmounted", path);
+        }
+        Err(e) => {
+            crate::console_println!("umount: {}: {:?}", path, e);
+        }
     }
 }
 

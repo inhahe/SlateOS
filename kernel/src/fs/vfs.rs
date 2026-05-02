@@ -1479,10 +1479,38 @@ impl Vfs {
     /// Future optimization: if both paths are on the same filesystem,
     /// delegate to a filesystem-level copy (reflink, server-side copy).
     pub fn copy(src: &str, dst: &str) -> KernelResult<u64> {
-        let data = Self::read_file(src)?;
-        let size = data.len() as u64;
-        Self::write_file(dst, &data)?;
-        Ok(size)
+        // For files that fit in a reasonable buffer (≤64 KiB), do a
+        // simple read-all + write-all.  For larger files, use chunked
+        // read_at / write_at to avoid loading the entire file into
+        // heap memory at once.
+        const CHUNK_THRESHOLD: u64 = 64 * 1024;
+        const CHUNK_SIZE: usize = 64 * 1024;
+
+        let entry = Self::stat(src)?;
+        let size = entry.size;
+
+        if size <= CHUNK_THRESHOLD {
+            // Small file — simple path.
+            let data = Self::read_file(src)?;
+            Self::write_file(dst, &data)?;
+            return Ok(data.len() as u64);
+        }
+
+        // Large file — chunked copy.
+        // Create/truncate the destination first.
+        Self::write_file(dst, &[])?;
+
+        let mut offset: u64 = 0;
+        while offset < size {
+            let chunk = Self::read_at(src, offset, CHUNK_SIZE)?;
+            if chunk.is_empty() {
+                break; // EOF.
+            }
+            Self::write_at(dst, offset, &chunk)?;
+            offset = offset.saturating_add(chunk.len() as u64);
+        }
+
+        Ok(offset)
     }
 
     /// Recursively copy a file or directory tree from `src` to `dst`.

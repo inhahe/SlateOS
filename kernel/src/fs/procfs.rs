@@ -1339,6 +1339,7 @@ impl FileSystem for ProcFs {
         let task_count = crate::sched::task_list().len();
         Ok(FsInfo {
             fs_type: String::from("procfs"),
+            volume_label: String::new(),
             block_size: 0,
             total_blocks: 0,
             free_blocks: 0,

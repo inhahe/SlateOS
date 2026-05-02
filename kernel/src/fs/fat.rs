@@ -2571,6 +2571,10 @@ impl FileSystem for FatFs {
 
         Ok(FsInfo {
             fs_type: String::from(self.fs_type()),
+            volume_label: core::str::from_utf8(&self.bpb.volume_label)
+                .unwrap_or("")
+                .trim_end()
+                .into(),
             block_size: cluster_bytes,
             total_blocks: total_clusters,
             free_blocks: free_clusters,

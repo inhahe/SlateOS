@@ -367,6 +367,7 @@ impl FileSystem for DevFs {
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
         Ok(FsInfo {
             fs_type: String::from("devfs"),
+            volume_label: String::new(),
             block_size: 0,
             total_blocks: 0,
             free_blocks: 0,

@@ -1015,6 +1015,7 @@ impl FileSystem for MemFs {
 
         Ok(FsInfo {
             fs_type: String::from("memfs"),
+            volume_label: String::new(),
             block_size: 1, // Byte-granular allocation.
             total_blocks: 0, // Unlimited (bounded by heap).
             free_blocks: 0,

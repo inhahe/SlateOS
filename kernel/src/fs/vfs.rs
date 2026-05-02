@@ -278,6 +278,8 @@ impl FileMeta {
 pub struct FsInfo {
     /// Filesystem type name (e.g., `"fat16"`, `"ext4"`, `"memfs"`).
     pub fs_type: String,
+    /// Volume label (empty if not available or not set).
+    pub volume_label: String,
     /// Fundamental block size in bytes (the allocation unit).
     pub block_size: u64,
     /// Total number of blocks on the filesystem.
@@ -629,6 +631,7 @@ pub trait FileSystem: Send {
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
         Ok(FsInfo {
             fs_type: String::from(self.fs_type()),
+            volume_label: String::new(),
             block_size: 0,
             total_blocks: 0,
             free_blocks: 0,
@@ -2317,6 +2320,7 @@ impl Vfs {
                     );
                     FsInfo {
                         fs_type: String::from(mp.fs.fs_type()),
+                        volume_label: String::new(),
                         block_size: 0,
                         total_blocks: 0,
                         free_blocks: 0,

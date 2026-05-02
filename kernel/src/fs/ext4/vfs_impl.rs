@@ -1247,6 +1247,7 @@ impl FileSystem for Ext4Fs {
         let sb = self.driver.superblock();
         Ok(FsInfo {
             fs_type: String::from("ext4"),
+            volume_label: sb.volume_name.clone(),
             block_size: u64::from(sb.block_size),
             total_blocks: sb.block_count,
             free_blocks: sb.free_block_count,

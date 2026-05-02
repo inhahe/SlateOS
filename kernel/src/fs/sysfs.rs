@@ -523,6 +523,7 @@ impl FileSystem for SysFs {
         let param_count = crate::sysctl::count();
         Ok(FsInfo {
             fs_type: String::from("sysfs"),
+            volume_label: String::new(),
             block_size: 0,
             total_blocks: 0,
             free_blocks: 0,

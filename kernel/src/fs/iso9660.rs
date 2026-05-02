@@ -250,6 +250,7 @@ impl FileSystem for Iso9660Fs {
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
         Ok(FsInfo {
             fs_type: String::from("iso9660"),
+            volume_label: self.pvd.volume_id.clone(),
             block_size: 2048, // ISO 9660 logical block size.
             total_blocks: u64::from(self.pvd.volume_space_size),
             free_blocks: 0, // Read-only — nothing free.

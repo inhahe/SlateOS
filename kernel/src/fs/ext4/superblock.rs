@@ -44,6 +44,13 @@ pub struct ParsedSuperblock {
     pub has_extents: bool,
     /// Whether the filesystem has a journal.
     pub has_journal: bool,
+    /// Whether the filesystem supports huge files (RO_COMPAT_HUGE_FILE).
+    ///
+    /// When set, inodes may use 48-bit block counts (lo+hi).  If a
+    /// specific inode also has `inode_flags::HUGE_FILE`, the block count
+    /// is in filesystem block units rather than 512-byte sectors.
+    #[allow(dead_code)]
+    pub has_huge_file: bool,
     /// Whether we can mount read-write (false if unsupported ro_compat).
     #[allow(dead_code)]
     pub can_write: bool,
@@ -118,6 +125,8 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
     let is_64bit = (raw.s_feature_incompat & ondisk::incompat::BIT64) != 0;
     let has_extents = (raw.s_feature_incompat & ondisk::incompat::EXTENTS) != 0;
     let has_journal = (raw.s_feature_compat & ondisk::compat::HAS_JOURNAL) != 0;
+    let has_huge_file =
+        (raw.s_feature_ro_compat & ondisk::ro_compat::HUGE_FILE) != 0;
 
     // Check incompatible features — refuse to mount if we don't understand.
     let unsupported_incompat = raw.s_feature_incompat & !SUPPORTED_INCOMPAT;
@@ -215,6 +224,7 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
         is_64bit,
         has_extents,
         has_journal,
+        has_huge_file,
         can_write,
         volume_name,
         has_metadata_csum,

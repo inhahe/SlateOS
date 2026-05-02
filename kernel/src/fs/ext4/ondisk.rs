@@ -588,6 +588,10 @@ pub mod inode_flags {
     pub const NODUMP: u32       = 0x0000_0040;
     /// Do not update atime.
     pub const NOATIME: u32      = 0x0000_0080;
+    /// Huge file: i_blocks stores filesystem block units, not 512-byte
+    /// sectors.  Only valid when `ro_compat::HUGE_FILE` is set in the
+    /// superblock.  See Linux `EXT4_HUGE_FILE_FL` in fs/ext4/ext4.h.
+    pub const HUGE_FILE: u32    = 0x0004_0000;
     /// Uses extents (not indirect blocks).
     pub const EXTENTS: u32      = 0x0008_0000;
     /// Inode stores a large extended attribute.

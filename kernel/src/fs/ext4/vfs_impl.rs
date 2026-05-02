@@ -878,7 +878,7 @@ impl FileSystem for Ext4Fs {
             permissions,
             attributes: attrs,
             nlinks: u32::from(inode.i_links_count),
-            blocks: inode_blocks_48(&inode),
+            blocks: inode_block_sectors(&inode, self.driver.superblock().block_size),
             xattrs: self.driver.read_all_xattrs(ino, &inode).unwrap_or_default(),
             hash: Vec::new(),
         })
@@ -1486,26 +1486,51 @@ fn set_inode_gid_32(inode: &mut super::ondisk::Ext4Inode, gid: u32) {
     if let Some(slot) = inode.i_osd2.get_mut(7) { *slot = hi_bytes[1]; }
 }
 
-/// Read the 48-bit block count from an inode (in 512-byte sectors).
+/// Read the inode block count and return 512-byte sectors.
 ///
 /// Combines `i_blocks_lo` (32 bits) with `i_osd2[0..2]` (high 16 bits)
-/// for a total 48-bit sector count.  This matters for files larger than
-/// ~2 TB on 4K-block filesystems (or ~32 TB on our 16K pages).
-fn inode_blocks_48(inode: &super::ondisk::Ext4Inode) -> u64 {
+/// for a 48-bit raw value.  If the inode has `HUGE_FILE` flag set, the
+/// raw value is in filesystem block units — multiply by `block_size / 512`
+/// to convert to 512-byte sectors.
+///
+/// This matters for files larger than ~2 TB on 4K-block filesystems (or
+/// ~32 TB on our 16K pages).  The HUGE_FILE conversion handles the rare
+/// case where Linux stored the count in fs-block units because the
+/// 48-bit sector count would overflow.
+///
+/// Based on Linux `ext4_inode_blocks()` in `fs/ext4/inode.c`.
+fn inode_block_sectors(inode: &super::ondisk::Ext4Inode, block_size: u32) -> u64 {
     let lo = u64::from(inode.i_blocks_lo);
     let hi = u64::from(u16::from_le_bytes([
         *inode.i_osd2.get(0).unwrap_or(&0),
         *inode.i_osd2.get(1).unwrap_or(&0),
     ]));
-    lo | (hi << 32)
+    let raw = lo | (hi << 32);
+
+    if (inode.i_flags & super::ondisk::inode_flags::HUGE_FILE) != 0 {
+        // Raw value is in filesystem blocks — convert to 512-byte sectors.
+        let sectors_per_block = u64::from(block_size / 512);
+        raw.saturating_mul(sectors_per_block)
+    } else {
+        // Raw value is already in 512-byte sectors.
+        raw
+    }
 }
 
 /// Write the 48-bit block count into an inode (in 512-byte sectors).
+///
+/// Clears the `HUGE_FILE` inode flag since we always store in sector
+/// units (the 48-bit range supports up to 128 PiB, far beyond any
+/// practical file size).
+///
+/// Based on Linux `ext4_inode_blocks_set()` in `fs/ext4/inode.c`.
 fn set_inode_blocks_48(inode: &mut super::ondisk::Ext4Inode, sectors: u64) {
     inode.i_blocks_lo = sectors as u32;
     let hi = ((sectors >> 32) as u16).to_le_bytes();
     if let Some(slot) = inode.i_osd2.get_mut(0) { *slot = hi[0]; }
     if let Some(slot) = inode.i_osd2.get_mut(1) { *slot = hi[1]; }
+    // Always clear HUGE_FILE since we store sectors, not fs blocks.
+    inode.i_flags &= !super::ondisk::inode_flags::HUGE_FILE;
 }
 
 /// Split a path into parent directory and final name component.

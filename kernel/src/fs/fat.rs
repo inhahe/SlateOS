@@ -434,6 +434,41 @@ const fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
+/// Convert a kernel RTC `DateTime` to DOS packed date and time.
+///
+/// Returns `(date, time)` in DOS format.
+/// If year < 1980 or > 2107, clamps to the DOS epoch range.
+#[allow(clippy::arithmetic_side_effects)]
+fn rtc_to_dos_datetime(dt: &crate::rtc::DateTime) -> (u16, u16) {
+    // DOS year is offset from 1980, stored in 7 bits (0-127 → 1980-2107).
+    let dos_year = if dt.year < 1980 {
+        0u16
+    } else if dt.year > 2107 {
+        127u16
+    } else {
+        dt.year - 1980
+    };
+
+    let date: u16 = (dos_year << 9)
+        | (u16::from(dt.month) << 5)
+        | u16::from(dt.day);
+
+    // DOS time packs hours (5 bits), minutes (6 bits), seconds/2 (5 bits).
+    let time: u16 = (u16::from(dt.hour) << 11)
+        | (u16::from(dt.minute) << 5)
+        | (u16::from(dt.second) >> 1); // 2-second granularity.
+
+    (date, time)
+}
+
+/// Get the current time as DOS packed date and time.
+///
+/// Reads the CMOS RTC and converts to DOS format.
+fn current_dos_datetime() -> (u16, u16) {
+    let dt = crate::rtc::read_datetime();
+    rtc_to_dos_datetime(&dt)
+}
+
 // ---------------------------------------------------------------------------
 // FAT filesystem (FAT16 / FAT32)
 // ---------------------------------------------------------------------------
@@ -1331,6 +1366,9 @@ impl FatFs {
     }
 
     /// Write a directory entry at the specified location.
+    ///
+    /// Stamps current RTC time as the last-write and last-access time.
+    /// For new entries (not overwrite), also stamps creation time.
     #[allow(clippy::arithmetic_side_effects)]
     fn write_dir_entry(
         &mut self,
@@ -1344,17 +1382,43 @@ impl FatFs {
         let mut sector_buf = [0u8; SECTOR_SIZE];
         self.read_sector(lba, &mut sector_buf)?;
 
+        // Read the old first byte to detect if this is a new entry.
+        let old_first_byte = sector_buf.get(offset).copied().unwrap_or(0);
+        let is_new = old_first_byte == 0x00 || old_first_byte == 0xE5;
+
+        // Get current time as DOS packed date/time.
+        let (now_date, now_time) = current_dos_datetime();
+
         // Write the 32-byte directory entry.
         if let Some(entry) = sector_buf.get_mut(offset..offset + 32) {
             entry[0..11].copy_from_slice(name83);
             entry[11] = attr;
-            // Zero out time/date fields (12-19).
-            entry[12..20].fill(0);
+            // Byte 12: reserved (NT case flags), clear.
+            entry[12] = 0;
+            // Byte 13: creation time fine resolution (10ms units, 0-199).
+            entry[13] = 0;
+            // Bytes 14-15: creation time (only set for new entries).
+            if is_new {
+                entry[14] = now_time as u8;
+                entry[15] = (now_time >> 8) as u8;
+                // Bytes 16-17: creation date.
+                entry[16] = now_date as u8;
+                entry[17] = (now_date >> 8) as u8;
+            }
+            // else: preserve existing creation time (already in buffer).
+
+            // Bytes 18-19: last access date.
+            entry[18] = now_date as u8;
+            entry[19] = (now_date >> 8) as u8;
             // First cluster high word (offset 20-21, FAT32; zero for FAT16).
             entry[20] = (first_cluster >> 16) as u8;
             entry[21] = (first_cluster >> 24) as u8;
-            // Zero out remaining time/date fields (22-25).
-            entry[22..26].fill(0);
+            // Bytes 22-23: last write time.
+            entry[22] = now_time as u8;
+            entry[23] = (now_time >> 8) as u8;
+            // Bytes 24-25: last write date.
+            entry[24] = now_date as u8;
+            entry[25] = (now_date >> 8) as u8;
             // First cluster low word (offset 26-27).
             entry[26] = first_cluster as u8;
             entry[27] = (first_cluster >> 8) as u8;
@@ -2477,10 +2541,47 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove("/METATST.TXT")?;
         return Err(KernelError::IoError);
     }
+    // Verify newly written files have non-zero timestamps (RTC-stamped).
+    // DOS epoch (1980-01-01) in ns = 315_532_800_000_000_000.
+    let dos_epoch_ns: u64 = 315_532_800_000_000_000;
+    if meta.created_ns < dos_epoch_ns {
+        crate::serial_println!(
+            "[fat]   metadata WARNING: created_ns={} is before DOS epoch (RTC may not be set)",
+            meta.created_ns
+        );
+    }
+    if meta.modified_ns < dos_epoch_ns {
+        crate::serial_println!(
+            "[fat]   metadata WARNING: modified_ns={} is before DOS epoch",
+            meta.modified_ns
+        );
+    }
+    // Timestamps should be non-zero since we now stamp them on write.
+    if meta.created_ns == 0 || meta.modified_ns == 0 {
+        crate::serial_println!(
+            "[fat]   metadata WARNING: timestamps are zero — write_dir_entry may not be stamping"
+        );
+    }
     crate::serial_println!(
         "[fat]   metadata OK: size={}, type=File, created_ns={}, modified_ns={}, accessed_ns={}",
         meta.size, meta.created_ns, meta.modified_ns, meta.accessed_ns
     );
+
+    // Test round-trip: rtc_to_dos_datetime → dos_datetime_to_ns should
+    // produce a timestamp within a few seconds of "now" (from RTC).
+    let dt = crate::rtc::read_datetime();
+    let (rt_date, rt_time) = rtc_to_dos_datetime(&dt);
+    let rt_ns = dos_datetime_to_ns(rt_date, rt_time);
+    crate::serial_println!(
+        "[fat]   RTC round-trip: {} → date=0x{:04X} time=0x{:04X} → {} ns",
+        dt, rt_date, rt_time, rt_ns
+    );
+    // Sanity check: the round-tripped timestamp should be >= DOS epoch.
+    if rt_ns < dos_epoch_ns {
+        crate::serial_println!(
+            "[fat]   RTC round-trip WARNING: result before DOS epoch"
+        );
+    }
 
     // Test directory metadata.
     let _ = crate::fs::Vfs::remove("/METADIR/INSIDE.TXT");

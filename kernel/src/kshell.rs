@@ -5653,7 +5653,14 @@ fn cmd_stat(args: &str) {
 
             // Show filesystem type via VFS mount table.
             if let Ok(info) = crate::fs::Vfs::statvfs(&path) {
-                crate::console_println!("  FS:   {} (block size: {})", info.fs_type, info.block_size);
+                if info.volume_label.is_empty() {
+                    crate::console_println!("  FS:   {} (block size: {})", info.fs_type, info.block_size);
+                } else {
+                    crate::console_println!(
+                        "  FS:   {} \"{}\" (block size: {})",
+                        info.fs_type, info.volume_label, info.block_size,
+                    );
+                }
             }
 
             let ns_to_display = |ns: u64| -> alloc::string::String {
@@ -5734,8 +5741,8 @@ fn cmd_df(args: &str) {
         match crate::fs::Vfs::mount_info() {
             Ok(mounts) => {
                 crate::console_println!(
-                    "{:<12} {:>10} {:>10} {:>10} {:>5}  {}",
-                    "Filesystem", "Size", "Used", "Avail", "Use%", "Mounted on"
+                    "{:<12} {:>10} {:>10} {:>10} {:>5}  {:<16} {}",
+                    "Filesystem", "Size", "Used", "Avail", "Use%", "Mounted on", "Label"
                 );
                 for (mount_path, info) in &mounts {
                     let total = info.total_bytes();
@@ -5743,13 +5750,14 @@ fn cmd_df(args: &str) {
                     let used = info.used_bytes();
                     let pct = info.usage_percent();
                     crate::console_println!(
-                        "{:<12} {:>10} {:>10} {:>10} {:>4}%  {}",
+                        "{:<12} {:>10} {:>10} {:>10} {:>4}%  {:<16} {}",
                         info.fs_type,
                         format_bytes(total),
                         format_bytes(used),
                         format_bytes(free),
                         pct,
-                        mount_path
+                        mount_path,
+                        info.volume_label,
                     );
                     if verbose {
                         if let Ok(stats) = crate::fs::Vfs::debug_stats(mount_path) {
@@ -5772,21 +5780,22 @@ fn cmd_df(args: &str) {
         match crate::fs::Vfs::statvfs(&path) {
             Ok(info) => {
                 crate::console_println!(
-                    "{:<12} {:>10} {:>10} {:>10} {:>5}  {}",
-                    "Filesystem", "Size", "Used", "Avail", "Use%", "Path"
+                    "{:<12} {:>10} {:>10} {:>10} {:>5}  {:<16} {}",
+                    "Filesystem", "Size", "Used", "Avail", "Use%", "Path", "Label"
                 );
                 let total = info.total_bytes();
                 let free = info.free_bytes();
                 let used = info.used_bytes();
                 let pct = info.usage_percent();
                 crate::console_println!(
-                    "{:<12} {:>10} {:>10} {:>10} {:>4}%  {}",
+                    "{:<12} {:>10} {:>10} {:>10} {:>4}%  {:<16} {}",
                     info.fs_type,
                     format_bytes(total),
                     format_bytes(used),
                     format_bytes(free),
                     pct,
-                    path
+                    path,
+                    info.volume_label,
                 );
             }
             Err(e) => {

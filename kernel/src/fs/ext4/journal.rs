@@ -86,6 +86,10 @@ mod tag_flags {
 
 /// Journal superblock (on-disk format, first block of journal).
 ///
+/// **Layout documentation only** — all fields are big-endian on disk,
+/// so we parse them manually with `read_be32` instead of using
+/// `read_struct_pub` (which assumes native byte order).
+///
 /// 1024 bytes (padded to block size).
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -143,6 +147,8 @@ struct JournalSuperblock {
 const _: () = assert!(core::mem::size_of::<JournalSuperblock>() == 1024);
 
 /// Block header (common to descriptor, commit, revoke blocks).
+///
+/// **Layout documentation only** — parsed manually via `read_be32`.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct JournalBlockHeader {
@@ -153,6 +159,7 @@ struct JournalBlockHeader {
 
 /// Descriptor block tag (v1, 8 bytes).
 ///
+/// **Layout documentation only** — parsed manually via `read_be32`.
 /// Each tag describes one block being logged.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -178,6 +185,40 @@ struct JournalRevokeHeader {
     header: JournalBlockHeader,
     /// Total bytes used in this revoke block (including this header).
     r_count: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Big-endian helpers — jbd2 on-disk format is network byte order
+// ---------------------------------------------------------------------------
+
+/// Read a big-endian u32 from `buf` at the given byte offset.
+///
+/// Returns 0 if the slice is too short, which is safe for journal
+/// parsing (0 is never a valid magic or meaningful field value).
+#[inline]
+fn read_be32(buf: &[u8], offset: usize) -> u32 {
+    buf.get(offset..offset.wrapping_add(4))
+        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        .map_or(0, u32::from_be_bytes)
+}
+
+/// Read a big-endian u64 from `buf` at the given byte offset.
+///
+/// For 64-bit block numbers in revoke blocks.  Returns 0 on short
+/// reads.
+#[inline]
+fn read_be64(buf: &[u8], offset: usize) -> u64 {
+    buf.get(offset..offset.wrapping_add(8))
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(0, u64::from_be_bytes)
+}
+
+/// Write a big-endian u32 to `buf` at the given byte offset.
+#[inline]
+fn write_be32(buf: &mut [u8], offset: usize, val: u32) {
+    if let Some(dest) = buf.get_mut(offset..offset.wrapping_add(4)) {
+        dest.copy_from_slice(&val.to_be_bytes());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,19 +293,29 @@ impl Journal {
         let mut jsb_buf = vec![0u8; fs_block_size as usize];
         reader.read_block(jsb_block, &mut jsb_buf)?;
 
-        // Parse the journal superblock.
-        let jsb = super::driver::read_struct_pub::<JournalSuperblock>(&jsb_buf)?;
+        // Parse the journal superblock manually — jbd2 uses big-endian.
+        // (Cannot use read_struct_pub which assumes native/LE byte order.)
+        let magic = read_be32(&jsb_buf, 0x00);
+        let blocktype = read_be32(&jsb_buf, 0x04);
+        let _header_seq = read_be32(&jsb_buf, 0x08);
+        let s_blocksize = read_be32(&jsb_buf, 0x0C);
+        let s_maxlen = read_be32(&jsb_buf, 0x10);
+        let s_first = read_be32(&jsb_buf, 0x14);
+        let s_sequence = read_be32(&jsb_buf, 0x18);
+        let s_start = read_be32(&jsb_buf, 0x1C);
+        let _s_errno = read_be32(&jsb_buf, 0x20);
+        let _s_feature_compat = read_be32(&jsb_buf, 0x24);
+        let s_feature_incompat = read_be32(&jsb_buf, 0x28);
 
         // Validate magic.
-        if jsb.s_header_magic != JBD2_MAGIC {
+        if magic != JBD2_MAGIC {
             crate::serial_println!(
                 "[ext4-journal] Bad journal magic: {:#x} (expected {:#x})",
-                jsb.s_header_magic, JBD2_MAGIC
+                magic, JBD2_MAGIC
             );
             return Err(KernelError::IoError);
         }
 
-        let blocktype = jsb.s_header_blocktype;
         if blocktype != block_type::SUPERBLOCK_V1 && blocktype != block_type::SUPERBLOCK_V2 {
             crate::serial_println!(
                 "[ext4-journal] Bad journal superblock type: {}",
@@ -273,13 +324,13 @@ impl Journal {
             return Err(KernelError::IoError);
         }
 
-        let has_64bit = (jsb.s_feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT) != 0;
+        let has_64bit = (s_feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT) != 0;
         let state = JournalState {
-            block_size: jsb.s_blocksize,
-            max_len: jsb.s_maxlen,
-            first_block: jsb.s_first,
-            next_sequence: jsb.s_sequence,
-            write_pos: jsb.s_start,
+            block_size: s_blocksize,
+            max_len: s_maxlen,
+            first_block: s_first,
+            next_sequence: s_sequence,
+            write_pos: s_start,
             journal_ino,
             journal_blocks,
             has_64bit,
@@ -357,9 +408,9 @@ impl Journal {
         let mut desc_buf = vec![0u8; block_size];
         self.write_block_header(&mut desc_buf, block_type::DESCRIPTOR, txn.sequence);
 
-        // Write tags for each block in the transaction.
-        let header_size = core::mem::size_of::<JournalBlockHeader>();
-        let tag_size = core::mem::size_of::<JournalBlockTag>();
+        // Write tags for each block in the transaction (big-endian).
+        let header_size: usize = 12;
+        let tag_size: usize = 8;
         let mut tag_offset = header_size;
 
         for (i, (fs_block, _)) in txn.blocks.iter().enumerate() {
@@ -374,13 +425,9 @@ impl Journal {
                 flags |= tag_flags::LAST_TAG;
             }
 
-            // Write tag.
-            if let Some(dest) = desc_buf.get_mut(tag_offset..tag_offset + 4) {
-                dest.copy_from_slice(&(*fs_block as u32).to_le_bytes());
-            }
-            if let Some(dest) = desc_buf.get_mut(tag_offset + 4..tag_offset + 8) {
-                dest.copy_from_slice(&flags.to_le_bytes());
-            }
+            // Write tag (big-endian per jbd2 spec).
+            write_be32(&mut desc_buf, tag_offset, *fs_block as u32);
+            write_be32(&mut desc_buf, tag_offset.wrapping_add(4), flags);
 
             tag_offset = tag_offset.saturating_add(tag_size);
         }
@@ -490,8 +537,10 @@ impl Journal {
         start_seq: u32,
     ) -> KernelResult<(BTreeMap<u64, u32>, u32)> {
         let block_size = self.state.block_size as usize;
-        let header_size = core::mem::size_of::<JournalBlockHeader>();
-        let tag_size = core::mem::size_of::<JournalBlockTag>();
+        // jbd2 block header: 12 bytes (magic + type + seq), all big-endian.
+        let header_size: usize = 12;
+        // jbd2 v1 descriptor tag: 8 bytes (blocknr_lo + flags), big-endian.
+        let tag_size: usize = 8;
         let revoke_entry_size: usize = if self.state.has_64bit { 8 } else { 4 };
 
         let mut revoke_table: BTreeMap<u64, u32> = BTreeMap::new();
@@ -504,25 +553,25 @@ impl Journal {
             let mut buf = vec![0u8; block_size];
             self.reader.read_block(phys, &mut buf)?;
 
-            let header = super::driver::read_struct_pub::<JournalBlockHeader>(&buf)?;
-            if header.h_magic != JBD2_MAGIC || header.h_sequence != expected_seq {
+            // Parse header as big-endian.
+            let h_magic = read_be32(&buf, 0);
+            let h_blocktype = read_be32(&buf, 4);
+            let h_sequence = read_be32(&buf, 8);
+            if h_magic != JBD2_MAGIC || h_sequence != expected_seq {
                 break;
             }
 
-            match header.h_blocktype {
+            match h_blocktype {
                 block_type::DESCRIPTOR => {
                     // Skip past the descriptor and its data blocks.
                     let mut tag_offset = header_size;
                     let mut data_block_count = 0u32;
 
                     while tag_offset.saturating_add(tag_size) <= block_size {
-                        let tag = super::driver::read_struct_pub::<JournalBlockTag>(
-                            buf.get(tag_offset..).ok_or(KernelError::IoError)?,
-                        )?;
-
+                        let t_flags = read_be32(&buf, tag_offset.wrapping_add(4));
                         data_block_count = data_block_count.saturating_add(1);
 
-                        let is_last = (tag.t_flags & tag_flags::LAST_TAG) != 0;
+                        let is_last = (t_flags & tag_flags::LAST_TAG) != 0;
                         tag_offset = tag_offset.saturating_add(tag_size);
 
                         if is_last {
@@ -542,48 +591,19 @@ impl Journal {
                 }
                 block_type::REVOKE => {
                     // Parse revoke block: extract filesystem block numbers.
-                    //
-                    // NOTE: jbd2 spec uses big-endian for all fields, but
-                    // our journal module reads struct fields as raw LE
-                    // (via read_struct_pub on x86).  We use the same
-                    // convention here for consistency.  See todo.txt for
-                    // the known byte-order issue.
-                    let revoke_hdr_size =
-                        core::mem::size_of::<JournalRevokeHeader>();
+                    // Revoke header is block header (12 bytes) + r_count (4 bytes) = 16 bytes.
+                    let revoke_hdr_size: usize = 16;
 
-                    // Read r_count (total bytes used, including header).
-                    let r_count = if buf.len() >= revoke_hdr_size {
-                        u32::from_le_bytes([
-                            buf[12], buf[13], buf[14], buf[15],
-                        ]) as usize
-                    } else {
-                        0
-                    };
+                    // r_count is at offset 12, big-endian.
+                    let r_count = (read_be32(&buf, 12) as usize).min(block_size);
 
-                    // Validate r_count bounds.
-                    let r_count = r_count.min(block_size);
-
-                    // Parse revoked block numbers (LE, matching existing
-                    // descriptor tag convention for t_blocknr).
+                    // Parse revoked block numbers (big-endian, per jbd2 spec).
                     let mut offset = revoke_hdr_size;
                     while offset.saturating_add(revoke_entry_size) <= r_count {
                         let block_nr = if self.state.has_64bit {
-                            // 64-bit: 8 bytes, little-endian.
-                            let lo = u32::from_le_bytes([
-                                buf[offset], buf[offset + 1],
-                                buf[offset + 2], buf[offset + 3],
-                            ]);
-                            let hi = u32::from_le_bytes([
-                                buf[offset + 4], buf[offset + 5],
-                                buf[offset + 6], buf[offset + 7],
-                            ]);
-                            u64::from(lo) | (u64::from(hi) << 32)
+                            read_be64(&buf, offset)
                         } else {
-                            // 32-bit: 4 bytes, little-endian.
-                            u64::from(u32::from_le_bytes([
-                                buf[offset], buf[offset + 1],
-                                buf[offset + 2], buf[offset + 3],
-                            ]))
+                            u64::from(read_be32(&buf, offset))
                         };
 
                         // Record the highest revoking sequence for this block.
@@ -591,8 +611,6 @@ impl Journal {
                         revoke_table
                             .entry(block_nr)
                             .and_modify(|existing| {
-                                // Keep the highest sequence — a later revoke
-                                // supersedes an earlier one.
                                 if seq > *existing {
                                     *existing = seq;
                                 }
@@ -621,8 +639,8 @@ impl Journal {
         revoke_table: &BTreeMap<u64, u32>,
     ) -> KernelResult<(u32, u32, u32)> {
         let block_size = self.state.block_size as usize;
-        let header_size = core::mem::size_of::<JournalBlockHeader>();
-        let tag_size = core::mem::size_of::<JournalBlockTag>();
+        let header_size: usize = 12;
+        let tag_size: usize = 8;
 
         let mut replayed = 0u32;
         let mut revoked = 0u32;
@@ -635,12 +653,15 @@ impl Journal {
             let mut buf = vec![0u8; block_size];
             self.reader.read_block(phys, &mut buf)?;
 
-            let header = super::driver::read_struct_pub::<JournalBlockHeader>(&buf)?;
-            if header.h_magic != JBD2_MAGIC || header.h_sequence != expected_seq {
+            // Parse header as big-endian.
+            let h_magic = read_be32(&buf, 0);
+            let h_blocktype = read_be32(&buf, 4);
+            let h_sequence = read_be32(&buf, 8);
+            if h_magic != JBD2_MAGIC || h_sequence != expected_seq {
                 break;
             }
 
-            match header.h_blocktype {
+            match h_blocktype {
                 block_type::DESCRIPTOR => {
                     let txn_seq = expected_seq;
 
@@ -649,13 +670,12 @@ impl Journal {
                     let mut block_positions = Vec::new();
 
                     while tag_offset.saturating_add(tag_size) <= block_size {
-                        let tag = super::driver::read_struct_pub::<JournalBlockTag>(
-                            buf.get(tag_offset..).ok_or(KernelError::IoError)?,
-                        )?;
+                        let t_blocknr = read_be32(&buf, tag_offset);
+                        let t_flags = read_be32(&buf, tag_offset.wrapping_add(4));
 
-                        block_positions.push(u64::from(tag.t_blocknr));
+                        block_positions.push(u64::from(t_blocknr));
 
-                        let is_last = (tag.t_flags & tag_flags::LAST_TAG) != 0;
+                        let is_last = (t_flags & tag_flags::LAST_TAG) != 0;
                         tag_offset = tag_offset.saturating_add(tag_size);
 
                         if is_last {
@@ -738,17 +758,11 @@ impl Journal {
         }
     }
 
-    /// Write a block header (magic + type + sequence).
+    /// Write a block header (magic + type + sequence) in big-endian.
     fn write_block_header(&self, buf: &mut [u8], blocktype: u32, sequence: u32) {
-        if let Some(dest) = buf.get_mut(0..4) {
-            dest.copy_from_slice(&JBD2_MAGIC.to_le_bytes());
-        }
-        if let Some(dest) = buf.get_mut(4..8) {
-            dest.copy_from_slice(&blocktype.to_le_bytes());
-        }
-        if let Some(dest) = buf.get_mut(8..12) {
-            dest.copy_from_slice(&sequence.to_le_bytes());
-        }
+        write_be32(buf, 0, JBD2_MAGIC);
+        write_be32(buf, 4, blocktype);
+        write_be32(buf, 8, sequence);
     }
 
     /// Write the journal superblock back to disk.
@@ -760,13 +774,9 @@ impl Journal {
         let mut buf = vec![0u8; block_size];
         self.reader.read_block(jsb_phys, &mut buf)?;
 
-        // Update sequence and start position.
-        if let Some(dest) = buf.get_mut(0x18..0x1C) {
-            dest.copy_from_slice(&self.state.next_sequence.to_le_bytes());
-        }
-        if let Some(dest) = buf.get_mut(0x1C..0x20) {
-            dest.copy_from_slice(&self.state.write_pos.to_le_bytes());
-        }
+        // Update sequence and start position (big-endian).
+        write_be32(&mut buf, 0x18, self.state.next_sequence);
+        write_be32(&mut buf, 0x1C, self.state.write_pos);
 
         self.reader.write_block(jsb_phys, &buf)?;
         self.reader.flush()

@@ -2147,6 +2147,7 @@ impl Ext4Driver {
                 let extent = read_struct::<Ext4Extent>(ext_bytes)?;
 
                 let ext_logical = u64::from(extent.ee_block);
+                let ext_unwritten = (extent.ee_len & 0x8000) != 0;
                 let ext_len = u64::from(extent.ee_len & 0x7FFF);
                 let ext_phys = u64::from(extent.ee_start_lo)
                     | (u64::from(extent.ee_start_hi) << 32);
@@ -2167,9 +2168,12 @@ impl Ext4Driver {
                         return Ok(());
                     }
 
-                    let phys = ext_phys.saturating_add(b);
                     let mut buf = vec![0u8; block_size_usize];
-                    self.reader.read_block(phys, &mut buf)?;
+                    if !ext_unwritten {
+                        let phys = ext_phys.saturating_add(b);
+                        self.reader.read_block(phys, &mut buf)?;
+                    }
+                    // Unwritten extents: buf stays zeroed.
 
                     // Calculate how much of this block to copy.
                     let block_start_byte = logical.saturating_mul(block_size);
@@ -2574,13 +2578,18 @@ impl Ext4Driver {
 
                 let phys_block = u64::from(extent.ee_start_lo)
                     | (u64::from(extent.ee_start_hi) << 32);
-                // Uninitialized extents have the high bit of ee_len set.
+                // Uninitialized (unwritten) extents have bit 15 of ee_len set.
+                // These are pre-allocated but not yet written — reads return zeros.
+                let unwritten = (extent.ee_len & 0x8000) != 0;
                 let block_count = u64::from(extent.ee_len & 0x7FFF);
 
                 for b in 0..block_count {
-                    let block_nr = phys_block.saturating_add(b);
                     let mut buf = vec![0u8; block_size as usize];
-                    self.reader.read_block(block_nr, &mut buf)?;
+                    if !unwritten {
+                        let block_nr = phys_block.saturating_add(b);
+                        self.reader.read_block(block_nr, &mut buf)?;
+                    }
+                    // Unwritten extents: buf stays zeroed (correct behavior).
 
                     // Don't append past file_size.
                     let remaining = file_size.saturating_sub(result.len() as u64);
@@ -2626,15 +2635,18 @@ impl Ext4Driver {
 
                 let phys_block = u64::from(extent.ee_start_lo)
                     | (u64::from(extent.ee_start_hi) << 32);
+                let unwritten = (extent.ee_len & 0x8000) != 0;
                 let block_count = u64::from(extent.ee_len & 0x7FFF);
 
                 for b in 0..block_count {
                     if result.len() as u64 >= file_size {
                         return Ok(());
                     }
-                    let block_nr = phys_block.saturating_add(b);
                     let mut buf = vec![0u8; block_size];
-                    self.reader.read_block(block_nr, &mut buf)?;
+                    if !unwritten {
+                        let block_nr = phys_block.saturating_add(b);
+                        self.reader.read_block(block_nr, &mut buf)?;
+                    }
 
                     let remaining = file_size.saturating_sub(result.len() as u64);
                     let copy_len = (block_size as u64).min(remaining) as usize;

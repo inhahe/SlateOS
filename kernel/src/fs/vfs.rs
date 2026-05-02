@@ -1953,6 +1953,48 @@ impl Vfs {
         VFS_DCACHE.lock().stats()
     }
 
+    // ----- Glob -----
+
+    /// Find all files/directories matching a glob pattern path.
+    ///
+    /// The pattern can contain glob metacharacters in any path component:
+    /// - `/tmp/*.txt` — all .txt files in /tmp
+    /// - `/proc/*/status` — status file for all PIDs
+    /// - `/sys/params/mm.*` — all mm. params
+    /// - `/**/*.rs` — all .rs files recursively (not yet supported)
+    ///
+    /// Returns a list of absolute paths that match.  Directories are not
+    /// recursed into unless the pattern explicitly has deeper components.
+    ///
+    /// ## Limits
+    ///
+    /// - Maximum 1000 results to prevent runaway expansion.
+    /// - Maximum pattern depth of 32 components.
+    pub fn glob(pattern: &str) -> KernelResult<Vec<String>> {
+        let components: Vec<&str> = pattern
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .collect();
+
+        if components.is_empty() {
+            return Ok(alloc::vec![String::from("/")]);
+        }
+
+        if components.len() > 32 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let mut results = Vec::new();
+        glob_recurse(
+            &String::from("/"),
+            &components,
+            0,
+            &mut results,
+            1000, // max results
+        );
+        Ok(results)
+    }
+
     // ----- Sync / Flush -----
 
     /// Flush all dirty data and metadata across all mounted filesystems.
@@ -2212,6 +2254,96 @@ pub fn normalize_path(path: &str) -> String {
         result.push_str(c);
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Mount point lookup
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Glob expansion helper
+// ---------------------------------------------------------------------------
+
+/// Recursively expand a glob pattern by matching directory contents.
+///
+/// `base` is the current absolute path prefix.
+/// `components` is the full list of pattern components.
+/// `depth` is the current component index being matched.
+/// `results` collects matching paths.
+/// `max_results` caps the output to prevent runaway expansion.
+fn glob_recurse(
+    base: &str,
+    components: &[&str],
+    depth: usize,
+    results: &mut Vec<String>,
+    max_results: usize,
+) {
+    if results.len() >= max_results {
+        return;
+    }
+
+    // Get the current component to match.
+    let component = match components.get(depth) {
+        Some(c) => *c,
+        None => return, // No more components — shouldn't get here.
+    };
+
+    let is_last = depth + 1 == components.len();
+
+    // Check if this component contains glob metacharacters.
+    let is_glob = component.contains('*') || component.contains('?') || component.contains('[');
+
+    if is_glob {
+        // Read the current directory and match each entry against the pattern.
+        let entries = match Vfs::readdir(base) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in &entries {
+            if glob_match(&entry.name, component, true) {
+                let child_path = if base == "/" {
+                    alloc::format!("/{}", entry.name)
+                } else {
+                    alloc::format!("{}/{}", base, entry.name)
+                };
+
+                if is_last {
+                    // This was the last component — add to results.
+                    if results.len() < max_results {
+                        results.push(child_path);
+                    }
+                } else if entry.entry_type == EntryType::Directory {
+                    // More components to match — recurse into directories.
+                    glob_recurse(&child_path, components, depth + 1, results, max_results);
+                }
+            }
+        }
+    } else {
+        // No glob chars — this is a literal path component.
+        let child_path = if base == "/" {
+            alloc::format!("/{}", component)
+        } else {
+            alloc::format!("{}/{}", base, component)
+        };
+
+        if is_last {
+            // Check if this path exists.
+            if Vfs::stat(&child_path).is_ok() {
+                if results.len() < max_results {
+                    results.push(child_path);
+                }
+            }
+        } else {
+            // Check if it's a directory before recursing.
+            match Vfs::stat(&child_path) {
+                Ok(entry) if entry.entry_type == EntryType::Directory => {
+                    glob_recurse(&child_path, components, depth + 1, results, max_results);
+                }
+                _ => {} // Not a directory or doesn't exist — skip.
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

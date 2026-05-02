@@ -187,6 +187,7 @@ fn execute(line: &str) {
         "dd" => cmd_dd(args),
         "free" => cmd_free(),
         "lsblk" | "blkdev" => cmd_lsblk(),
+        "glob" => cmd_glob(args),
         "readlink" => cmd_readlink(args),
         "symlink" | "mklink" => cmd_symlink(args),
         "xattr" => cmd_xattr(args),
@@ -267,6 +268,7 @@ fn cmd_help() {
     crate::console_println!("  dd ..     Copy blocks between files (if=/of=/bs=/count=)");
     crate::console_println!("  free      Show memory usage summary");
     crate::console_println!("  lsblk     List block devices with sizes");
+    crate::console_println!("  glob P    Expand glob pattern (e.g., /tmp/*.txt)");
     crate::console_println!("  readlink P Show symlink target");
     crate::console_println!("  symlink T P Create symlink at P pointing to T");
     crate::console_println!("  xattr F .. Extended attributes (list/get/set/rm)");
@@ -3058,5 +3060,37 @@ fn cmd_lsblk() {
             "{:<8} {:>12} {:>8} {:>6}  disk",
             dev.name, dev.sector_count, size_str, ro
         );
+    }
+}
+
+/// `glob PATTERN` — expand a glob pattern against the filesystem.
+///
+/// Supports wildcards in any path component:
+///   glob /tmp/*.txt
+///   glob /proc/*/status
+///   glob /sys/params/mm.*
+fn cmd_glob(args: &str) {
+    let pattern = args.trim();
+    if pattern.is_empty() {
+        crate::console_println!("Usage: glob <pattern>");
+        crate::console_println!("  Example: glob /tmp/*.txt");
+        crate::console_println!("  Example: glob /proc/*/status");
+        return;
+    }
+
+    match crate::fs::Vfs::glob(pattern) {
+        Ok(matches) => {
+            if matches.is_empty() {
+                crate::console_println!("(no matches)");
+            } else {
+                for path in &matches {
+                    crate::console_println!("{}", path);
+                }
+                crate::console_println!("\n{} matches", matches.len());
+            }
+        }
+        Err(e) => {
+            crate::console_println!("glob: error: {:?}", e);
+        }
     }
 }

@@ -23,6 +23,7 @@
 //! still processing input promptly when keys arrive.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -176,6 +177,11 @@ fn execute(line: &str) {
         "grep" => cmd_grep(args),
         "cmp" | "diff" => cmd_cmp(args),
         "fallocate" => cmd_fallocate(args),
+        "sort" => cmd_sort(args),
+        "uniq" => cmd_uniq(args),
+        "tee" => cmd_tee(args),
+        "truncate" => cmd_truncate(args),
+        "sha256" | "hash" => cmd_sha256(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -237,6 +243,11 @@ fn cmd_help() {
     crate::console_println!("  grep P F  Search for pattern P in file F");
     crate::console_println!("  cmp F1 F2 Compare two files byte-by-byte");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
+    crate::console_println!("  sort FILE Sort lines of a file alphabetically");
+    crate::console_println!("  uniq FILE Remove adjacent duplicate lines");
+    crate::console_println!("  tee F T   Write text T to file F and display it");
+    crate::console_println!("  truncate N F Truncate file F to N bytes");
+    crate::console_println!("  sha256 F  Compute SHA-256 hash of file contents");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -2235,4 +2246,209 @@ fn cmd_reboot() {
 fn cmd_version() {
     crate::console_println!("Kernel v0.1.0 (x86_64, microkernel)");
     crate::console_println!("Built with Rust, AI-developed");
+}
+
+// ---------------------------------------------------------------------------
+// Text processing utilities
+// ---------------------------------------------------------------------------
+
+/// `sort FILE` — sort lines of a file alphabetically.
+///
+/// Options: `sort -r FILE` for reverse order.
+fn cmd_sort(args: &str) {
+    let (reverse, path) = if args.starts_with("-r ") {
+        (true, args.get(3..).unwrap_or("").trim())
+    } else {
+        (false, args.trim())
+    };
+
+    if path.is_empty() {
+        crate::console_println!("Usage: sort [-r] <file>");
+        return;
+    }
+
+    let data = match crate::fs::Vfs::read_file(path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("sort: cannot read '{}': {:?}", path, e);
+            return;
+        }
+    };
+
+    let text = match core::str::from_utf8(&data) {
+        Ok(t) => t,
+        Err(_) => {
+            crate::console_println!("sort: file is not valid UTF-8");
+            return;
+        }
+    };
+
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.sort_unstable();
+    if reverse {
+        lines.reverse();
+    }
+
+    for line in &lines {
+        crate::console_println!("{}", line);
+    }
+}
+
+/// `uniq FILE` — remove adjacent duplicate lines.
+///
+/// Options: `uniq -c FILE` to prefix lines with occurrence count.
+fn cmd_uniq(args: &str) {
+    let (count_mode, path) = if args.starts_with("-c ") {
+        (true, args.get(3..).unwrap_or("").trim())
+    } else {
+        (false, args.trim())
+    };
+
+    if path.is_empty() {
+        crate::console_println!("Usage: uniq [-c] <file>");
+        return;
+    }
+
+    let data = match crate::fs::Vfs::read_file(path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("uniq: cannot read '{}': {:?}", path, e);
+            return;
+        }
+    };
+
+    let text = match core::str::from_utf8(&data) {
+        Ok(t) => t,
+        Err(_) => {
+            crate::console_println!("uniq: file is not valid UTF-8");
+            return;
+        }
+    };
+
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return;
+    }
+
+    let mut prev = lines[0];
+    let mut count = 1u64;
+
+    for &line in lines.iter().skip(1) {
+        if line == prev {
+            count = count.wrapping_add(1);
+        } else {
+            if count_mode {
+                crate::console_println!("{:7} {}", count, prev);
+            } else {
+                crate::console_println!("{}", prev);
+            }
+            prev = line;
+            count = 1;
+        }
+    }
+    // Print the last run.
+    if count_mode {
+        crate::console_println!("{:7} {}", count, prev);
+    } else {
+        crate::console_println!("{}", prev);
+    }
+}
+
+/// `tee FILE TEXT` — write TEXT to FILE and also display it.
+///
+/// Like the Unix tee command but with direct text input instead of stdin.
+fn cmd_tee(args: &str) {
+    let mut parts = args.splitn(2, ' ');
+    let path = parts.next().unwrap_or("").trim();
+    let text = parts.next().unwrap_or("").trim();
+
+    if path.is_empty() || text.is_empty() {
+        crate::console_println!("Usage: tee <file> <text>");
+        return;
+    }
+
+    // Display the text.
+    crate::console_println!("{}", text);
+
+    // Write to the file.
+    if let Err(e) = crate::fs::Vfs::write_file(path, text.as_bytes()) {
+        crate::console_println!("tee: write error: {:?}", e);
+    }
+}
+
+/// `truncate N FILE` — truncate a file to N bytes.
+///
+/// Supports K/M/G suffixes. If N is larger than the current file size,
+/// the behavior depends on the filesystem (may extend with zeros or
+/// return an error).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_truncate(args: &str) {
+    let mut parts = args.splitn(2, ' ');
+    let size_str = parts.next().unwrap_or("").trim();
+    let path = parts.next().unwrap_or("").trim();
+
+    if size_str.is_empty() || path.is_empty() {
+        crate::console_println!("Usage: truncate <size>[K|M|G] <file>");
+        return;
+    }
+
+    // Parse size with optional suffix.
+    let (num_str, multiplier) = if size_str.ends_with('G') || size_str.ends_with('g') {
+        (size_str.get(..size_str.len() - 1).unwrap_or(""), 1024u64 * 1024 * 1024)
+    } else if size_str.ends_with('M') || size_str.ends_with('m') {
+        (size_str.get(..size_str.len() - 1).unwrap_or(""), 1024u64 * 1024)
+    } else if size_str.ends_with('K') || size_str.ends_with('k') {
+        (size_str.get(..size_str.len() - 1).unwrap_or(""), 1024u64)
+    } else {
+        (size_str, 1u64)
+    };
+
+    let size = match num_str.parse::<u64>() {
+        Ok(n) => n.saturating_mul(multiplier),
+        Err(_) => {
+            crate::console_println!("truncate: invalid size '{}'", size_str);
+            return;
+        }
+    };
+
+    // Open the file handle and truncate.
+    match crate::fs::handle::open(path, crate::fs::handle::OpenFlags::from_bits(0x02)) {
+        Ok(handle) => {
+            match crate::fs::handle::ftruncate(handle, size) {
+                Ok(()) => {
+                    crate::console_println!("Truncated '{}' to {} bytes", path, size);
+                }
+                Err(e) => {
+                    crate::console_println!("truncate: error: {:?}", e);
+                }
+            }
+            let _ = crate::fs::handle::close(handle);
+        }
+        Err(e) => {
+            crate::console_println!("truncate: cannot open '{}': {:?}", path, e);
+        }
+    }
+}
+
+/// `sha256 FILE` — compute and display the SHA-256 hash of a file.
+fn cmd_sha256(args: &str) {
+    let path = args.trim();
+    if path.is_empty() {
+        crate::console_println!("Usage: sha256 <file>");
+        return;
+    }
+
+    match crate::fs::Vfs::content_hash(path) {
+        Ok(hash) => {
+            // Display as hex string.
+            let mut hex = alloc::string::String::with_capacity(64);
+            for byte in &hash {
+                hex.push_str(&alloc::format!("{:02x}", byte));
+            }
+            crate::console_println!("{} {}", hex, path);
+        }
+        Err(e) => {
+            crate::console_println!("sha256: cannot hash '{}': {:?}", path, e);
+        }
+    }
 }

@@ -257,6 +257,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Truncate optimization (zero-size fast path: free blocks + reset extent header)
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
+  - [x] Long Filename (LFN/VFAT) support: read/write/delete with UCS-2↔UTF-8 conversion, basis ~N name generation, contiguous slot allocation, checksum validation
+  - [x] Rich metadata: DOS timestamp parsing (create/write/access), RTC-stamped writes, attribute mapping (read-only→immutable, hidden, system)
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
 - [x] ISO 9660 (optical media, read-only, Joliet detection)
 - [x] Filesystem infrastructure:
@@ -278,7 +280,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Journaling (via ext4 jbd2)
   - [x] File metadata: owner, group, permissions, created/modified/accessed (relatime), immutable flag, append-only flag, extended attributes (key-value, 255-byte key / 64 KiB value)
   - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639), VFS-level cross-mount symlink resolution
-  - [-] File metadata: capabilities per file (needs security zone), content hash (SHA-256 via Vfs::content_hash)
+  - [-] File metadata: capabilities per file (needs security zone)
+  - [x] Content hash (SHA-256 via Vfs::content_hash)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

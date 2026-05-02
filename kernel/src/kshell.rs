@@ -3082,7 +3082,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cat",
+    "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
     "cd", "chmod", "chown", "clear", "cls", "cmp", "command", "copy", "cp",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
@@ -4161,6 +4161,7 @@ fn dispatch(line: &str) {
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "time" | "date" => cmd_time(),
+        "cal" => cmd_cal(args),
         "reboot" => cmd_reboot(),
         "irq" => cmd_irq(),
         "pci" => cmd_pci(),
@@ -4405,6 +4406,7 @@ fn cmd_help() {
     crate::console_println!("  yes [STR]  Repeat STR (default 'y') indefinitely");
     crate::console_println!("  xargs [-n N] CMD  Run CMD with piped input as arguments");
     crate::console_println!("  date       Show current date and time");
+    crate::console_println!("  cal [M] [Y] Show monthly calendar (current month if no args)");
     crate::console_println!("  test EXPR / [ EXPR ]  Conditional expressions");
     crate::console_println!("  expr EXPR  Evaluate arithmetic expression");
     crate::console_println!("  read [-p PROMPT] VAR  Read user input into variable");
@@ -4893,6 +4895,160 @@ fn cmd_printf(args: &str) {
 fn cmd_time() {
     let dt = crate::rtc::read_datetime();
     shell_println!("{}", dt);
+}
+
+/// Display a monthly calendar.
+///
+/// Usage: `cal` (current month), `cal MONTH YEAR`, or `cal YEAR`.
+/// Uses Tomohiko Sakamoto's day-of-week algorithm for the 1st of the
+/// month, then prints a standard 7-column grid (Su Mo Tu We Th Fr Sa)
+/// with today highlighted by brackets.
+///
+/// Reference: Unix cal(1).
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn cmd_cal(args: &str) {
+    let dt = crate::rtc::read_datetime();
+    let trimmed = args.trim();
+
+    let (month, year) = if trimmed.is_empty() {
+        // No arguments — show current month.
+        (u32::from(dt.month), u32::from(dt.year))
+    } else {
+        let parts: alloc::vec::Vec<&str> = trimmed.split_whitespace().collect();
+        match parts.len() {
+            1 => {
+                // Single argument: either a year (>12) or month (1-12).
+                if let Ok(v) = parts[0].parse::<u32>() {
+                    if v >= 1 && v <= 12 {
+                        (v, u32::from(dt.year))
+                    } else if v >= 1970 && v <= 9999 {
+                        // Show just one month — default to current month.
+                        (u32::from(dt.month), v)
+                    } else {
+                        crate::console_println!("Usage: cal [MONTH] [YEAR]");
+                        set_exit(1);
+                        return;
+                    }
+                } else {
+                    crate::console_println!("Usage: cal [MONTH] [YEAR]");
+                    set_exit(1);
+                    return;
+                }
+            }
+            2 => {
+                let m = parts[0].parse::<u32>().unwrap_or(0);
+                let y = parts[1].parse::<u32>().unwrap_or(0);
+                if m < 1 || m > 12 || y < 1 || y > 9999 {
+                    crate::console_println!("Usage: cal [MONTH (1-12)] [YEAR (1-9999)]");
+                    set_exit(1);
+                    return;
+                }
+                (m, y)
+            }
+            _ => {
+                crate::console_println!("Usage: cal [MONTH] [YEAR]");
+                set_exit(1);
+                return;
+            }
+        }
+    };
+
+    // Month names.
+    let month_names = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ];
+    let mname = month_names.get((month - 1) as usize).unwrap_or(&"???");
+
+    // Header: centered month and year over the 20-char-wide grid.
+    let header = alloc::format!("{} {}", mname, year);
+    // The grid is 20 characters wide (Su Mo Tu .. Sa).
+    let pad = if header.len() < 20 {
+        (20 - header.len()) / 2
+    } else {
+        0
+    };
+    shell_println!("{:>width$}{}", "", header, width = pad);
+    shell_println!("Su Mo Tu We Th Fr Sa");
+
+    // Days in month.
+    let dim = days_in_month(year, month);
+
+    // Day of the week for the 1st of this month.
+    // Tomohiko Sakamoto's algorithm: returns 0=Sunday, 1=Monday, ..., 6=Saturday.
+    let dow1 = day_of_week(year, month, 1);
+
+    // Is this the current month? (for highlighting today.)
+    let is_current = year == u32::from(dt.year) && month == u32::from(dt.month);
+    let today = u32::from(dt.day);
+
+    // Build each day cell as a fixed 2-character string, then join
+    // with single spaces (3 chars per cell: "DD ").  This avoids
+    // alignment issues with highlighted-today markers.
+    //
+    // Standard cal(1) format: each day is right-justified in a
+    // 2-char field, separated by single spaces.
+
+    // Print leading blanks for the first week.
+    for _ in 0..dow1 {
+        shell_print!("   ");
+    }
+
+    let mut col = dow1;
+    for day in 1..=dim {
+        let highlight = is_current && day == today;
+        if highlight {
+            // Highlight today with an asterisk suffix.  We replace the
+            // trailing space with '*' so alignment is preserved.
+            shell_print!("{:2}*", day);
+        } else if col < 6 || day < dim {
+            shell_print!("{:2} ", day);
+        } else {
+            // Last column or last day — no trailing space.
+            shell_print!("{:2}", day);
+        }
+
+        col += 1;
+        if col == 7 {
+            shell_println!("");
+            col = 0;
+        }
+    }
+
+    // Final newline if we didn't just print one.
+    if col != 0 {
+        shell_println!("");
+    }
+}
+
+/// Number of days in a given month (1-12) of a given year.
+#[allow(clippy::arithmetic_side_effects)]
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30, // Shouldn't happen with validated input.
+    }
+}
+
+/// Day of the week for a given date (0=Sunday, 1=Monday, ..., 6=Saturday).
+///
+/// Tomohiko Sakamoto's algorithm.  Works for any Gregorian date with
+/// year ≥ 1.
+#[allow(clippy::arithmetic_side_effects)]
+fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
+    // Lookup table for month offset.
+    let t: [u32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    let m = month as usize;
+    (y + y / 4 - y / 100 + y / 400 + t[m - 1] + day) % 7
 }
 
 // PCI device class/subclass descriptions and bar formatting use simple

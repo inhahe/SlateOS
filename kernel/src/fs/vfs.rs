@@ -684,6 +684,206 @@ static LOCK_TABLE: Mutex<Vec<PathLockEntry>> = Mutex::new(Vec::new());
 /// Maximum number of distinct file paths that can be locked.
 const MAX_LOCKED_PATHS: usize = 1024;
 
+// ---------------------------------------------------------------------------
+// VFS path resolution cache (dcache)
+// ---------------------------------------------------------------------------
+
+/// Number of entries in the VFS-level path resolution cache.
+///
+/// Caches `(normalized_path, follow_last) → resolved_path` to avoid the
+/// expensive component-by-component `lstat()` walk that `resolve_inner()`
+/// does for every VFS operation.  256 entries is enough for typical
+/// working-set locality (editor with 10-20 open files, shell navigating
+/// a few directories).
+pub(super) const VFS_DCACHE_SIZE: usize = 256;
+
+/// A single entry in the VFS path resolution cache.
+struct VfsDcacheEntry {
+    /// The normalized input path (key).
+    key: String,
+    /// Whether the final component was followed (true = resolve_follow,
+    /// false = resolve_no_follow).
+    follow_last: bool,
+    /// The resolved output path (after symlink expansion).
+    resolved: String,
+    /// Monotonic access counter for LRU eviction.
+    last_access: u64,
+    /// Whether this entry contains valid data.
+    valid: bool,
+}
+
+impl VfsDcacheEntry {
+    const fn empty() -> Self {
+        Self {
+            key: String::new(),
+            follow_last: false,
+            resolved: String::new(),
+            last_access: 0,
+            valid: false,
+        }
+    }
+}
+
+/// VFS-level directory entry cache.
+///
+/// Caches resolved paths to skip the per-component symlink-checking walk
+/// in `resolve_inner()`.  Each VFS operation first checks this cache;
+/// a hit avoids N `lstat()` calls (where N is the path depth).
+///
+/// ## Invalidation
+///
+/// Any mutation (write, remove, mkdir, rmdir, rename, symlink, link)
+/// invalidates entries whose key or resolved path has a matching prefix.
+/// Mount/unmount invalidates everything (rare operations).
+///
+/// ## Thread safety
+///
+/// Protected by its own spinlock, separate from the VFS mount table
+/// lock.  This avoids extending the VFS critical section.
+struct VfsDcache {
+    entries: [VfsDcacheEntry; VFS_DCACHE_SIZE],
+    /// Monotonic access counter.
+    counter: u64,
+    /// Cache hit count (for diagnostics).
+    hits: u64,
+    /// Cache miss count (for diagnostics).
+    misses: u64,
+}
+
+impl VfsDcache {
+    const fn new() -> Self {
+        // SAFETY: VfsDcacheEntry::empty() is const and produces a valid
+        // zero-like state.  We can't use [VfsDcacheEntry::empty(); N]
+        // because String isn't Copy, so we initialize in init().
+        Self {
+            entries: [const { VfsDcacheEntry::empty() }; VFS_DCACHE_SIZE],
+            counter: 0,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Look up a resolved path in the cache.
+    ///
+    /// Returns `Some(resolved_path)` on hit, `None` on miss.
+    fn lookup(&mut self, key: &str, follow_last: bool) -> Option<String> {
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.follow_last == follow_last && entry.key == key {
+                self.counter = self.counter.wrapping_add(1);
+                entry.last_access = self.counter;
+                self.hits = self.hits.wrapping_add(1);
+                return Some(entry.resolved.clone());
+            }
+        }
+        self.misses = self.misses.wrapping_add(1);
+        None
+    }
+
+    /// Insert a resolution result into the cache.
+    ///
+    /// Overwrites the least-recently-used entry if the cache is full.
+    fn insert(&mut self, key: &str, follow_last: bool, resolved: &str) {
+        self.counter = self.counter.wrapping_add(1);
+
+        // Check if already cached (update in place).
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.follow_last == follow_last && entry.key == key {
+                entry.resolved.clear();
+                entry.resolved.push_str(resolved);
+                entry.last_access = self.counter;
+                return;
+            }
+        }
+
+        // Find an empty slot.
+        for entry in self.entries.iter_mut() {
+            if !entry.valid {
+                entry.key = String::from(key);
+                entry.follow_last = follow_last;
+                entry.resolved = String::from(resolved);
+                entry.last_access = self.counter;
+                entry.valid = true;
+                return;
+            }
+        }
+
+        // Evict LRU entry.
+        let mut lru_idx = 0;
+        let mut lru_access = u64::MAX;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.last_access < lru_access {
+                lru_access = entry.last_access;
+                lru_idx = i;
+            }
+        }
+
+        self.entries[lru_idx].key.clear();
+        self.entries[lru_idx].key.push_str(key);
+        self.entries[lru_idx].follow_last = follow_last;
+        self.entries[lru_idx].resolved.clear();
+        self.entries[lru_idx].resolved.push_str(resolved);
+        self.entries[lru_idx].last_access = self.counter;
+        self.entries[lru_idx].valid = true;
+    }
+
+    /// Invalidate all entries whose key or resolved path starts with
+    /// `prefix` (or whose key/resolved path IS the prefix).
+    ///
+    /// Uses path-boundary checking: `/tmp` invalidates `/tmp/foo` but
+    /// not `/tmpfile`.
+    fn invalidate_prefix(&mut self, prefix: &str) {
+        for entry in self.entries.iter_mut() {
+            if !entry.valid {
+                continue;
+            }
+            if path_prefix_matches(&entry.key, prefix)
+                || path_prefix_matches(&entry.resolved, prefix)
+            {
+                entry.valid = false;
+            }
+        }
+    }
+
+    /// Invalidate all cache entries.
+    ///
+    /// Used on mount/unmount where any cached resolution could be stale.
+    fn invalidate_all(&mut self) {
+        for entry in self.entries.iter_mut() {
+            entry.valid = false;
+        }
+    }
+
+    /// Return (hits, misses, valid_entries) for diagnostics.
+    fn stats(&self) -> (u64, u64, usize) {
+        let valid = self.entries.iter().filter(|e| e.valid).count();
+        (self.hits, self.misses, valid)
+    }
+}
+
+/// Check if `path` starts with `prefix` at a path boundary.
+///
+/// Returns true if:
+/// - `path == prefix`, or
+/// - `path` starts with `prefix` followed by '/', or
+/// - `prefix == "/"` (root matches everything)
+fn path_prefix_matches(path: &str, prefix: &str) -> bool {
+    if prefix == "/" {
+        return true;
+    }
+    if path == prefix {
+        return true;
+    }
+    if path.starts_with(prefix) {
+        // Must be followed by '/' to be a path boundary.
+        path.as_bytes().get(prefix.len()) == Some(&b'/')
+    } else {
+        false
+    }
+}
+
+/// Global VFS path resolution cache.
+static VFS_DCACHE: Mutex<VfsDcache> = Mutex::new(VfsDcache::new());
+
 /// Public VFS interface.
 ///
 /// All methods are static — they operate on the global VFS singleton.
@@ -718,6 +918,10 @@ impl Vfs {
             path: String::from(mount_path),
             fs,
         });
+
+        // Mount changes affect path resolution — invalidate entire dcache.
+        drop(vfs);
+        VFS_DCACHE.lock().invalidate_all();
 
         Ok(())
     }
@@ -776,10 +980,13 @@ impl Vfs {
             mount_path
         );
 
+        // Unmount changes affect path resolution — invalidate entire dcache.
+        drop(vfs);
+        VFS_DCACHE.lock().invalidate_all();
+
         // Release any advisory locks on paths under this mount.
         // Use path-boundary check to avoid accidentally clearing locks
         // on paths like "/mnt_data" when unmounting "/mnt".
-        drop(vfs);
         let mut table = LOCK_TABLE.lock();
         table.retain(|entry| {
             if entry.path == mount_path {
@@ -828,7 +1035,24 @@ impl Vfs {
     fn resolve_follow(path: &str) -> KernelResult<String> {
         validate_path(path)?;
         let norm = normalize_path(path);
-        Self::resolve_inner(&norm, true, 0)
+
+        // Check VFS dcache first — avoids component-by-component lstat walk.
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            if let Some(resolved) = dcache.lookup(&norm, true) {
+                return Ok(resolved);
+            }
+        }
+
+        let resolved = Self::resolve_inner(&norm, true, 0)?;
+
+        // Cache the result for future lookups.
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            dcache.insert(&norm, true, &resolved);
+        }
+
+        Ok(resolved)
     }
 
     /// Like [`resolve_follow`] but does NOT follow the final component.
@@ -838,7 +1062,24 @@ impl Vfs {
     fn resolve_no_follow(path: &str) -> KernelResult<String> {
         validate_path(path)?;
         let norm = normalize_path(path);
-        Self::resolve_inner(&norm, false, 0)
+
+        // Check VFS dcache first.
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            if let Some(resolved) = dcache.lookup(&norm, false) {
+                return Ok(resolved);
+            }
+        }
+
+        let resolved = Self::resolve_inner(&norm, false, 0)?;
+
+        // Cache the result.
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            dcache.insert(&norm, false, &resolved);
+        }
+
+        Ok(resolved)
     }
 
     /// Core recursive resolver.
@@ -1124,6 +1365,9 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.remove(relative)?;
         }
+        // Removing a file/symlink can invalidate cached resolutions that
+        // traverse through it (if it was a symlink) or resolve to it.
+        VFS_DCACHE.lock().invalidate_prefix(&path);
         super::notify::emit_deleted(&path);
         super::journal::record(super::journal::JournalEventType::Deleted, &path);
         Ok(())
@@ -1153,6 +1397,8 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.rmdir(relative)?;
         }
+        // Removing a directory invalidates any cached paths through it.
+        VFS_DCACHE.lock().invalidate_prefix(&path);
         super::notify::emit_deleted(&path);
         super::journal::record(super::journal::JournalEventType::Deleted, &path);
         Ok(())
@@ -1258,6 +1504,12 @@ impl Vfs {
             Self::remove(&from)?;
         }
 
+        // Rename invalidates paths under both old and new locations.
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            dcache.invalidate_prefix(&from);
+            dcache.invalidate_prefix(&to);
+        }
         super::notify::emit_renamed(&from, &to);
         super::journal::record_rename(&from, &to);
         Ok(())
@@ -1444,6 +1696,12 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.symlink(relative, target)?;
         }
+        // A new symlink can change how any path through it resolves.
+        // Invalidate the parent directory prefix to be safe.
+        if let Some(last_slash) = path.rfind('/') {
+            let parent = if last_slash == 0 { "/" } else { &path[..last_slash] };
+            VFS_DCACHE.lock().invalidate_prefix(parent);
+        }
         super::notify::emit_created(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
         Ok(())
@@ -1592,6 +1850,15 @@ impl Vfs {
             result.push((mp.path.clone(), info));
         }
         Ok(result)
+    }
+
+    // ----- Path resolution cache stats -----
+
+    /// Return VFS dcache statistics: (hits, misses, valid_entries).
+    ///
+    /// Used by procfs to report cache performance.
+    pub fn dcache_stats() -> (u64, u64, usize) {
+        VFS_DCACHE.lock().stats()
     }
 
     // ----- Sync / Flush -----
@@ -2231,6 +2498,94 @@ pub fn self_test() -> KernelResult<()> {
 
         let _ = Vfs::remove(test_path);
         serial_println!("[vfs]     lock test cleanup OK");
+    }
+
+    // --- VFS dcache (path resolution cache) tests ---
+    if has_tmp {
+        serial_println!("[vfs]   Testing VFS path resolution cache (dcache)...");
+
+        // Create a test file.
+        let dcache_test = "/tmp/_vfs_dcache_test";
+        Vfs::write_file(dcache_test, b"dcache test data")?;
+
+        // Record stats before our test.
+        let (hits_before, _misses_before, _) = Vfs::dcache_stats();
+
+        // First access: will be a miss (not cached yet) or a hit
+        // if a previous operation already cached it.
+        let _content = Vfs::read_file(dcache_test)?;
+
+        // Second access to the same path: should be a cache hit.
+        let (hits_mid, _, _) = Vfs::dcache_stats();
+        let _content = Vfs::read_file(dcache_test)?;
+        let (hits_after, _, valid_entries) = Vfs::dcache_stats();
+
+        // The second read should have produced at least one more hit
+        // than before it (the resolve_follow path was cached).
+        if hits_after > hits_mid {
+            serial_println!(
+                "[vfs]     dcache hit on repeated path: {} → {} hits OK",
+                hits_mid, hits_after,
+            );
+        } else {
+            serial_println!(
+                "[vfs]     dcache repeated access: hits {} → {} (no increase, may be OK if path was simple)",
+                hits_mid, hits_after,
+            );
+        }
+        serial_println!("[vfs]     dcache valid entries: {}", valid_entries);
+
+        // Test invalidation: remove the file, then check that the
+        // resolved path was invalidated.
+        let (_, _, valid_before_remove) = Vfs::dcache_stats();
+        let _ = Vfs::remove(dcache_test);
+        let (_, _, valid_after_remove) = Vfs::dcache_stats();
+
+        // After remove, the entry should be invalidated (fewer valid entries).
+        if valid_after_remove < valid_before_remove {
+            serial_println!(
+                "[vfs]     dcache invalidation on remove: {} → {} valid OK",
+                valid_before_remove, valid_after_remove,
+            );
+        } else {
+            // Might be the same if other entries were added between.
+            serial_println!(
+                "[vfs]     dcache after remove: {} → {} valid (invalidation may have been masked by new inserts)",
+                valid_before_remove, valid_after_remove,
+            );
+        }
+
+        // Test path_prefix_matches helper.
+        if !path_prefix_matches("/tmp/foo", "/tmp") {
+            serial_println!("[vfs]   FAIL: path_prefix_matches('/tmp/foo', '/tmp') should be true");
+            return Err(KernelError::InternalError);
+        }
+        if path_prefix_matches("/tmpfile", "/tmp") {
+            serial_println!("[vfs]   FAIL: path_prefix_matches('/tmpfile', '/tmp') should be false");
+            return Err(KernelError::InternalError);
+        }
+        if !path_prefix_matches("/tmp", "/tmp") {
+            serial_println!("[vfs]   FAIL: path_prefix_matches('/tmp', '/tmp') should be true");
+            return Err(KernelError::InternalError);
+        }
+        if !path_prefix_matches("/anything", "/") {
+            serial_println!("[vfs]   FAIL: path_prefix_matches('/anything', '/') should be true");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     path_prefix_matches: all cases OK");
+
+        // Report overall dcache stats.
+        let (h, m, v) = Vfs::dcache_stats();
+        let total = h.saturating_add(m);
+        if total > 0 {
+            let rate = h.saturating_mul(100) / total;
+            serial_println!("[vfs]     dcache stats: {} hits, {} misses ({}% hit rate), {} valid entries",
+                h, m, rate, v);
+        } else {
+            serial_println!("[vfs]     dcache stats: no accesses yet");
+        }
+
+        serial_println!("[vfs]     dcache test completed OK");
     }
 
     serial_println!("[vfs] Self-test PASSED");

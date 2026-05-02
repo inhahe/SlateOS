@@ -317,8 +317,20 @@ fn gen_cacheinfo() -> Vec<u8> {
         0.0
     };
 
+    // VFS path resolution cache (dcache) stats.
+    let (dcache_hits, dcache_misses, dcache_valid) = super::vfs::Vfs::dcache_stats();
+    let dcache_hit_rate = {
+        let total = dcache_hits.saturating_add(dcache_misses);
+        if total > 0 {
+            (dcache_hits as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        }
+    };
+
     let text = format!(
-        "reads:        {}\n\
+        "--- buffer cache ---\n\
+         reads:        {}\n\
          hits:         {}\n\
          misses:       {}\n\
          hit_rate:     {:.1}%\n\
@@ -326,7 +338,12 @@ fn gen_cacheinfo() -> Vec<u8> {
          writebacks:   {}\n\
          readaheads:   {}\n\
          entries_used: {}/{}\n\
-         entries_dirty:{}\n",
+         entries_dirty:{}\n\
+         --- vfs dcache ---\n\
+         dcache_hits:  {}\n\
+         dcache_misses:{}\n\
+         dcache_valid: {}/{}\n\
+         dcache_rate:  {:.1}%\n",
         stats.reads,
         stats.hits,
         stats.misses,
@@ -337,6 +354,11 @@ fn gen_cacheinfo() -> Vec<u8> {
         stats.entries_used,
         stats.capacity,
         stats.entries_dirty,
+        dcache_hits,
+        dcache_misses,
+        dcache_valid,
+        super::vfs::VFS_DCACHE_SIZE,
+        dcache_hit_rate,
     );
     text.into_bytes()
 }

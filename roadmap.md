@@ -345,6 +345,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell break/continue: loop control for while and for loops, interacts correctly with nested function return
   - [x] Kshell read command: interactive keyboard input into variables, -p prompt flag, backspace editing, Ctrl+C cancel
   - [x] Kshell shift command: discard positional params, which/typeof for command type inspection, expanded tab completion
+  - [x] Kshell printf: formatted output (%s %d %u %x %X %o %c, zero-padding, width, escape sequences)
+  - [x] Kshell ${} parameter expansion: ${#VAR} length, ${VAR:-default}, ${VAR:+alt}, ${VAR:=default}, ${VAR:?msg}, ${VAR%pat}, ${VAR%%pat}, ${VAR#pat}, ${VAR##pat}
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -2643,6 +2643,25 @@ impl Ext4Driver {
         Ok(block_nr)
     }
 
+    /// Pre-allocate blocks for fallocate without writing data.
+    ///
+    /// Allocates `block_count` contiguous blocks starting near `goal`.
+    /// Returns the physical block number of the first allocated block.
+    /// The caller is responsible for setting up the extent tree and inode.
+    pub fn fallocate_blocks(
+        &mut self,
+        goal: u64,
+        block_count: u32,
+    ) -> KernelResult<u64> {
+        super::balloc::alloc_blocks(
+            &self.reader,
+            &mut self.sb,
+            &mut self.group_descs,
+            goal,
+            block_count,
+        )
+    }
+
     /// Flush all cached writes for this filesystem to disk.
     pub fn flush(&self) -> KernelResult<()> {
         self.reader.flush()
@@ -2704,6 +2723,29 @@ impl Ext4Driver {
         let base = 3; // offset in i_block for first extent
         inode.i_block[base] = logical_block;
         inode.i_block[base + 1] = u32::from(block_count)
+            | ((physical_block >> 32) as u32) << 16;
+        inode.i_block[base + 2] = physical_block as u32;
+    }
+
+    /// Set a single UNWRITTEN extent in the inode's i_block.
+    ///
+    /// Like `set_single_extent`, but marks the extent as uninitialized
+    /// (pre-allocated).  Reads from unwritten extents return zeros without
+    /// touching the disk blocks.  The UNWRITTEN flag is bit 15 of `ee_len`.
+    ///
+    /// Used by `fallocate()` to reserve disk space without committing data.
+    pub fn set_single_extent_unwritten(
+        &self,
+        inode: &mut Ext4Inode,
+        logical_block: u32,
+        physical_block: u64,
+        block_count: u16,
+    ) {
+        let base = 3; // offset in i_block for first extent
+        inode.i_block[base] = logical_block;
+        // Set UNWRITTEN flag: bit 15 of ee_len (0x8000 | count).
+        let ee_len_with_uninit = u32::from(block_count | 0x8000);
+        inode.i_block[base + 1] = ee_len_with_uninit
             | ((physical_block >> 32) as u32) << 16;
         inode.i_block[base + 2] = physical_block as u32;
     }

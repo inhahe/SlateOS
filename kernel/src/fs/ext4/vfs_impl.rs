@@ -502,6 +502,89 @@ impl FileSystem for Ext4Fs {
         }
     }
 
+    fn fallocate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        if size == 0 {
+            return Ok(());
+        }
+
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode = inode.i_mode & file_type::S_IFMT;
+        if mode != file_type::S_IFREG {
+            return Err(KernelError::NotSupported);
+        }
+
+        let current_size = inode_file_size(&inode);
+        let block_size = u64::from(self.driver.superblock().block_size);
+        if block_size == 0 {
+            return Err(KernelError::IoError);
+        }
+
+        // Calculate blocks currently allocated vs needed.
+        let current_blocks = current_size
+            .saturating_add(block_size.saturating_sub(1)) / block_size;
+        let needed_blocks = size
+            .saturating_add(block_size.saturating_sub(1)) / block_size;
+
+        if needed_blocks <= current_blocks {
+            // Already have enough allocated blocks.
+            return Ok(());
+        }
+
+        // Only handle pre-allocation for empty files (no existing extents).
+        // For files with existing data, the write path will extend as needed.
+        // Supporting mixed written/unwritten extents requires extent tree
+        // surgery that isn't worth the complexity for the common use case.
+        if current_size != 0 {
+            // Non-empty file — silently succeed (blocks will be allocated
+            // on demand when data is written).  This matches the default
+            // VFS fallocate behavior.
+            return Ok(());
+        }
+
+        // Allocate contiguous blocks via the driver (avoids split borrows).
+        let blocks_to_alloc = needed_blocks.min(u64::from(u16::MAX & 0x7FFF));
+
+        #[allow(clippy::cast_possible_truncation)]
+        let blocks_u32 = blocks_to_alloc as u32;
+        let goal = u64::from(self.driver.superblock().raw.s_first_data_block);
+
+        let first_block = self.driver.fallocate_blocks(goal, blocks_u32)?;
+
+        // Set up the extent tree with an UNWRITTEN extent.
+        // Unwritten extents have bit 15 set in ee_len, causing reads to
+        // return zeros instead of reading actual block data.
+        let mut new_inode = inode;
+        self.driver.init_extent_header_pub(&mut new_inode, 1);
+
+        // Set extent with UNWRITTEN flag (0x8000 | block_count).
+        #[allow(clippy::cast_possible_truncation)]
+        let block_count_u16 = blocks_to_alloc as u16;
+        self.driver.set_single_extent_unwritten(
+            &mut new_inode,
+            0,
+            first_block,
+            block_count_u16,
+        );
+
+        // Update block count (in 512-byte sectors) but NOT file size.
+        // File size stays 0 — reads past logical EOF return zeros.
+        #[allow(clippy::cast_possible_truncation)]
+        let sectors = blocks_u32.saturating_mul(
+            self.driver.superblock().block_size / 512
+        );
+        new_inode.i_blocks_lo = sectors;
+
+        self.driver.write_inode(ino, &new_inode)?;
+        self.driver.invalidate_extent_cache(ino);
+
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
     fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;

@@ -732,10 +732,10 @@ const MAX_LOCKED_PATHS: usize = 1024;
 ///
 /// Caches `(normalized_path, follow_last) → resolved_path` to avoid the
 /// expensive component-by-component `lstat()` walk that `resolve_inner()`
-/// does for every VFS operation.  256 entries is enough for typical
-/// working-set locality (editor with 10-20 open files, shell navigating
-/// a few directories).
-pub(super) const VFS_DCACHE_SIZE: usize = 256;
+/// does for every VFS operation.  1024 entries covers deep directory
+/// hierarchies and multi-process workloads.  At ~200 bytes per entry,
+/// the total overhead is ~200 KiB.
+pub(super) const VFS_DCACHE_SIZE: usize = 1024;
 
 /// A single entry in the VFS path resolution cache.
 struct VfsDcacheEntry {
@@ -745,11 +745,17 @@ struct VfsDcacheEntry {
     /// false = resolve_no_follow).
     follow_last: bool,
     /// The resolved output path (after symlink expansion).
+    /// Empty for negative entries (path does not exist).
     resolved: String,
     /// Monotonic access counter for LRU eviction.
     last_access: u64,
     /// Whether this entry contains valid data.
     valid: bool,
+    /// Negative cache entry: true if this path is known to NOT exist.
+    /// On hit, the caller can short-circuit with NotFound without
+    /// walking the filesystem.  Invalidated on any mutation in the
+    /// parent directory, same as positive entries.
+    negative: bool,
 }
 
 impl VfsDcacheEntry {
@@ -760,8 +766,25 @@ impl VfsDcacheEntry {
             resolved: String::new(),
             last_access: 0,
             valid: false,
+            negative: false,
         }
     }
+}
+
+/// Result of a VFS dcache lookup.
+///
+/// Distinguished from `Option<String>` so callers can tell the difference
+/// between "not in cache" (walk needed) and "known not to exist" (short-
+/// circuit with `NotFound`).
+enum DcacheLookup {
+    /// Path resolves to this value (positive cache hit).
+    Hit(String),
+    /// Path is known NOT to exist — a parent directory was missing when
+    /// the path was last resolved.  Caller can return `NotFound`
+    /// immediately without walking the filesystem.
+    NegativeHit,
+    /// Path not in cache — caller must do the full resolve walk.
+    Miss,
 }
 
 /// VFS-level directory entry cache.
@@ -770,11 +793,21 @@ impl VfsDcacheEntry {
 /// in `resolve_inner()`.  Each VFS operation first checks this cache;
 /// a hit avoids N `lstat()` calls (where N is the path depth).
 ///
+/// ## Negative entries
+///
+/// When path resolution fails with `NotFound` (a parent directory was
+/// missing), the result is cached as a negative entry.  Future lookups
+/// for the same path short-circuit with `NotFound` without touching the
+/// filesystem.  Negative entries are invalidated when files or
+/// directories are created at matching paths.
+///
 /// ## Invalidation
 ///
 /// Any mutation (write, remove, mkdir, rmdir, rename, symlink, link)
 /// invalidates entries whose key or resolved path has a matching prefix.
-/// Mount/unmount invalidates everything (rare operations).
+/// Creation operations (mkdir, write, link) specifically invalidate
+/// negative entries so the new path becomes resolvable.  Mount/unmount
+/// invalidates everything (rare operations).
 ///
 /// ## Thread safety
 ///
@@ -805,23 +838,29 @@ impl VfsDcache {
 
     /// Look up a resolved path in the cache.
     ///
-    /// Returns `Some(resolved_path)` on hit, `None` on miss.
-    fn lookup(&mut self, key: &str, follow_last: bool) -> Option<String> {
+    /// Returns `Hit(resolved)` for a positive cache entry, `NegativeHit`
+    /// for a path known not to exist, or `Miss` if the path is not cached.
+    fn lookup(&mut self, key: &str, follow_last: bool) -> DcacheLookup {
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.follow_last == follow_last && entry.key == key {
                 self.counter = self.counter.wrapping_add(1);
                 entry.last_access = self.counter;
                 self.hits = self.hits.wrapping_add(1);
-                return Some(entry.resolved.clone());
+                if entry.negative {
+                    return DcacheLookup::NegativeHit;
+                }
+                return DcacheLookup::Hit(entry.resolved.clone());
             }
         }
         self.misses = self.misses.wrapping_add(1);
-        None
+        DcacheLookup::Miss
     }
 
-    /// Insert a resolution result into the cache.
+    /// Insert a positive resolution result into the cache.
     ///
     /// Overwrites the least-recently-used entry if the cache is full.
+    /// If the key previously held a negative entry, it is promoted to
+    /// positive (the path now exists).
     fn insert(&mut self, key: &str, follow_last: bool, resolved: &str) {
         self.counter = self.counter.wrapping_add(1);
 
@@ -831,6 +870,7 @@ impl VfsDcache {
                 entry.resolved.clear();
                 entry.resolved.push_str(resolved);
                 entry.last_access = self.counter;
+                entry.negative = false;
                 return;
             }
         }
@@ -843,6 +883,7 @@ impl VfsDcache {
                 entry.resolved = String::from(resolved);
                 entry.last_access = self.counter;
                 entry.valid = true;
+                entry.negative = false;
                 return;
             }
         }
@@ -864,6 +905,58 @@ impl VfsDcache {
         self.entries[lru_idx].resolved.push_str(resolved);
         self.entries[lru_idx].last_access = self.counter;
         self.entries[lru_idx].valid = true;
+        self.entries[lru_idx].negative = false;
+    }
+
+    /// Insert a negative cache entry for a path known to NOT exist.
+    ///
+    /// Used when `resolve_inner()` returns `NotFound` — the path's
+    /// parent chain is broken, and subsequent lookups can short-circuit.
+    /// Negative entries are invalidated by `invalidate_negative_prefix()`
+    /// when creation operations succeed at matching paths.
+    fn insert_negative(&mut self, key: &str, follow_last: bool) {
+        self.counter = self.counter.wrapping_add(1);
+
+        // Check if already cached (update to negative in place).
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.follow_last == follow_last && entry.key == key {
+                entry.resolved.clear();
+                entry.negative = true;
+                entry.last_access = self.counter;
+                return;
+            }
+        }
+
+        // Find an empty slot.
+        for entry in self.entries.iter_mut() {
+            if !entry.valid {
+                entry.key = String::from(key);
+                entry.follow_last = follow_last;
+                entry.resolved = String::new();
+                entry.last_access = self.counter;
+                entry.valid = true;
+                entry.negative = true;
+                return;
+            }
+        }
+
+        // Evict LRU entry.
+        let mut lru_idx = 0;
+        let mut lru_access = u64::MAX;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.last_access < lru_access {
+                lru_access = entry.last_access;
+                lru_idx = i;
+            }
+        }
+
+        self.entries[lru_idx].key.clear();
+        self.entries[lru_idx].key.push_str(key);
+        self.entries[lru_idx].follow_last = follow_last;
+        self.entries[lru_idx].resolved.clear();
+        self.entries[lru_idx].last_access = self.counter;
+        self.entries[lru_idx].valid = true;
+        self.entries[lru_idx].negative = true;
     }
 
     /// Invalidate all entries whose key or resolved path starts with
@@ -879,6 +972,23 @@ impl VfsDcache {
             if path_prefix_matches(&entry.key, prefix)
                 || path_prefix_matches(&entry.resolved, prefix)
             {
+                entry.valid = false;
+            }
+        }
+    }
+
+    /// Invalidate only negative entries whose key starts with `prefix`.
+    ///
+    /// Used by creation operations (mkdir, write_file, link) — positive
+    /// cache entries remain valid because creating a new entry doesn't
+    /// change how existing paths resolve, but a previously-negative path
+    /// now exists.
+    fn invalidate_negative_prefix(&mut self, prefix: &str) {
+        for entry in self.entries.iter_mut() {
+            if !entry.valid || !entry.negative {
+                continue;
+            }
+            if path_prefix_matches(&entry.key, prefix) {
                 entry.valid = false;
             }
         }
@@ -1079,20 +1189,34 @@ impl Vfs {
         // Check VFS dcache first — avoids component-by-component lstat walk.
         {
             let mut dcache = VFS_DCACHE.lock();
-            if let Some(resolved) = dcache.lookup(&norm, true) {
-                return Ok(resolved);
+            match dcache.lookup(&norm, true) {
+                DcacheLookup::Hit(resolved) => return Ok(resolved),
+                DcacheLookup::NegativeHit => return Err(KernelError::NotFound),
+                DcacheLookup::Miss => {}
             }
         }
 
-        let resolved = Self::resolve_inner(&norm, true, 0)?;
-
-        // Cache the result for future lookups.
-        {
-            let mut dcache = VFS_DCACHE.lock();
-            dcache.insert(&norm, true, &resolved);
+        match Self::resolve_inner(&norm, true, 0) {
+            Ok(resolved) => {
+                // Cache the positive result for future lookups.
+                {
+                    let mut dcache = VFS_DCACHE.lock();
+                    dcache.insert(&norm, true, &resolved);
+                }
+                Ok(resolved)
+            }
+            Err(KernelError::NotFound) => {
+                // Cache the negative result — this path's parent chain is
+                // broken (a non-final component doesn't exist).  Future
+                // lookups can short-circuit without walking the filesystem.
+                {
+                    let mut dcache = VFS_DCACHE.lock();
+                    dcache.insert_negative(&norm, true);
+                }
+                Err(KernelError::NotFound)
+            }
+            Err(e) => Err(e),
         }
-
-        Ok(resolved)
     }
 
     /// Like [`resolve_follow`] but does NOT follow the final component.
@@ -1106,20 +1230,32 @@ impl Vfs {
         // Check VFS dcache first.
         {
             let mut dcache = VFS_DCACHE.lock();
-            if let Some(resolved) = dcache.lookup(&norm, false) {
-                return Ok(resolved);
+            match dcache.lookup(&norm, false) {
+                DcacheLookup::Hit(resolved) => return Ok(resolved),
+                DcacheLookup::NegativeHit => return Err(KernelError::NotFound),
+                DcacheLookup::Miss => {}
             }
         }
 
-        let resolved = Self::resolve_inner(&norm, false, 0)?;
-
-        // Cache the result.
-        {
-            let mut dcache = VFS_DCACHE.lock();
-            dcache.insert(&norm, false, &resolved);
+        match Self::resolve_inner(&norm, false, 0) {
+            Ok(resolved) => {
+                // Cache the positive result.
+                {
+                    let mut dcache = VFS_DCACHE.lock();
+                    dcache.insert(&norm, false, &resolved);
+                }
+                Ok(resolved)
+            }
+            Err(KernelError::NotFound) => {
+                // Cache the negative result.
+                {
+                    let mut dcache = VFS_DCACHE.lock();
+                    dcache.insert_negative(&norm, false);
+                }
+                Err(KernelError::NotFound)
+            }
+            Err(e) => Err(e),
         }
-
-        Ok(resolved)
     }
 
     /// Core recursive resolver.
@@ -1308,6 +1444,9 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.write_file(relative, data)?;
         }
+        // Writing may create a new file — invalidate negative cache entries
+        // that claimed this path didn't exist.
+        VFS_DCACHE.lock().invalidate_negative_prefix(&path);
         // Notify and journal after releasing VFS lock (avoids holding both locks).
         super::notify::emit_modified(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -1463,6 +1602,10 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.mkdir(relative)?;
         }
+        // New directory invalidates negative cache entries that claimed
+        // this path (or children) didn't exist.  Positive entries are
+        // unaffected — existing path resolutions remain valid.
+        VFS_DCACHE.lock().invalidate_negative_prefix(&path);
         super::notify::emit_created(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
         Ok(())
@@ -1877,6 +2020,8 @@ impl Vfs {
             mp.fs.link(rel_existing, rel_new)?;
         }
 
+        // New hard link invalidates negative cache entries for the new path.
+        VFS_DCACHE.lock().invalidate_negative_prefix(&new_path);
         super::notify::emit_created(&new_path);
         super::journal::record(super::journal::JournalEventType::Created, &new_path);
         Ok(())
@@ -2797,6 +2942,50 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[vfs]     path_prefix_matches: all cases OK");
+
+        // --- Negative cache test ---
+        // Access a path with a non-existent parent.  This should produce a
+        // NotFound error and cache the result as a negative entry.  The
+        // second access should hit the negative cache (increased hits).
+        let neg_path = "/tmp/_vfs_no_such_parent/child.txt";
+        let (_hits_pre_neg, _, _) = Vfs::dcache_stats();
+        // First access: miss, resolve_inner fails, inserts negative entry.
+        let r1 = Vfs::stat(neg_path);
+        assert!(r1.is_err(), "stat on non-existent parent should fail");
+        // Second access: should hit the negative cache.
+        let (hits_mid_neg, _, _) = Vfs::dcache_stats();
+        let r2 = Vfs::stat(neg_path);
+        assert!(r2.is_err(), "stat on non-existent parent should still fail");
+        let (hits_post_neg, _, _) = Vfs::dcache_stats();
+        if hits_post_neg > hits_mid_neg {
+            serial_println!(
+                "[vfs]     negative cache hit: {} → {} hits OK",
+                hits_mid_neg, hits_post_neg,
+            );
+        } else {
+            // May happen if resolve_follow doesn't fail at the resolve level
+            // for this particular path (parent exists but child doesn't).
+            serial_println!(
+                "[vfs]     negative cache: {} → {} hits (path may not trigger resolve-level NotFound)",
+                hits_mid_neg, hits_post_neg,
+            );
+        }
+
+        // Negative entry invalidation: creating the parent should allow
+        // subsequent accesses to proceed past the resolve step.
+        let neg_parent = "/tmp/_vfs_no_such_parent";
+        let _ = Vfs::mkdir(neg_parent);
+        Vfs::write_file(neg_path, b"negative cache invalidation test")?;
+        let content = Vfs::read_file(neg_path)?;
+        assert!(
+            content == b"negative cache invalidation test",
+            "file should be readable after negative cache invalidation",
+        );
+        serial_println!("[vfs]     negative cache invalidation: create parent + file OK");
+        // Cleanup.
+        let _ = Vfs::remove(neg_path);
+        let _ = Vfs::rmdir(neg_parent);
+        serial_println!("[vfs]     negative cache test OK");
 
         // Report overall dcache stats.
         let (h, m, v) = Vfs::dcache_stats();

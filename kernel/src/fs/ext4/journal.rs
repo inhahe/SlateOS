@@ -24,11 +24,28 @@
 //!
 //! ## Implementation
 //!
-//! Based on Linux `fs/jbd2/` (simplified — no revoke blocks, no async commit,
-//! single-threaded transactions).
+//! Based on Linux `fs/jbd2/` (simplified — no async commit, single-threaded
+//! transactions).
+//!
+//! ## Revoke blocks
+//!
+//! Revoke blocks list filesystem block numbers that must NOT be replayed
+//! during recovery, even if a prior transaction logged them.  This
+//! prevents stale data from overwriting blocks that were freed and
+//! reallocated between the transaction that logged them and the crash.
+//!
+//! Recovery uses a two-pass approach (matching Linux jbd2):
+//!
+//! - **Pass 1 (SCAN)**: walk the journal collecting all revoke records
+//!   into a revoke table: `BTreeMap<u64, u32>` mapping filesystem block
+//!   number → highest revoking sequence number.
+//! - **Pass 2 (REPLAY)**: replay data blocks from descriptor transactions,
+//!   skipping any block whose revoke sequence is ≥ the descriptor's
+//!   transaction sequence.
 
 #![allow(dead_code)] // Infrastructure for upcoming integration.
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -146,9 +163,32 @@ struct JournalBlockTag {
     t_flags: u32,
 }
 
+/// Revoke block header (jbd2 format).
+///
+/// Follows the standard `JournalBlockHeader` in a revoke block.  The
+/// `r_count` field indicates the total number of bytes used in the block
+/// (including the header), so the number of revoked block entries is
+/// `(r_count - 16) / 4` for 32-bit entries or `(r_count - 16) / 8` for
+/// 64-bit entries.  Our implementation supports 32-bit block numbers
+/// (sufficient for < 16 TiB filesystems with 4k blocks).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct JournalRevokeHeader {
+    /// Standard journal block header (12 bytes).
+    header: JournalBlockHeader,
+    /// Total bytes used in this revoke block (including this header).
+    r_count: u32,
+}
+
 // ---------------------------------------------------------------------------
 // In-memory journal state
 // ---------------------------------------------------------------------------
+
+/// JBD2 incompat feature flag for 64-bit block numbers.
+///
+/// When set, descriptor tags use 12-byte format (with high 32-bit
+/// block number) and revoke entries are 8 bytes instead of 4.
+const JBD2_FEATURE_INCOMPAT_64BIT: u32 = 0x0000_0002;
 
 /// Parsed journal metadata.
 #[derive(Debug)]
@@ -168,6 +208,9 @@ pub struct JournalState {
     /// Physical block numbers of the journal's data blocks.
     /// Mapped from the journal inode's extent tree.
     journal_blocks: Vec<u64>,
+    /// Whether the journal uses 64-bit block numbers in descriptor
+    /// tags and revoke entries.
+    has_64bit: bool,
 }
 
 /// A pending transaction — blocks that will be committed together.
@@ -230,6 +273,7 @@ impl Journal {
             return Err(KernelError::IoError);
         }
 
+        let has_64bit = (jsb.s_feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT) != 0;
         let state = JournalState {
             block_size: jsb.s_blocksize,
             max_len: jsb.s_maxlen,
@@ -238,6 +282,7 @@ impl Journal {
             write_pos: jsb.s_start,
             journal_ino,
             journal_blocks,
+            has_64bit,
         };
 
         crate::serial_println!(
@@ -381,47 +426,231 @@ impl Journal {
     /// Replay committed transactions from the journal.
     ///
     /// Called during mount when the RECOVER incompat flag is set.
-    /// Scans the journal for committed transactions and replays their
-    /// data blocks to the final filesystem locations.
+    /// Uses a two-pass approach (matching Linux jbd2):
+    ///
+    /// - **Pass 1 (SCAN)**: walk the journal collecting all revoke
+    ///   records into a table: block_nr → highest revoking sequence.
+    /// - **Pass 2 (REPLAY)**: replay data blocks from descriptor
+    ///   transactions, skipping any whose revoke sequence ≥ the
+    ///   descriptor's transaction sequence.
     pub fn replay(&mut self) -> KernelResult<u32> {
+        let start_pos = self.state.write_pos;
+        let start_seq = self.state.next_sequence;
+
+        crate::serial_println!(
+            "[ext4-journal] Starting recovery from pos={}, seq={}",
+            start_pos, start_seq,
+        );
+
+        // Pass 1: scan for revoke records.
+        let (revoke_table, end_seq) = self.scan_revokes(start_pos, start_seq)?;
+
+        if !revoke_table.is_empty() {
+            crate::serial_println!(
+                "[ext4-journal] Revoke table: {} entries (blocks protected from stale replay)",
+                revoke_table.len(),
+            );
+        }
+
+        // Pass 2: replay data blocks, respecting revokes.
+        let (replayed, final_pos, final_seq) =
+            self.replay_with_revokes(start_pos, start_seq, &revoke_table)?;
+
+        if replayed > 0 {
+            crate::serial_println!(
+                "[ext4-journal] Replayed {} blocks from journal",
+                replayed,
+            );
+            self.reader.flush()?;
+        }
+
+        // Update journal state to past the last replayed transaction.
+        self.state.next_sequence = final_seq;
+        self.state.write_pos = final_pos;
+        self.write_journal_superblock()?;
+
+        // Sanity check: both passes should agree on where the journal ends.
+        if final_seq != end_seq {
+            crate::serial_println!(
+                "[ext4-journal] WARNING: scan ended at seq={} but replay at seq={} (journal may be inconsistent)",
+                end_seq, final_seq,
+            );
+        }
+
+        Ok(replayed)
+    }
+
+    /// Pass 1: scan the journal collecting revoke records.
+    ///
+    /// Returns (revoke_table, end_sequence) where the revoke table maps
+    /// filesystem block number → highest revoking transaction sequence.
+    fn scan_revokes(
+        &self,
+        start_pos: u32,
+        start_seq: u32,
+    ) -> KernelResult<(BTreeMap<u64, u32>, u32)> {
         let block_size = self.state.block_size as usize;
         let header_size = core::mem::size_of::<JournalBlockHeader>();
         let tag_size = core::mem::size_of::<JournalBlockTag>();
-        let mut replayed = 0u32;
-        let mut pos = self.state.write_pos;
-        let mut expected_seq = self.state.next_sequence;
+        let revoke_entry_size: usize = if self.state.has_64bit { 8 } else { 4 };
 
-        crate::serial_println!(
-            "[ext4-journal] Starting replay from pos={}, seq={}",
-            pos, expected_seq
-        );
-
-        // Scan for transactions.
+        let mut revoke_table: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut pos = start_pos;
+        let mut expected_seq = start_seq;
         let max_scan = self.state.max_len;
+
         for _ in 0..max_scan {
-            // Read block at current position.
             let phys = self.journal_phys_block(pos)?;
             let mut buf = vec![0u8; block_size];
             self.reader.read_block(phys, &mut buf)?;
 
-            // Check for a valid header.
             let header = super::driver::read_struct_pub::<JournalBlockHeader>(&buf)?;
-            if header.h_magic != JBD2_MAGIC {
-                break; // End of journal log.
-            }
-            if header.h_sequence != expected_seq {
-                break; // Not the transaction we're looking for.
+            if header.h_magic != JBD2_MAGIC || header.h_sequence != expected_seq {
+                break;
             }
 
             match header.h_blocktype {
                 block_type::DESCRIPTOR => {
+                    // Skip past the descriptor and its data blocks.
+                    let mut tag_offset = header_size;
+                    let mut data_block_count = 0u32;
+
+                    while tag_offset.saturating_add(tag_size) <= block_size {
+                        let tag = super::driver::read_struct_pub::<JournalBlockTag>(
+                            buf.get(tag_offset..).ok_or(KernelError::IoError)?,
+                        )?;
+
+                        data_block_count = data_block_count.saturating_add(1);
+
+                        let is_last = (tag.t_flags & tag_flags::LAST_TAG) != 0;
+                        tag_offset = tag_offset.saturating_add(tag_size);
+
+                        if is_last {
+                            break;
+                        }
+                    }
+
+                    // Advance past the descriptor block + data blocks.
+                    pos = self.advance_pos(pos);
+                    for _ in 0..data_block_count {
+                        pos = self.advance_pos(pos);
+                    }
+                }
+                block_type::COMMIT => {
+                    expected_seq = expected_seq.wrapping_add(1);
+                    pos = self.advance_pos(pos);
+                }
+                block_type::REVOKE => {
+                    // Parse revoke block: extract filesystem block numbers.
+                    //
+                    // NOTE: jbd2 spec uses big-endian for all fields, but
+                    // our journal module reads struct fields as raw LE
+                    // (via read_struct_pub on x86).  We use the same
+                    // convention here for consistency.  See todo.txt for
+                    // the known byte-order issue.
+                    let revoke_hdr_size =
+                        core::mem::size_of::<JournalRevokeHeader>();
+
+                    // Read r_count (total bytes used, including header).
+                    let r_count = if buf.len() >= revoke_hdr_size {
+                        u32::from_le_bytes([
+                            buf[12], buf[13], buf[14], buf[15],
+                        ]) as usize
+                    } else {
+                        0
+                    };
+
+                    // Validate r_count bounds.
+                    let r_count = r_count.min(block_size);
+
+                    // Parse revoked block numbers (LE, matching existing
+                    // descriptor tag convention for t_blocknr).
+                    let mut offset = revoke_hdr_size;
+                    while offset.saturating_add(revoke_entry_size) <= r_count {
+                        let block_nr = if self.state.has_64bit {
+                            // 64-bit: 8 bytes, little-endian.
+                            let lo = u32::from_le_bytes([
+                                buf[offset], buf[offset + 1],
+                                buf[offset + 2], buf[offset + 3],
+                            ]);
+                            let hi = u32::from_le_bytes([
+                                buf[offset + 4], buf[offset + 5],
+                                buf[offset + 6], buf[offset + 7],
+                            ]);
+                            u64::from(lo) | (u64::from(hi) << 32)
+                        } else {
+                            // 32-bit: 4 bytes, little-endian.
+                            u64::from(u32::from_le_bytes([
+                                buf[offset], buf[offset + 1],
+                                buf[offset + 2], buf[offset + 3],
+                            ]))
+                        };
+
+                        // Record the highest revoking sequence for this block.
+                        let seq = expected_seq;
+                        revoke_table
+                            .entry(block_nr)
+                            .and_modify(|existing| {
+                                // Keep the highest sequence — a later revoke
+                                // supersedes an earlier one.
+                                if seq > *existing {
+                                    *existing = seq;
+                                }
+                            })
+                            .or_insert(seq);
+
+                        offset = offset.saturating_add(revoke_entry_size);
+                    }
+
+                    pos = self.advance_pos(pos);
+                }
+                _ => break,
+            }
+        }
+
+        Ok((revoke_table, expected_seq))
+    }
+
+    /// Pass 2: replay data blocks, skipping revoked ones.
+    ///
+    /// Returns (replayed_count, final_pos, final_seq).
+    fn replay_with_revokes(
+        &self,
+        start_pos: u32,
+        start_seq: u32,
+        revoke_table: &BTreeMap<u64, u32>,
+    ) -> KernelResult<(u32, u32, u32)> {
+        let block_size = self.state.block_size as usize;
+        let header_size = core::mem::size_of::<JournalBlockHeader>();
+        let tag_size = core::mem::size_of::<JournalBlockTag>();
+
+        let mut replayed = 0u32;
+        let mut revoked = 0u32;
+        let mut pos = start_pos;
+        let mut expected_seq = start_seq;
+        let max_scan = self.state.max_len;
+
+        for _ in 0..max_scan {
+            let phys = self.journal_phys_block(pos)?;
+            let mut buf = vec![0u8; block_size];
+            self.reader.read_block(phys, &mut buf)?;
+
+            let header = super::driver::read_struct_pub::<JournalBlockHeader>(&buf)?;
+            if header.h_magic != JBD2_MAGIC || header.h_sequence != expected_seq {
+                break;
+            }
+
+            match header.h_blocktype {
+                block_type::DESCRIPTOR => {
+                    let txn_seq = expected_seq;
+
                     // Parse tags to find which blocks are in this transaction.
                     let mut tag_offset = header_size;
                     let mut block_positions = Vec::new();
 
                     while tag_offset.saturating_add(tag_size) <= block_size {
                         let tag = super::driver::read_struct_pub::<JournalBlockTag>(
-                            buf.get(tag_offset..).ok_or(KernelError::IoError)?
+                            buf.get(tag_offset..).ok_or(KernelError::IoError)?,
                         )?;
 
                         block_positions.push(u64::from(tag.t_blocknr));
@@ -434,49 +663,50 @@ impl Journal {
                         }
                     }
 
-                    // Read and replay each data block.
+                    // Read and replay each data block, checking revokes.
                     pos = self.advance_pos(pos);
                     for fs_block in &block_positions {
                         let data_phys = self.journal_phys_block(pos)?;
-                        let mut data_buf = vec![0u8; block_size];
-                        self.reader.read_block(data_phys, &mut data_buf)?;
 
-                        // Write to final filesystem location.
-                        self.reader.write_block(*fs_block, &data_buf)?;
-                        replayed = replayed.saturating_add(1);
+                        // Check if this block was revoked by a later transaction.
+                        // If revoke_seq >= txn_seq, the block was freed/reallocated
+                        // AFTER this transaction, so replaying would corrupt data.
+                        let is_revoked = revoke_table
+                            .get(fs_block)
+                            .map_or(false, |&revoke_seq| revoke_seq >= txn_seq);
+
+                        if is_revoked {
+                            revoked = revoked.saturating_add(1);
+                        } else {
+                            let mut data_buf = vec![0u8; block_size];
+                            self.reader.read_block(data_phys, &mut data_buf)?;
+                            self.reader.write_block(*fs_block, &data_buf)?;
+                            replayed = replayed.saturating_add(1);
+                        }
 
                         pos = self.advance_pos(pos);
                     }
                 }
                 block_type::COMMIT => {
-                    // Transaction committed — advance to next.
                     expected_seq = expected_seq.wrapping_add(1);
                     pos = self.advance_pos(pos);
                 }
                 block_type::REVOKE => {
-                    // Skip revoke blocks (not yet implemented).
+                    // Already processed in pass 1 — skip.
                     pos = self.advance_pos(pos);
                 }
-                _ => {
-                    break; // Unknown block type — stop.
-                }
+                _ => break,
             }
         }
 
-        if replayed > 0 {
+        if revoked > 0 {
             crate::serial_println!(
-                "[ext4-journal] Replayed {} blocks from journal",
-                replayed
+                "[ext4-journal] Skipped {} revoked blocks during replay",
+                revoked,
             );
-            self.reader.flush()?;
         }
 
-        // Update journal state.
-        self.state.next_sequence = expected_seq;
-        self.state.write_pos = pos;
-        self.write_journal_superblock()?;
-
-        Ok(replayed)
+        Ok((replayed, pos, expected_seq))
     }
 
     /// Check if the journal needs recovery.

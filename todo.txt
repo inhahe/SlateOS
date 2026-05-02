@@ -64,6 +64,22 @@
   propagating through all VFS consumers.  Deferred until the VFS can be
   refactored — affects driver.rs:3049 and superblock.rs:286.
 
+- ext4 journal byte order: jbd2 spec stores all header fields and block
+  references in big-endian (network byte order), but our journal module
+  reads them as raw LE via read_struct_pub (x86 native).  The write path
+  (write_block_header) also uses to_le_bytes().  This means:
+  (a) journal recovery of a Linux-formatted ext4 image with RECOVER set
+      will misinterpret the journal header magic and all field values;
+  (b) our journal writes are LE, so round-trip works within our OS but
+      would be unreadable by Linux.
+  Current impact: low — test images don't have RECOVER set (clean umount),
+  so the replay path was never exercised with a real Linux-format journal.
+  Fix: add be32_to_cpu/cpu_to_be32 helpers and convert all jbd2 field
+  accesses.  Affects journal.rs open(), replay(), scan_revokes(),
+  replay_with_revokes(), write_block_header(), write_journal_superblock().
+  Trigger: before deploying on real hardware or importing ext4 images
+  from a Linux system that crashed.
+
 ## Judgment Calls
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from

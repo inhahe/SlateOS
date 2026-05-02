@@ -484,10 +484,32 @@ impl FileSystem for Ext4Fs {
             self.driver.write_at_inplace(ino, &inode, offset, data)?;
             self.driver.flush()?;
             Ok(())
+        } else if offset == file_size {
+            // Append at EOF — try the efficient extend path.
+            // This avoids reading/rewriting the entire file for the
+            // common case of growing a log file, database, etc.
+            let mut new_inode = inode;
+            match self.driver.extend_file_data(&mut new_inode, data) {
+                Ok(()) => {
+                    self.driver.write_inode(ino, &new_inode)?;
+                    self.driver.invalidate_extent_cache(ino);
+                    self.driver.write_superblock()?;
+                    self.driver.write_group_descs()?;
+                    self.driver.flush()?;
+                    Ok(())
+                }
+                Err(KernelError::NotSupported) => {
+                    // Deep extent tree or extent entries full — fall back
+                    // to read-modify-write.
+                    let mut contents = self.driver.read_file_data(ino, &inode)?;
+                    contents.extend_from_slice(data);
+                    self.write_file(path, &contents)
+                }
+                Err(e) => Err(e),
+            }
         } else {
-            // Write extends past file end — fall back to read-modify-write.
-            // A production implementation would extend the extent tree
-            // incrementally; for now, the safe approach avoids complexity.
+            // Write starts before EOF but extends past it — need to
+            // patch existing data AND extend.  Read-modify-write.
             let mut contents = self.driver.read_file_data(ino, &inode)?;
             let start = offset as usize;
             let end_usize = end as usize;

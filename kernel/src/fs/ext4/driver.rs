@@ -1529,6 +1529,233 @@ impl Ext4Driver {
         Ok(())
     }
 
+    /// Extend a file by appending data at the current end.
+    ///
+    /// Much more efficient than `write_file_data` for append operations
+    /// on existing files: only allocates and writes the new blocks instead
+    /// of reading and rewriting the entire file.
+    ///
+    /// Handles depth-0 extent trees only (up to 4 extents in the inode root).
+    /// Returns `Err(NotSupported)` for deeper trees, signalling the caller
+    /// should fall back to read-modify-write.
+    ///
+    /// `append_data` is the bytes to append starting at the current EOF.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    pub fn extend_file_data(
+        &mut self,
+        inode: &mut Ext4Inode,
+        append_data: &[u8],
+    ) -> KernelResult<()> {
+        if append_data.is_empty() {
+            return Ok(());
+        }
+
+        let block_size = self.sb.block_size as usize;
+        if block_size == 0 {
+            return Err(KernelError::IoError);
+        }
+        let block_size_u64 = self.sb.block_size as u64;
+
+        let current_size = {
+            let lo = u64::from(inode.i_size_lo);
+            let hi = u64::from(inode.i_size_high);
+            lo | (hi << 32)
+        };
+
+        // Parse the existing extent tree.
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+
+        if header.eh_magic != EXT4_EXTENT_MAGIC {
+            return Err(KernelError::IoError);
+        }
+        // Only handle depth-0 trees.
+        if header.eh_depth != 0 {
+            return Err(KernelError::NotSupported);
+        }
+
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+        let extent_size = core::mem::size_of::<Ext4Extent>();
+        let entries = header.eh_entries as usize;
+        let max_entries = header.eh_max as usize;
+
+        // Read the last extent to determine where the file's physical blocks end.
+        let (last_logical_start, last_phys_start, last_block_count) = if entries > 0 {
+            let idx = entries.saturating_sub(1);
+            let offset = header_size.saturating_add(idx.saturating_mul(extent_size));
+            let ext_bytes = block_bytes.get(offset..)
+                .ok_or(KernelError::IoError)?;
+            let extent = read_struct::<Ext4Extent>(ext_bytes)?;
+            let phys = u64::from(extent.ee_start_lo)
+                | (u64::from(extent.ee_start_hi) << 32);
+            let len = u64::from(extent.ee_len & 0x7FFF); // strip unwritten flag
+            (u64::from(extent.ee_block), phys, len)
+        } else {
+            (0, 0, 0)
+        };
+
+        // Calculate the partial block at EOF (if the file doesn't end on
+        // a block boundary, we need to read-modify-write the last block).
+        let tail_bytes_in_last_block = if current_size > 0 {
+            let rem = current_size % block_size_u64;
+            if rem == 0 { 0 } else { rem as usize }
+        } else {
+            0
+        };
+
+        // Build the combined data: partial last-block content + append_data.
+        let combined = if tail_bytes_in_last_block > 0 {
+            // Read the current tail block, patch in the new data.
+            let last_logical_block = current_size.saturating_sub(1) / block_size_u64;
+            let phys = last_phys_start.saturating_add(
+                last_logical_block.saturating_sub(last_logical_start)
+            );
+            let mut buf = vec![0u8; block_size];
+            self.reader.read_block(phys, &mut buf)?;
+
+            // Write the existing partial block back with the start of append_data.
+            let space_in_block = block_size.saturating_sub(tail_bytes_in_last_block);
+            let fill = append_data.len().min(space_in_block);
+            if let (Some(dest), Some(src)) = (
+                buf.get_mut(tail_bytes_in_last_block..tail_bytes_in_last_block + fill),
+                append_data.get(..fill),
+            ) {
+                dest.copy_from_slice(src);
+            }
+            self.reader.write_block(phys, &buf)?;
+
+            // Return the remaining data that needs new blocks.
+            append_data.get(fill..).unwrap_or(&[]).to_vec()
+        } else {
+            append_data.to_vec()
+        };
+
+        // If all append data fit in the existing last block, just update size.
+        if combined.is_empty() {
+            let new_size = current_size.saturating_add(append_data.len() as u64);
+            inode.i_size_lo = new_size as u32;
+            inode.i_size_high = (new_size >> 32) as u32;
+            return Ok(());
+        }
+
+        // Calculate new blocks needed for the remaining data.
+        let new_blocks_needed = combined.len()
+            .saturating_add(block_size)
+            .saturating_sub(1)
+            / block_size;
+
+        if new_blocks_needed == 0 {
+            return Ok(());
+        }
+
+        // Goal: allocate adjacent to the last extent's end for contiguity.
+        let last_extent_end = last_phys_start.saturating_add(last_block_count);
+        let goal = if last_extent_end > 0 { last_extent_end } else {
+            u64::from(self.sb.raw.s_first_data_block)
+        };
+
+        let first_new_block = super::balloc::alloc_blocks(
+            &self.reader,
+            &mut self.sb,
+            &mut self.group_descs,
+            goal,
+            new_blocks_needed as u32,
+        )?;
+
+        // Write new data to the allocated blocks.
+        let mut data_offset = 0usize;
+        for i in 0..new_blocks_needed {
+            let block_nr = first_new_block.saturating_add(i as u64);
+            let end = data_offset.saturating_add(block_size).min(combined.len());
+            let chunk = combined.get(data_offset..end).unwrap_or(&[]);
+
+            let mut buf = vec![0u8; block_size];
+            if let Some(dest) = buf.get_mut(..chunk.len()) {
+                dest.copy_from_slice(chunk);
+            }
+            self.reader.write_block(block_nr, &buf)?;
+
+            data_offset = end;
+        }
+
+        // Update the extent tree in the inode.
+        let new_logical_start = if current_size > 0 {
+            // Next logical block after the current last allocated block.
+            let current_blocks = current_size
+                .saturating_add(block_size_u64.saturating_sub(1))
+                / block_size_u64;
+            current_blocks
+        } else {
+            0
+        };
+
+        // Check if the new allocation is adjacent to the last extent.
+        let is_adjacent = entries > 0
+            && first_new_block == last_extent_end
+            && last_block_count.saturating_add(new_blocks_needed as u64) <= 0x7FFF;
+
+        if is_adjacent {
+            // Extend the last extent's block count.
+            let new_len = (last_block_count as u16)
+                .saturating_add(new_blocks_needed as u16);
+            let idx = entries.saturating_sub(1);
+            let base = 3 + idx * 3; // each extent is 3 u32s, header is 3 u32s
+            // ee_len is in the low 16 bits of the second u32.
+            if let Some(word) = inode.i_block.get(base + 1).copied() {
+                // Preserve ee_start_hi in high 16 bits.
+                let hi_bits = word & 0xFFFF_0000;
+                inode.i_block[base + 1] = hi_bits | u32::from(new_len);
+            }
+        } else if entries < max_entries {
+            // Add a new extent entry.
+            let new_entries = (entries as u16).saturating_add(1);
+            // Update eh_entries in the header.
+            inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
+                | (u32::from(new_entries) << 16);
+
+            // Write the new extent at index `entries`.
+            let base = 3 + entries * 3;
+            if base + 2 < inode.i_block.len() {
+                inode.i_block[base] = new_logical_start as u32;
+                inode.i_block[base + 1] = (new_blocks_needed as u32 & 0x7FFF)
+                    | (((first_new_block >> 32) as u32) << 16);
+                inode.i_block[base + 2] = first_new_block as u32;
+            } else {
+                // Should not happen for depth-0 trees with max 4 extents,
+                // but guard against overflow.
+                return Err(KernelError::NotSupported);
+            }
+        } else {
+            // Extent entries full and not adjacent — cannot extend in place.
+            // Free the blocks we just allocated and signal fallback.
+            for i in 0..new_blocks_needed {
+                let block_nr = first_new_block.saturating_add(i as u64);
+                let _ = super::balloc::free_block(
+                    &self.reader,
+                    &mut self.sb,
+                    &mut self.group_descs,
+                    block_nr,
+                );
+            }
+            return Err(KernelError::NotSupported);
+        }
+
+        // Update inode size and block count.
+        let new_size = current_size.saturating_add(append_data.len() as u64);
+        inode.i_size_lo = new_size as u32;
+        inode.i_size_high = (new_size >> 32) as u32;
+
+        // Recalculate total block count in 512-byte sectors.
+        let total_blocks = new_size
+            .saturating_add(block_size_u64.saturating_sub(1))
+            / block_size_u64;
+        let sectors = (total_blocks as u32)
+            .saturating_mul(self.sb.block_size / 512);
+        inode.i_blocks_lo = sectors;
+
+        Ok(())
+    }
+
     /// Write data back to blocks already mapped by the inode's extent tree.
     ///
     /// Unlike `write_file_data` which allocates entirely new blocks and

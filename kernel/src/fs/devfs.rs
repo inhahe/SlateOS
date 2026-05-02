@@ -203,16 +203,13 @@ impl FileSystem for DevFs {
                 Ok(Vec::new())
             }
             "kmsg" => {
-                // /dev/kmsg: kernel log ring buffer.
-                // For now, return a synthetic summary since we don't
-                // have a formal kernel log ring buffer yet.
-                let ns = crate::hpet::elapsed_ns();
-                let secs = ns / 1_000_000_000;
-                let msg = alloc::format!(
-                    "[{}.000000] kernel: kmsg device read (log buffer not yet implemented)\n",
-                    secs
-                );
-                Ok(msg.into_bytes())
+                // /dev/kmsg: kernel log ring buffer (JSON-lines format).
+                // Reads all entries from the klog ring buffer.
+                let mut buf = alloc::vec![0u8; 64 * 1024];
+                let (written, _last_seq) =
+                    crate::klog::read_logs(u64::MAX, &mut buf);
+                buf.truncate(written);
+                Ok(buf)
             }
             "uptime" => {
                 // /dev/uptime: system uptime as a simple decimal string.

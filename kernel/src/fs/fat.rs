@@ -972,6 +972,12 @@ pub struct FatFs {
     /// Hint: next free cluster number (start scanning from here).
     /// `0` means unknown — scan from cluster 2.
     next_free_hint: u32,
+    /// Whether the volume has been modified since mount.
+    ///
+    /// Used to decide whether to mark the clean-shutdown bit in FAT
+    /// entry 1 on sync/unmount.  Also prevents redundant writes of the
+    /// FSInfo sector when nothing has changed.
+    modified: bool,
 }
 
 impl FatFs {
@@ -1045,7 +1051,7 @@ impl FatFs {
             );
         }
 
-        Ok(Self {
+        let mut fs = Self {
             device_name: String::from(device_name),
             bpb,
             dcache,
@@ -1054,7 +1060,116 @@ impl FatFs {
             dcache_misses: 0,
             free_clusters,
             next_free_hint,
-        })
+            modified: false,
+        };
+
+        // Check the clean-shutdown bit in FAT entry 1.
+        // If it's clear, the volume was not cleanly unmounted — warn.
+        if let Ok(was_clean) = fs.read_clean_shutdown_bit() {
+            if !was_clean {
+                crate::serial_println!(
+                    "[fat] WARNING: {} was not cleanly unmounted — possible data inconsistency",
+                    device_name,
+                );
+            }
+        }
+
+        // Mark the volume as dirty (clear the clean-shutdown bit) so
+        // that a crash while mounted is detectable on next mount.
+        let _ = fs.set_clean_shutdown_bit(false);
+
+        Ok(fs)
+    }
+
+    // -- Clean-shutdown bit in FAT entry 1 --
+    //
+    // The FAT spec reserves FAT entry 1 for volume status bits:
+    //   FAT32: bit 27 = ClnShutBitMask (1 = clean), bit 26 = HrdErrBitMask
+    //   FAT16: bit 15 = ClnShutBitMask (1 = clean), bit 14 = HrdErrBitMask
+    //
+    // We set the clean bit on sync/unmount and clear it on mount so that
+    // a crash leaves the bit clear, signaling "not cleanly unmounted" on
+    // next mount.
+
+    /// Read the clean-shutdown bit from FAT entry 1.
+    fn read_clean_shutdown_bit(&mut self) -> KernelResult<bool> {
+        let bps = u32::from(self.bpb.bytes_per_sector);
+        let fat_sector = self.bpb.fat_start_lba() + match self.bpb.fat_type {
+            FatType::Fat16 => 2 / bps, // entry 1 at offset 2 (2 bytes/entry)
+            FatType::Fat32 => 4 / bps, // entry 1 at offset 4 (4 bytes/entry)
+        };
+        let offset = match self.bpb.fat_type {
+            FatType::Fat16 => (2 % bps) as usize,
+            FatType::Fat32 => (4 % bps) as usize,
+        };
+
+        let mut buf = [0u8; SECTOR_SIZE];
+        self.read_sector(u64::from(fat_sector), &mut buf)?;
+
+        let clean = match self.bpb.fat_type {
+            FatType::Fat16 => {
+                let val = read_u16(&buf, offset);
+                val & 0x8000 != 0 // bit 15
+            }
+            FatType::Fat32 => {
+                let val = read_u32(&buf, offset);
+                val & 0x0800_0000 != 0 // bit 27
+            }
+        };
+        Ok(clean)
+    }
+
+    /// Set or clear the clean-shutdown bit in FAT entry 1.
+    ///
+    /// `clean = true` → volume cleanly unmounted (set bit).
+    /// `clean = false` → volume being mounted / in use (clear bit).
+    fn set_clean_shutdown_bit(&mut self, clean: bool) -> KernelResult<()> {
+        let bps = u32::from(self.bpb.bytes_per_sector);
+        let entry_offset = match self.bpb.fat_type {
+            FatType::Fat16 => 2u32,  // entry 1 at byte offset 2
+            FatType::Fat32 => 4u32,  // entry 1 at byte offset 4
+        };
+
+        // Update all FAT copies.
+        for fat_idx in 0..u32::from(self.bpb.num_fats) {
+            let fat_base = self.bpb.fat_start_lba()
+                + fat_idx * self.bpb.sectors_per_fat();
+            let sector_num = fat_base + entry_offset / bps;
+            let offset = (entry_offset % bps) as usize;
+
+            let mut buf = [0u8; SECTOR_SIZE];
+            self.read_sector(u64::from(sector_num), &mut buf)?;
+
+            match self.bpb.fat_type {
+                FatType::Fat16 => {
+                    let mut val = read_u16(&buf, offset);
+                    if clean {
+                        val |= 0x8000;  // set bit 15
+                    } else {
+                        val &= !0x8000; // clear bit 15
+                    }
+                    if let Some(lo) = buf.get_mut(offset) {
+                        *lo = val as u8;
+                    }
+                    if let Some(hi) = buf.get_mut(offset + 1) {
+                        *hi = (val >> 8) as u8;
+                    }
+                }
+                FatType::Fat32 => {
+                    let mut val = read_u32(&buf, offset);
+                    if clean {
+                        val |= 0x0800_0000;  // set bit 27
+                    } else {
+                        val &= !0x0800_0000; // clear bit 27
+                    }
+                    write_u32_le(&mut buf, offset, val);
+                }
+            }
+
+            self.write_sector(u64::from(sector_num), &buf)?;
+        }
+
+        Ok(())
     }
 
     // -- FSInfo sector (FAT32) --
@@ -2557,6 +2672,15 @@ impl FileSystem for FatFs {
     fn sync(&mut self) -> KernelResult<()> {
         // Persist the FSInfo sector with updated free count / next-free hint.
         let _ = self.write_fsinfo();
+
+        // Set the clean-shutdown bit: we've synced all data, so the volume
+        // is in a consistent state.  If the system crashes *after* this
+        // write but before the next mutation, the volume stays clean.
+        if self.modified {
+            let _ = self.set_clean_shutdown_bit(true);
+            self.modified = false;
+        }
+
         super::cache::flush(&self.device_name)
     }
 
@@ -2855,6 +2979,7 @@ impl FileSystem for FatFs {
     /// file with the requested cluster pre-allocation.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn fallocate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        self.modified = true;
         if size == 0 {
             return Ok(());
         }
@@ -2975,6 +3100,7 @@ impl FileSystem for FatFs {
 
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+        self.modified = true;
         let (parent_path, filename) = split_path(path);
 
         // Check file size limit (FAT16 max: 2 GiB, but u32 field caps at ~4 GiB).
@@ -3049,6 +3175,7 @@ impl FileSystem for FatFs {
     }
 
     fn remove(&mut self, path: &str) -> KernelResult<()> {
+        self.modified = true;
         let (parent_path, _filename) = split_path(path);
 
         // Resolve the parent directory.
@@ -3093,6 +3220,7 @@ impl FileSystem for FatFs {
     }
 
     fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+        self.modified = true;
         let (parent_path, dirname) = split_path(path);
         let name83 = Self::to_83_name(dirname).ok_or(KernelError::InvalidArgument)?;
 
@@ -3140,6 +3268,7 @@ impl FileSystem for FatFs {
 
     #[allow(clippy::arithmetic_side_effects)]
     fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+        self.modified = true;
         let (parent_path, dirname) = split_path(path);
         let name83 = Self::to_83_name(dirname).ok_or(KernelError::InvalidArgument)?;
 
@@ -3227,6 +3356,7 @@ impl FileSystem for FatFs {
     /// — only the directory entries change.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+        self.modified = true;
         // 1. Resolve the source entry.
         let (from_parent_path, from_filename) = split_path(from);
         let from_name83 = Self::to_83_name(from_filename)
@@ -3398,6 +3528,7 @@ impl FileSystem for FatFs {
     /// memory, and rewrites everything.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        self.modified = true;
         if data.is_empty() {
             return Ok(());
         }
@@ -3563,6 +3694,7 @@ impl FileSystem for FatFs {
     /// zero-filling new clusters.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        self.modified = true;
         if size > u64::from(u32::MAX) {
             return Err(KernelError::InvalidArgument);
         }
@@ -3723,6 +3855,7 @@ impl FileSystem for FatFs {
     /// Returns `NotSupported` for the root directory (no on-disk entry).
     #[allow(clippy::arithmetic_side_effects)]
     fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+        self.modified = true;
         // Resolve path — root directory has no entry to modify.
         let (parent_path, _filename) = split_path(path);
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;

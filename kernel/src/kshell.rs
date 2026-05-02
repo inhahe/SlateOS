@@ -384,6 +384,23 @@ fn expand_vars(input: &str) -> String {
                 result.push(next as char);
                 i = i.saturating_add(1);
             }
+        } else if b == b'`' {
+            // Backtick command substitution: `command`
+            i = i.saturating_add(1);
+            let start = i;
+            // Find the closing backtick.
+            while i < len && bytes[i] != b'`' {
+                i = i.saturating_add(1);
+            }
+            if let Some(cmd_bytes) = bytes.get(start..i) {
+                if let Ok(cmd) = core::str::from_utf8(cmd_bytes) {
+                    let output = capture_command(cmd);
+                    result.push_str(output.trim_end_matches('\n'));
+                }
+            }
+            if i < len && bytes[i] == b'`' {
+                i = i.saturating_add(1); // skip closing backtick
+            }
         } else {
             result.push(b as char);
             i = i.saturating_add(1);

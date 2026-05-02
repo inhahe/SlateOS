@@ -215,6 +215,80 @@ fn env_remove(name: &str) -> bool {
     ENV_VARS.lock().remove(name).is_some()
 }
 
+// ---------------------------------------------------------------------------
+// Array variables
+// ---------------------------------------------------------------------------
+
+/// Shell array variables, accessible via `${arr[N]}` or `${arr[@]}` syntax.
+///
+/// Declared with `arr=(word1 word2 ...)`.  Element access: `${arr[0]}`.
+/// All elements: `${arr[@]}` or `${arr[*]}`.  Length: `${#arr[@]}`.
+/// Element assignment: `arr[N]=value`.  Remove: `unset arr` or `unset arr[N]`.
+static ARRAY_VARS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
+
+/// Get an array element by index.  Returns `None` if array or index doesn't exist.
+fn array_get(name: &str, index: usize) -> Option<String> {
+    ARRAY_VARS.lock().get(name).and_then(|v| v.get(index).cloned())
+}
+
+/// Get all elements of an array, space-separated.
+fn array_all(name: &str) -> Option<String> {
+    ARRAY_VARS.lock().get(name).map(|v| {
+        let mut result = String::new();
+        for (i, elem) in v.iter().enumerate() {
+            if i > 0 {
+                result.push(' ');
+            }
+            result.push_str(elem);
+        }
+        result
+    })
+}
+
+/// Get the number of elements in an array.
+fn array_len(name: &str) -> Option<usize> {
+    ARRAY_VARS.lock().get(name).map(Vec::len)
+}
+
+/// Set an array element, growing the array with empty strings if needed.
+fn array_set_element(name: &str, index: usize, value: &str) {
+    let mut arrays = ARRAY_VARS.lock();
+    let arr = arrays.entry(String::from(name)).or_insert_with(Vec::new);
+    // Grow the array if needed.
+    while arr.len() <= index {
+        arr.push(String::new());
+    }
+    if let Some(elem) = arr.get_mut(index) {
+        *elem = String::from(value);
+    }
+}
+
+/// Set an entire array from a list of values.
+fn array_set(name: &str, values: Vec<String>) {
+    ARRAY_VARS.lock().insert(String::from(name), values);
+}
+
+/// Remove an array entirely.  Returns true if it existed.
+fn array_remove(name: &str) -> bool {
+    ARRAY_VARS.lock().remove(name).is_some()
+}
+
+/// Remove a single element from an array by index (sets it to empty string,
+/// preserving indices — same as bash `unset arr[N]`).
+fn array_unset_element(name: &str, index: usize) {
+    let mut arrays = ARRAY_VARS.lock();
+    if let Some(arr) = arrays.get_mut(name) {
+        if let Some(elem) = arr.get_mut(index) {
+            *elem = String::new();
+        }
+    }
+}
+
+/// Check if a name refers to an array variable.
+fn is_array(name: &str) -> bool {
+    ARRAY_VARS.lock().contains_key(name)
+}
+
 /// Expand `$VAR` and `${VAR}` references in a string.
 ///
 /// - `$NAME` expands the longest run of alphanumeric/underscore chars.
@@ -424,11 +498,46 @@ fn expand_vars(input: &str) -> String {
 ///   - `${NAME#prefix}` — remove shortest prefix match
 ///   - `${NAME##prefix}` — remove longest prefix match
 fn expand_brace_expr(inner: &str, result: &mut String) {
-    // ${#NAME} — string length.
+    // ${#NAME[@]} — array length.
     if let Some(name) = inner.strip_prefix('#') {
+        if let Some(arr_name) = name.strip_suffix("[@]").or_else(|| name.strip_suffix("[*]")) {
+            let len = array_len(arr_name).unwrap_or(0);
+            result.push_str(&alloc::format!("{}", len));
+            return;
+        }
+        // ${#NAME} — string length (scalar).
         let val = env_get(name).unwrap_or_default();
         result.push_str(&alloc::format!("{}", val.len()));
         return;
+    }
+
+    // ${NAME[index]} — array element access.
+    // ${NAME[@]} or ${NAME[*]} — all array elements.
+    if let Some(bracket_pos) = inner.find('[') {
+        if inner.ends_with(']') {
+            let arr_name = inner.get(..bracket_pos).unwrap_or("");
+            let idx_str = inner.get(bracket_pos.saturating_add(1)..inner.len().saturating_sub(1)).unwrap_or("");
+
+            if !arr_name.is_empty() {
+                if idx_str == "@" || idx_str == "*" {
+                    // ${arr[@]} or ${arr[*]} — all elements.
+                    if let Some(all) = array_all(arr_name) {
+                        result.push_str(&all);
+                    }
+                    return;
+                }
+                // Parse numeric index (supports variable expansion in index).
+                let expanded_idx = expand_vars(idx_str);
+                if let Ok(index) = expanded_idx.trim().parse::<usize>() {
+                    if let Some(val) = array_get(arr_name, index) {
+                        result.push_str(&val);
+                    }
+                    return;
+                }
+                // Non-numeric index — treat as error, expand to empty.
+                return;
+            }
+        }
     }
 
     // Try to find an operator: :-, :+, :=, :?, %, %%, #, ##
@@ -439,7 +548,11 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
     let rest = inner.get(name_end..).unwrap_or("");
 
     if rest.is_empty() {
-        // Simple ${NAME}.
+        // Simple ${NAME}.  Check arrays first (${arr} → first element).
+        if let Some(val) = array_get(name, 0) {
+            result.push_str(&val);
+            return;
+        }
         if let Some(val) = env_get(name) {
             result.push_str(&val);
         }
@@ -2562,6 +2675,135 @@ fn split_chain_operators(line: &str) -> Vec<ChainSegment<'_>> {
     segments
 }
 
+/// Parsed array assignment syntax.
+enum ArraySyntax {
+    /// `name=(word1 word2 ...)` — declare/replace entire array.
+    Declare { name: String, values: Vec<String> },
+    /// `name+=(word1 word2 ...)` — append to existing array.
+    Append { name: String, values: Vec<String> },
+    /// `name[index]=value` — set a single array element.
+    SetElement { name: String, index: usize, value: String },
+}
+
+/// Try to parse array declaration or element assignment.
+///
+/// Returns `Some(ArraySyntax::Declare{..})` for `name=(word1 word2 ...)`,
+/// `Some(ArraySyntax::SetElement{..})` for `name[N]=value`,
+/// or `None` if the line doesn't match either pattern.
+fn parse_array_syntax(line: &str) -> Option<ArraySyntax> {
+    // Check for `name+=(...)` — append to array (must check before `=(` match).
+    if let Some(plus_eq) = line.find("+=(") {
+        let name = line.get(..plus_eq)?.trim();
+        if name.is_empty()
+            || !name.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return None;
+        }
+        let after_plus_eq = line.get(plus_eq.saturating_add(2)..)?;
+        if !after_plus_eq.starts_with('(') || !after_plus_eq.ends_with(')') {
+            return None;
+        }
+        let inside = after_plus_eq.get(1..after_plus_eq.len().saturating_sub(1)).unwrap_or("");
+        let values = split_array_words(inside);
+        return Some(ArraySyntax::Append {
+            name: String::from(name),
+            values,
+        });
+    }
+
+    // Check for `name=(...)` — array declaration.
+    // The `=(` must appear with a valid identifier before it.
+    if let Some(eq_paren) = line.find("=(") {
+        let name = line.get(..eq_paren)?.trim();
+        // Validate identifier: alphanumeric/underscore, starts with letter or underscore.
+        if name.is_empty()
+            || !name.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return None;
+        }
+        // Find the closing `)`.
+        let after_eq = line.get(eq_paren.saturating_add(1)..)?;
+        if !after_eq.starts_with('(') || !after_eq.ends_with(')') {
+            return None;
+        }
+        let inside = after_eq.get(1..after_eq.len().saturating_sub(1)).unwrap_or("");
+
+        // Split words (quote-aware).
+        let values = split_array_words(inside);
+        return Some(ArraySyntax::Declare {
+            name: String::from(name),
+            values,
+        });
+    }
+
+    // Check for `name[N]=value` — element assignment.
+    if let Some(bracket_pos) = line.find('[') {
+        let name = line.get(..bracket_pos)?.trim();
+        if name.is_empty()
+            || !name.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return None;
+        }
+
+        let rest = line.get(bracket_pos.saturating_add(1)..)?;
+        // Find `]=`
+        let close_eq = rest.find("]=")?;
+        let idx_str = rest.get(..close_eq)?.trim();
+        let value = rest.get(close_eq.saturating_add(2)..)?.trim();
+
+        // Parse index.
+        let index: usize = idx_str.parse().ok()?;
+
+        // Strip quotes from value if present.
+        let value = strip_quotes(value);
+
+        return Some(ArraySyntax::SetElement {
+            name: String::from(name),
+            index,
+            value: String::from(value),
+        });
+    }
+
+    None
+}
+
+/// Split array declaration words, respecting quotes.
+///
+/// `"hello world" foo bar` → `["hello world", "foo", "bar"]`
+fn split_array_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_sq = false;
+    let mut in_dq = false;
+
+    for ch in input.chars() {
+        match ch {
+            '\'' if !in_dq => {
+                in_sq = !in_sq;
+                // Don't include the quotes in the value.
+            }
+            '"' if !in_sq => {
+                in_dq = !in_dq;
+            }
+            ' ' | '\t' if !in_sq && !in_dq => {
+                if !current.is_empty() {
+                    words.push(core::mem::take(&mut current));
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
 /// Execute a single command segment (after chain-operator splitting).
 ///
 /// Handles alias expansion, pipe/redirect parsing, and dispatch.
@@ -2574,6 +2816,30 @@ fn execute_single(line: &str) {
     // Expand aliases (first word only).
     let aliased = expand_aliases(line);
     let line = aliased.trim();
+
+    // Check for array declaration: `name=(word1 word2 ...)`
+    // array append: `name+=(word1 word2 ...)`
+    // and element assignment: `name[N]=value`
+    if let Some(assign) = parse_array_syntax(line) {
+        match assign {
+            ArraySyntax::Declare { name, values } => {
+                array_set(&name, values);
+                set_exit(0);
+            }
+            ArraySyntax::Append { name, values } => {
+                let mut arrays = ARRAY_VARS.lock();
+                let arr = arrays.entry(name).or_insert_with(Vec::new);
+                arr.extend(values);
+                drop(arrays);
+                set_exit(0);
+            }
+            ArraySyntax::SetElement { name, index, value } => {
+                array_set_element(&name, index, &value);
+                set_exit(0);
+            }
+        }
+        return;
+    }
 
     // Check for `export`/`unset`/`alias`/`unalias` before
     // pipe/redirect parsing — these are variable-setting commands that
@@ -3104,6 +3370,15 @@ fn cmd_help() {
     crate::console_println!("  declare -f       List all defined functions");
     crate::console_println!("  unset -f NAME    Remove a function definition");
     crate::console_println!("  return [N]       Return from function with status N");
+    crate::console_println!("Arrays:");
+    crate::console_println!("  arr=(a b c)      Declare array");
+    crate::console_println!("  ${{arr[0]}}        Access element (0-based)");
+    crate::console_println!("  ${{arr[@]}}        All elements (space-separated)");
+    crate::console_println!("  ${{#arr[@]}}       Array length");
+    crate::console_println!("  arr[N]=value     Set element N");
+    crate::console_println!("  unset arr        Remove array");
+    crate::console_println!("  unset arr[N]     Clear element N");
+    crate::console_println!("  declare -a       List all arrays");
     crate::console_println!("  reboot    Reboot the system");
 }
 
@@ -6045,7 +6320,19 @@ fn cmd_unset(args: &str) {
     }
 
     for name in args.split_whitespace() {
-        if !env_remove(name) {
+        // Check for `unset arr[N]` — remove a single array element.
+        if let Some(bracket) = name.find('[') {
+            if name.ends_with(']') {
+                let arr_name = name.get(..bracket).unwrap_or("");
+                let idx_str = name.get(bracket.saturating_add(1)..name.len().saturating_sub(1)).unwrap_or("");
+                if let Ok(index) = idx_str.parse::<usize>() {
+                    array_unset_element(arr_name, index);
+                    continue;
+                }
+            }
+        }
+        // Try removing as array first, then as scalar.
+        if !array_remove(name) && !env_remove(name) {
             crate::console_println!("unset: '{}': not set", name);
         }
     }
@@ -6076,6 +6363,13 @@ fn cmd_type(args: &str) {
         // Check user-defined functions.
         if FUNCTIONS.lock().contains_key(name) {
             crate::console_println!("{} is a function", name);
+            continue;
+        }
+
+        // Check array variables.
+        if is_array(name) {
+            let len = array_len(name).unwrap_or(0);
+            crate::console_println!("{} is an array ({} elements)", name, len);
             continue;
         }
 
@@ -6167,7 +6461,49 @@ fn cmd_declare(args: &str) {
         return;
     }
 
-    crate::console_println!("Usage: declare [-f [NAME]]");
+    if args == "-a" {
+        // List all arrays with contents.
+        let arrays = ARRAY_VARS.lock();
+        if arrays.is_empty() {
+            crate::console_println!("No arrays defined.");
+        } else {
+            for (name, values) in arrays.iter() {
+                let mut display = String::from("(");
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        display.push(' ');
+                    }
+                    // Quote values that contain spaces.
+                    if v.contains(' ') {
+                        display.push('"');
+                        display.push_str(v);
+                        display.push('"');
+                    } else {
+                        display.push_str(v);
+                    }
+                }
+                display.push(')');
+                crate::console_println!("{}={}", name, display);
+            }
+        }
+        return;
+    }
+
+    if let Some(name) = args.strip_prefix("-a ") {
+        let name = name.trim();
+        let arrays = ARRAY_VARS.lock();
+        if let Some(values) = arrays.get(name) {
+            for (i, v) in values.iter().enumerate() {
+                crate::console_println!("{}[{}]={}", name, i, v);
+            }
+        } else {
+            crate::console_println!("declare: array '{}' not found", name);
+            set_exit(1);
+        }
+        return;
+    }
+
+    crate::console_println!("Usage: declare [-f [NAME]] [-a [NAME]]");
 }
 
 /// Define or list shell aliases.

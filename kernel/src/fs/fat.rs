@@ -3971,6 +3971,79 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // ---------------------------------------------------------------
+    // fallocate tests
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing fallocate...");
+
+    // Test 1: fallocate on a new file.
+    let alloc_path = "/FALLOC.TXT";
+    // Pre-allocate 8192 bytes (should allocate 1+ clusters).
+    crate::fs::Vfs::fallocate(alloc_path, 8192)?;
+
+    // File should exist now with size 0 (pre-allocated but no data written).
+    let m_alloc = crate::fs::Vfs::stat(alloc_path)?;
+    if m_alloc.size != 0 {
+        crate::serial_println!(
+            "[fat]   fallocate FAILED: expected size 0, got {}",
+            m_alloc.size
+        );
+        let _ = crate::fs::Vfs::remove(alloc_path);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   fallocate new file: size correctly 0 after pre-alloc");
+
+    // Write some data — should succeed without new allocation since space is reserved.
+    let falloc_data = b"pre-allocated data";
+    crate::fs::Vfs::write_file(alloc_path, falloc_data)?;
+    let readback = crate::fs::Vfs::read_file(alloc_path)?;
+    if readback.as_slice() != falloc_data.as_slice() {
+        crate::serial_println!("[fat]   fallocate FAILED: write-after-alloc mismatch");
+        let _ = crate::fs::Vfs::remove(alloc_path);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   fallocate write-after-alloc verified");
+
+    // Test 2: fallocate on an existing file should not shrink the chain.
+    crate::fs::Vfs::fallocate(alloc_path, 1)?; // Smaller than existing
+    let m_alloc2 = crate::fs::Vfs::stat(alloc_path)?;
+    // Size should be unchanged from our write.
+    if m_alloc2.size != falloc_data.len() as u64 {
+        crate::serial_println!(
+            "[fat]   fallocate FAILED: small fallocate changed size to {}",
+            m_alloc2.size
+        );
+        let _ = crate::fs::Vfs::remove(alloc_path);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   fallocate no-shrink verified");
+
+    // Test 3: fallocate with size 0 is a no-op.
+    crate::fs::Vfs::fallocate(alloc_path, 0)?;
+    crate::serial_println!("[fat]   fallocate(0) no-op verified");
+
+    // Test 4: fallocate on a directory should fail.
+    crate::fs::Vfs::mkdir("/FALLOCDIR")?;
+    match crate::fs::Vfs::fallocate("/FALLOCDIR", 4096) {
+        Err(KernelError::IsADirectory) => {
+            crate::serial_println!("[fat]   fallocate on directory correctly returns IsADirectory");
+        }
+        other => {
+            crate::serial_println!(
+                "[fat]   fallocate on directory FAILED: expected IsADirectory, got {:?}",
+                other
+            );
+            let _ = crate::fs::Vfs::remove(alloc_path);
+            let _ = crate::fs::Vfs::rmdir("/FALLOCDIR");
+            return Err(KernelError::IoError);
+        }
+    }
+    let _ = crate::fs::Vfs::rmdir("/FALLOCDIR");
+
+    // Clean up.
+    crate::fs::Vfs::remove(alloc_path)?;
+    crate::serial_println!("[fat]   fallocate tests passed");
+
+    // ---------------------------------------------------------------
     // Long Filename (LFN) tests
     // ---------------------------------------------------------------
     crate::serial_println!("[fat]   Testing LFN support...");

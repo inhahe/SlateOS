@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem};
 
 // ---------------------------------------------------------------------------
 // FAT type detection
@@ -263,6 +263,16 @@ struct FatDirEntry {
     first_cluster: u32,
     /// File size in bytes.
     file_size: u32,
+    /// Last-write time (DOS packed: HHHHHmmmmmmSSSSS).
+    write_time: u16,
+    /// Last-write date (DOS packed: YYYYYYYMMMMDDDDD, Y=year-1980).
+    write_date: u16,
+    /// Creation time (DOS packed, same format as write_time).
+    create_time: u16,
+    /// Creation date (DOS packed, same format as write_date).
+    create_date: u16,
+    /// Last-access date (DOS packed, date only — no time component).
+    access_date: u16,
 }
 
 impl FatDirEntry {
@@ -299,11 +309,23 @@ impl FatDirEntry {
         let first_cluster = (cluster_hi << 16) | cluster_lo;
         let file_size = read_u32(raw, 28);
 
+        // Timestamps (DOS packed format).
+        let create_time = read_u16(raw, 14);
+        let create_date = read_u16(raw, 16);
+        let access_date = read_u16(raw, 18);
+        let write_time = read_u16(raw, 22);
+        let write_date = read_u16(raw, 24);
+
         Some(Self {
             name,
             attr,
             first_cluster,
             file_size,
+            write_time,
+            write_date,
+            create_time,
+            create_date,
+            access_date,
         })
     }
 
@@ -355,6 +377,64 @@ impl FatDirEntry {
 }
 
 // ---------------------------------------------------------------------------
+// DOS date/time → nanoseconds-since-Unix-epoch conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a DOS packed date+time to nanoseconds since Unix epoch.
+///
+/// DOS date format: `(year-1980) << 9 | month << 5 | day`
+/// DOS time format: `hours << 11 | minutes << 5 | seconds/2`
+///
+/// Returns 0 if date is 0 (not set).
+fn dos_datetime_to_ns(date: u16, time: u16) -> u64 {
+    if date == 0 {
+        return 0;
+    }
+
+    let day   = u64::from(date & 0x1F);
+    let month = u64::from((date >> 5) & 0x0F);
+    let year  = u64::from((date >> 9) & 0x7F).wrapping_add(1980);
+
+    let secs2 = u64::from(time & 0x1F);
+    let mins  = u64::from((time >> 5) & 0x3F);
+    let hours = u64::from((time >> 11) & 0x1F);
+
+    // Rough days-since-epoch using the common formula.
+    // Not perfectly accurate for all leap years but correct within a day.
+    let mut days: u64 = 0;
+    // Years since 1970.
+    let mut y = 1970u64;
+    while y < year {
+        days = days.wrapping_add(if is_leap(y) { 366 } else { 365 });
+        y = y.wrapping_add(1);
+    }
+    // Months within the target year.
+    let month_days: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 1u64;
+    while m < month && m <= 12 {
+        let md = if m == 2 && is_leap(year) { 29 } else {
+            month_days.get(m.wrapping_sub(1) as usize).copied().unwrap_or(30)
+        };
+        days = days.wrapping_add(md);
+        m = m.wrapping_add(1);
+    }
+    days = days.wrapping_add(day.saturating_sub(1));
+
+    let total_secs = days
+        .wrapping_mul(86400)
+        .wrapping_add(hours.wrapping_mul(3600))
+        .wrapping_add(mins.wrapping_mul(60))
+        .wrapping_add(secs2.wrapping_mul(2));
+
+    total_secs.wrapping_mul(1_000_000_000)
+}
+
+/// Check if a year is a leap year.
+const fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+// ---------------------------------------------------------------------------
 // FAT filesystem (FAT16 / FAT32)
 // ---------------------------------------------------------------------------
 
@@ -389,6 +469,11 @@ impl DcacheEntry {
                 attr: 0,
                 first_cluster: 0,
                 file_size: 0,
+                write_time: 0,
+                write_date: 0,
+                create_time: 0,
+                create_date: 0,
+                access_date: 0,
             },
             last_access: 0,
             valid: false,
@@ -1389,6 +1474,77 @@ impl FileSystem for FatFs {
         }
     }
 
+    /// Return rich metadata including FAT timestamps.
+    ///
+    /// FAT stores creation, last-write, and last-access timestamps in
+    /// packed DOS format.  We convert them to nanoseconds-since-epoch.
+    /// FAT has no ownership or Unix permissions, so those stay at 0.
+    ///
+    /// FAT attribute flags are mapped to VFS attributes:
+    /// - `ATTR_READ_ONLY` → `FileAttr::IMMUTABLE`
+    /// - `ATTR_HIDDEN` → `FileAttr::HIDDEN`
+    /// - `ATTR_SYSTEM` → `FileAttr::SYSTEM`
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        let (parent_cluster, entry) = self.resolve_path(path)?;
+
+        match entry {
+            None => {
+                // Root or resolved directory — no FAT entry with timestamps.
+                let entry_type = crate::fs::vfs::EntryType::Directory;
+                Ok(FileMeta::minimal(entry_type, 0))
+            }
+            Some(e) => {
+                let entry_type = if e.is_volume_label() {
+                    EntryType::VolumeLabel
+                } else if e.is_directory() {
+                    EntryType::Directory
+                } else {
+                    EntryType::File
+                };
+
+                // Convert DOS timestamps to nanoseconds-since-epoch.
+                let created_ns = dos_datetime_to_ns(e.create_date, e.create_time);
+                let modified_ns = dos_datetime_to_ns(e.write_date, e.write_time);
+                // Access date has no time component — use midnight.
+                let accessed_ns = dos_datetime_to_ns(e.access_date, 0);
+
+                // Map FAT attribute flags to VFS attributes.
+                let mut attrs = FileAttr::NONE;
+                if e.attr & ATTR_READ_ONLY != 0 {
+                    attrs = attrs.union(FileAttr::IMMUTABLE);
+                }
+                if e.attr & ATTR_HIDDEN != 0 {
+                    attrs = attrs.union(FileAttr::HIDDEN);
+                }
+                if e.attr & ATTR_SYSTEM != 0 {
+                    attrs = attrs.union(FileAttr::SYSTEM);
+                }
+
+                // Suppress unused variable warning — parent_cluster is needed
+                // by resolve_path but not used in the metadata response.
+                let _ = parent_cluster;
+
+                Ok(FileMeta {
+                    size: u64::from(e.file_size),
+                    entry_type,
+                    created_ns,
+                    modified_ns,
+                    accessed_ns,
+                    // FAT has no metadata-change timestamp; use modified as proxy.
+                    changed_ns: modified_ns,
+                    // FAT has no ownership model.
+                    uid: 0,
+                    gid: 0,
+                    // FAT has no Unix permissions; 0 signals "not applicable".
+                    permissions: 0,
+                    attributes: attrs,
+                    xattrs: Vec::new(),
+                    hash: Vec::new(),
+                })
+            }
+        }
+    }
+
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
         let (parent_path, filename) = split_path(path);
@@ -2250,6 +2406,102 @@ pub fn self_test() -> KernelResult<()> {
     // Clean up: remove the empty test directory.
     crate::fs::Vfs::rmdir("/TESTDIR")?;
     crate::serial_println!("[fat]   rmdir verified: TESTDIR removed");
+
+    // ---------------------------------------------------------------
+    // dos_datetime_to_ns unit tests (pure computation, no disk I/O)
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing dos_datetime_to_ns...");
+
+    // Known epoch: 0 date → 0 ns.
+    assert_eq!(dos_datetime_to_ns(0, 0), 0);
+
+    // 1980-01-01 00:00:00 — DOS epoch.
+    //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
+    //   time = 0
+    //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
+    let dos_epoch_date: u16 = (0 << 9) | (1 << 5) | 1;
+    let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
+    // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
+    let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
+    if dos_epoch_ns != expected_dos_epoch_ns {
+        crate::serial_println!(
+            "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
+            dos_epoch_ns, expected_dos_epoch_ns
+        );
+        return Err(KernelError::IoError);
+    }
+
+    // 2000-06-15 14:30:00.
+    //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
+    //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
+    let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
+    let y2k_time: u16 = (14 << 11) | (30 << 5) | 0;
+    let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
+    // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
+    let expected_y2k_ns: u64 = 961_078_200_000_000_000;
+    if y2k_ns != expected_y2k_ns {
+        crate::serial_println!(
+            "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
+            y2k_ns, expected_y2k_ns
+        );
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   dos_datetime_to_ns verified");
+
+    // ---------------------------------------------------------------
+    // FAT metadata integration test
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing metadata...");
+
+    // Create a test file, fetch its metadata, verify fields.
+    let meta_test_data = b"Metadata test file content.\n";
+    crate::fs::Vfs::write_file("/METATST.TXT", meta_test_data)?;
+
+    let meta = crate::fs::Vfs::metadata("/METATST.TXT")?;
+    if meta.size != meta_test_data.len() as u64 {
+        crate::serial_println!(
+            "[fat]   metadata FAILED: size = {}, expected {}",
+            meta.size, meta_test_data.len()
+        );
+        crate::fs::Vfs::remove("/METATST.TXT")?;
+        return Err(KernelError::IoError);
+    }
+    if meta.entry_type != EntryType::File {
+        crate::serial_println!("[fat]   metadata FAILED: entry_type is not File");
+        crate::fs::Vfs::remove("/METATST.TXT")?;
+        return Err(KernelError::IoError);
+    }
+    // FAT has no ownership — uid/gid should be 0.
+    if meta.uid != 0 || meta.gid != 0 {
+        crate::serial_println!("[fat]   metadata FAILED: uid={}, gid={}", meta.uid, meta.gid);
+        crate::fs::Vfs::remove("/METATST.TXT")?;
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!(
+        "[fat]   metadata OK: size={}, type=File, created_ns={}, modified_ns={}, accessed_ns={}",
+        meta.size, meta.created_ns, meta.modified_ns, meta.accessed_ns
+    );
+
+    // Test directory metadata.
+    let _ = crate::fs::Vfs::remove("/METADIR/INSIDE.TXT");
+    let _ = crate::fs::Vfs::rmdir("/METADIR");
+    crate::fs::Vfs::mkdir("/METADIR")?;
+
+    let dir_meta = crate::fs::Vfs::metadata("/METADIR")?;
+    if dir_meta.entry_type != EntryType::Directory {
+        crate::serial_println!("[fat]   metadata FAILED: METADIR entry_type is not Directory");
+        crate::fs::Vfs::rmdir("/METADIR")?;
+        crate::fs::Vfs::remove("/METATST.TXT")?;
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!(
+        "[fat]   directory metadata OK: type=Directory, size={}",
+        dir_meta.size
+    );
+
+    // Clean up.
+    crate::fs::Vfs::rmdir("/METADIR")?;
+    crate::fs::Vfs::remove("/METATST.TXT")?;
 
     // Report dcache statistics.
     match crate::fs::Vfs::debug_stats("/") {

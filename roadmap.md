@@ -282,6 +282,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639), VFS-level cross-mount symlink resolution
   - [-] File metadata: capabilities per file (needs security zone)
   - [x] Content hash (SHA-256 via Vfs::content_hash)
+  - [x] Filesystem space query (statvfs: FsInfo struct, block/inode counts, FAT scan, ext4 superblock, memfs node count)
+  - [x] Hard links (VFS link() with same-mount enforcement, ext4 impl with i_links_count, nlinks in FileMeta, comprehensive self-test)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

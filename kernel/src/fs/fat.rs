@@ -799,6 +799,65 @@ const fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
+/// Convert nanoseconds-since-Unix-epoch to DOS packed date+time.
+///
+/// Returns `(date, time)`.  Returns `(0, 0)` if `ns` is 0 (leave
+/// unchanged).  Timestamps before 1980-01-01 are clamped to the DOS
+/// epoch start.
+#[allow(clippy::arithmetic_side_effects)]
+fn ns_to_dos_datetime(ns: u64) -> (u16, u16) {
+    if ns == 0 {
+        return (0, 0);
+    }
+
+    let total_secs = ns / 1_000_000_000;
+    let day_secs = total_secs % 86400;
+    let mut days = total_secs / 86400;
+
+    // Compute year, month, day from days since 1970-01-01.
+    let mut year = 1970u64;
+    loop {
+        let yd = if is_leap(year) { 366 } else { 365 };
+        if days < yd {
+            break;
+        }
+        days -= yd;
+        year += 1;
+    }
+
+    // DOS epoch starts at 1980.
+    if year < 1980 {
+        return (0x0021, 0); // 1980-01-01 00:00:00
+    }
+
+    let month_days: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1u64;
+    for m in 0..12u64 {
+        let md = if m == 1 && is_leap(year) { 29 } else {
+            month_days.get(m as usize).copied().unwrap_or(30)
+        };
+        if days < md {
+            month = m + 1;
+            break;
+        }
+        days -= md;
+        if m == 11 {
+            month = 12;
+        }
+    }
+    let day = days + 1; // 1-based.
+
+    let hours = day_secs / 3600;
+    let mins = (day_secs % 3600) / 60;
+    let secs = day_secs % 60;
+
+    let dos_year = if year > 2107 { 127u16 } else { (year - 1980) as u16 };
+    let date: u16 = (dos_year << 9) | ((month as u16) << 5) | (day as u16);
+    let time: u16 = ((hours as u16) << 11) | ((mins as u16) << 5) | ((secs as u16) >> 1);
+
+    (date, time)
+}
+
 /// Convert a kernel RTC `DateTime` to DOS packed date and time.
 ///
 /// Returns `(date, time)` in DOS format.
@@ -2493,12 +2552,87 @@ impl FileSystem for FatFs {
                     attributes: attrs,
                     // FAT has no hard link support; always 1.
                     nlinks: 1,
-                    blocks: 0,
+                    // Allocated sectors: file occupies whole clusters.
+                    blocks: {
+                        let csize = u64::from(self.bpb.sectors_per_cluster)
+                            .saturating_mul(512);
+                        if e.file_size == 0 || e.first_cluster < 2 || csize == 0 {
+                            0
+                        } else {
+                            let clusters = (u64::from(e.file_size)
+                                .saturating_add(csize.saturating_sub(1))) / csize;
+                            clusters.saturating_mul(
+                                u64::from(self.bpb.sectors_per_cluster)
+                            )
+                        }
+                    },
                     xattrs: Vec::new(),
                     hash: Vec::new(),
                 })
             }
         }
+    }
+
+    /// Update timestamps on a FAT file or directory.
+    ///
+    /// FAT supports: write_date/write_time (2-second granularity) and
+    /// access_date (date only, no time).  Pass 0 to leave a timestamp
+    /// unchanged.  Root directory has no entry and returns NotSupported.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn set_times(
+        &mut self,
+        path: &str,
+        accessed_ns: crate::fs::vfs::Timestamp,
+        modified_ns: crate::fs::vfs::Timestamp,
+    ) -> KernelResult<()> {
+        // Resolve path to get the entry and parent.
+        let (parent_path, _filename) = split_path(path);
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
+        let (_pc, entry_opt) = self.resolve_path(path)?;
+        let entry = entry_opt.ok_or(KernelError::NotSupported)?; // Root has no entry.
+
+        // Find the on-disk location of the 8.3 entry.
+        let name83 = entry.name;
+        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
+            parent_cluster, &name83,
+        )?;
+        if !exists {
+            return Err(KernelError::NotFound);
+        }
+
+        // Read the sector containing the entry.
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        self.read_sector(dir_lba, &mut sector_buf)?;
+
+        let ent = sector_buf.get_mut(dir_offset..dir_offset + 32)
+            .ok_or(KernelError::IoError)?;
+
+        // Update modification time (bytes 22-25: write_time + write_date).
+        if modified_ns != 0 {
+            let (date, time) = ns_to_dos_datetime(modified_ns);
+            if date != 0 {
+                ent[22] = time as u8;
+                ent[23] = (time >> 8) as u8;
+                ent[24] = date as u8;
+                ent[25] = (date >> 8) as u8;
+            }
+        }
+
+        // Update access date (bytes 18-19, date only — no time component).
+        if accessed_ns != 0 {
+            let (date, _time) = ns_to_dos_datetime(accessed_ns);
+            if date != 0 {
+                ent[18] = date as u8;
+                ent[19] = (date >> 8) as u8;
+            }
+        }
+
+        self.write_sector(dir_lba, &sector_buf)?;
+
+        // Invalidate dcache since the entry's timestamp changed.
+        self.dcache_invalidate_prefix(path);
+
+        Ok(())
     }
 
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]

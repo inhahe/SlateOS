@@ -273,8 +273,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Change journal (persistent across reboots, JSON-lines /_JOURNAL file, 1024-entry ring buffer, 3 syscalls)
   - [x] In-memory filesystem (memfs/ramfs) for /tmp and pseudo-FS foundation, mounted at /tmp during boot
   - [x] Multi-mount VFS with longest-prefix path-boundary matching, mount-point synthesis in readdir
-  - [x] Procfs virtual filesystem at /proc (version, uptime, meminfo, cpuinfo, mounts, task stats, per-PID status, filesystems, cmdline, loadavg)
-  - [x] Devfs virtual filesystem at /dev (null, zero, full, random, urandom, console) with streaming read_at/write_at
+  - [x] Procfs virtual filesystem at /proc (version, uptime, meminfo, cpuinfo, mounts, task stats, per-PID status, filesystems, cmdline, loadavg, vmstat, buddyinfo, swaps)
+  - [x] Devfs virtual filesystem at /dev (null, zero, full, random, urandom, console, stdin, stdout, stderr, kmsg, uptime)
+  - [x] Sysfs virtual filesystem at /sys (kernel info, sysctl params, PCI devices, buffer cache stats) with read/write for tunables
 - [x] Filesystem features:
   - [x] Case-sensitive paths, forward slash separator (VFS is case-sensitive; FAT case-insensitive by nature)
   - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths
@@ -309,7 +310,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ext4 htree (hash-tree) directory index: half_md4/TEA/legacy hash functions, dx_root/dx_node parsing, binary search, O(1) amortized lookups for INDEX directories (read-only; write-side node splitting deferred)
   - [x] Procfs expansion: /proc/interrupts (APIC timer, ISR latency, IRQ state), /proc/devices (PCI bus scan), /proc/net (interface config snapshot)
   - [x] Kshell commands: lsp (paginated ls), cmp/diff (byte-by-byte file compare), fallocate (space reservation with K/M/G suffixes)
-  - [x] Self-tests: recursive copy/remove (3-level directory tree), cross-mount rename (memfs↔ext4), paginated readdir_at (page boundary, overlap, tail, past-end), VFS dcache (hit verification, invalidation, prefix matching), htree hash functions (determinism, divergence, scan_leaf_block)
+  - [x] Kshell commands: sort, uniq, tee, truncate, sha256 (text processing and file ops)
+  - [x] Kshell commands: readlink, symlink, xattr, basename, dirname, realpath, pwd, id, mktemp (path utilities)
+  - [x] Kshell commands: sysctl (list/get/set kernel params), hostname (get/set), dd (block copy), free (memory summary), lsblk (block devices), glob (pattern expansion)
+  - [x] Glob pattern matching: *, ?, [abc], [a-z], [!abc], \\ escape, case-insensitive mode; VFS glob_match() for filename matching, Vfs::glob() for path-level expansion
+  - [x] Procfs expansion: /proc/vmstat (frames, swap, zram, kswapd, OOM), /proc/buddyinfo (buddy allocator per-order), /proc/swaps (swap devices with priority)
+  - [x] Sysctl name-based API: list_all(), find_by_name(), set_by_name() for filesystem and shell access
+  - [x] Self-tests: recursive copy/remove (3-level directory tree), cross-mount rename (memfs↔ext4), paginated readdir_at (page boundary, overlap, tail, past-end), VFS dcache (hit verification, invalidation, prefix matching), htree hash functions (determinism, divergence, scan_leaf_block), glob matching (wildcards, char classes, ranges, negation, escaping, edge cases), sysfs (directory layout, read/write, permissions)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -12,7 +12,8 @@
 //! ├── full       Reads return zero bytes, writes fail with DiskFull
 //! ├── random     Reads return pseudo-random bytes (xorshift64)
 //! ├── urandom    Same as random (no entropy blocking distinction)
-//! └── console    Reads/writes to the kernel console
+//! ├── console    Reads/writes to the kernel console
+//! └── tty        Controlling terminal (aliases console, single-console)
 //! ```
 //!
 //! ## Design
@@ -105,6 +106,7 @@ const DEV_FILES: &[&str] = &[
     "random",
     "urandom",
     "console",
+    "tty",
     "stdin",
     "stdout",
     "stderr",
@@ -160,9 +162,11 @@ impl FileSystem for DevFs {
                 fill_random(&mut buf);
                 Ok(buf)
             }
-            "console" => {
-                // /dev/console: reading returns whatever is in the
+            "console" | "tty" => {
+                // /dev/console, /dev/tty: reading returns whatever is in the
                 // keyboard buffer; for now, return empty (non-blocking).
+                // /dev/tty is the controlling terminal of the calling process;
+                // since we're single-console, it aliases /dev/console.
                 Ok(Vec::new())
             }
             _ => Err(KernelError::NotFound),
@@ -188,8 +192,8 @@ impl FileSystem for DevFs {
                 fill_random(&mut buf);
                 Ok(buf)
             }
-            "console" | "stdin" => {
-                // Reading from console/stdin returns empty (no interactive input).
+            "console" | "tty" | "stdin" => {
+                // Reading from console/tty/stdin returns empty (no interactive input).
                 let _ = offset;
                 Ok(Vec::new())
             }
@@ -268,8 +272,8 @@ impl FileSystem for DevFs {
                 }
                 Ok(())
             }
-            "console" | "stdout" | "stderr" => {
-                // /dev/console, stdout, stderr: write to kernel console output.
+            "console" | "tty" | "stdout" | "stderr" => {
+                // /dev/console, /dev/tty, stdout, stderr: write to kernel console output.
                 if let Ok(text) = core::str::from_utf8(data) {
                     crate::console_print!("{}", text);
                 } else {

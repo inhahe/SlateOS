@@ -84,6 +84,7 @@ const ROOT_FILES: &[&str] = &[
     "locks",
     "fdinfo",
     "diskstats",
+    "partitions",
     "interrupts",
     "devices",
     "net",
@@ -458,6 +459,30 @@ fn gen_diskstats() -> Vec<u8> {
         "\nBuffer cache: {} hits / {} reads ({}% hit rate), {} readaheads\n",
         cache_stats.hits, cache_stats.reads, hit_rate, cache_stats.readaheads,
     ));
+
+    text.into_bytes()
+}
+
+/// `/proc/partitions` — block device partitions.
+///
+/// Matches Linux format: `major minor #blocks name`.
+/// Since our OS doesn't yet support partitions, each device is listed
+/// as a whole-disk entry with major 254 (virtio).
+fn gen_partitions() -> Vec<u8> {
+    let devices = crate::blkdev::list_devices_full();
+
+    let mut text = String::from("major minor  #blocks  name\n\n");
+
+    for (i, dev) in devices.iter().enumerate() {
+        // Calculate size in 1 KiB blocks (Linux convention).
+        let kib_blocks = dev.sector_count
+            .saturating_mul(dev.sector_size as u64)
+            / 1024;
+        text.push_str(&format!(
+            " 254    {:>4}  {:>8}  {}\n",
+            i, kib_blocks, dev.name,
+        ));
+    }
 
     text.into_bytes()
 }
@@ -957,6 +982,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "locks" => Ok(gen_locks()),
         "fdinfo" => Ok(gen_fdinfo()),
         "diskstats" => Ok(gen_diskstats()),
+        "partitions" => Ok(gen_partitions()),
         "interrupts" => Ok(gen_interrupts()),
         "devices" => Ok(gen_devices()),
         "net" => Ok(gen_net()),

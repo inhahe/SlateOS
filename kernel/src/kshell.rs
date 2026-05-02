@@ -83,8 +83,122 @@ macro_rules! shell_println {
 /// Maximum line length.  Longer lines are silently truncated.
 const MAX_LINE: usize = 256;
 
+/// Maximum number of commands stored in the history ring buffer.
+const HISTORY_SIZE: usize = 64;
+
 /// The shell prompt string.
 const PROMPT: &str = "kernel> ";
+
+// ---------------------------------------------------------------------------
+// Command history
+// ---------------------------------------------------------------------------
+
+/// Ring buffer of recent commands.  Oldest entry is at `start`, newest
+/// at `(start + count - 1) % HISTORY_SIZE`.
+struct History {
+    /// The stored command strings.
+    entries: Vec<String>,
+    /// Index of the oldest entry.
+    start: usize,
+    /// Number of valid entries.
+    count: usize,
+    /// Current browse position (0 = most recent, count-1 = oldest).
+    /// Set to count (past-end) when the user hasn't pressed Up yet.
+    browse: usize,
+    /// The "live" line the user was typing before pressing Up.
+    /// Saved so pressing Down all the way restores it.
+    saved_line: String,
+}
+
+impl History {
+    fn new() -> Self {
+        let mut entries = Vec::with_capacity(HISTORY_SIZE);
+        for _ in 0..HISTORY_SIZE {
+            entries.push(String::new());
+        }
+        Self {
+            entries,
+            start: 0,
+            count: 0,
+            browse: 0,
+            saved_line: String::new(),
+        }
+    }
+
+    /// Add a command to the history.  Duplicates of the most recent
+    /// entry are suppressed.
+    fn push(&mut self, line: &str) {
+        if line.is_empty() {
+            return;
+        }
+        // Don't duplicate the last command.
+        if self.count > 0 {
+            let last_idx = (self.start.wrapping_add(self.count).wrapping_sub(1)) % HISTORY_SIZE;
+            if let Some(last) = self.entries.get(last_idx) {
+                if last == line {
+                    self.browse = self.count;
+                    return;
+                }
+            }
+        }
+
+        if self.count < HISTORY_SIZE {
+            // Not full yet — append.
+            let idx = (self.start.wrapping_add(self.count)) % HISTORY_SIZE;
+            if let Some(entry) = self.entries.get_mut(idx) {
+                entry.clear();
+                entry.push_str(line);
+            }
+            self.count = self.count.saturating_add(1);
+        } else {
+            // Full — overwrite oldest.
+            if let Some(entry) = self.entries.get_mut(self.start) {
+                entry.clear();
+                entry.push_str(line);
+            }
+            self.start = (self.start.wrapping_add(1)) % HISTORY_SIZE;
+        }
+        self.browse = self.count;
+    }
+
+    /// Reset the browse position (call at start of each new line).
+    fn reset_browse(&mut self, current_line: &str) {
+        self.browse = self.count;
+        self.saved_line.clear();
+        self.saved_line.push_str(current_line);
+    }
+
+    /// Move up in history (older).  Returns the command to display,
+    /// or None if already at the oldest entry.
+    fn up(&mut self) -> Option<&str> {
+        if self.count == 0 || self.browse == 0 {
+            return None;
+        }
+        self.browse = self.browse.saturating_sub(1);
+        let abs_idx = (self.start.wrapping_add(
+            self.count.wrapping_sub(1).wrapping_sub(self.browse)
+        )) % HISTORY_SIZE;
+        self.entries.get(abs_idx).map(|s| s.as_str())
+    }
+
+    /// Move down in history (newer).  Returns the command to display,
+    /// or the saved live line if we've scrolled past the newest entry.
+    fn down(&mut self) -> Option<&str> {
+        if self.browse >= self.count {
+            return None; // Already at live line.
+        }
+        self.browse = self.browse.saturating_add(1);
+        if self.browse >= self.count {
+            // Back to the live line.
+            Some(self.saved_line.as_str())
+        } else {
+            let abs_idx = (self.start.wrapping_add(
+                self.count.wrapping_sub(1).wrapping_sub(self.browse)
+            )) % HISTORY_SIZE;
+            self.entries.get(abs_idx).map(|s| s.as_str())
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shell entry point
@@ -100,6 +214,7 @@ pub fn run() -> ! {
     crate::console_println!("");
 
     let mut line_buf = String::with_capacity(MAX_LINE);
+    let mut history = History::new();
 
     loop {
         // Print prompt.
@@ -107,7 +222,7 @@ pub fn run() -> ! {
 
         // Read a line (blocking on keyboard).
         line_buf.clear();
-        read_line(&mut line_buf);
+        read_line(&mut line_buf, &mut history);
 
         // Parse and execute.
         let trimmed = line_buf.trim();
@@ -115,50 +230,88 @@ pub fn run() -> ! {
             continue;
         }
 
+        // Add to history before executing (so even failed commands
+        // are recallable).
+        history.push(trimmed);
         execute(trimmed);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Line input
+// Line input with history support
 // ---------------------------------------------------------------------------
 
-/// Read a line from the keyboard, echoing characters and handling
-/// backspace.  Returns when Enter is pressed.
-fn read_line(buf: &mut String) {
+/// Erase the current line from the console (prompt + text) and
+/// reprint it with new content.
+fn replace_line(buf: &mut String, new_content: &str) {
+    // Erase current content by sending backspaces.
+    for _ in 0..buf.len() {
+        crate::console::putchar(b'\x08');
+        crate::console::putchar(b' ');
+        crate::console::putchar(b'\x08');
+    }
+
+    // Replace buffer.
+    buf.clear();
+    buf.push_str(new_content);
+
+    // Print new content.
+    for &b in buf.as_bytes() {
+        crate::console::putchar(b);
+    }
+}
+
+/// Read a line from the keyboard with history support.
+///
+/// Handles printable characters, backspace, delete, and arrow keys
+/// (Up/Down for history browsing).  Returns when Enter is pressed.
+fn read_line(buf: &mut String, history: &mut History) {
+    use crate::keyboard;
+
+    // Start in "live" mode (not browsing history).
+    history.reset_browse("");
+
     loop {
-        let ch = crate::keyboard::read_char();
+        let ch = keyboard::read_char();
 
         match ch {
             b'\n' => {
-                // Enter — finish the line.
-                // The keyboard handler already echoed the newline to
-                // the console, but we need to make sure it appears.
-                // (The echo in keyboard.rs handles normal chars; newline
-                // needs explicit handling here.)
                 crate::console::putchar(b'\n');
                 return;
             }
-            b'\x08' => {
-                // Backspace — remove last character if any.
+            b'\x08' | 0x7F => {
+                // Backspace / DEL — remove last character.
                 if buf.pop().is_some() {
-                    // Move cursor back, overwrite with space, move back again.
-                    // We use raw putchar calls for this.
                     crate::console::putchar(b'\x08');
                     crate::console::putchar(b' ');
                     crate::console::putchar(b'\x08');
                 }
             }
             0x1B => {
-                // ESC — ignore (could clear line in the future).
+                // ESC — clear the current line.
+                replace_line(buf, "");
             }
-            0x7F => {
-                // DEL — treat like backspace.
-                if buf.pop().is_some() {
-                    crate::console::putchar(b'\x08');
-                    crate::console::putchar(b' ');
-                    crate::console::putchar(b'\x08');
+            keyboard::KEY_UP => {
+                // Save current line if this is the first Up press.
+                if history.browse >= history.count {
+                    history.saved_line.clear();
+                    history.saved_line.push_str(buf.as_str());
                 }
+                if let Some(cmd) = history.up() {
+                    let cmd = String::from(cmd); // Copy to avoid borrow conflict.
+                    replace_line(buf, &cmd);
+                }
+            }
+            keyboard::KEY_DOWN => {
+                if let Some(cmd) = history.down() {
+                    let cmd = String::from(cmd);
+                    replace_line(buf, &cmd);
+                }
+            }
+            keyboard::KEY_LEFT | keyboard::KEY_RIGHT |
+            keyboard::KEY_HOME | keyboard::KEY_END => {
+                // Cursor movement within the line — not yet supported.
+                // Would require tracking a cursor position within `buf`.
             }
             ch if ch >= 0x20 && ch < 0x7F => {
                 // Printable ASCII — add to buffer if room.
@@ -2112,7 +2265,8 @@ fn cmd_lsp(args: &str) {
 
                 // Wait for Enter key to continue.
                 let mut dummy = alloc::string::String::new();
-                read_line(&mut dummy);
+                let mut h = History::new();
+                read_line(&mut dummy, &mut h);
             }
             Err(e) => {
                 crate::console_println!("lsp: error: {:?}", e);

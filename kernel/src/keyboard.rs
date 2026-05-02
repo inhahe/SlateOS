@@ -418,15 +418,29 @@ fn scancode_to_ascii(code: u8) -> Option<u8> {
 ///
 /// Most extended keys don't produce standard ASCII.  We map arrow keys
 /// and a few others to escape sequences or special codes.
+/// Special byte codes for extended keys (above ASCII range).
+///
+/// These are emitted by `extended_to_ascii` for keys that don't map to
+/// standard ASCII.  The kshell interprets them for command history
+/// (up/down) and cursor movement (left/right).
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
+pub const KEY_LEFT: u8 = 0x82;
+pub const KEY_RIGHT: u8 = 0x83;
+pub const KEY_HOME: u8 = 0x84;
+pub const KEY_END: u8 = 0x85;
+
 fn extended_to_ascii(code: u8) -> Option<u8> {
     match code {
-        0x1C => Some(b'\n'), // Keypad Enter
-        0x35 => Some(b'/'),  // Keypad /
-        0x53 => Some(0x7F),  // Delete → DEL character
-
-        // Arrow keys, Home, End, PgUp, PgDn, Insert → no single ASCII.
-        // A future input system will emit richer key events.  For now,
-        // these are dropped.
+        0x1C => Some(b'\n'),   // Keypad Enter
+        0x35 => Some(b'/'),    // Keypad /
+        0x53 => Some(0x7F),    // Delete → DEL character
+        0x48 => Some(KEY_UP),  // Up arrow
+        0x50 => Some(KEY_DOWN),// Down arrow
+        0x4B => Some(KEY_LEFT),// Left arrow
+        0x4D => Some(KEY_RIGHT),// Right arrow
+        0x47 => Some(KEY_HOME),// Home
+        0x4F => Some(KEY_END), // End
         _ => None,
     }
 }
@@ -463,6 +477,9 @@ fn push_char(ch: u8) {
             // just print the character and let the future shell handle it.
         }
         0x1B => {} // Don't echo ESC
+        // Don't echo extended key codes (arrow keys, home/end) — the
+        // kshell handles their visual effect by redrawing the line.
+        KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_HOME | KEY_END => {}
         _ => crate::console::putchar(ch),
     }
 }

@@ -6264,19 +6264,45 @@ fn tree_recurse(path: &str, prefix: &str, dirs: &mut u64, files: &mut u64, depth
 /// Show disk usage for a path (like Unix `du`).
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_du(args: &str) {
-    let path = if args.is_empty() {
+    let mut summary_only = false;
+    let mut max_depth: usize = usize::MAX;
+    let mut path_arg = "";
+
+    for word in args.split_whitespace() {
+        if word == "-s" {
+            summary_only = true;
+        } else if word.starts_with("-d") {
+            // -d N or -dN
+            let num_str = if word.len() > 2 {
+                &word[2..]
+            } else {
+                // -d followed by next arg is not handled in this simple parser;
+                // use -dN form.
+                "0"
+            };
+            max_depth = num_str.parse::<usize>().unwrap_or(0);
+        } else {
+            path_arg = word;
+        }
+    }
+
+    let path = if path_arg.is_empty() {
         get_cwd()
     } else {
-        resolve_path(args)
+        resolve_path(path_arg)
     };
 
-    let total = du_recurse(&path);
+    let total = du_recurse(&path, 0, max_depth, summary_only);
     crate::console_println!("{}\t{}", format_bytes(total), path);
 }
 
 /// Recursively calculate total size of a directory tree.
+///
+/// `depth` is the current recursion depth (0 = root).
+/// `max_depth` limits how deep subdirectories are printed.
+/// `summary_only` suppresses all subdirectory output.
 #[allow(clippy::arithmetic_side_effects)]
-fn du_recurse(path: &str) -> u64 {
+fn du_recurse(path: &str, depth: usize, max_depth: usize, summary_only: bool) -> u64 {
     let mut total: u64 = 0;
 
     let entries = match crate::fs::Vfs::readdir(path) {
@@ -6294,8 +6320,15 @@ fn du_recurse(path: &str) -> u64 {
         total = total.saturating_add(entry.size);
 
         if entry.entry_type == crate::fs::EntryType::Directory {
-            let subdir_total = du_recurse(&child_path);
-            crate::console_println!("{}\t{}", format_bytes(subdir_total), child_path);
+            let subdir_total = du_recurse(
+                &child_path,
+                depth.saturating_add(1),
+                max_depth,
+                summary_only,
+            );
+            if !summary_only && depth < max_depth {
+                crate::console_println!("{}\t{}", format_bytes(subdir_total), child_path);
+            }
             total = total.saturating_add(subdir_total);
         }
     }

@@ -78,6 +78,51 @@ impl FileSystem for Ext4Fs {
         Ok(entries)
     }
 
+    fn readdir_at(
+        &mut self,
+        path: &str,
+        offset: usize,
+        count: usize,
+    ) -> KernelResult<(Vec<DirEntry>, usize)> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        if (inode.i_mode & file_type::S_IFMT) != file_type::S_IFDIR {
+            return Err(KernelError::NotADirectory);
+        }
+
+        // Read raw directory entries (cheap — just parses names/types, no inode reads).
+        let raw_entries = self.driver.read_dir_entries(&inode)?;
+
+        // Filter . and .. and count total.
+        let filtered: Vec<_> = raw_entries
+            .into_iter()
+            .filter(|(_, _, name)| name != "." && name != "..")
+            .collect();
+        let total = filtered.len();
+
+        // Only read child inodes for the entries in the requested window.
+        // This is the key optimization: for a 10,000-entry directory with
+        // offset=20, count=20, we only read 20 inodes instead of 10,000.
+        let start = offset.min(total);
+        let end = start.saturating_add(count).min(total);
+
+        let page = filtered
+            .into_iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .map(|(child_ino, ftype, name)| {
+                let entry_type = dir_type_to_entry_type(ftype);
+                let size = self.driver.read_inode(child_ino)
+                    .map(|ci| inode_file_size(&ci))
+                    .unwrap_or(0);
+                DirEntry { name, entry_type, size }
+            })
+            .collect();
+
+        Ok((page, total))
+    }
+
     fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;

@@ -2348,6 +2348,51 @@ impl FileSystem for FatFs {
         Ok(vfs_entries)
     }
 
+    fn readdir_at(
+        &mut self,
+        path: &str,
+        offset: usize,
+        count: usize,
+    ) -> KernelResult<(Vec<DirEntry>, usize)> {
+        // For FAT, we still have to read all raw entries (they're stored as
+        // contiguous on-disk structures).  But we avoid calling to_vfs_entry
+        // (which formats names/dates) for entries outside the window.
+        let (parent_cluster, entry) = self.resolve_path(path)?;
+
+        let fat_entries = match entry {
+            None => {
+                if parent_cluster == 0 {
+                    self.read_root_dir()?
+                } else {
+                    self.read_dir_cluster(parent_cluster)?
+                }
+            }
+            Some(ref e) if e.is_directory() => {
+                self.read_dir_cluster(e.first_cluster)?
+            }
+            Some(_) => {
+                return Err(KernelError::NotADirectory);
+            }
+        };
+
+        // Filter volume labels (same as readdir).
+        let filtered: Vec<_> = fat_entries
+            .iter()
+            .filter(|e| !e.is_volume_label())
+            .collect();
+        let total = filtered.len();
+
+        let start = offset.min(total);
+        let end = start.saturating_add(count).min(total);
+
+        let page = filtered[start..end]
+            .iter()
+            .map(|e| e.to_vfs_entry())
+            .collect();
+
+        Ok((page, total))
+    }
+
     fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
         let (_parent, entry) = self.resolve_path(path)?;
         let entry = entry.ok_or(KernelError::NotFound)?;

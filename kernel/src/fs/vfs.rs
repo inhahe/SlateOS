@@ -2419,6 +2419,16 @@ impl Vfs {
             return Ok(());
         }
 
+        // Check mount options: read-only mounts deny W_OK, noexec denies X_OK.
+        if let Ok(opts) = Self::mount_options(path) {
+            if mode & W_OK != 0 && opts.read_only {
+                return Err(KernelError::ReadOnlyFilesystem);
+            }
+            if mode & X_OK != 0 && opts.noexec {
+                return Err(KernelError::PermissionDenied);
+            }
+        }
+
         // Immutable files deny write regardless of permission bits.
         if mode & W_OK != 0 && meta.attributes.contains(FileAttr::IMMUTABLE) {
             return Err(KernelError::PermissionDenied);

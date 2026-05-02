@@ -14,7 +14,10 @@
 //! ├── cpuinfo        CPU topology and features
 //! ├── mounts         Mounted filesystems
 //! ├── stat           System-wide scheduler statistics
-//! └── <pid>/         Per-process directories (future)
+//! ├── filesystems    Available filesystem types
+//! ├── cmdline        Kernel command line
+//! ├── loadavg        Instantaneous system load
+//! └── <pid>/         Per-process directories
 //!     ├── status     Process name, state, priority
 //!     └── ...
 //! ```
@@ -61,6 +64,9 @@ const ROOT_FILES: &[&str] = &[
     "cpuinfo",
     "mounts",
     "stat",
+    "filesystems",
+    "cmdline",
+    "loadavg",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -235,6 +241,68 @@ fn gen_stat() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `/proc/filesystems` — list of available filesystem types.
+///
+/// Format follows Linux: `nodev <type>` for virtual filesystems,
+/// plain `<type>` for disk-backed ones.
+fn gen_filesystems() -> Vec<u8> {
+    let mut s = String::with_capacity(256);
+
+    // Virtual filesystems (no backing block device).
+    s.push_str("nodev\tmemfs\n");
+    s.push_str("nodev\tprocfs\n");
+    s.push_str("nodev\tdevfs\n");
+
+    // Disk-backed filesystems.
+    s.push_str("\text4\n");
+    s.push_str("\tfat\n");
+    s.push_str("\tiso9660\n");
+
+    s.into_bytes()
+}
+
+/// `/proc/cmdline` — kernel command line.
+///
+/// Reports a synthetic command line reflecting the boot configuration.
+/// In the future, this could read actual bootloader-provided arguments.
+fn gen_cmdline() -> Vec<u8> {
+    // Build a synthetic cmdline from boot state.
+    let cpu_count = crate::acpi::processor_count();
+    let text = format!(
+        "kernel=mintos cpus={cpu_count} pages=16k\n"
+    );
+    text.into_bytes()
+}
+
+/// `/proc/loadavg` — system load average approximation.
+///
+/// Reports the number of runnable (ready + running) tasks as an
+/// instantaneous load metric.  True exponentially-weighted load
+/// averages (1/5/15 min) would require periodic sampling in the
+/// scheduler; for now, the snapshot is useful for monitoring.
+fn gen_loadavg() -> Vec<u8> {
+    let tasks = crate::sched::task_list();
+
+    use crate::sched::task::TaskState;
+
+    let runnable = tasks.iter()
+        .filter(|t| matches!(t.state, TaskState::Running | TaskState::Ready))
+        .count();
+    let total = tasks.len();
+
+    // Format: "load_now running/total last_pid\n"
+    // We use the instantaneous runnable count for all three slots
+    // (1/5/15 min) since we don't track history yet.
+    let load = runnable as f64; // exact integer, no precision loss
+    let last_pid = tasks.iter().map(|t| t.id).max().unwrap_or(0);
+
+    let text = format!(
+        "{:.2} {:.2} {:.2} {runnable}/{total} {last_pid}\n",
+        load, load, load,
+    );
+    text.into_bytes()
+}
+
 /// `/proc/<pid>/status` — per-task status information.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     use crate::sched::task::TaskState;
@@ -299,6 +367,9 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cpuinfo" => Ok(gen_cpuinfo()),
         "mounts" => Ok(gen_mounts()),
         "stat" => Ok(gen_stat()),
+        "filesystems" => Ok(gen_filesystems()),
+        "cmdline" => Ok(gen_cmdline()),
+        "loadavg" => Ok(gen_loadavg()),
         _ => Err(KernelError::NotFound),
     }
 }

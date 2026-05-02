@@ -9,7 +9,9 @@
 //! /dev/
 //! ├── null       Discards all writes, reads return EOF (empty)
 //! ├── zero       Reads return zero bytes, writes succeed
+//! ├── full       Reads return zero bytes, writes fail with DiskFull
 //! ├── random     Reads return pseudo-random bytes (xorshift64)
+//! ├── urandom    Same as random (no entropy blocking distinction)
 //! └── console    Reads/writes to the kernel console
 //! ```
 //!
@@ -99,7 +101,9 @@ impl DevFs {
 const DEV_FILES: &[&str] = &[
     "null",
     "zero",
+    "full",
     "random",
+    "urandom",
     "console",
 ];
 
@@ -139,13 +143,14 @@ impl FileSystem for DevFs {
                 // /dev/null: read returns empty (EOF).
                 Ok(Vec::new())
             }
-            "zero" => {
-                // /dev/zero: return a page of zero bytes.
+            "zero" | "full" => {
+                // /dev/zero and /dev/full: return a page of zero bytes.
                 // Real /dev/zero is infinite; we return a bounded chunk.
                 Ok(vec![0u8; 4096])
             }
-            "random" => {
-                // /dev/random: return a page of pseudo-random bytes.
+            "random" | "urandom" => {
+                // /dev/random, /dev/urandom: return pseudo-random bytes.
+                // No distinction between the two — our PRNG never blocks.
                 let mut buf = vec![0u8; 256];
                 fill_random(&mut buf);
                 Ok(buf)
@@ -153,6 +158,33 @@ impl FileSystem for DevFs {
             "console" => {
                 // /dev/console: reading returns whatever is in the
                 // keyboard buffer; for now, return empty (non-blocking).
+                Ok(Vec::new())
+            }
+            _ => Err(KernelError::NotFound),
+        }
+    }
+
+    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let rel = path.strip_prefix('/').unwrap_or(path);
+
+        // For streaming devices, offset is ignored — they always produce
+        // fresh data.  This is important for file-handle reads that advance
+        // a cursor: reading /dev/zero at offset 8192 should still produce
+        // zeros, not EOF.
+        match rel {
+            "" => Err(KernelError::IsADirectory),
+            "null" => Ok(Vec::new()),
+            "zero" | "full" => {
+                Ok(vec![0u8; len.min(65536)])
+            }
+            "random" | "urandom" => {
+                let actual = len.min(65536);
+                let mut buf = vec![0u8; actual];
+                fill_random(&mut buf);
+                Ok(buf)
+            }
+            "console" => {
+                let _ = offset;
                 Ok(Vec::new())
             }
             _ => Err(KernelError::NotFound),
@@ -174,7 +206,13 @@ impl FileSystem for DevFs {
                 let _ = data;
                 Ok(())
             }
-            "random" => {
+            "full" => {
+                // /dev/full: writes always fail with DiskFull.
+                // Useful for testing error handling in programs.
+                let _ = data;
+                Err(KernelError::DiskFull)
+            }
+            "random" | "urandom" => {
                 // /dev/random: writes contribute to entropy pool.
                 // For our simple PRNG, XOR the data into the state.
                 if !data.is_empty() {
@@ -211,6 +249,12 @@ impl FileSystem for DevFs {
             }
             _ => Err(KernelError::NotFound),
         }
+    }
+
+    fn write_at(&mut self, path: &str, _offset: u64, data: &[u8]) -> KernelResult<()> {
+        // For device files, write_at behaves the same as write_file —
+        // offset is meaningless for streaming devices.
+        self.write_file(path, data)
     }
 
     fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
@@ -304,6 +348,25 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[devfs]   zero: {} zero bytes OK", zero_data.len());
 
+    // Test /dev/full: read returns zeros, write fails with DiskFull.
+    let full_data = fs.read_file("/full")?;
+    if full_data.is_empty() {
+        serial_println!("[devfs]   FAIL: /dev/full read should not be empty");
+        return Err(KernelError::InternalError);
+    }
+    if full_data.iter().any(|&b| b != 0) {
+        serial_println!("[devfs]   FAIL: /dev/full data contains non-zero bytes");
+        return Err(KernelError::InternalError);
+    }
+    match fs.write_file("/full", b"should fail") {
+        Err(KernelError::DiskFull) => {}
+        other => {
+            serial_println!("[devfs]   FAIL: /dev/full write should return DiskFull, got {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[devfs]   full: read=zeros, write=DiskFull OK");
+
     // Test /dev/random: read returns data, two reads differ.
     let rand1 = fs.read_file("/random")?;
     let rand2 = fs.read_file("/random")?;
@@ -318,6 +381,23 @@ pub fn self_test() -> KernelResult<()> {
     // Write to random (entropy contribution) should succeed.
     fs.write_file("/random", b"entropy seed")?;
     serial_println!("[devfs]   random: {} random bytes, entropy write OK", rand1.len());
+
+    // Test /dev/urandom: same behavior as /dev/random.
+    let urand = fs.read_file("/urandom")?;
+    if urand.is_empty() {
+        serial_println!("[devfs]   FAIL: /dev/urandom read should not be empty");
+        return Err(KernelError::InternalError);
+    }
+    fs.write_file("/urandom", b"more entropy")?;
+    serial_println!("[devfs]   urandom: {} random bytes OK", urand.len());
+
+    // Test read_at on /dev/zero — should always return zeros regardless of offset.
+    let zero_at = fs.read_at("/zero", 99999, 64)?;
+    if zero_at.len() != 64 || zero_at.iter().any(|&b| b != 0) {
+        serial_println!("[devfs]   FAIL: /dev/zero read_at should return 64 zero bytes");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[devfs]   read_at /dev/zero: offset-independent OK");
 
     // Test /dev/console: write should succeed (outputs to console).
     fs.write_file("/console", b"[devfs]   console write test\n")?;

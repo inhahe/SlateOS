@@ -397,6 +397,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ext4 xattr block checksums: CRC32C validation on read, stamping on write (was the only metadata type missing checksum support); uses csum_seed + block_nr as seed (shared blocks)
   - [x] ext4 i_file_acl_high offset fix (xattr free path): write_xattr_block cleared i_osd2[4..5] (i_uid_high) instead of [2..3] (i_file_acl_high) when freeing xattr blocks
   - [x] ext4 bitmap checksums: block/inode bitmap CRC32C validation on read and stamping on write via group descriptor bg_*_bitmap_csum_lo/hi fields; 16-bit or 32-bit depending on desc_size
+  - [x] FAT set_attributes: VFS FileAttr → FAT attribute byte mapping (IMMUTABLE↔READ_ONLY, HIDDEN, SYSTEM); set_permissions/set_owner return NotSupported (no Unix model)
+  - [x] Kshell `cal` command: monthly calendar display with Tomohiko Sakamoto day-of-week, today highlight, optional month/year args
+  - [x] Kshell `ls -l` enhancements: "total N" blocks header, symlink target display (" -> target"), -R recursive, -S size-sort, -t time-sort, -r reverse-sort
+  - [x] Kshell `chattr`/`lsattr` commands: set/clear/display file attributes (immutable, append-only, hidden, system) on ext4 and FAT
+  - [x] Kshell `stat` enhanced output: symbolic permission display, human-readable attributes, filesystem type from statvfs, extended attribute listing
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -495,6 +495,52 @@ fn read_line(buf: &mut String, history: &mut History) {
                 }
                 cursor = buf.len();
             }
+            b'\t' => {
+                // Tab — attempt completion.
+                let (suffix, candidates) = tab_complete(buf, cursor);
+
+                if !candidates.is_empty() && suffix.is_empty() {
+                    // Multiple matches, no common prefix to add — display them.
+                    crate::console::putchar(b'\n');
+                    for (i, name) in candidates.iter().enumerate() {
+                        if i > 0 {
+                            crate::console::write_str("  ");
+                        }
+                        crate::console::write_str(name);
+                    }
+                    crate::console::putchar(b'\n');
+                    // Reprint the prompt and current line.
+                    crate::console::write_str(PROMPT);
+                    for &b in buf.as_bytes() {
+                        crate::console::putchar(b);
+                    }
+                    // Move cursor back to the correct position.
+                    let tail_len = buf.len() - cursor;
+                    for _ in 0..tail_len {
+                        crate::console::putchar(b'\x08');
+                    }
+                } else if !suffix.is_empty() {
+                    // Insert the completion suffix at cursor.
+                    for ch in suffix.chars() {
+                        if buf.len() < MAX_LINE {
+                            buf.insert(cursor, ch);
+                            cursor += 1;
+                        }
+                    }
+                    // Redraw from the insertion point.
+                    if let Some(tail) = buf.as_bytes().get(cursor - suffix.len()..) {
+                        for &b in tail {
+                            crate::console::putchar(b);
+                        }
+                    }
+                    // Move cursor back to correct position.
+                    let tail_len = buf.len() - cursor;
+                    for _ in 0..tail_len {
+                        crate::console::putchar(b'\x08');
+                    }
+                }
+                // If no matches at all, do nothing (no beep in our console).
+            }
             ch if ch >= 0x20 && ch < 0x7F => {
                 // Printable ASCII — insert at cursor position.
                 if buf.len() < MAX_LINE {
@@ -515,6 +561,141 @@ fn read_line(buf: &mut String, history: &mut History) {
                 // Non-printable, non-handled — ignore.
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tab completion
+// ---------------------------------------------------------------------------
+
+/// All built-in command names, sorted alphabetically.
+const COMMANDS: &[&str] = &[
+    "append", "basename", "blkdev", "blkinfo", "blkread", "cat", "chmod",
+    "chown", "clear", "cls", "cmp", "copy", "cp", "date", "dd", "del",
+    "df", "dhcp", "diff", "dir", "dirname", "dns", "du", "echo", "env",
+    "exec", "fallocate", "false", "find", "free", "glob", "grep", "hash",
+    "head", "help", "hexdump", "hostname", "http", "id", "ifconfig",
+    "irq", "ln", "link", "ls", "lsblk", "lsof", "lsp", "mem", "meminfo",
+    "mkdir", "mkelf", "mklink", "mktemp", "mount", "move", "mv", "net",
+    "nl", "nslookup", "pci", "ping", "printenv", "ps", "pwd", "readlink",
+    "realpath", "reboot", "ren", "rev", "rm", "rmdir", "run", "seq",
+    "sha256", "sleep", "sort", "source", "stat", "symlink", "sync",
+    "sysctl", "tail", "tasks", "tee", "time", "touch", "tree", "true",
+    "truncate", "type", "umount", "uniq", "unmount", "uptime", "ver",
+    "version", "wc", "wget", "whoami", "write", "xattr", "xxd",
+];
+
+/// Find the longest common prefix among a set of strings.
+fn longest_common_prefix(candidates: &[&str]) -> String {
+    if candidates.is_empty() {
+        return String::new();
+    }
+    let first = candidates[0];
+    let mut prefix_len = first.len();
+    for c in candidates.iter().skip(1) {
+        let common = first.as_bytes().iter()
+            .zip(c.as_bytes().iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if common < prefix_len {
+            prefix_len = common;
+        }
+    }
+    first.get(..prefix_len).unwrap_or("").into()
+}
+
+/// Perform tab completion on the current line.
+///
+/// Returns the completed text to insert (may be empty if no match),
+/// and optionally a list of candidates to display.
+fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
+    // Extract the text up to the cursor for completion.
+    let text_before = line.get(..cursor).unwrap_or("");
+
+    // Determine if we're completing a command (first word) or a path.
+    let first_space = text_before.find(' ');
+
+    if first_space.is_none() {
+        // Completing a command name.
+        let prefix = text_before;
+        let matches: Vec<&str> = COMMANDS.iter()
+            .copied()
+            .filter(|c| c.starts_with(prefix))
+            .collect();
+
+        if matches.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        if matches.len() == 1 {
+            // Unique match — complete it with a trailing space.
+            let suffix: String = matches[0].get(prefix.len()..).unwrap_or("").into();
+            let mut result = suffix;
+            result.push(' ');
+            return (result, Vec::new());
+        }
+        // Multiple matches — complete the common prefix.
+        let common = longest_common_prefix(&matches);
+        let suffix: String = common.get(prefix.len()..).unwrap_or("").into();
+        let display: Vec<String> = matches.iter().map(|s| String::from(*s)).collect();
+        (suffix, display)
+    } else {
+        // Completing a file path argument.
+        // Find the start of the current word (last space before cursor).
+        let word_start = text_before.rfind(' ')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let partial_path = text_before.get(word_start..).unwrap_or("");
+
+        // Determine the directory to search and the prefix to match.
+        let (dir, name_prefix) = if let Some(slash_pos) = partial_path.rfind('/') {
+            let dir_part = partial_path.get(..=slash_pos).unwrap_or("/");
+            let name_part = partial_path.get(slash_pos + 1..).unwrap_or("");
+            (dir_part, name_part)
+        } else {
+            ("/", partial_path)
+        };
+
+        // List the directory and filter by prefix.
+        let entries = match crate::fs::Vfs::readdir(dir) {
+            Ok(e) => e,
+            Err(_) => return (String::new(), Vec::new()),
+        };
+
+        let matches: Vec<&crate::fs::DirEntry> = entries.iter()
+            .filter(|e| e.name.starts_with(name_prefix))
+            .filter(|e| e.name != "." && e.name != "..")
+            .collect();
+
+        if matches.is_empty() {
+            return (String::new(), Vec::new());
+        }
+
+        if matches.len() == 1 {
+            // Unique match.
+            let entry = &matches[0];
+            let suffix: String = entry.name.get(name_prefix.len()..).unwrap_or("").into();
+            let mut result = suffix;
+            // Add trailing slash for directories, space for files.
+            if entry.entry_type == crate::fs::EntryType::Directory {
+                result.push('/');
+            } else {
+                result.push(' ');
+            }
+            return (result, Vec::new());
+        }
+
+        // Multiple matches — complete common prefix.
+        let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
+        let common = longest_common_prefix(&names);
+        let suffix: String = common.get(name_prefix.len()..).unwrap_or("").into();
+        let display: Vec<String> = matches.iter().map(|e| {
+            let mut s = e.name.clone();
+            if e.entry_type == crate::fs::EntryType::Directory {
+                s.push('/');
+            }
+            s
+        }).collect();
+        (suffix, display)
     }
 }
 

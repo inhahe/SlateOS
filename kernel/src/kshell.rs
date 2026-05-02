@@ -870,22 +870,12 @@ fn cmd_cp(args: &str) {
         s
     };
 
-    // Read source file.
-    let data = match crate::fs::Vfs::read_file(&src_path) {
-        Ok(d) => d,
-        Err(e) => {
-            crate::console_println!("cp: cannot read '{}': {:?}", src_path, e);
-            return;
-        }
-    };
-
-    // Write to destination.
-    match crate::fs::Vfs::write_file(&dst_path, &data) {
-        Ok(()) => {
-            crate::console_println!("'{}' -> '{}' ({} bytes)", src_path, dst_path, data.len());
+    match crate::fs::Vfs::copy(&src_path, &dst_path) {
+        Ok(size) => {
+            crate::console_println!("'{}' -> '{}' ({} bytes)", src_path, dst_path, size);
         }
         Err(e) => {
-            crate::console_println!("cp: cannot write '{}': {:?}", dst_path, e);
+            crate::console_println!("cp: {:?}", e);
         }
     }
 }

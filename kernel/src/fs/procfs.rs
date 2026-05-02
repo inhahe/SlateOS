@@ -37,7 +37,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
 
 // ---------------------------------------------------------------------------
 // ProcFs implementation
@@ -604,6 +604,39 @@ impl FileSystem for ProcFs {
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
+    }
+
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        // Verify the path exists by calling stat.
+        let entry = self.stat(path)?;
+
+        let perms = if entry.entry_type == EntryType::Directory {
+            0o555
+        } else {
+            0o444
+        };
+
+        Ok(FileMeta {
+            size: entry.size,
+            entry_type: entry.entry_type,
+            permissions: perms,
+            nlinks: 1,
+            ..FileMeta::minimal(entry.entry_type, entry.size)
+        })
+    }
+
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        let task_count = crate::sched::task_list().len();
+        Ok(FsInfo {
+            fs_type: String::from("procfs"),
+            block_size: 0,
+            total_blocks: 0,
+            free_blocks: 0,
+            total_inodes: (ROOT_FILES.len() + task_count) as u64,
+            free_inodes: 0,
+            max_name_len: 255,
+            read_only: true,
+        })
     }
 
     fn debug_stats(&self) -> String {

@@ -982,6 +982,20 @@ impl Vfs {
         Ok(())
     }
 
+    /// Copy a file from one path to another.
+    ///
+    /// Reads the source and writes to the destination.  Both paths are
+    /// resolved through symlinks.  Works across mount boundaries.
+    ///
+    /// Future optimization: if both paths are on the same filesystem,
+    /// delegate to a filesystem-level copy (reflink, server-side copy).
+    pub fn copy(src: &str, dst: &str) -> KernelResult<u64> {
+        let data = Self::read_file(src)?;
+        let size = data.len() as u64;
+        Self::write_file(dst, &data)?;
+        Ok(size)
+    }
+
     /// Delete a file.
     ///
     /// Does NOT follow the final symlink — removes the link itself.

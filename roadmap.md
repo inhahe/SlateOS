@@ -263,13 +263,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Multi-mount VFS with longest-prefix path-boundary matching, mount-point synthesis in readdir
   - [x] Procfs virtual filesystem at /proc (version, uptime, meminfo, cpuinfo, mounts, task stats, per-PID status)
   - [x] Devfs virtual filesystem at /dev (null, zero, random, console)
-- [-] Filesystem features:
+- [x] Filesystem features:
   - [x] Case-sensitive paths, forward slash separator (VFS is case-sensitive; FAT case-insensitive by nature)
   - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths
   - [x] Journaling (via ext4 jbd2)
   - [x] File metadata: owner, group, permissions, created/modified/accessed (relatime), immutable flag, append-only flag, extended attributes (key-value, 255-byte key / 64 KiB value)
   - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639)
-  - [ ] File metadata: capabilities per file, content hash (per-file/per-block)
+  - [-] File metadata: capabilities per file (needs security zone), content hash (SHA-256 via Vfs::content_hash)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

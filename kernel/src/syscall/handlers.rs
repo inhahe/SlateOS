@@ -4097,6 +4097,157 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(len)
 }
 
+/// `SYS_FS_READDIR_AT` — paginated directory listing.
+///
+/// `arg0`: pointer to directory path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: packed `(offset << 32) | count`.
+/// `arg3`: pointer to output buffer.
+/// `arg4`: buffer capacity.
+///
+/// Each entry is serialized as:
+///   `u8 entry_type | u32 name_len | name bytes | u64 size`
+///
+/// Returns: packed `(total_entries << 32) | entries_written`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
+    // Validate path pointer.
+    let path_len = args.arg1 as usize;
+    if path_len == 0 || path_len > 4096 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, path_len) {
+        return SyscallResult::err(e);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // Unpack offset and count from arg2.
+    let offset = (args.arg2 >> 32) as usize;
+    let count = (args.arg2 & 0xFFFF_FFFF) as usize;
+
+    if count == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate output buffer.
+    let out_ptr = args.arg3 as *mut u8;
+    let out_cap = args.arg4 as usize;
+    if out_ptr.is_null() || out_cap == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, out_cap) {
+        return SyscallResult::err(e);
+    }
+
+    // Perform paginated readdir.
+    let (entries, total) = match crate::fs::Vfs::readdir_at(path, offset, count) {
+        Ok(r) => r,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Serialize entries into the output buffer.
+    // Format: [u8 type][u32 name_len][name bytes][u64 size] per entry.
+    let out_slice = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_cap) };
+    let mut pos = 0usize;
+    let mut written = 0u32;
+
+    for entry in &entries {
+        let name_bytes = entry.name.as_bytes();
+        // Each entry needs: 1 + 4 + name_len + 8 bytes.
+        let entry_size = 1usize
+            .saturating_add(4)
+            .saturating_add(name_bytes.len())
+            .saturating_add(8);
+
+        if pos.saturating_add(entry_size) > out_cap {
+            break; // Buffer full — stop writing (not an error).
+        }
+
+        // Entry type: 0=file, 1=dir, 2=symlink, 3=volume_label.
+        out_slice[pos] = match entry.entry_type {
+            crate::fs::vfs::EntryType::File => 0,
+            crate::fs::vfs::EntryType::Directory => 1,
+            crate::fs::vfs::EntryType::Symlink => 2,
+            crate::fs::vfs::EntryType::VolumeLabel => 3,
+        };
+        pos = pos.saturating_add(1);
+
+        // Name length (u32 LE).
+        let name_len = name_bytes.len() as u32;
+        out_slice[pos..pos.saturating_add(4)]
+            .copy_from_slice(&name_len.to_le_bytes());
+        pos = pos.saturating_add(4);
+
+        // Name bytes.
+        out_slice[pos..pos.saturating_add(name_bytes.len())]
+            .copy_from_slice(name_bytes);
+        pos = pos.saturating_add(name_bytes.len());
+
+        // Size (u64 LE).
+        out_slice[pos..pos.saturating_add(8)]
+            .copy_from_slice(&entry.size.to_le_bytes());
+        pos = pos.saturating_add(8);
+
+        written = written.saturating_add(1);
+    }
+
+    // Pack result: (total << 32) | entries_written.
+    let result = ((total as u64) << 32) | (written as u64);
+    SyscallResult::ok(result as i64)
+}
+
+/// `SYS_FS_TMPFILE` — create a temporary file with no directory entry.
+///
+/// `arg0`: pointer to directory path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: open flags.
+///
+/// Returns: file handle on success.
+#[allow(clippy::cast_possible_wrap)]
+pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
+    let path_len = args.arg1 as usize;
+    if path_len == 0 || path_len > 4096 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, path_len) {
+        return SyscallResult::err(e);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
+    let dir_path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // Generate a unique temporary filename using the TSC for entropy.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let tmp_name = alloc::format!("{}/.tmp_{:016x}", dir_path, tsc);
+
+    // Create the file.
+    if let Err(e) = crate::fs::Vfs::write_file(&tmp_name, &[]) {
+        return SyscallResult::err(e);
+    }
+
+    // Open it as a handle.
+    let flags = args.arg2 as u32;
+    match crate::fs::handle::open(&tmp_name, crate::fs::handle::OpenFlags::from_bits(flags)) {
+        Ok(handle) => SyscallResult::ok(handle as i64),
+        Err(e) => {
+            // Clean up the file if we can't open it.
+            let _ = crate::fs::Vfs::remove(&tmp_name);
+            SyscallResult::err(e)
+        }
+    }
+    // Note: the file is NOT auto-deleted on close in this implementation.
+    // True tmpfile (unlinked at creation) requires filesystem support
+    // (ext4 O_TMPFILE).  For now, callers should delete after use.
+}
+
 // ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------

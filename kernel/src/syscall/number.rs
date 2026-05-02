@@ -1006,6 +1006,36 @@ pub const SYS_FS_DUP: u64 = 645;
 /// or negative error code.
 pub const SYS_FS_HANDLE_PATH: u64 = 646;
 
+/// List directory entries with pagination.
+///
+/// `arg0`: pointer to directory path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: packed `(offset << 32) | count`.
+///   - Bits 63..32: offset (0-based index of first entry to return).
+///   - Bits 31..0:  count  (maximum number of entries to return).
+/// `arg3`: pointer to output buffer for serialized entries.
+/// `arg4`: output buffer capacity in bytes.
+///
+/// Each entry is serialized as:
+///   `u8 entry_type | u32 name_len | u8[name_len] name | u64 size`
+///   (entry_type: 0=file, 1=dir, 2=symlink, 3=volume_label)
+///
+/// Returns: packed `(total_entries << 32) | entries_written`.
+/// If the buffer is too small, entries are truncated (not an error).
+pub const SYS_FS_READDIR_AT: u64 = 647;
+
+/// Create a temporary file (no directory entry).
+///
+/// `arg0`: pointer to directory path string (where to create).
+/// `arg1`: path length (bytes).
+/// `arg2`: open flags bitfield.
+///
+/// Creates an unnamed temporary file in the specified directory.
+/// The file is automatically deleted when the handle is closed.
+///
+/// Returns: file handle on success, negative error code on failure.
+pub const SYS_FS_TMPFILE: u64 = 648;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

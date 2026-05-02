@@ -172,6 +172,7 @@ fn execute(line: &str) {
         "tail" => cmd_tail(args),
         "hexdump" | "xxd" => cmd_hexdump(args),
         "lsof" => cmd_lsof(),
+        "lsp" => cmd_lsp(args),
         "grep" => cmd_grep(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
@@ -230,6 +231,7 @@ fn cmd_help() {
     crate::console_println!("  tail N F  Show last N lines of file");
     crate::console_println!("  hexdump F Hex dump of file contents");
     crate::console_println!("  lsof      List open file handles");
+    crate::console_println!("  lsp [N] D Paginated ls: show N entries at a time");
     crate::console_println!("  grep P F  Search for pattern P in file F");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
@@ -1617,6 +1619,93 @@ fn cmd_lsof() {
     }
 
     crate::console_println!("\nTotal: {} open handles", handles.len());
+}
+
+/// Paginated directory listing.
+///
+/// Usage: `lsp [page_size] <path>`
+/// Shows entries one page at a time, with "--- more ---" between pages.
+/// Default page size is 20 entries if not specified.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_lsp(args: &str) {
+    let (page_size, path) = {
+        let mut parts = args.splitn(2, ' ');
+        let first = parts.next().unwrap_or("");
+        let second = parts.next();
+
+        // Try to parse first arg as a number.
+        match first.parse::<usize>() {
+            Ok(n) if n > 0 => {
+                // First arg is page size, second is path (or "/" default).
+                (n, second.unwrap_or("/"))
+            }
+            _ => {
+                // First arg is the path (or "/" if empty).
+                (20, if first.is_empty() { "/" } else { first })
+            }
+        }
+    };
+
+    let mut offset = 0usize;
+    loop {
+        match crate::fs::Vfs::readdir_at(path, offset, page_size) {
+            Ok((entries, total)) => {
+                if offset == 0 {
+                    crate::console_println!(
+                        "Directory '{}' — {} entries (page size {})",
+                        path, total, page_size,
+                    );
+                    crate::console_println!(
+                        "{:<5} {:<8} {:<12} {}",
+                        "TYPE", "SIZE", "NAME", "",
+                    );
+                }
+
+                if entries.is_empty() {
+                    if offset == 0 {
+                        crate::console_println!("  (empty directory)");
+                    }
+                    break;
+                }
+
+                for entry in &entries {
+                    let type_str = match entry.entry_type {
+                        crate::fs::vfs::EntryType::File => "FILE",
+                        crate::fs::vfs::EntryType::Directory => "DIR",
+                        crate::fs::vfs::EntryType::Symlink => "LINK",
+                        crate::fs::vfs::EntryType::VolumeLabel => "VOL",
+                    };
+                    crate::console_println!(
+                        "{:<5} {:<8} {}",
+                        type_str, entry.size, entry.name,
+                    );
+                }
+
+                offset += entries.len();
+
+                if offset >= total {
+                    crate::console_println!(
+                        "--- end ({}/{} entries shown) ---",
+                        offset, total,
+                    );
+                    break;
+                }
+
+                crate::console_println!(
+                    "--- {}/{} shown, press Enter for next page ---",
+                    offset, total,
+                );
+
+                // Wait for Enter key to continue.
+                let mut dummy = alloc::string::String::new();
+                read_line(&mut dummy);
+            }
+            Err(e) => {
+                crate::console_println!("lsp: error: {:?}", e);
+                break;
+            }
+        }
+    }
 }
 
 /// List mounted filesystems or mount a new one.

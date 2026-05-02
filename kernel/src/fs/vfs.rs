@@ -328,6 +328,28 @@ pub trait FileSystem: Send {
     /// subdirectory, etc.
     fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>>;
 
+    /// List entries in a directory with pagination.
+    ///
+    /// Returns up to `count` entries starting from `offset` (0-based).
+    /// Also returns the total number of entries in the directory for
+    /// the caller to know when it has read everything.
+    ///
+    /// Default implementation calls `readdir()` and slices.  Filesystem
+    /// implementations with native pagination (e.g., ext4 htree) should
+    /// override for efficiency.
+    fn readdir_at(
+        &mut self,
+        path: &str,
+        offset: usize,
+        count: usize,
+    ) -> KernelResult<(Vec<DirEntry>, usize)> {
+        let all = self.readdir(path)?;
+        let total = all.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(count).min(total);
+        Ok((all.into_iter().skip(start).take(end.saturating_sub(start)).collect(), total))
+    }
+
     /// Read the contents of a file.
     ///
     /// `path` is the full path relative to filesystem root
@@ -1203,6 +1225,45 @@ impl Vfs {
         }
 
         Ok(entries)
+    }
+
+    /// List entries in a directory with pagination.
+    ///
+    /// Returns up to `count` entries starting from `offset` (0-based
+    /// index into the combined listing of filesystem entries + submount
+    /// directories).  Also returns the total entry count.
+    ///
+    /// This is the efficient API for large directories — callers can
+    /// read entries in batches instead of loading everything at once.
+    pub fn readdir_at(
+        path: &str,
+        offset: usize,
+        count: usize,
+    ) -> KernelResult<(Vec<DirEntry>, usize)> {
+        let path = Self::resolve_follow(path)?;
+        let mut vfs = VFS.lock();
+
+        let submount_names: Vec<String> = Self::submount_children(&vfs, &path);
+
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
+        let mut entries = mp.fs.readdir(relative)?;
+
+        // Inject submount directories.
+        for name in submount_names {
+            if !entries.iter().any(|e| e.name == name) {
+                entries.push(DirEntry {
+                    name,
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
+            }
+        }
+
+        let total = entries.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(count).min(total);
+        let page: Vec<DirEntry> = entries.into_iter().skip(start).take(end.saturating_sub(start)).collect();
+        Ok((page, total))
     }
 
     /// Read a file's contents.
@@ -2756,6 +2817,102 @@ pub fn self_test() -> KernelResult<()> {
                 let _ = Vfs::remove(src_path);
             }
         }
+    }
+
+    // --- Paginated readdir_at test ---
+    if has_tmp {
+        serial_println!("[vfs]   Testing paginated readdir_at...");
+
+        // Create a directory with several files for pagination testing.
+        let pg_dir = "/tmp/_vfs_paginate";
+        Vfs::mkdir(pg_dir)?;
+        for i in 0..10 {
+            let fname = format!("{}/file_{:02}.txt", pg_dir, i);
+            let content = format!("content {}", i);
+            Vfs::write_file(&fname, content.as_bytes())?;
+        }
+
+        // Full listing should have 10 entries.
+        let (all, total) = Vfs::readdir_at(pg_dir, 0, 100)?;
+        if total != 10 {
+            serial_println!(
+                "[vfs]   FAIL: readdir_at total = {}, expected 10",
+                total
+            );
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        if all.len() != 10 {
+            serial_println!(
+                "[vfs]   FAIL: readdir_at returned {} entries, expected 10",
+                all.len()
+            );
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readdir_at(0, 100): {} entries, total={} OK", all.len(), total);
+
+        // Read first page (3 entries).
+        let (page1, total1) = Vfs::readdir_at(pg_dir, 0, 3)?;
+        if page1.len() != 3 || total1 != 10 {
+            serial_println!(
+                "[vfs]   FAIL: page1 len={}, total={} (expected 3, 10)",
+                page1.len(), total1,
+            );
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readdir_at(0, 3): {} entries OK", page1.len());
+
+        // Read second page (3 entries starting at offset 3).
+        let (page2, total2) = Vfs::readdir_at(pg_dir, 3, 3)?;
+        if page2.len() != 3 || total2 != 10 {
+            serial_println!(
+                "[vfs]   FAIL: page2 len={}, total={} (expected 3, 10)",
+                page2.len(), total2,
+            );
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readdir_at(3, 3): {} entries OK", page2.len());
+
+        // Verify no overlap between pages.
+        let names1: Vec<&str> = page1.iter().map(|e| e.name.as_str()).collect();
+        let names2: Vec<&str> = page2.iter().map(|e| e.name.as_str()).collect();
+        let has_overlap = names1.iter().any(|n| names2.contains(n));
+        if has_overlap {
+            serial_println!("[vfs]   FAIL: page1 and page2 overlap!");
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     pages don't overlap OK");
+
+        // Read past end: offset 8, count 5 → should return 2 entries.
+        let (tail, total_tail) = Vfs::readdir_at(pg_dir, 8, 5)?;
+        if tail.len() != 2 || total_tail != 10 {
+            serial_println!(
+                "[vfs]   FAIL: tail len={}, total={} (expected 2, 10)",
+                tail.len(), total_tail,
+            );
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readdir_at(8, 5): {} entries (tail) OK", tail.len());
+
+        // Read completely past end: offset 20 → should return 0 entries.
+        let (empty, total_empty) = Vfs::readdir_at(pg_dir, 20, 5)?;
+        if !empty.is_empty() || total_empty != 10 {
+            serial_println!(
+                "[vfs]   FAIL: past-end len={}, total={} (expected 0, 10)",
+                empty.len(), total_empty,
+            );
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readdir_at(20, 5): empty (past end) OK");
+
+        let _ = Vfs::remove_recursive(pg_dir);
+        serial_println!("[vfs]     readdir_at pagination test PASSED");
     }
 
     serial_println!("[vfs] Self-test PASSED");

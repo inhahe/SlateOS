@@ -838,3 +838,149 @@ fn write_dotdot_entry(buf: &mut [u8], offset: usize, inode: u32, rec_len: usize)
         *b = b'.';
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::KernelError;
+
+    // --- split_parent_name tests ---
+
+    #[test]
+    fn test_split_parent_name_simple() {
+        let (parent, name) = split_parent_name("/foo/bar").unwrap();
+        assert_eq!(parent, "/foo");
+        assert_eq!(name, "bar");
+    }
+
+    #[test]
+    fn test_split_parent_name_root() {
+        let (parent, name) = split_parent_name("/file.txt").unwrap();
+        assert_eq!(parent, "/");
+        assert_eq!(name, "file.txt");
+    }
+
+    #[test]
+    fn test_split_parent_name_deep() {
+        let (parent, name) = split_parent_name("/a/b/c/d").unwrap();
+        assert_eq!(parent, "/a/b/c");
+        assert_eq!(name, "d");
+    }
+
+    #[test]
+    fn test_split_parent_name_trailing_slash() {
+        // Trailing slash should be stripped.
+        let (parent, name) = split_parent_name("/foo/bar/").unwrap();
+        assert_eq!(parent, "/foo");
+        assert_eq!(name, "bar");
+    }
+
+    #[test]
+    fn test_split_parent_name_no_slash() {
+        // Relative paths without a slash should fail.
+        assert!(matches!(
+            split_parent_name("file.txt"),
+            Err(KernelError::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn test_split_parent_name_root_only() {
+        // Just "/" has no name component.
+        assert!(matches!(
+            split_parent_name("/"),
+            Err(KernelError::InvalidArgument)
+        ));
+    }
+
+    // --- dir_type_to_entry_type tests ---
+
+    #[test]
+    fn test_dir_type_to_entry_type() {
+        use super::super::ondisk::dir_type;
+        assert_eq!(dir_type_to_entry_type(dir_type::DIR), EntryType::Directory);
+        assert_eq!(dir_type_to_entry_type(dir_type::REG_FILE), EntryType::File);
+        assert_eq!(dir_type_to_entry_type(dir_type::SYMLINK), EntryType::Symlink);
+        // Unknown types fall back to File.
+        assert_eq!(dir_type_to_entry_type(dir_type::CHRDEV), EntryType::File);
+        assert_eq!(dir_type_to_entry_type(dir_type::SOCK), EntryType::File);
+        assert_eq!(dir_type_to_entry_type(dir_type::UNKNOWN), EntryType::File);
+    }
+
+    // --- mode_to_entry_type tests ---
+
+    #[test]
+    fn test_mode_to_entry_type() {
+        assert_eq!(mode_to_entry_type(file_type::S_IFDIR), EntryType::Directory);
+        assert_eq!(mode_to_entry_type(file_type::S_IFREG), EntryType::File);
+        assert_eq!(mode_to_entry_type(file_type::S_IFLNK), EntryType::Symlink);
+        // Unknown modes fall back to File.
+        assert_eq!(mode_to_entry_type(file_type::S_IFBLK), EntryType::File);
+        assert_eq!(mode_to_entry_type(file_type::S_IFIFO), EntryType::File);
+    }
+
+    // --- inode_file_size tests ---
+
+    #[test]
+    fn test_inode_file_size_regular_file() {
+        let mut inode: super::super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
+        inode.i_mode = file_type::S_IFREG | 0o644;
+        inode.i_size_lo = 0x1234_5678;
+        inode.i_size_high = 0x0000_0001;
+
+        // Regular file uses the high bits.
+        assert_eq!(inode_file_size(&inode), 0x0000_0001_1234_5678);
+    }
+
+    #[test]
+    fn test_inode_file_size_directory() {
+        let mut inode: super::super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
+        inode.i_mode = file_type::S_IFDIR | 0o755;
+        inode.i_size_lo = 4096;
+        inode.i_size_high = 0xDEAD; // Should be ignored for directories.
+
+        assert_eq!(inode_file_size(&inode), 4096);
+    }
+
+    #[test]
+    fn test_inode_file_size_zero() {
+        let inode: super::super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
+        assert_eq!(inode_file_size(&inode), 0);
+    }
+
+    // --- write_dot_entry / write_dotdot_entry tests ---
+
+    #[test]
+    fn test_write_dot_entry() {
+        let mut buf = [0u8; 32];
+        write_dot_entry(&mut buf, 0, 42, 12);
+
+        // inode = 42 (LE)
+        assert_eq!(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 42);
+        // rec_len = 12
+        assert_eq!(u16::from_le_bytes([buf[4], buf[5]]), 12);
+        // name_len = 1
+        assert_eq!(buf[6], 1);
+        // file_type = DIR (2)
+        assert_eq!(buf[7], super::super::ondisk::dir_type::DIR);
+        // name = "."
+        assert_eq!(buf[8], b'.');
+    }
+
+    #[test]
+    fn test_write_dotdot_entry() {
+        let mut buf = [0u8; 32];
+        write_dotdot_entry(&mut buf, 0, 99, 1012);
+
+        assert_eq!(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]), 99);
+        assert_eq!(u16::from_le_bytes([buf[4], buf[5]]), 1012);
+        assert_eq!(buf[6], 2); // name_len
+        assert_eq!(buf[7], super::super::ondisk::dir_type::DIR);
+        assert_eq!(buf[8], b'.');
+        assert_eq!(buf[9], b'.');
+    }
+}

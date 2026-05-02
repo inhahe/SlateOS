@@ -215,8 +215,7 @@ impl FileSystem for Iso9660Fs {
     }
 
     fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
-        let (lba, size, is_dir) = self.resolve_file(path)?;
-        let _ = lba;
+        let (_lba, size, is_dir) = self.resolve_file(path)?;
 
         let name = path.rsplit('/').next().unwrap_or(path);
         let name = if name.is_empty() { "/" } else { name };

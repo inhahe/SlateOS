@@ -91,13 +91,9 @@ pub struct TrashItem {
 /// Returns `Ok(())` on success, or an error if the file doesn't exist
 /// or the trash directory can't be created.
 pub fn trash(path: &str) -> KernelResult<()> {
-    // Verify the source exists and is a file (not a directory — directories
-    // require recursive trash, which we'll add later).
+    // Verify the source exists.
     let stat = Vfs::stat(path)?;
-    if stat.entry_type == EntryType::Directory {
-        // TODO: Support trashing directories by recursively moving contents.
-        return Err(KernelError::NotSupported);
-    }
+    let _ = stat; // Used for existence check only.
 
     // Ensure the trash directory exists.
     ensure_trash_dir()?;
@@ -205,17 +201,27 @@ pub fn empty() -> KernelResult<()> {
     let mut errors: Option<KernelError> = None;
 
     for entry in &entries {
-        if entry.entry_type == EntryType::Directory {
+        // Skip the _INDEX file — we'll delete it after everything else.
+        if entry.name.eq_ignore_ascii_case("_INDEX") {
             continue;
         }
 
-        let file_path = format_trash_path(&entry.name);
-        if let Err(e) = Vfs::remove(&file_path) {
+        let item_path = format_trash_path(&entry.name);
+        let result = if entry.entry_type == EntryType::Directory {
+            recursive_delete(&item_path)
+        } else {
+            Vfs::remove(&item_path)
+        };
+
+        if let Err(e) = result {
             errors = Some(e);
         } else {
             count = count.wrapping_add(1);
         }
     }
+
+    // Clear the index file.
+    let _ = Vfs::remove(INDEX_FILE);
 
     crate::serial_println!("[trash] Emptied recycle bin ({} items deleted)", count);
 
@@ -231,7 +237,14 @@ pub fn empty() -> KernelResult<()> {
 pub fn purge_one(trash_name: &str) -> KernelResult<()> {
     let trash_path = format_trash_path(trash_name);
 
-    Vfs::remove(&trash_path)?;
+    // Determine if this is a file or directory.
+    let stat = Vfs::stat(&trash_path)?;
+    if stat.entry_type == EntryType::Directory {
+        recursive_delete(&trash_path)?;
+    } else {
+        Vfs::remove(&trash_path)?;
+    }
+
     // Best-effort: remove the entry from the index.
     let _ = index_remove(trash_name);
 
@@ -326,6 +339,42 @@ fn format_trash_path(name: &str) -> String {
     path.push('/');
     path.push_str(name);
     path
+}
+
+/// Recursively delete a directory and all its contents.
+///
+/// Walks the directory tree depth-first, removing files first, then
+/// empty directories.  Returns the first error encountered, but
+/// continues trying to delete remaining items.
+fn recursive_delete(path: &str) -> KernelResult<()> {
+    let entries = Vfs::readdir(path)?;
+    let mut worst_error: Option<KernelError> = None;
+
+    for entry in &entries {
+        let mut child_path = String::from(path);
+        child_path.push('/');
+        child_path.push_str(&entry.name);
+
+        let result = if entry.entry_type == EntryType::Directory {
+            recursive_delete(&child_path)
+        } else {
+            Vfs::remove(&child_path)
+        };
+
+        if let Err(e) = result {
+            worst_error = Some(e);
+        }
+    }
+
+    // Now the directory should be empty — remove it.
+    if let Err(e) = Vfs::rmdir(path) {
+        worst_error = Some(e);
+    }
+
+    match worst_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------

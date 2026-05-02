@@ -12,6 +12,7 @@
 //! ├── uptime         Uptime in seconds (decimal)
 //! ├── meminfo        Memory statistics (key: value format)
 //! ├── cpuinfo        CPU topology and features
+//! ├── config         Kernel build configuration and enabled features
 //! ├── mounts         Mounted filesystems
 //! ├── stat           System-wide scheduler statistics
 //! ├── filesystems    Available filesystem types
@@ -75,6 +76,7 @@ const ROOT_FILES: &[&str] = &[
     "uptime",
     "meminfo",
     "cpuinfo",
+    "config",
     "mounts",
     "stat",
     "filesystems",
@@ -192,6 +194,51 @@ fn gen_cpuinfo() -> Vec<u8> {
         s.push_str(&format!("online_cap : {}\n", p.online_capable));
         s.push('\n');
     }
+
+    s.into_bytes()
+}
+
+/// `/proc/config` — kernel build configuration and enabled features.
+///
+/// Reports architecture, page size, subsystem limits, and which filesystem
+/// and network features are compiled in.  Uses real constants from the
+/// codebase where available, hardcoded values for private constants.
+fn gen_config() -> Vec<u8> {
+    let mut s = String::with_capacity(512);
+
+    s.push_str("# Kernel Configuration\n");
+    s.push_str("ARCH=x86_64\n");
+    s.push_str(&format!("PAGE_SIZE={}\n", crate::mm::frame::FRAME_SIZE));
+    s.push_str(&format!("MAX_CPUS={}\n", crate::sched::priority_rr::MAX_CPUS));
+    s.push_str("PREEMPTION=yes\n");
+
+    // Memory subsystems.
+    s.push_str("SWAP=yes\n");
+    s.push_str("ZRAM=yes\n");
+
+    // Filesystems.
+    s.push_str("EXT4=yes\n");
+    s.push_str("FAT=yes\n");
+    s.push_str("ISO9660=yes\n");
+    s.push_str("MEMFS=yes\n");
+    s.push_str("PROCFS=yes\n");
+    s.push_str("DEVFS=yes\n");
+    s.push_str("SYSFS=yes\n");
+
+    // Drivers.
+    s.push_str("VIRTIO_BLK=yes\n");
+    s.push_str("VIRTIO_NET=yes\n");
+
+    // Networking.
+    s.push_str("TCP=yes\n");
+    s.push_str("UDP=yes\n");
+    s.push_str("DHCP=yes\n");
+    s.push_str("DNS=yes\n");
+
+    // Subsystem limits.
+    // cache::MAX_ENTRIES is private (2048), hardcoded here.
+    s.push_str("BUFFER_CACHE_SECTORS=2048\n");
+    s.push_str(&format!("VFS_DCACHE_SIZE={}\n", super::vfs::VFS_DCACHE_SIZE));
 
     s.into_bytes()
 }
@@ -973,6 +1020,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "uptime" => Ok(gen_uptime()),
         "meminfo" => Ok(gen_meminfo()),
         "cpuinfo" => Ok(gen_cpuinfo()),
+        "config" => Ok(gen_config()),
         "mounts" => Ok(gen_mounts()),
         "stat" => Ok(gen_stat()),
         "filesystems" => Ok(gen_filesystems()),

@@ -87,6 +87,9 @@ const MAX_LINE: usize = 256;
 /// Maximum number of commands stored in the history ring buffer.
 const HISTORY_SIZE: usize = 64;
 
+/// Maximum nesting depth for if/then/else/fi and while/do/done blocks.
+const MAX_NESTING: usize = 16;
+
 // ---------------------------------------------------------------------------
 // Exit status
 // ---------------------------------------------------------------------------
@@ -344,6 +347,175 @@ fn expand_aliases(line: &str) -> String {
     }
 
     current
+}
+
+// ---------------------------------------------------------------------------
+// Control flow (if/then/else/fi, while/do/done)
+// ---------------------------------------------------------------------------
+
+/// State of one nesting level of control flow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlState {
+    /// In `then` block: condition was true → execute.
+    ThenActive,
+    /// In `then` block: condition was false → skip.
+    ThenSkip,
+    /// In `else` block: original condition was true → skip (already executed then).
+    ElseSkip,
+    /// In `else` block: original condition was false → execute.
+    ElseActive,
+    /// Entered `elif` after a previous then-block already ran → skip rest.
+    ElifDone,
+}
+
+impl ControlState {
+    /// Should the current line be executed?
+    fn should_execute(self) -> bool {
+        matches!(self, Self::ThenActive | Self::ElseActive)
+    }
+}
+
+/// Control flow nesting stack.
+///
+/// When empty, all commands execute normally.  Each `if` pushes a frame;
+/// `fi` pops it.  Between `if` and `fi`, lines are executed or skipped
+/// based on the condition result.
+static CONTROL_STACK: Mutex<Vec<ControlState>> = Mutex::new(Vec::new());
+
+/// Check whether execution is currently active (not skipped by an
+/// outer control-flow block).
+fn control_should_execute() -> bool {
+    let stack = CONTROL_STACK.lock();
+    // All frames must be in an "execute" state.
+    stack.iter().all(|s| s.should_execute())
+}
+
+/// Handle control-flow keywords in a command line.
+///
+/// Returns `true` if the line was a control-flow keyword and was fully
+/// handled (caller should not dispatch it further).
+fn handle_control_flow(line: &str) -> bool {
+    let trimmed = line.trim();
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+
+    match first_word {
+        "if" => {
+            let mut stack = CONTROL_STACK.lock();
+            if stack.len() >= MAX_NESTING {
+                crate::console_println!("Error: maximum nesting depth ({}) exceeded", MAX_NESTING);
+                return true;
+            }
+
+            // If an outer block is already skipping, push skip state
+            // unconditionally (we don't evaluate the condition).
+            let outer_active = stack.iter().all(|s| s.should_execute());
+            if !outer_active {
+                stack.push(ControlState::ThenSkip);
+                return true;
+            }
+            drop(stack); // Release lock before executing condition.
+
+            // Extract the condition (everything after "if").
+            let condition = trimmed.get(2..).unwrap_or("").trim();
+            if condition.is_empty() {
+                crate::console_println!("Syntax error: if requires a condition");
+                CONTROL_STACK.lock().push(ControlState::ThenSkip);
+                return true;
+            }
+
+            // Remove trailing "then" if present (allow `if test -f /x; then`).
+            let condition = condition.strip_suffix("then")
+                .unwrap_or(condition)
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+
+            // Execute the condition to set exit status.
+            execute(condition);
+            let result = last_exit() == 0;
+
+            let state = if result { ControlState::ThenActive } else { ControlState::ThenSkip };
+            CONTROL_STACK.lock().push(state);
+            true
+        }
+        "then" => {
+            // `then` on its own line — just skip (the if handler already pushed state).
+            true
+        }
+        "elif" => {
+            let mut stack = CONTROL_STACK.lock();
+            if stack.is_empty() {
+                crate::console_println!("Syntax error: elif without if");
+                return true;
+            }
+
+            let current = stack.last().copied();
+            match current {
+                Some(ControlState::ThenActive | ControlState::ElseActive | ControlState::ElifDone) => {
+                    // A previous branch already ran — skip this and all subsequent branches.
+                    if let Some(s) = stack.last_mut() {
+                        *s = ControlState::ElifDone;
+                    }
+                }
+                Some(ControlState::ThenSkip) => {
+                    // Previous condition was false — evaluate this elif's condition.
+                    drop(stack);
+
+                    let condition = trimmed.get(4..).unwrap_or("").trim()
+                        .strip_suffix("then").unwrap_or(trimmed.get(4..).unwrap_or(""))
+                        .trim().trim_end_matches(';').trim();
+
+                    if condition.is_empty() {
+                        crate::console_println!("Syntax error: elif requires a condition");
+                        return true;
+                    }
+
+                    execute(condition);
+                    let result = last_exit() == 0;
+
+                    let mut stack = CONTROL_STACK.lock();
+                    if let Some(s) = stack.last_mut() {
+                        *s = if result { ControlState::ThenActive } else { ControlState::ThenSkip };
+                    }
+                }
+                _ => {
+                    // ElseSkip or other state — skip.
+                    if let Some(s) = stack.last_mut() {
+                        *s = ControlState::ElifDone;
+                    }
+                }
+            }
+            true
+        }
+        "else" => {
+            let mut stack = CONTROL_STACK.lock();
+            if stack.is_empty() {
+                crate::console_println!("Syntax error: else without if");
+                return true;
+            }
+
+            let current = stack.last().copied();
+            if let Some(s) = stack.last_mut() {
+                *s = match current {
+                    Some(ControlState::ThenActive) => ControlState::ElseSkip,
+                    Some(ControlState::ThenSkip) => ControlState::ElseActive,
+                    Some(ControlState::ElifDone) => ControlState::ElseSkip,
+                    _ => ControlState::ElseSkip,
+                };
+            }
+            true
+        }
+        "fi" => {
+            let mut stack = CONTROL_STACK.lock();
+            if stack.is_empty() {
+                crate::console_println!("Syntax error: fi without if");
+            } else {
+                stack.pop();
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -855,8 +1027,9 @@ const COMMANDS: &[&str] = &[
     "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
     "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
     "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
+    "elif", "else", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
-    "time", "touch", "tree", "true", "truncate", "type", "umount",
+    "then", "time", "touch", "tree", "true", "truncate", "type", "umount",
     "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
     "wc", "wget", "whoami", "write", "xattr", "xxd",
 ];
@@ -989,6 +1162,23 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
 /// - Variable expansion: `$VAR`, `${VAR}`
 /// - Alias expansion (first word only)
 fn execute(line: &str) {
+    // Phase 0: Handle control flow keywords (if/then/elif/else/fi).
+    // These are checked before variable expansion so that skipped blocks
+    // don't trigger side effects.  Control-flow keywords themselves still
+    // expand variables in their conditions (the handler calls execute()
+    // recursively for conditions).
+    let trimmed_check = line.trim();
+    if !trimmed_check.is_empty() {
+        // Check for control-flow keywords.
+        if handle_control_flow(trimmed_check) {
+            return;
+        }
+        // If we're inside a skip block, silently discard the line.
+        if !control_should_execute() {
+            return;
+        }
+    }
+
     // Phase 1: Expand environment variables ($VAR, ${VAR}).
     let expanded = expand_vars(line);
     let line = expanded.trim();
@@ -1505,6 +1695,9 @@ fn cmd_help() {
     crate::console_println!("Variable expansion:");
     crate::console_println!("  $NAME / ${{NAME}}  Expand environment variable");
     crate::console_println!("  $$               Literal dollar sign");
+    crate::console_println!("Control flow:");
+    crate::console_println!("  if COND; then ... elif COND; then ... else ... fi");
+    crate::console_println!("  test EXPR / [ EXPR ]  Conditional expressions");
     crate::console_println!("  reboot    Reboot the system");
 }
 

@@ -393,6 +393,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell watch command: real-time filesystem change monitoring via notify system, -r recursive flag, event display (CREATE/DELETE/MODIFY/RENAME/META)
   - [x] ext4 48-bit block count: i_blocks_lo + i_osd2[0..2] high bits, supports files >2TB; FileMeta.blocks field; stat shows block count
   - [x] ext4 i_file_acl_high offset fix: was reading/writing i_osd2[4..6] (i_uid_high) instead of [2..4] (i_file_acl_high), corrupting UIDs on xattr-heavy filesystems
+  - [x] ext4 HUGE_FILE inode flag: inode_block_sectors() converts fs-block units to 512-byte sectors when EXT4_HUGE_FILE_FL (0x40000) is set; set_inode_blocks_48 clears flag (always stores sectors)
+  - [x] ext4 xattr block checksums: CRC32C validation on read, stamping on write (was the only metadata type missing checksum support); uses csum_seed + block_nr as seed (shared blocks)
+  - [x] ext4 i_file_acl_high offset fix (xattr free path): write_xattr_block cleared i_osd2[4..5] (i_uid_high) instead of [2..3] (i_file_acl_high) when freeing xattr blocks
+  - [x] ext4 bitmap checksums: block/inode bitmap CRC32C validation on read and stamping on write via group descriptor bg_*_bitmap_csum_lo/hi fields; 16-bit or 32-bit depending on desc_size
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

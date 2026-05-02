@@ -11184,9 +11184,12 @@ fn cmd_lsblk() {
         return;
     }
 
+    // Collect mount info for cross-referencing devices to mount points.
+    let mounts = crate::fs::Vfs::mounts_full();
+
     crate::console_println!(
-        "{:<8} {:>12} {:>8} {:>6}  {}",
-        "NAME", "SECTORS", "SIZE", "RO", "TYPE"
+        "{:<8} {:>12} {:>8} {:>6}  {:<8} {:<16} {}",
+        "NAME", "SECTORS", "SIZE", "RO", "FSTYPE", "MOUNTPOINT", "LABEL"
     );
 
     for dev in &devices {
@@ -11202,9 +11205,54 @@ fn cmd_lsblk() {
         };
         let ro = if dev.read_only { "ro" } else { "rw" };
 
+        // Probe filesystem type.
+        let fs_type = if crate::fs::ext4::probe(&dev.name) {
+            "ext4"
+        } else if crate::fs::iso9660::probe(&dev.name) {
+            "iso9660"
+        } else {
+            // Try FAT probe: read boot sector and check signature.
+            let mut boot = [0u8; 512];
+            if crate::fs::cache::read_sector(&dev.name, 0, &mut boot).is_ok()
+                && boot.get(510).copied() == Some(0x55)
+                && boot.get(511).copied() == Some(0xAA)
+            {
+                // Check for FAT signature in the filesystem type field.
+                let fat16_sig = boot.get(54..62).unwrap_or(&[]);
+                let fat32_sig = boot.get(82..90).unwrap_or(&[]);
+                if fat32_sig.starts_with(b"FAT32") {
+                    "fat32"
+                } else if fat16_sig.starts_with(b"FAT16") || fat16_sig.starts_with(b"FAT12") || fat16_sig.starts_with(b"FAT") {
+                    "fat16"
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            }
+        };
+
+        // Check if this device is mounted anywhere.
+        // The mount system uses the device name as the key for block-backed mounts.
+        let mut mount_path = "";
+        let mut label = String::new();
+        for (mp, _fs_t, _opts) in &mounts {
+            if let Ok(info) = crate::fs::Vfs::statvfs(mp) {
+                // Heuristic: if the fstype matches and the device name appears
+                // in the debug_stats output, it's this device.
+                if let Ok(stats) = crate::fs::Vfs::debug_stats(mp) {
+                    if stats.contains(&dev.name) || (info.fs_type == fs_type && !fs_type.is_empty()) {
+                        mount_path = mp;
+                        label = info.volume_label.clone();
+                        break;
+                    }
+                }
+            }
+        }
+
         crate::console_println!(
-            "{:<8} {:>12} {:>8} {:>6}  disk",
-            dev.name, dev.sector_count, size_str, ro
+            "{:<8} {:>12} {:>8} {:>6}  {:<8} {:<16} {}",
+            dev.name, dev.sector_count, size_str, ro, fs_type, mount_path, label
         );
     }
 }

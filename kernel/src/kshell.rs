@@ -3083,13 +3083,14 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
-    "cd", "chattr", "chmod", "chown", "clear", "cls", "cmp", "column", "command", "copy", "cp",
+    "cd", "chattr", "chmod", "chown", "clear", "cls", "cmp", "column", "comm", "command", "copy",
+    "cp", "cpuinfo",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount", "mv",
-    "move", "net", "nl", "nproc", "nslookup", "paste", "pci", "ping", "printenv",
+    "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "rev", "rm",
     "rmdir", "run", "select", "seq", "set", "sha256", "sleep", "sort", "source",
@@ -4203,7 +4204,10 @@ fn dispatch(line: &str) {
         "lsp" => cmd_lsp(args),
         "grep" => cmd_grep(args),
         "cmp" => cmd_cmp(args),
+        "comm" => cmd_comm(args),
         "diff" => cmd_diff(args),
+        "od" => cmd_od(args),
+        "cpuinfo" => cmd_cpuinfo(),
         "fallocate" => cmd_fallocate(args),
         "sort" => cmd_sort(args),
         "uniq" => cmd_uniq(args),
@@ -4362,7 +4366,10 @@ fn cmd_help() {
     crate::console_println!("  lsp [N] D Paginated ls: show N entries at a time");
     crate::console_println!("  grep [-ivclnwrI] PATTERN FILE  Search for pattern in files (-r recursive, -v invert, -c count, -w whole-word, -l files-only, -I case-sensitive)");
     crate::console_println!("  cmp F1 F2 Compare two files byte-by-byte");
+    crate::console_println!("  comm [-123] F1 F2  Compare sorted files (3-column output)");
     crate::console_println!("  diff F1 F2 Line-level diff (unified format)");
+    crate::console_println!("  od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] F  Octal/hex dump");
+    crate::console_println!("  cpuinfo   Show per-CPU information");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
     crate::console_println!("  uniq FILE Remove adjacent duplicate lines");
@@ -11721,5 +11728,255 @@ fn cmd_glob(args: &str) {
         Err(e) => {
             crate::console_println!("glob: error: {:?}", e);
         }
+    }
+}
+
+/// Compare two sorted files line by line.
+///
+/// Usage: `comm [-1] [-2] [-3] FILE1 FILE2`
+///
+/// Produces three-column output:
+///   Column 1: lines only in FILE1
+///   Column 2: lines only in FILE2
+///   Column 3: lines in both files
+///
+/// `-1` suppresses column 1, `-2` suppresses column 2, `-3` suppresses column 3.
+/// `comm -12 FILE1 FILE2` shows only lines common to both.
+///
+/// Reference: POSIX comm(1).
+fn cmd_comm(args: &str) {
+    let mut show1 = true;
+    let mut show2 = true;
+    let mut show3 = true;
+    let mut files: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+
+    for word in args.split_whitespace() {
+        if word.starts_with('-') && word.len() > 1 && word.as_bytes()[1] != b'/' {
+            // Parse flag characters.
+            for ch in word[1..].chars() {
+                match ch {
+                    '1' => show1 = false,
+                    '2' => show2 = false,
+                    '3' => show3 = false,
+                    _ => {
+                        crate::console_println!("comm: unknown flag '-{}'", ch);
+                        set_exit(1);
+                        return;
+                    }
+                }
+            }
+        } else {
+            files.push(word);
+        }
+    }
+
+    if files.len() < 2 {
+        crate::console_println!("Usage: comm [-123] FILE1 FILE2");
+        set_exit(1);
+        return;
+    }
+
+    let path1 = resolve_path(files[0]);
+    let path2 = resolve_path(files[1]);
+
+    let data1 = match crate::fs::Vfs::read_file(&path1) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("comm: {}: {:?}", path1, e);
+            set_exit(1);
+            return;
+        }
+    };
+    let data2 = match crate::fs::Vfs::read_file(&path2) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("comm: {}: {:?}", path2, e);
+            set_exit(1);
+            return;
+        }
+    };
+
+    let text1 = alloc::string::String::from_utf8_lossy(&data1);
+    let text2 = alloc::string::String::from_utf8_lossy(&data2);
+
+    let lines1: alloc::vec::Vec<&str> = text1.lines().collect();
+    let lines2: alloc::vec::Vec<&str> = text2.lines().collect();
+
+    let mut i = 0usize;
+    let mut j = 0usize;
+
+    // Build tab prefixes based on which columns are visible.
+    // Column 2 is indented by one tab (or zero if col 1 is suppressed).
+    // Column 3 is indented by two tabs minus suppressed columns.
+    let col2_prefix = if show1 { "\t" } else { "" };
+    let col3_prefix = match (show1, show2) {
+        (true, true) => "\t\t",
+        (true, false) | (false, true) => "\t",
+        (false, false) => "",
+    };
+
+    while i < lines1.len() && j < lines2.len() {
+        let cmp = lines1[i].cmp(lines2[j]);
+        match cmp {
+            core::cmp::Ordering::Less => {
+                // Line only in file 1.
+                if show1 {
+                    crate::console_println!("{}", lines1[i]);
+                }
+                i += 1;
+            }
+            core::cmp::Ordering::Greater => {
+                // Line only in file 2.
+                if show2 {
+                    crate::console_println!("{}{}", col2_prefix, lines2[j]);
+                }
+                j += 1;
+            }
+            core::cmp::Ordering::Equal => {
+                // Line in both files.
+                if show3 {
+                    crate::console_println!("{}{}", col3_prefix, lines1[i]);
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+
+    // Remaining lines from file 1.
+    while i < lines1.len() {
+        if show1 {
+            crate::console_println!("{}", lines1[i]);
+        }
+        i += 1;
+    }
+
+    // Remaining lines from file 2.
+    while j < lines2.len() {
+        if show2 {
+            crate::console_println!("{}{}", col2_prefix, lines2[j]);
+        }
+        j += 1;
+    }
+}
+
+/// Display file contents in various dump formats.
+///
+/// Usage: `od [-A RADIX] [-t TYPE] [-N COUNT] <file>`
+///
+/// Address radix: `-A o` (octal, default), `-A d` (decimal), `-A x` (hex), `-A n` (none)
+/// Type: `-t o1` (octal bytes, default), `-t x1` (hex bytes), `-t d1` (decimal bytes),
+///       `-t c` (ASCII/escape), `-t u1` (unsigned decimal)
+/// `-N COUNT` limits output to COUNT bytes.
+///
+/// Reference: POSIX od(1).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_od(args: &str) {
+    let mut addr_fmt = 'o'; // octal addresses by default
+    let mut data_fmt = 'o'; // octal bytes by default
+    let mut max_bytes: usize = usize::MAX;
+    let mut file_path = "";
+
+    let mut words = args.split_whitespace().peekable();
+    while let Some(w) = words.next() {
+        if w == "-A" {
+            if let Some(radix) = words.next() {
+                addr_fmt = radix.chars().next().unwrap_or('o');
+            }
+        } else if w == "-t" {
+            if let Some(ty) = words.next() {
+                data_fmt = ty.chars().next().unwrap_or('o');
+            }
+        } else if w == "-N" {
+            if let Some(n) = words.next() {
+                max_bytes = n.parse::<usize>().unwrap_or(usize::MAX);
+            }
+        } else if w.starts_with("-N") {
+            max_bytes = w[2..].parse::<usize>().unwrap_or(usize::MAX);
+        } else {
+            file_path = w;
+        }
+    }
+
+    if file_path.is_empty() {
+        crate::console_println!("Usage: od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] <file>");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(file_path);
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("od: {}: {:?}", path, e);
+            set_exit(1);
+            return;
+        }
+    };
+
+    let limit = data.len().min(max_bytes).min(4096);
+    let data = &data[..limit];
+    let bytes_per_line = 16;
+
+    for offset in (0..data.len()).step_by(bytes_per_line) {
+        let mut line = alloc::string::String::with_capacity(80);
+
+        // Address.
+        match addr_fmt {
+            'o' => line.push_str(&alloc::format!("{:07o}", offset)),
+            'd' => line.push_str(&alloc::format!("{:07}", offset)),
+            'x' => line.push_str(&alloc::format!("{:07x}", offset)),
+            'n' => {} // no address
+            _ => line.push_str(&alloc::format!("{:07o}", offset)),
+        }
+
+        // Data bytes.
+        let end = data.len().min(offset + bytes_per_line);
+        for i in offset..end {
+            match data_fmt {
+                'o' => line.push_str(&alloc::format!(" {:03o}", data[i])),
+                'x' => line.push_str(&alloc::format!(" {:02x}", data[i])),
+                'd' => line.push_str(&alloc::format!(" {:4}", data[i] as i8)),
+                'u' => line.push_str(&alloc::format!(" {:3}", data[i])),
+                'c' => {
+                    let ch = data[i];
+                    let s = match ch {
+                        b'\0' => alloc::string::String::from("  \\0"),
+                        b'\n' => alloc::string::String::from("  \\n"),
+                        b'\r' => alloc::string::String::from("  \\r"),
+                        b'\t' => alloc::string::String::from("  \\t"),
+                        0x20..=0x7E => alloc::format!("   {}", ch as char),
+                        _ => alloc::format!(" {:03o}", ch),
+                    };
+                    line.push_str(&s);
+                }
+                _ => line.push_str(&alloc::format!(" {:03o}", data[i])),
+            }
+        }
+
+        crate::console_println!("{}", line);
+    }
+
+    // Print final address (marks the end).
+    match addr_fmt {
+        'o' => crate::console_println!("{:07o}", data.len()),
+        'd' => crate::console_println!("{:07}", data.len()),
+        'x' => crate::console_println!("{:07x}", data.len()),
+        _ => {}
+    }
+}
+
+/// Display per-CPU information.
+///
+/// Shows CPU ID, online status, and basic info for each processor.
+fn cmd_cpuinfo() {
+    let count = crate::smp::cpu_count();
+    crate::console_println!("CPUs online: {}", count);
+    for cpu in 0..count {
+        crate::console_println!(
+            "  CPU {:2}: online (APIC ID {})",
+            cpu,
+            crate::smp::cpu_apic_id(cpu).unwrap_or(0),
+        );
     }
 }

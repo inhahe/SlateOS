@@ -3056,6 +3056,9 @@ impl Ext4Driver {
             return Err(KernelError::IoError);
         }
 
+        // Validate checksum if metadata checksums are enabled.
+        validate_xattr_block_checksum(&self.sb, block_nr, &block_data)?;
+
         let header_size = core::mem::size_of::<super::ondisk::Ext4XattrHeader>();
         let entry_header_size = core::mem::size_of::<super::ondisk::Ext4XattrEntry>();
 
@@ -3228,6 +3231,9 @@ impl Ext4Driver {
                 goal,
             )?
         };
+
+        // Stamp the checksum before writing.
+        stamp_xattr_block_checksum(&self.sb, block_nr, &mut block_data);
 
         // Write the xattr block to disk.
         self.reader.write_block(block_nr, &block_data)?;
@@ -4249,6 +4255,125 @@ fn init_dirent_tail(block_data: &mut [u8]) {
     ) {
         dest.copy_from_slice(&0u32.to_le_bytes());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Extended attribute block checksums
+// ---------------------------------------------------------------------------
+
+/// Validate an xattr block's CRC32C checksum.
+///
+/// ext4 with metadata_csum stores a checksum in `h_checksum` of the
+/// `Ext4XattrHeader` at the start of each standalone xattr block.
+/// The checksum covers `csum_seed + block_nr_le64 + block_data` with
+/// the `h_checksum` field zeroed during computation.
+///
+/// Based on Linux `ext4_xattr_block_csum()` in `fs/ext4/xattr.c`.
+fn validate_xattr_block_checksum(
+    sb: &ParsedSuperblock,
+    block_nr: u64,
+    block_data: &[u8],
+) -> KernelResult<()> {
+    if !sb.has_metadata_csum {
+        return Ok(());
+    }
+
+    // h_checksum is at offset 16 within Ext4XattrHeader (after h_magic,
+    // h_refcount, h_blocks, h_hash — each u32).
+    const CSUM_OFFSET: usize = 16;
+    const CSUM_SIZE: usize = 4;
+
+    if block_data.len() < CSUM_OFFSET.saturating_add(CSUM_SIZE) {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Read stored checksum.
+    let stored = u32::from_le_bytes([
+        block_data[CSUM_OFFSET],
+        block_data[CSUM_OFFSET.saturating_add(1)],
+        block_data[CSUM_OFFSET.saturating_add(2)],
+        block_data[CSUM_OFFSET.saturating_add(3)],
+    ]);
+
+    let computed = compute_xattr_block_checksum(sb, block_nr, block_data);
+    if stored != computed {
+        crate::serial_println!(
+            "[ext4] xattr block {} checksum MISMATCH: stored={:#010x} computed={:#010x}",
+            block_nr, stored, computed,
+        );
+        return Err(KernelError::CorruptedData);
+    }
+
+    Ok(())
+}
+
+/// Compute and stamp the checksum for an xattr block.
+///
+/// Writes the CRC32C into the `h_checksum` field at offset 16.
+///
+/// Based on Linux `ext4_xattr_block_csum_set()` in `fs/ext4/xattr.c`.
+fn stamp_xattr_block_checksum(
+    sb: &ParsedSuperblock,
+    block_nr: u64,
+    block_data: &mut [u8],
+) {
+    if !sb.has_metadata_csum {
+        return;
+    }
+
+    const CSUM_OFFSET: usize = 16;
+    const CSUM_SIZE: usize = 4;
+
+    if block_data.len() < CSUM_OFFSET.saturating_add(CSUM_SIZE) {
+        return;
+    }
+
+    // Zero the checksum field before computing.
+    if let Some(dest) = block_data.get_mut(CSUM_OFFSET..CSUM_OFFSET.saturating_add(CSUM_SIZE)) {
+        dest.copy_from_slice(&[0u8; CSUM_SIZE]);
+    }
+
+    let computed = compute_xattr_block_checksum(sb, block_nr, block_data);
+    let csum_bytes = computed.to_le_bytes();
+    if let Some(dest) = block_data.get_mut(CSUM_OFFSET..CSUM_OFFSET.saturating_add(CSUM_SIZE)) {
+        dest.copy_from_slice(&csum_bytes);
+    }
+}
+
+/// Compute the CRC32C checksum for an xattr block.
+///
+/// The xattr block checksum differs from extent/directory checksums:
+/// it uses `csum_seed + block_nr` as the seed (not the per-inode seed),
+/// because a single xattr block can be shared by multiple inodes.
+///
+/// Algorithm: `crc32c(csum_seed, block_nr_le64 || block_data)`
+/// with h_checksum (4 bytes at offset 16) replaced by zeros.
+fn compute_xattr_block_checksum(
+    sb: &ParsedSuperblock,
+    block_nr: u64,
+    block_data: &[u8],
+) -> u32 {
+    const CSUM_OFFSET: usize = 16;
+    const CSUM_SIZE: usize = 4;
+
+    let block_nr_le = block_nr.to_le_bytes();
+
+    // Feed: csum_seed + block_nr_le64
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &block_nr_le);
+
+    // Feed: block data before h_checksum (bytes 0..16).
+    let before = block_data.get(..CSUM_OFFSET).unwrap_or(&[]);
+    let crc = crate::crypto::crc32c_raw(crc, before);
+
+    // Feed: 4 zero bytes in place of h_checksum.
+    let crc = crate::crypto::crc32c_raw(crc, &[0u8; CSUM_SIZE]);
+
+    // Feed: block data after h_checksum (bytes 20..block_size).
+    let after_start = CSUM_OFFSET.saturating_add(CSUM_SIZE);
+    let after = block_data.get(after_start..).unwrap_or(&[]);
+
+    // Final segment with inversion (consistent with our other checksums).
+    crate::crypto::crc32c_seed(crc, after)
 }
 
 // ---------------------------------------------------------------------------

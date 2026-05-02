@@ -22,7 +22,7 @@
 //! between interrupts).  This keeps the idle loop power-efficient while
 //! still processing input promptly when keys arrive.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -215,18 +215,36 @@ static OPT_XTRACE: core::sync::atomic::AtomicBool =
 /// (`PWD`, `SHELL`, `HOME`).
 static ENV_VARS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+/// Set of variable names that are read-only (cannot be re-assigned or unset).
+static READONLY_VARS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Check whether a variable is read-only.
+fn is_readonly(name: &str) -> bool {
+    READONLY_VARS.lock().contains(name)
+}
+
 /// Get an environment variable's value, or `None` if not set.
 fn env_get(name: &str) -> Option<String> {
     ENV_VARS.lock().get(name).cloned()
 }
 
-/// Set an environment variable.
-fn env_set(name: &str, value: &str) {
+/// Set an environment variable.  Returns false (and prints error) if readonly.
+fn env_set(name: &str, value: &str) -> bool {
+    if is_readonly(name) {
+        crate::console_println!("{}: readonly variable", name);
+        return false;
+    }
     ENV_VARS.lock().insert(String::from(name), String::from(value));
+    true
 }
 
 /// Remove an environment variable.  Returns true if it existed.
+/// Refuses to unset readonly variables.
 fn env_remove(name: &str) -> bool {
+    if is_readonly(name) {
+        crate::console_println!("unset: {}: readonly variable", name);
+        return false;
+    }
     ENV_VARS.lock().remove(name).is_some()
 }
 
@@ -490,6 +508,27 @@ fn expand_vars(input: &str) -> String {
             if i < len && bytes[i] == b'`' {
                 i = i.saturating_add(1); // skip closing backtick
             }
+        } else if b == b'~' {
+            // Tilde expansion: `~` or `~/...` at word start → $HOME.
+            // Only expand when at position 0 or after whitespace/=/:
+            // (assignment context, PATH-like lists).
+            let at_word_start = if i == 0 {
+                true
+            } else {
+                matches!(bytes[i.saturating_sub(1)], b' ' | b'\t' | b'=' | b':')
+            };
+            let next_ok = i.saturating_add(1) >= len
+                || matches!(bytes[i.saturating_add(1)], b'/' | b' ' | b'\t' | b'"' | b'\'' | b':');
+            if at_word_start && next_ok {
+                if let Some(home) = env_get("HOME") {
+                    result.push_str(&home);
+                } else {
+                    result.push('~');
+                }
+            } else {
+                result.push('~');
+            }
+            i = i.saturating_add(1);
         } else {
             result.push(b as char);
             i = i.saturating_add(1);
@@ -2059,7 +2098,7 @@ fn execute_function(body: &[String], args: &[String]) {
     if let Some(frame) = LOCAL_VARS.lock().pop() {
         for (name, prev) in frame {
             match prev {
-                Some(val) => env_set(&name, &val),
+                Some(val) => { env_set(&name, &val); }
                 None => { env_remove(&name); }
             }
         }
@@ -2583,12 +2622,13 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cat",
     "cd", "chmod", "chown", "clear", "cls", "cmp", "copy", "cp", "date",
     "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dns", "du",
-    "echo", "env", "exec", "export", "fallocate", "false", "find", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "find", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "irq", "ln", "link", "ls", "lsblk", "lsof", "lsp",
-    "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount",
+    "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsblk", "lsof", "lsp",
+    "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount",
     "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
-    "printf", "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
+    "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
+    "reboot", "ren", "rev", "rm",
     "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
@@ -3037,6 +3077,17 @@ fn execute_single(line: &str) {
         return;
     }
 
+    // `eval` re-parses its arguments as a command line — must be handled
+    // before pipe/redirect parsing since the eval'd string may itself
+    // contain pipes, redirects, or any other syntax.
+    if line.starts_with("eval ") || line.starts_with("eval\t") || line == "eval" {
+        let eval_args = line.get(5..).unwrap_or("").trim();
+        if !eval_args.is_empty() {
+            execute(eval_args);
+        }
+        return;
+    }
+
     // Check for `export`/`unset`/`alias`/`unalias` before
     // pipe/redirect parsing — these are variable-setting commands that
     // should not be piped.
@@ -3054,18 +3105,12 @@ fn execute_single(line: &str) {
         }
     }
 
-    // Check for pipe first (highest-level operator).
+    // Check for pipe chain (highest-level operator).
     // Note: single `|` only — `||` was already handled as chain operator.
-    if let Some(pipe_pos) = find_pipe(line) {
-        let left = line.get(..pipe_pos).unwrap_or("").trim();
-        let right = line.get(pipe_pos.saturating_add(1)..).unwrap_or("").trim();
-        if left.is_empty() || right.is_empty() {
-            crate::console_println!("Syntax error: empty pipe operand");
-            set_exit(1);
-            return;
-        }
-        execute_pipe(left, right);
-        set_exit(0);
+    // Supports multi-pipe: `cmd1 | cmd2 | cmd3 | ... | cmdN`.
+    let pipe_segments = split_pipes(line);
+    if pipe_segments.len() > 1 {
+        execute_pipe_chain(&pipe_segments);
         return;
     }
 
@@ -3207,17 +3252,43 @@ fn execute_input_redirect(command: &str, path: &str) {
 }
 
 /// Find the position of the first un-quoted `|` character.
-fn find_pipe(line: &str) -> Option<usize> {
+/// Split a command line on pipe operators (`|`), respecting quoting.
+///
+/// Returns a single-element vec if there are no pipes.
+/// Ignores `||` (already consumed by chain operator splitting).
+fn split_pipes(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
-    let mut in_quote = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'"' || b == b'\'' {
-            in_quote = !in_quote;
-        } else if !in_quote && b == b'|' {
-            return Some(i);
+    let len = bytes.len();
+    let mut segments: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut in_sq = false;
+    let mut in_dq = false;
+
+    while i < len {
+        let b = bytes[i];
+        if b == b'\'' && !in_dq { in_sq = !in_sq; i = i.saturating_add(1); continue; }
+        if b == b'"' && !in_sq { in_dq = !in_dq; i = i.saturating_add(1); continue; }
+        if in_sq || in_dq { i = i.saturating_add(1); continue; }
+
+        if b == b'|' {
+            // Skip `||` — that's an OR chain operator, not a pipe.
+            if bytes.get(i.saturating_add(1)) == Some(&b'|') {
+                i = i.saturating_add(2);
+                continue;
+            }
+            let seg = line.get(start..i).unwrap_or("").trim();
+            segments.push(seg);
+            i = i.saturating_add(1);
+            start = i;
+            continue;
         }
+        i = i.saturating_add(1);
     }
-    None
+    // Push the final segment.
+    let last = line.get(start..).unwrap_or("").trim();
+    segments.push(last);
+    segments
 }
 
 /// Execute a command with its output redirected to a file.
@@ -3328,18 +3399,49 @@ fn parse_bare_redirect(s: &str) -> Option<(&str, bool)> {
     }
 }
 
-/// Execute a pipe: capture left side's output, feed to right side.
-fn execute_pipe(left: &str, right: &str) {
-    // Capture left side output.
-    capture_start();
-    dispatch(left);
-    let piped_input = capture_stop();
+/// Execute a multi-pipe chain: `cmd1 | cmd2 | ... | cmdN`.
+///
+/// Each stage captures the previous stage's output and feeds it as piped
+/// input to the next stage.  The last stage may have output redirection.
+fn execute_pipe_chain(segments: &[&str]) {
+    if segments.is_empty() {
+        return;
+    }
 
-    // The right side may itself have redirection.
-    if let Some(redir) = parse_redirect(right) {
-        // pipe | cmd > file
+    // Validate: no empty segments.
+    for seg in segments {
+        if seg.is_empty() {
+            crate::console_println!("Syntax error: empty pipe operand");
+            set_exit(1);
+            return;
+        }
+    }
+
+    // First stage: run with no piped input, capture its output.
+    capture_start();
+    // The first segment might have input redirection (cmd < file | ...).
+    let first = segments[0];
+    if let Some((command, path)) = parse_input_redirect(first) {
+        execute_input_redirect(&command, &path);
+    } else {
+        dispatch(first);
+    }
+    let mut piped_data = capture_stop();
+
+    // Middle stages: each reads from the previous output and captures for
+    // the next stage.
+    let last_idx = segments.len().saturating_sub(1);
+    for seg in segments.get(1..last_idx).unwrap_or(&[]) {
         capture_start();
-        dispatch_with_input(&redir.command, &piped_input);
+        dispatch_with_input(seg, &piped_data);
+        piped_data = capture_stop();
+    }
+
+    // Last stage: may have output redirection; otherwise prints to console.
+    let last = segments[last_idx];
+    if let Some(redir) = parse_redirect(last) {
+        capture_start();
+        dispatch_with_input(&redir.command, &piped_data);
         let output = capture_stop();
         if !output.is_empty() {
             use crate::fs::vfs::Vfs;
@@ -3359,8 +3461,9 @@ fn execute_pipe(left: &str, right: &str) {
             }
         }
     } else {
-        dispatch_with_input(right, &piped_input);
+        dispatch_with_input(last, &piped_data);
     }
+    set_exit(0);
 }
 
 /// Execute a command with optional piped input.
@@ -3387,6 +3490,8 @@ fn dispatch_with_input(line: &str, input: &str) {
             // `cat` with no args reads from pipe.
             shell_print!("{}", input);
         }
+        "mapfile" | "readarray" => cmd_mapfile_input(args, input),
+        "tee" => cmd_tee_input(args, input),
         _ => {
             // Command doesn't support piped input — just run normally.
             dispatch(line);
@@ -3491,6 +3596,9 @@ fn dispatch(line: &str) {
         "printenv" | "env" => cmd_printenv(),
         "declare" => cmd_declare(args),
         "read" => cmd_read(args),
+        "mapfile" | "readarray" => cmd_mapfile(args),
+        "readonly" => cmd_readonly(args),
+        "let" => cmd_let(args),
         "which" | "typeof" => cmd_type(args),
         "return" => {
             // `return [N]` — set exit status and signal function return.
@@ -6624,6 +6732,189 @@ fn cmd_read(args: &str) {
     }
 }
 
+/// `mapfile [-t] ARRAY [FILE]` — read lines from file into an array.
+///
+/// Reads all lines from FILE (or stdin if invoked via pipe) and stores
+/// each line as an element of ARRAY.  With `-t`, trailing newlines are
+/// stripped from each element.  Also available as `readarray`.
+fn cmd_mapfile(args: &str) {
+    let mut strip_newlines = false;
+    let mut rest = args;
+
+    // Parse flags.
+    while rest.starts_with('-') {
+        if rest.starts_with("-t ") || rest.starts_with("-t\t") || rest == "-t" {
+            strip_newlines = true;
+            rest = rest.get(3..).unwrap_or("").trim_start();
+        } else {
+            break;
+        }
+    }
+
+    // Parse array name.
+    let (var_name, file_path) = if let Some(sp) = rest.find(' ') {
+        (rest.get(..sp).unwrap_or("MAPFILE"), rest.get(sp.saturating_add(1)..).unwrap_or("").trim())
+    } else if !rest.is_empty() {
+        (rest, "")
+    } else {
+        ("MAPFILE", "")
+    };
+
+    if file_path.is_empty() {
+        crate::console_println!("mapfile: no file specified (pipe input or provide a file path)");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(file_path);
+    match crate::fs::Vfs::read_file(&path) {
+        Ok(data) => {
+            let text = core::str::from_utf8(&data).unwrap_or("");
+            mapfile_store(var_name, text, strip_newlines);
+            set_exit(0);
+        }
+        Err(e) => {
+            crate::console_println!("mapfile: {}: {:?}", file_path, e);
+            set_exit(1);
+        }
+    }
+}
+
+/// `mapfile` with piped input: `cmd | mapfile [-t] ARRAY`
+fn cmd_mapfile_input(args: &str, input: &str) {
+    let mut strip_newlines = false;
+    let mut rest = args;
+
+    while rest.starts_with('-') {
+        if rest.starts_with("-t ") || rest.starts_with("-t\t") || rest == "-t" {
+            strip_newlines = true;
+            rest = rest.get(3..).unwrap_or("").trim_start();
+        } else {
+            break;
+        }
+    }
+
+    let var_name = if rest.is_empty() { "MAPFILE" } else { rest.split_whitespace().next().unwrap_or("MAPFILE") };
+    mapfile_store(var_name, input, strip_newlines);
+    set_exit(0);
+}
+
+/// Common helper: split text into lines and store as an array variable.
+fn mapfile_store(var_name: &str, text: &str, strip_newlines: bool) {
+    let lines: Vec<String> = text.split('\n')
+        .map(|line| {
+            if strip_newlines {
+                String::from(line.trim_end_matches('\n').trim_end_matches('\r'))
+            } else {
+                alloc::format!("{}\n", line)
+            }
+        })
+        .collect();
+
+    // Remove the trailing empty element that split('\n') produces for
+    // text ending in a newline.
+    let lines = if lines.last().map_or(false, |l| l.is_empty() || l == "\n") {
+        lines.get(..lines.len().saturating_sub(1)).unwrap_or(&[]).to_vec()
+    } else {
+        lines
+    };
+
+    array_set(var_name, lines);
+}
+
+/// `tee FILE` with piped input: writes input to file AND passes through.
+fn cmd_tee_input(args: &str, input: &str) {
+    let path = args.trim();
+    if path.is_empty() {
+        // No file — just pass through.
+        shell_print!("{}", input);
+        return;
+    }
+
+    let resolved = resolve_path(path);
+    // Pass through to output.
+    shell_print!("{}", input);
+    // Also write to file.
+    if let Err(e) = crate::fs::Vfs::write_file(&resolved, input.as_bytes()) {
+        crate::console_println!("tee: write error: {:?}", e);
+    }
+}
+
+/// `readonly [VAR=VALUE ...]` — mark variables as read-only.
+///
+/// With no arguments, lists all readonly variables.
+/// `readonly VAR=VALUE` sets the value and marks it readonly.
+/// `readonly VAR` marks an existing variable readonly without changing its value.
+fn cmd_readonly(args: &str) {
+    if args.is_empty() {
+        // List all readonly variables.
+        let ro = READONLY_VARS.lock();
+        for name in ro.iter() {
+            if let Some(val) = env_get(name) {
+                crate::console_println!("declare -r {}=\"{}\"", name, val);
+            } else {
+                crate::console_println!("declare -r {}", name);
+            }
+        }
+        return;
+    }
+
+    // Process each word as a separate readonly declaration.
+    for word in args.split_whitespace() {
+        if let Some(eq_pos) = word.find('=') {
+            let name = word.get(..eq_pos).unwrap_or("");
+            let value = word.get(eq_pos.saturating_add(1)..).unwrap_or("");
+            if name.is_empty() {
+                crate::console_println!("readonly: invalid variable name");
+                continue;
+            }
+            // Set the value (bypass readonly check since we're about to mark it).
+            ENV_VARS.lock().insert(String::from(name), String::from(value));
+            READONLY_VARS.lock().insert(String::from(name));
+        } else {
+            // Just mark as readonly (no value change).
+            READONLY_VARS.lock().insert(String::from(word));
+        }
+    }
+}
+
+/// `let EXPR [EXPR ...]` — evaluate arithmetic expressions.
+///
+/// Each argument is evaluated as an arithmetic expression.  The exit
+/// status is 1 if the last expression evaluates to 0, and 0 otherwise
+/// (like bash).  Supports assignment: `let "x = 5 + 3"`.
+fn cmd_let(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: let EXPRESSION ...");
+        set_exit(1);
+        return;
+    }
+
+    // Each whitespace-separated word is a separate expression, unless
+    // quoted.  For simplicity in our kshell, treat the entire arg as
+    // one expression (users can quote as needed).
+    let expr = strip_quotes(args);
+
+    // Check for assignment: `VAR = EXPR` or `VAR=EXPR`.
+    if let Some(eq_pos) = expr.find('=') {
+        let left = expr.get(..eq_pos).unwrap_or("").trim();
+        let right = expr.get(eq_pos.saturating_add(1)..).unwrap_or("").trim();
+        // Left side must be a valid variable name.
+        if !left.is_empty() && left.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !left.starts_with(|c: char| c.is_ascii_digit())
+        {
+            let val = eval_arithmetic(right);
+            env_set(left, &alloc::format!("{}", val));
+            set_exit(if val == 0 { 1 } else { 0 });
+            return;
+        }
+    }
+
+    // No assignment — just evaluate.
+    let val = eval_arithmetic(&expr);
+    set_exit(if val == 0 { 1 } else { 0 });
+}
+
 fn cmd_export(args: &str) {
     if args.is_empty() {
         // List all variables.
@@ -6868,9 +7159,10 @@ fn is_builtin(name: &str) -> bool {
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
-        | "env" | "declare" | "read" | "which" | "typeof" | "export" | "set"
+        | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
+        | "readonly" | "let" | "which" | "typeof" | "export" | "set"
         | "unset" | "alias" | "unalias" | "return" | "break" | "continue"
-        | "shift" | "local"
+        | "shift" | "local" | "printf"
     )
 }
 

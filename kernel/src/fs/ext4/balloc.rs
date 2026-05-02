@@ -36,6 +36,9 @@ use super::superblock::ParsedSuperblock;
 /// Returns a Vec of `block_size` bytes representing the bitmap.
 /// Each bit corresponds to one block in the group.  Bit 0 of byte 0
 /// is the first block in the group.
+///
+/// If metadata checksums are enabled, validates the CRC32C stored in
+/// the group descriptor against the bitmap data.
 pub fn read_block_bitmap(
     reader: &BlockReader,
     sb: &ParsedSuperblock,
@@ -44,24 +47,49 @@ pub fn read_block_bitmap(
     let bitmap_block = group_desc_block_bitmap(gd, sb.is_64bit);
     let mut buf = vec![0u8; sb.block_size as usize];
     reader.read_block(bitmap_block, &mut buf)?;
+
+    // Validate checksum if metadata checksums are enabled.
+    if sb.has_metadata_csum {
+        let computed = compute_bitmap_checksum(sb, &buf);
+        let stored = block_bitmap_checksum(gd, sb.desc_size);
+        if stored != computed {
+            crate::serial_println!(
+                "[ext4] block bitmap checksum mismatch: stored={:#010x} computed={:#010x}",
+                stored, computed,
+            );
+            return Err(KernelError::CorruptedData);
+        }
+    }
+
     Ok(buf)
 }
 
 /// Write the block bitmap for a given block group.
+///
+/// Also updates the bitmap checksum in the group descriptor.
 pub fn write_block_bitmap(
     reader: &BlockReader,
     sb: &ParsedSuperblock,
-    gd: &Ext4GroupDesc,
+    gd: &mut Ext4GroupDesc,
     bitmap: &[u8],
 ) -> KernelResult<()> {
     let bitmap_block = group_desc_block_bitmap(gd, sb.is_64bit);
     if bitmap.len() < sb.block_size as usize {
         return Err(KernelError::InvalidArgument);
     }
+
+    // Stamp checksum into the group descriptor.
+    if sb.has_metadata_csum {
+        let csum = compute_bitmap_checksum(sb, bitmap);
+        set_block_bitmap_checksum(gd, sb.desc_size, csum);
+    }
+
     reader.write_block(bitmap_block, bitmap)
 }
 
 /// Read the inode bitmap for a given block group.
+///
+/// If metadata checksums are enabled, validates the CRC32C.
 pub fn read_inode_bitmap(
     reader: &BlockReader,
     sb: &ParsedSuperblock,
@@ -70,20 +98,43 @@ pub fn read_inode_bitmap(
     let bitmap_block = group_desc_inode_bitmap(gd, sb.is_64bit);
     let mut buf = vec![0u8; sb.block_size as usize];
     reader.read_block(bitmap_block, &mut buf)?;
+
+    // Validate checksum if metadata checksums are enabled.
+    if sb.has_metadata_csum {
+        let computed = compute_bitmap_checksum(sb, &buf);
+        let stored = inode_bitmap_checksum(gd, sb.desc_size);
+        if stored != computed {
+            crate::serial_println!(
+                "[ext4] inode bitmap checksum mismatch: stored={:#010x} computed={:#010x}",
+                stored, computed,
+            );
+            return Err(KernelError::CorruptedData);
+        }
+    }
+
     Ok(buf)
 }
 
 /// Write the inode bitmap for a given block group.
+///
+/// Also updates the bitmap checksum in the group descriptor.
 pub fn write_inode_bitmap(
     reader: &BlockReader,
     sb: &ParsedSuperblock,
-    gd: &Ext4GroupDesc,
+    gd: &mut Ext4GroupDesc,
     bitmap: &[u8],
 ) -> KernelResult<()> {
     let bitmap_block = group_desc_inode_bitmap(gd, sb.is_64bit);
     if bitmap.len() < sb.block_size as usize {
         return Err(KernelError::InvalidArgument);
     }
+
+    // Stamp checksum into the group descriptor.
+    if sb.has_metadata_csum {
+        let csum = compute_bitmap_checksum(sb, bitmap);
+        set_inode_bitmap_checksum(gd, sb.desc_size, csum);
+    }
+
     reader.write_block(bitmap_block, bitmap)
 }
 
@@ -221,7 +272,7 @@ pub fn alloc_block(
     // Try preferred group first, then scan all groups.
     for delta in 0..group_count {
         let group_idx = (pref_group.wrapping_add(delta)) % group_count;
-        let gd = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
+        let gd = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
 
         // Check if this group has any free blocks.
         let free = group_desc_free_blocks(gd, sb.is_64bit);
@@ -250,13 +301,11 @@ pub fn alloc_block(
             // Mark the block as allocated.
             bitmap_set(&mut bitmap, bit);
 
-            // Write the updated bitmap back.
-            let gd_ref = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
-            write_block_bitmap(reader, sb, gd_ref, &bitmap)?;
+            // Write the updated bitmap (stamps checksum in GD).
+            write_block_bitmap(reader, sb, gd, &bitmap)?;
 
             // Update the group descriptor free count.
-            let gd_mut = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
-            decrement_gd_free_blocks(gd_mut, sb.is_64bit);
+            decrement_gd_free_blocks(gd, sb.is_64bit);
 
             // Update the superblock free count.
             sb.free_block_count = sb.free_block_count.saturating_sub(1);
@@ -305,7 +354,7 @@ pub fn alloc_blocks(
 
     for delta in 0..group_count {
         let group_idx = (pref_group.wrapping_add(delta)) % group_count;
-        let gd = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
+        let gd = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
 
         let free = group_desc_free_blocks(gd, sb.is_64bit);
         if (free as u32) < count {
@@ -333,12 +382,11 @@ pub fn alloc_blocks(
                 bitmap_set(&mut bitmap, first_bit.saturating_add(i));
             }
 
-            let gd_ref = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
-            write_block_bitmap(reader, sb, gd_ref, &bitmap)?;
+            // Write bitmap (stamps checksum in GD).
+            write_block_bitmap(reader, sb, gd, &bitmap)?;
 
-            let gd_mut = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
             for _ in 0..count {
-                decrement_gd_free_blocks(gd_mut, sb.is_64bit);
+                decrement_gd_free_blocks(gd, sb.is_64bit);
             }
 
             sb.free_block_count = sb.free_block_count.saturating_sub(u64::from(count));
@@ -375,7 +423,7 @@ pub fn free_block(
     let group_idx = (relative / blocks_per_group) as usize;
     let bit = (relative % blocks_per_group) as u32;
 
-    let gd = group_descs.get(group_idx).ok_or(KernelError::InvalidArgument)?;
+    let gd = group_descs.get_mut(group_idx).ok_or(KernelError::InvalidArgument)?;
     let mut bitmap = read_block_bitmap(reader, sb, gd)?;
 
     if !bitmap_test(&bitmap, bit) {
@@ -385,11 +433,10 @@ pub fn free_block(
 
     bitmap_clear(&mut bitmap, bit);
 
-    let gd_ref = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
-    write_block_bitmap(reader, sb, gd_ref, &bitmap)?;
+    // Write bitmap (stamps checksum in GD).
+    write_block_bitmap(reader, sb, gd, &bitmap)?;
 
-    let gd_mut = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
-    increment_gd_free_blocks(gd_mut, sb.is_64bit);
+    increment_gd_free_blocks(gd, sb.is_64bit);
 
     sb.free_block_count = sb.free_block_count.saturating_add(1);
     update_sb_free_blocks(&mut sb.raw, sb.free_block_count, sb.is_64bit);
@@ -443,7 +490,7 @@ pub fn alloc_inode(
 
     for delta in 0..group_count {
         let group_idx = ((preferred_group as usize).wrapping_add(delta)) % group_count;
-        let gd = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
+        let gd = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
 
         let free = group_desc_free_inodes(gd, sb.is_64bit);
         if free == 0 {
@@ -458,11 +505,10 @@ pub fn alloc_inode(
         if let Some(bit) = found {
             bitmap_set(&mut bitmap, bit);
 
-            let gd_ref = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
-            write_inode_bitmap(reader, sb, gd_ref, &bitmap)?;
+            // Write bitmap (stamps checksum in GD).
+            write_inode_bitmap(reader, sb, gd, &bitmap)?;
 
-            let gd_mut = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
-            decrement_gd_free_inodes(gd_mut, sb.is_64bit);
+            decrement_gd_free_inodes(gd, sb.is_64bit);
 
             // Update superblock free inode count.
             sb.raw.s_free_inodes_count = sb.raw.s_free_inodes_count.saturating_sub(1);
@@ -502,7 +548,7 @@ pub fn free_inode(
         return Err(KernelError::InvalidArgument);
     }
 
-    let gd = group_descs.get(group_idx).ok_or(KernelError::InvalidArgument)?;
+    let gd = group_descs.get_mut(group_idx).ok_or(KernelError::InvalidArgument)?;
     let mut bitmap = read_inode_bitmap(reader, sb, gd)?;
 
     if !bitmap_test(&bitmap, bit) {
@@ -512,11 +558,10 @@ pub fn free_inode(
 
     bitmap_clear(&mut bitmap, bit);
 
-    let gd_ref = group_descs.get(group_idx).ok_or(KernelError::IoError)?;
-    write_inode_bitmap(reader, sb, gd_ref, &bitmap)?;
+    // Write bitmap (stamps checksum in GD).
+    write_inode_bitmap(reader, sb, gd, &bitmap)?;
 
-    let gd_mut = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
-    increment_gd_free_inodes(gd_mut, sb.is_64bit);
+    increment_gd_free_inodes(gd, sb.is_64bit);
 
     sb.raw.s_free_inodes_count = sb.raw.s_free_inodes_count.saturating_add(1);
 
@@ -612,6 +657,65 @@ fn update_sb_free_blocks(raw: &mut super::ondisk::Ext4Superblock, count: u64, is
     raw.s_free_blocks_count_lo = count as u32;
     if is_64bit {
         raw.s_free_blocks_count_hi = (count >> 32) as u32;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bitmap checksum helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the CRC32C checksum for a bitmap block.
+///
+/// The bitmap checksum is `crc32c(csum_seed, bitmap_data)`.
+/// The result is stored split across low-16 and high-16 fields in
+/// the group descriptor.
+///
+/// Based on Linux `ext4_block_bitmap_csum_set()` in `fs/ext4/bitmap.c`.
+fn compute_bitmap_checksum(sb: &ParsedSuperblock, bitmap_data: &[u8]) -> u32 {
+    crate::crypto::crc32c_seed(sb.csum_seed, bitmap_data)
+}
+
+/// Read the stored block bitmap checksum from a group descriptor.
+///
+/// Uses only the low 16 bits if `desc_size < 58` (32-byte descriptors),
+/// otherwise combines lo+hi for a full 32-bit checksum.
+fn block_bitmap_checksum(gd: &Ext4GroupDesc, desc_size: u32) -> u32 {
+    let lo = u32::from(gd.bg_block_bitmap_csum_lo);
+    // bg_block_bitmap_csum_hi ends at offset 0x3A = 58.
+    if desc_size >= 58 {
+        lo | (u32::from(gd.bg_block_bitmap_csum_hi) << 16)
+    } else {
+        lo
+    }
+}
+
+/// Write a block bitmap checksum into a group descriptor.
+fn set_block_bitmap_checksum(gd: &mut Ext4GroupDesc, desc_size: u32, csum: u32) {
+    gd.bg_block_bitmap_csum_lo = csum as u16;
+    if desc_size >= 58 {
+        gd.bg_block_bitmap_csum_hi = (csum >> 16) as u16;
+    }
+}
+
+/// Read the stored inode bitmap checksum from a group descriptor.
+///
+/// Uses only the low 16 bits if `desc_size < 60` (32-byte descriptors),
+/// otherwise combines lo+hi for a full 32-bit checksum.
+fn inode_bitmap_checksum(gd: &Ext4GroupDesc, desc_size: u32) -> u32 {
+    let lo = u32::from(gd.bg_inode_bitmap_csum_lo);
+    // bg_inode_bitmap_csum_hi ends at offset 0x3C = 60.
+    if desc_size >= 60 {
+        lo | (u32::from(gd.bg_inode_bitmap_csum_hi) << 16)
+    } else {
+        lo
+    }
+}
+
+/// Write an inode bitmap checksum into a group descriptor.
+fn set_inode_bitmap_checksum(gd: &mut Ext4GroupDesc, desc_size: u32, csum: u32) {
+    gd.bg_inode_bitmap_csum_lo = csum as u16;
+    if desc_size >= 60 {
+        gd.bg_inode_bitmap_csum_hi = (csum >> 16) as u16;
     }
 }
 

@@ -184,6 +184,9 @@ fn execute(line: &str) {
         "sha256" | "hash" => cmd_sha256(args),
         "sysctl" => cmd_sysctl(args),
         "hostname" => cmd_hostname(args),
+        "dd" => cmd_dd(args),
+        "free" => cmd_free(),
+        "lsblk" | "blkdev" => cmd_lsblk(),
         "readlink" => cmd_readlink(args),
         "symlink" | "mklink" => cmd_symlink(args),
         "xattr" => cmd_xattr(args),
@@ -261,6 +264,9 @@ fn cmd_help() {
     crate::console_println!("  sha256 F  Compute SHA-256 hash of file contents");
     crate::console_println!("  sysctl .. List/get/set kernel parameters");
     crate::console_println!("  hostname  Show or set system hostname");
+    crate::console_println!("  dd ..     Copy blocks between files (if=/of=/bs=/count=)");
+    crate::console_println!("  free      Show memory usage summary");
+    crate::console_println!("  lsblk     List block devices with sizes");
     crate::console_println!("  readlink P Show symlink target");
     crate::console_println!("  symlink T P Create symlink at P pointing to T");
     crate::console_println!("  xattr F .. Extended attributes (list/get/set/rm)");
@@ -2853,5 +2859,204 @@ fn cmd_hostname(args: &str) {
                 crate::console_println!("hostname: cannot set hostname: {:?}", e);
             }
         }
+    }
+}
+
+/// `dd if=FILE of=FILE [bs=N] [count=N]` — copy blocks between files.
+///
+/// Simplified `dd` supporting `if=`, `of=`, `bs=` (block size), and
+/// `count=` (number of blocks) options.  Reads in chunks and writes
+/// them out.  Reports bytes transferred.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_dd(args: &str) {
+    let mut input: Option<&str> = None;
+    let mut output: Option<&str> = None;
+    let mut bs: usize = 512;
+    let mut count: Option<u64> = None;
+
+    // Parse key=value pairs.
+    for token in args.split_whitespace() {
+        if let Some(val) = token.strip_prefix("if=") {
+            input = Some(val);
+        } else if let Some(val) = token.strip_prefix("of=") {
+            output = Some(val);
+        } else if let Some(val) = token.strip_prefix("bs=") {
+            // Parse block size with optional K/M suffix.
+            bs = match parse_size_suffix(val) {
+                Some(n) => n as usize,
+                None => {
+                    crate::console_println!("dd: invalid block size '{}'", val);
+                    return;
+                }
+            };
+        } else if let Some(val) = token.strip_prefix("count=") {
+            count = match val.parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    crate::console_println!("dd: invalid count '{}'", val);
+                    return;
+                }
+            };
+        } else {
+            crate::console_println!("dd: unknown option '{}'", token);
+            crate::console_println!("Usage: dd if=<input> of=<output> [bs=N] [count=N]");
+            return;
+        }
+    }
+
+    let input = match input {
+        Some(p) => p,
+        None => {
+            crate::console_println!("Usage: dd if=<input> of=<output> [bs=N] [count=N]");
+            return;
+        }
+    };
+    let output = match output {
+        Some(p) => p,
+        None => {
+            crate::console_println!("Usage: dd if=<input> of=<output> [bs=N] [count=N]");
+            return;
+        }
+    };
+
+    // Clamp block size to something reasonable.
+    if bs == 0 || bs > 1024 * 1024 {
+        crate::console_println!("dd: block size must be 1..1M");
+        return;
+    }
+
+    // Read input file.
+    let data = match crate::fs::Vfs::read_file(input) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("dd: cannot read '{}': {:?}", input, e);
+            return;
+        }
+    };
+
+    // Apply count limit.
+    let max_bytes = match count {
+        Some(n) => (n as usize).saturating_mul(bs),
+        None => data.len(),
+    };
+    let to_write = if max_bytes < data.len() {
+        data.get(..max_bytes).unwrap_or(&data)
+    } else {
+        &data
+    };
+
+    // Write output file.
+    match crate::fs::Vfs::write_file(output, to_write) {
+        Ok(()) => {
+            let blocks = to_write.len() / bs;
+            let remainder = to_write.len() % bs;
+            let total_blocks = if remainder > 0 { blocks + 1 } else { blocks };
+            crate::console_println!(
+                "{}+{} records in",
+                blocks,
+                if remainder > 0 { 1 } else { 0 }
+            );
+            crate::console_println!(
+                "{}+{} records out",
+                blocks,
+                if remainder > 0 { 1 } else { 0 }
+            );
+            crate::console_println!(
+                "{} bytes ({} blocks of {} bytes) copied",
+                to_write.len(),
+                total_blocks,
+                bs
+            );
+        }
+        Err(e) => {
+            crate::console_println!("dd: cannot write '{}': {:?}", output, e);
+        }
+    }
+}
+
+/// Parse a size string with optional K/M/G suffix into bytes.
+fn parse_size_suffix(s: &str) -> Option<u64> {
+    let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
+        (s.get(..s.len().wrapping_sub(1))?, 1024u64 * 1024 * 1024)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        (s.get(..s.len().wrapping_sub(1))?, 1024u64 * 1024)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        (s.get(..s.len().wrapping_sub(1))?, 1024u64)
+    } else {
+        (s, 1u64)
+    };
+    num_str.parse::<u64>().ok().map(|n| n.saturating_mul(multiplier))
+}
+
+/// `free` — show memory usage summary in human-readable format.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_free() {
+    let info = crate::mm::memory_info();
+
+    let total_mb = info.total_bytes / (1024 * 1024);
+    let used_mb = info.used_bytes / (1024 * 1024);
+    let free_mb = info.free_bytes / (1024 * 1024);
+    let swap_total_kib = info.swap_total_bytes / 1024;
+    let swap_used_kib = info.swap_used_bytes / 1024;
+    let swap_free_kib = swap_total_kib.saturating_sub(swap_used_kib);
+
+    crate::console_println!(
+        "             total       used       free"
+    );
+    crate::console_println!(
+        "Mem:    {:>6} MiB  {:>6} MiB  {:>6} MiB",
+        total_mb, used_mb, free_mb
+    );
+    crate::console_println!(
+        "Swap:   {:>6} KiB  {:>6} KiB  {:>6} KiB",
+        swap_total_kib, swap_used_kib, swap_free_kib
+    );
+
+    // Frame counts.
+    crate::console_println!(
+        "Frames: {:>6} total  {:>6} free  {:>6} zero-pool",
+        info.total_frames, info.free_frames, info.zero_pool_count
+    );
+
+    // Heap.
+    let heap_live = info.heap_slab_allocs.saturating_sub(info.heap_slab_frees);
+    crate::console_println!(
+        "Heap:   {:>6} slab allocs  {:>6} live  {:>6} large",
+        info.heap_slab_allocs, heap_live, info.heap_large_allocs
+    );
+}
+
+/// `lsblk` — list block devices with capacity.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_lsblk() {
+    let devices = crate::blkdev::list_devices();
+
+    if devices.is_empty() {
+        crate::console_println!("No block devices found.");
+        return;
+    }
+
+    crate::console_println!(
+        "{:<8} {:>12} {:>8} {:>6}  {}",
+        "NAME", "SECTORS", "SIZE", "RO", "TYPE"
+    );
+
+    for dev in &devices {
+        let size_bytes = (dev.sector_count as u64).saturating_mul(dev.sector_size as u64);
+        let size_str = if size_bytes >= 1024 * 1024 * 1024 {
+            alloc::format!("{} GiB", size_bytes / (1024 * 1024 * 1024))
+        } else if size_bytes >= 1024 * 1024 {
+            alloc::format!("{} MiB", size_bytes / (1024 * 1024))
+        } else if size_bytes >= 1024 {
+            alloc::format!("{} KiB", size_bytes / 1024)
+        } else {
+            alloc::format!("{} B", size_bytes)
+        };
+        let ro = if dev.read_only { "ro" } else { "rw" };
+
+        crate::console_println!(
+            "{:<8} {:>12} {:>8} {:>6}  disk",
+            dev.name, dev.sector_count, size_str, ro
+        );
     }
 }

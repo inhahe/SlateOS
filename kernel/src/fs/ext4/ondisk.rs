@@ -731,6 +731,80 @@ pub mod dir_type {
 }
 
 // ---------------------------------------------------------------------------
+// Hash-tree (htree / dx) directory index
+// ---------------------------------------------------------------------------
+
+/// dx_root_info — metadata at the start of a hash-tree root block.
+///
+/// Located inside the first directory block right after the fake "."
+/// and ".." directory entries.  The layout is:
+///
+/// ```text
+/// [ DirEntry: "." (12 bytes) ]
+/// [ DirEntry: ".." (rec_len = block_size - 12) ]
+///   within the ".." rec_len padding:
+///   [ dx_root_info (8 bytes) ]
+///   [ dx_entry[0..count] (8 bytes each) ]
+/// ```
+///
+/// Based on Linux `fs/ext4/namei.c` struct `dx_root_info`.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct DxRootInfo {
+    /// Reserved (must be zero).
+    pub reserved_zero: u32,
+    /// Hash version (0=legacy, 1=half_md4, 2=tea, 4=half_md4_unsigned, 5=tea_unsigned).
+    pub hash_version: u8,
+    /// Length of this info structure (always 8).
+    pub info_length: u8,
+    /// Number of indirect levels (0 = entries point directly to leaf blocks,
+    /// 1 = one level of dx_node intermediates).
+    pub indirect_levels: u8,
+    /// Unused flags (must be zero).
+    pub unused_flags: u8,
+}
+
+const _: () = assert!(core::mem::size_of::<DxRootInfo>() == 8);
+
+/// dx_entry — a single `(hash, block)` entry in the hash tree index.
+///
+/// The hash tree root and internal nodes contain arrays of these.
+/// The entries are sorted by hash value to enable binary search.
+///
+/// Based on Linux `fs/ext4/namei.c` struct `dx_entry`.
+///
+/// Currently parsed via raw byte offsets in `htree.rs` for read lookups.
+/// This struct is defined for future htree write support (node splitting).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct DxEntry {
+    /// Hash value (or 0 for the first entry which covers all hashes < entries[1].hash).
+    pub hash: u32,
+    /// Logical block number containing directory entries with this hash range.
+    pub block: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<DxEntry>() == 8);
+
+/// dx_countlimit — located at the start of the dx_entry array.
+///
+/// The first dx_entry slot actually stores (limit, count) instead of
+/// (hash, block).  This tells us how many entries follow and the max capacity.
+///
+/// Based on Linux `fs/ext4/namei.c` struct `dx_countlimit`.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct DxCountLimit {
+    /// Maximum number of dx_entry items that can fit in this node.
+    pub limit: u16,
+    /// Actual number of valid dx_entry items (including this one).
+    pub count: u16,
+}
+
+const _: () = assert!(core::mem::size_of::<DxCountLimit>() == 4);
+
+// ---------------------------------------------------------------------------
 // Extended attributes
 // ---------------------------------------------------------------------------
 

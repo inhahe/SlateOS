@@ -30,6 +30,7 @@
 
 pub mod balloc;
 pub mod driver;
+pub mod htree;
 pub mod io;
 pub mod journal;
 pub mod ondisk;
@@ -434,6 +435,9 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove(&link_path)?;
         serial_println!("[ext4]     hard link test files cleaned up OK");
     }
+
+    // --- Htree hash function tests ---
+    htree::self_test()?;
 
     serial_println!("[ext4] Self-test passed.");
     Ok(())

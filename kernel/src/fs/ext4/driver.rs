@@ -241,6 +241,28 @@ impl Ext4Driver {
         &self.sb
     }
 
+    /// Read a single ext4 block by physical block number.
+    ///
+    /// Returns a newly allocated buffer containing the block data.
+    /// Used by the htree module to read dx_root / dx_node / leaf blocks.
+    pub(super) fn read_block(&self, phys_block: u64) -> KernelResult<Vec<u8>> {
+        let bs = self.sb.block_size as usize;
+        let mut buf = vec![0u8; bs];
+        self.reader.read_block(phys_block, &mut buf)?;
+        Ok(buf)
+    }
+
+    /// Map a logical block number to a physical block number for an inode.
+    ///
+    /// Wrapper around [`lookup_physical_block`] for the htree module.
+    pub(super) fn logical_to_physical(
+        &self,
+        inode: &Ext4Inode,
+        logical_block: u64,
+    ) -> KernelResult<Option<u64>> {
+        self.lookup_physical_block(inode, logical_block)
+    }
+
     /// Read an inode by number.
     ///
     /// Inode numbers are 1-based (inode 0 is invalid, inode 2 is root).
@@ -383,12 +405,27 @@ impl Ext4Driver {
         dir_ino: u32,
         name: &str,
     ) -> KernelResult<u32> {
-        // Check dcache first.
+        // Check dcache first (fastest path — O(1) with no I/O).
         if let Some((child_ino, _ftype)) = self.dcache.lookup(dir_ino, name) {
             return Ok(child_ino);
         }
 
-        // Cache miss — linear scan.
+        // Try htree-accelerated lookup if the directory uses hash indexing.
+        // This avoids reading all directory blocks for large directories.
+        if dir_inode.i_flags & inode_flags::INDEX != 0 {
+            if let Ok(Some((child_ino, ftype))) =
+                super::htree::htree_lookup(self, dir_ino, name)
+            {
+                // Cache the result for next time.
+                self.dcache.insert(dir_ino, name, child_ino, ftype);
+                return Ok(child_ino);
+            }
+            // htree lookup failed or returned None — fall through to
+            // linear scan as a fallback (htree may be corrupt or the
+            // directory is being converted).
+        }
+
+        // Fallback: linear scan of all directory entries.
         let entries = self.read_dir_entries(dir_inode)?;
         for (ino, ftype, entry_name) in &entries {
             if entry_name == name {

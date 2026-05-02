@@ -402,6 +402,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell `ls -l` enhancements: "total N" blocks header, symlink target display (" -> target"), -R recursive, -S size-sort, -t time-sort, -r reverse-sort
   - [x] Kshell `chattr`/`lsattr` commands: set/clear/display file attributes (immutable, append-only, hidden, system) on ext4 and FAT
   - [x] Kshell `stat` enhanced output: symbolic permission display, human-readable attributes, filesystem type from statvfs, extended attribute listing
+  - [x] FAT fallocate: cluster pre-allocation without changing file size, zero-fill new clusters, extends existing chains
+  - [x] FAT FSInfo sector: read/write FAT32 FSInfo for cached free cluster count and next-free hint; O(1) statvfs after first call; alloc_cluster starts from hint instead of scanning from cluster 2
+  - [x] Kshell `grep` enhancements: -r recursive directory search (depth 16), -v invert, -c count-only, -w whole-word, -l files-only, -I case-sensitive, multi-file output with filename prefix
+  - [x] VFS mount options: MountOptions struct (ro/noatime/noexec/nosuid), mount_with_options(), remount(), read-only enforcement on all write-path VFS methods, ReadOnlyFilesystem error
+  - [x] Kshell `mount -o` options: mount -o ro,noatime, mount -o remount,ro, bare mount shows options column, /proc/mounts shows Linux-compatible format
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -417,22 +417,33 @@ impl ControlState {
 /// based on the condition result.
 static CONTROL_STACK: Mutex<Vec<ControlState>> = Mutex::new(Vec::new());
 
-/// While-loop state: when collecting, lines are buffered until `done`.
-/// Then the body is replayed while the condition remains true.
-struct WhileLoop {
-    /// The condition command string.
-    condition: String,
+/// What kind of loop is being collected.
+enum LoopKind {
+    /// `while CONDITION; do ... done` — repeats while condition exits 0.
+    While { condition: String },
+    /// `for VAR in WORDS...; do ... done` — iterates over a word list.
+    For { variable: String, words_raw: String },
+}
+
+/// Loop body collector: buffers lines between `do` and `done`.
+///
+/// Works for both `while` and `for` loops. Both use the same `do...done`
+/// body structure and must track each other's nesting (a `for` inside a
+/// `while` needs a matching `done` that doesn't terminate the outer loop).
+struct LoopCollector {
+    /// Whether this is a while or for loop, plus its parameters.
+    kind: LoopKind,
     /// Buffered body lines.
     body: Vec<String>,
-    /// Nesting depth of while/done during collection (0 = our own while).
+    /// Nesting depth of while/for/done during collection (0 = our own loop).
     nesting: u32,
 }
 
-/// Active while-loop collection buffer (only one at a time).
+/// Active loop collection buffer (only one at a time).
 ///
-/// When `Some`, we are collecting lines for a while loop body.
+/// When `Some`, we are collecting lines for a loop body.
 /// When `done` is seen at nesting depth 0, the loop executes.
-static WHILE_LOOP: Mutex<Option<WhileLoop>> = Mutex::new(None);
+static LOOP_COLLECTOR: Mutex<Option<LoopCollector>> = Mutex::new(None);
 
 /// Check whether execution is currently active (not skipped by an
 /// outer control-flow block).
@@ -450,13 +461,14 @@ fn handle_control_flow(line: &str) -> bool {
     let trimmed = line.trim();
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
 
-    // If we're collecting while-loop body lines, buffer them.
+    // If we're collecting loop body lines (while or for), buffer them.
     {
-        let mut wl = WHILE_LOOP.lock();
-        if let Some(ref mut state) = *wl {
+        let mut lc = LOOP_COLLECTOR.lock();
+        if let Some(ref mut state) = *lc {
             match first_word {
-                "while" => {
-                    // Nested while — increase depth.
+                // Both `while` and `for` open a new do..done block,
+                // so both increment nesting when seen inside a loop body.
+                "while" | "for" => {
                     state.nesting = state.nesting.saturating_add(1);
                     state.body.push(String::from(trimmed));
                     return true;
@@ -469,13 +481,22 @@ fn handle_control_flow(line: &str) -> bool {
                         return true;
                     }
                     // Our matching done — execute the loop.
-                    let condition = state.condition.clone();
+                    let kind = core::mem::replace(
+                        &mut state.kind,
+                        LoopKind::While { condition: String::new() },
+                    );
                     let body = state.body.clone();
-                    *wl = None; // Clear the collection state.
-                    drop(wl);
+                    *lc = None; // Clear the collection state.
+                    drop(lc);
 
-                    // Execute the while loop body.
-                    execute_while_loop(&condition, &body);
+                    match kind {
+                        LoopKind::While { condition } => {
+                            execute_while_loop(&condition, &body);
+                        }
+                        LoopKind::For { variable, words_raw } => {
+                            execute_for_loop(&variable, &words_raw, &body);
+                        }
+                    }
                     return true;
                 }
                 "do" => {
@@ -507,19 +528,67 @@ fn handle_control_flow(line: &str) -> bool {
             }
 
             // Start collecting body lines.
-            *WHILE_LOOP.lock() = Some(WhileLoop {
-                condition: String::from(condition),
+            *LOOP_COLLECTOR.lock() = Some(LoopCollector {
+                kind: LoopKind::While { condition: String::from(condition) },
+                body: Vec::new(),
+                nesting: 0,
+            });
+            return true;
+        }
+        "for" => {
+            // Parse: for VAR in WORD1 WORD2 ...; do
+            // or:    for VAR in WORD1 WORD2 ...
+            //        do
+            let rest = trimmed.get(3..).unwrap_or("").trim();
+
+            // Split "VAR in WORDS..." — variable is the first token.
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let variable = parts.next().unwrap_or("").trim();
+            let after_var = parts.next().unwrap_or("").trim();
+
+            if variable.is_empty() {
+                crate::console_println!("Syntax error: for requires a variable name");
+                return true;
+            }
+
+            // Strip leading "in " keyword.
+            let words_part = if let Some(stripped) = after_var.strip_prefix("in") {
+                stripped.trim_start()
+            } else {
+                crate::console_println!("Syntax error: for requires 'in' keyword");
+                return true;
+            };
+
+            // Remove trailing "do" if present (allow `for x in a b c; do`).
+            let words_raw = words_part
+                .strip_suffix("do")
+                .unwrap_or(words_part)
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+
+            if words_raw.is_empty() {
+                crate::console_println!("Syntax error: for requires a word list after 'in'");
+                return true;
+            }
+
+            // Start collecting body lines.
+            *LOOP_COLLECTOR.lock() = Some(LoopCollector {
+                kind: LoopKind::For {
+                    variable: String::from(variable),
+                    words_raw: String::from(words_raw),
+                },
                 body: Vec::new(),
                 nesting: 0,
             });
             return true;
         }
         "do" => {
-            // `do` on its own line without while — syntax error or no-op.
+            // `do` on its own line without a loop — syntax error or no-op.
             return true;
         }
         "done" => {
-            crate::console_println!("Syntax error: done without while");
+            crate::console_println!("Syntax error: done without while/for");
             return true;
         }
         _ => {}
@@ -665,6 +734,93 @@ fn execute_while_loop(condition: &str, body: &[String]) {
             execute(line);
         }
     }
+}
+
+/// Execute a for loop: expand the word list, iterate, set the variable,
+/// and replay the body for each word.
+///
+/// The word list is expanded (variable substitution) at execution time,
+/// then split on whitespace.  Quoted strings are treated as single words.
+///
+/// Same 1000-iteration safety limit as while loops (the word list itself
+/// is the bound, but a malicious `seq`-style expansion could still be huge).
+fn execute_for_loop(variable: &str, words_raw: &str, body: &[String]) {
+    // Expand variables in the word list now (it was stored raw).
+    let expanded = expand_vars(words_raw);
+    let words = split_words(&expanded);
+
+    if words.len() > 1000 {
+        crate::console_println!(
+            "Error: for loop word list too large ({} words, max 1000)",
+            words.len(),
+        );
+        return;
+    }
+
+    for word in &words {
+        // Set the loop variable.
+        ENV_VARS.lock().insert(String::from(variable), word.clone());
+
+        // Execute the body lines.
+        for line in body {
+            execute(line);
+        }
+    }
+}
+
+/// Split a string into words, respecting single and double quotes.
+///
+/// - Unquoted text is split on whitespace.
+/// - `"foo bar"` → single word `foo bar`.
+/// - `'foo bar'` → single word `foo bar`.
+/// - Quotes can appear mid-word: `a"b c"d` → `ab cd`.
+fn split_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        match ch {
+            ' ' | '\t' => {
+                if !current.is_empty() {
+                    words.push(core::mem::take(&mut current));
+                }
+                chars.next();
+            }
+            '"' => {
+                chars.next(); // consume opening quote
+                while let Some(&c) = chars.peek() {
+                    if c == '"' {
+                        chars.next(); // consume closing quote
+                        break;
+                    }
+                    current.push(c);
+                    chars.next();
+                }
+            }
+            '\'' => {
+                chars.next(); // consume opening quote
+                while let Some(&c) = chars.peek() {
+                    if c == '\'' {
+                        chars.next(); // consume closing quote
+                        break;
+                    }
+                    current.push(c);
+                    chars.next();
+                }
+            }
+            _ => {
+                current.push(ch);
+                chars.next();
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    words
 }
 
 // ---------------------------------------------------------------------------

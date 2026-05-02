@@ -246,6 +246,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] File creation/deletion (write_file, remove via VFS)
   - [x] Directory entry insertion/removal (add_dir_entry, mkdir, rmdir)
   - [x] Journal (jbd2 write-ahead log: transaction begin/log/commit, circular replay)
+  - [x] Block/inode reclamation on delete and overwrite (no resource leaks)
+  - [x] Crash-safe overwrite (allocate new → update inode → free old)
+  - [x] Rename/move (files and directories, cross-directory with ".." update)
+  - [x] Rich metadata (permissions, ownership, timestamps, immutable/append-only flags)
+  - [x] Symlink create/read (fast symlinks ≤60 bytes in inode, slow via data blocks)
+  - [x] Efficient partial I/O (extent-aware read_at, in-place write_at via block lookup)
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
@@ -256,7 +262,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Path resolution cache (dcache, 64-entry LRU with prefix invalidation)
   - [x] Efficient partial I/O (FAT read_at/write_at/truncate override default read-all-rewrite-all)
   - [x] Filesystem change notification system (inotify equivalent, async watches with bounded queues)
-  - [x] Recycle bin (per-filesystem /_TRASH with _INDEX metadata file, trash/list/restore/empty)
+  - [x] Recycle bin (per-filesystem /_TRASH with _INDEX metadata file, trash/list/restore/empty, recursive directory trash/purge)
   - [x] 30 filesystem syscalls (600-639): file handles, trash, watch/notify, journal, metadata/xattrs, symlinks
   - [x] Change journal (persistent across reboots, JSON-lines /_JOURNAL file, 1024-entry ring buffer, 3 syscalls)
   - [x] In-memory filesystem (memfs/ramfs) for /tmp and pseudo-FS foundation, mounted at /tmp during boot

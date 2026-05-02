@@ -388,6 +388,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ext4 inline xattr support: reads xattrs from both inode body (inline) and external block, Linux compatibility for security.selinux and other inline attrs
   - [x] ext4 creation time (i_crtime): metadata() now reads creation time from extra inode fields
   - [x] Kshell timestamp formatting: stat and ls -l show YYYY-MM-DD HH:MM:SS via civil_from_days algorithm instead of raw epoch seconds
+  - [x] Kshell diff command: line-level unified diff with LCS algorithm, 3-line context, hunk headers, 2000-line cap (separate from byte-level cmp)
+  - [x] ext4 depth>0 extent tree write support: write_to_existing_blocks, extend_file_data, and last_extent_end now handle multi-level extent trees (leaf block read-modify-write with checksum stamping)
+  - [x] Kshell watch command: real-time filesystem change monitoring via notify system, -r recursive flag, event display (CREATE/DELETE/MODIFY/RENAME/META)
+  - [x] ext4 48-bit block count: i_blocks_lo + i_osd2[0..2] high bits, supports files >2TB; FileMeta.blocks field; stat shows block count
+  - [x] ext4 i_file_acl_high offset fix: was reading/writing i_osd2[4..6] (i_uid_high) instead of [2..4] (i_file_acl_high), corrupting UIDs on xattr-heavy filesystems
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

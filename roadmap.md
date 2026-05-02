@@ -321,6 +321,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Procfs expansion: /proc/vmstat (frames, swap, zram, kswapd, OOM), /proc/buddyinfo (buddy allocator per-order), /proc/swaps (swap devices with priority)
   - [x] Sysctl name-based API: list_all(), find_by_name(), set_by_name() for filesystem and shell access
   - [x] Self-tests: recursive copy/remove (3-level directory tree), cross-mount rename (memfs↔ext4), paginated readdir_at (page boundary, overlap, tail, past-end), VFS dcache (hit verification, invalidation, prefix matching), htree hash functions (determinism, divergence, scan_leaf_block), glob matching (wildcards, char classes, ranges, negation, escaping, edge cases), sysfs (directory layout, read/write, permissions)
+  - [x] Kshell output redirection (`> file`, `>> file`) and piping (`cmd1 | cmd2`): capture buffer, pipe-input variants for sort/uniq/grep/head/tail/wc/cat/nl/rev
+  - [x] Kshell commands: source (script execution with #comments, 8-level depth), seq, nl, rev, sleep, printenv, true/false
+  - [x] Kshell command history: 64-entry ring buffer, Up/Down arrow browsing, duplicate suppression, saved live-line restoration
+  - [x] Kshell cursor-aware line editing: Left/Right arrow, Home/End, insert/delete at cursor, readline shortcuts (Ctrl+A/E/C/K/U/W/L), keyboard echo control
+  - [x] Kshell tab completion: command names (80+ built-in commands) and file paths (VFS directory listing), longest-common-prefix for multi-candidate, inline insertion
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

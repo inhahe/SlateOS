@@ -5250,14 +5250,28 @@ fn cmd_ls(args: &str) {
 
             if long_format {
                 // Long format: type+perms links uid gid size date name
+                // First pass: gather metadata and compute total blocks.
+                let mut total_blocks: u64 = 0;
+                let mut metas: Vec<Option<crate::fs::vfs::FileMeta>> =
+                    Vec::with_capacity(filtered.len());
+
                 for entry in &filtered {
-                    // Build the entry's full path for metadata lookup.
                     let full_path = if path == "/" {
                         alloc::format!("/{}", entry.name)
                     } else {
                         alloc::format!("{}/{}", path, entry.name)
                     };
+                    if let Ok(meta) = crate::fs::Vfs::metadata(&full_path) {
+                        total_blocks = total_blocks.saturating_add(meta.blocks);
+                        metas.push(Some(meta));
+                    } else {
+                        metas.push(None);
+                    }
+                }
 
+                shell_println!("total {}", total_blocks);
+
+                for (i, entry) in filtered.iter().enumerate() {
                     let type_ch = match entry.entry_type {
                         crate::fs::EntryType::Directory => 'd',
                         crate::fs::EntryType::File => '-',
@@ -5265,8 +5279,7 @@ fn cmd_ls(args: &str) {
                         crate::fs::EntryType::VolumeLabel => 'v',
                     };
 
-                    // Try to get rich metadata; fall back to basic info.
-                    if let Ok(meta) = crate::fs::Vfs::metadata(&full_path) {
+                    if let Some(Some(meta)) = metas.get(i) {
                         let perms = format_perms(meta.permissions);
                         let perm_str = core::str::from_utf8(&perms).unwrap_or("---------");
 
@@ -5283,11 +5296,26 @@ fn cmd_ls(args: &str) {
                             String::from("-")
                         };
 
+                        // For symlinks, show " -> target".
+                        let suffix = if entry.entry_type == crate::fs::EntryType::Symlink {
+                            let full_path = if path == "/" {
+                                alloc::format!("/{}", entry.name)
+                            } else {
+                                alloc::format!("{}/{}", path, entry.name)
+                            };
+                            match crate::fs::Vfs::readlink(&full_path) {
+                                Ok(target) => alloc::format!(" -> {}", target),
+                                Err(_) => String::new(),
+                            }
+                        } else {
+                            String::new()
+                        };
+
                         shell_println!(
-                            "{}{} {:>3} {:>5} {:>5} {:>8} {} {}",
+                            "{}{} {:>3} {:>5} {:>5} {:>8} {} {}{}",
                             type_ch, perm_str, meta.nlinks,
                             meta.uid, meta.gid, size_str,
-                            time_str, entry.name,
+                            time_str, entry.name, suffix,
                         );
                     } else {
                         // Metadata unavailable — basic listing.

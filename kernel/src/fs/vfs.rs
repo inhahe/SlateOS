@@ -2946,6 +2946,297 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[vfs]     readdir_at pagination test PASSED");
     }
 
+    // ── Glob pattern matching tests ──
+    glob_self_test()?;
+
     serial_println!("[vfs] Self-test PASSED");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Glob pattern matching
+// ---------------------------------------------------------------------------
+
+/// Match a filename against a glob pattern.
+///
+/// Supports:
+/// - `*` — matches zero or more characters (except `/`)
+/// - `?` — matches exactly one character (except `/`)
+/// - `[abc]` — matches any one of the characters in the set
+/// - `[a-z]` — matches any character in the range
+/// - `[!abc]` or `[^abc]` — negated character class
+/// - `\\` — literal escape (e.g., `\\*` matches a literal `*`)
+///
+/// Case-insensitive by default (controlled by `case_insensitive` parameter).
+///
+/// This operates on a single filename component (no `/` matching).  For
+/// full path globbing, use `Vfs::glob()`.
+///
+/// ## Examples
+///
+/// - `glob_match("hello.rs", "*.rs", false)` → true
+/// - `glob_match("hello.rs", "hello.?s", false)` → true
+/// - `glob_match("test.txt", "test.[tx][tx][tx]", false)` → true
+/// - `glob_match("abc", "a*c", false)` → true
+/// - `glob_match("abc", "a?c", false)` → true
+pub fn glob_match(name: &str, pattern: &str, case_insensitive: bool) -> bool {
+    glob_match_inner(name.as_bytes(), pattern.as_bytes(), case_insensitive)
+}
+
+/// Inner recursive glob matcher operating on byte slices.
+///
+/// Uses a simple recursive algorithm with backtracking.  For the patterns
+/// and name lengths we encounter in a filesystem (max 255 bytes), this is
+/// efficient enough.  A pathological case like `*****abc` could be slow
+/// on very long names, but that doesn't happen in practice.
+fn glob_match_inner(name: &[u8], pattern: &[u8], ci: bool) -> bool {
+    let mut ni = 0;
+    let mut pi = 0;
+
+    // Track the last `*` position for backtracking.
+    let mut star_pi: Option<usize> = None;
+    let mut star_ni: usize = 0;
+
+    while ni < name.len() {
+        if pi < pattern.len() {
+            match pattern.get(pi).copied() {
+                Some(b'?') => {
+                    // Match any single character.
+                    ni += 1;
+                    pi += 1;
+                    continue;
+                }
+                Some(b'*') => {
+                    // Record backtrack point and try matching zero chars.
+                    star_pi = Some(pi);
+                    star_ni = ni;
+                    pi += 1;
+                    continue;
+                }
+                Some(b'[') => {
+                    // Character class.
+                    if let Some((matched, end_pi)) = match_char_class(
+                        name.get(ni).copied().unwrap_or(0),
+                        pattern,
+                        pi,
+                        ci,
+                    ) {
+                        if matched {
+                            ni += 1;
+                            pi = end_pi;
+                            continue;
+                        }
+                    }
+                    // Class didn't match — try backtracking.
+                    if let Some(sp) = star_pi {
+                        star_ni += 1;
+                        ni = star_ni;
+                        pi = sp + 1;
+                        continue;
+                    }
+                    return false;
+                }
+                Some(b'\\') => {
+                    // Escaped character — match literally.
+                    pi += 1;
+                    let pc = pattern.get(pi).copied().unwrap_or(b'\\');
+                    let nc = name.get(ni).copied().unwrap_or(0);
+                    if char_eq(nc, pc, ci) {
+                        ni += 1;
+                        pi += 1;
+                        continue;
+                    }
+                    if let Some(sp) = star_pi {
+                        star_ni += 1;
+                        ni = star_ni;
+                        pi = sp + 1;
+                        continue;
+                    }
+                    return false;
+                }
+                Some(pc) => {
+                    let nc = name.get(ni).copied().unwrap_or(0);
+                    if char_eq(nc, pc, ci) {
+                        ni += 1;
+                        pi += 1;
+                        continue;
+                    }
+                    // Mismatch — try backtracking to last `*`.
+                    if let Some(sp) = star_pi {
+                        star_ni += 1;
+                        ni = star_ni;
+                        pi = sp + 1;
+                        continue;
+                    }
+                    return false;
+                }
+                None => {
+                    // Pattern exhausted but name has characters left.
+                    if let Some(sp) = star_pi {
+                        star_ni += 1;
+                        ni = star_ni;
+                        pi = sp + 1;
+                        continue;
+                    }
+                    return false;
+                }
+            }
+        } else {
+            // Pattern exhausted.  Backtrack if we had a `*`.
+            if let Some(sp) = star_pi {
+                star_ni += 1;
+                ni = star_ni;
+                pi = sp + 1;
+                continue;
+            }
+            return false;
+        }
+    }
+
+    // Name exhausted.  Skip any remaining `*`s in pattern.
+    while pattern.get(pi) == Some(&b'*') {
+        pi += 1;
+    }
+
+    // Both must be exhausted for a match.
+    pi == pattern.len()
+}
+
+/// Match a character class `[...]` at the given pattern index.
+///
+/// Returns `Some((matched, end_index))` where `end_index` is the byte
+/// position after the closing `]`.  Returns `None` if the pattern is
+/// malformed (no closing `]`).
+fn match_char_class(ch: u8, pattern: &[u8], start: usize, ci: bool) -> Option<(bool, usize)> {
+    // start points to `[`; advance past it.
+    let mut pi = start + 1;
+    let mut negated = false;
+
+    if pattern.get(pi) == Some(&b'!') || pattern.get(pi) == Some(&b'^') {
+        negated = true;
+        pi += 1;
+    }
+
+    let mut matched = false;
+
+    // Handle `]` as first character in class (literal `]`).
+    if pattern.get(pi) == Some(&b']') {
+        if char_eq(ch, b']', ci) {
+            matched = true;
+        }
+        pi += 1;
+    }
+
+    while let Some(&c) = pattern.get(pi) {
+        if c == b']' {
+            // End of class.
+            let result = if negated { !matched } else { matched };
+            return Some((result, pi + 1));
+        }
+
+        // Check for range: `a-z`.
+        if pattern.get(pi + 1) == Some(&b'-') {
+            if let Some(&end_c) = pattern.get(pi + 2) {
+                if end_c != b']' {
+                    // It's a range.
+                    let lo = if ci { c.to_ascii_lowercase() } else { c };
+                    let hi = if ci { end_c.to_ascii_lowercase() } else { end_c };
+                    let test = if ci { ch.to_ascii_lowercase() } else { ch };
+                    if test >= lo && test <= hi {
+                        matched = true;
+                    }
+                    pi += 3;
+                    continue;
+                }
+            }
+        }
+
+        // Single character.
+        if char_eq(ch, c, ci) {
+            matched = true;
+        }
+        pi += 1;
+    }
+
+    // No closing `]` found — malformed pattern.
+    None
+}
+
+/// Compare two bytes, optionally case-insensitively.
+fn char_eq(a: u8, b: u8, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        a.to_ascii_lowercase() == b.to_ascii_lowercase()
+    } else {
+        a == b
+    }
+}
+
+/// Self-test for glob pattern matching.
+///
+/// Exercises `*`, `?`, character classes, negation, ranges, escaping,
+/// and case-insensitive mode.
+#[allow(clippy::needless_pass_by_value)]
+pub fn glob_self_test() -> KernelResult<()> {
+    use crate::serial_println;
+    serial_println!("[glob] Running self-test...");
+
+    // Basic wildcard.
+    assert!(glob_match("hello.rs", "*.rs", false));
+    assert!(glob_match("hello.rs", "hello.*", false));
+    assert!(glob_match("hello.rs", "*", false));
+    assert!(glob_match("", "*", false));
+    assert!(!glob_match("hello.rs", "*.txt", false));
+    serial_println!("[glob]   wildcard (*): OK");
+
+    // Single char.
+    assert!(glob_match("hello.rs", "hell?.rs", false));
+    assert!(!glob_match("hello.rs", "hell?.txt", false));
+    assert!(!glob_match("hello.rs", "hel?.rs", false)); // ? matches exactly one
+    serial_println!("[glob]   single char (?): OK");
+
+    // Character classes.
+    assert!(glob_match("hello.rs", "hello.[rt]s", false));
+    assert!(glob_match("a", "[abc]", false));
+    assert!(!glob_match("d", "[abc]", false));
+    serial_println!("[glob]   char class []: OK");
+
+    // Negated classes.
+    assert!(glob_match("d", "[!abc]", false));
+    assert!(!glob_match("a", "[!abc]", false));
+    assert!(glob_match("d", "[^abc]", false));
+    serial_println!("[glob]   negated class [!]: OK");
+
+    // Ranges.
+    assert!(glob_match("m", "[a-z]", false));
+    assert!(!glob_match("5", "[a-z]", false));
+    assert!(glob_match("5", "[0-9]", false));
+    serial_println!("[glob]   ranges [a-z]: OK");
+
+    // Case insensitive.
+    assert!(glob_match("Hello.RS", "*.rs", true));
+    assert!(!glob_match("Hello.RS", "*.rs", false));
+    serial_println!("[glob]   case insensitive: OK");
+
+    // Escape.
+    assert!(glob_match("file*.txt", "file\\*.txt", false));
+    assert!(!glob_match("fileX.txt", "file\\*.txt", false));
+    serial_println!("[glob]   escape: OK");
+
+    // Complex patterns.
+    assert!(glob_match("abcdef", "a*f", false));
+    assert!(glob_match("abcdef", "a*d*f", false));
+    assert!(glob_match("abcdef", "*", false));
+    assert!(glob_match("abc", "abc", false));
+    assert!(!glob_match("abc", "abd", false));
+    serial_println!("[glob]   complex patterns: OK");
+
+    // Edge cases.
+    assert!(glob_match("", "", false));
+    assert!(!glob_match("a", "", false));
+    assert!(!glob_match("", "a", false));
+    assert!(glob_match("", "*", false));
+    serial_println!("[glob]   edge cases: OK");
+
+    serial_println!("[glob] Self-test passed.");
     Ok(())
 }

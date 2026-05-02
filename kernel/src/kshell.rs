@@ -1292,9 +1292,11 @@ fn cmd_find(args: &str) {
     } else if !args.is_empty() {
         ("/", args)
     } else {
-        crate::console_println!("Usage: find [path] <name-pattern>");
-        crate::console_println!("  Searches for files/dirs containing the pattern.");
-        crate::console_println!("  Example: find /tmp log");
+        crate::console_println!("Usage: find [path] <pattern>");
+        crate::console_println!("  Searches for files/dirs matching the glob pattern.");
+        crate::console_println!("  Patterns: * (any), ? (one char), [abc] (set), [a-z] (range)");
+        crate::console_println!("  Example: find /tmp *.txt");
+        crate::console_println!("  Example: find / *.rs");
         return;
     };
 
@@ -1306,15 +1308,20 @@ fn cmd_find(args: &str) {
         s
     };
 
+    // Detect whether the pattern contains glob metacharacters.
+    let is_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
+
     let mut count: u64 = 0;
-    find_recurse(&root, pattern, &mut count, 0);
+    find_recurse(&root, pattern, is_glob, &mut count, 0);
     crate::console_println!("\n{} matches found", count);
 }
 
 /// Recursive helper for find — search directory tree for name matches.
 ///
-/// Uses case-insensitive substring matching.  Limits depth to 16.
-fn find_recurse(path: &str, pattern: &str, count: &mut u64, depth: u32) {
+/// Uses glob matching if the pattern contains metacharacters (`*`, `?`,
+/// `[`), otherwise falls back to case-insensitive substring matching.
+/// Limits depth to 16.
+fn find_recurse(path: &str, pattern: &str, is_glob: bool, count: &mut u64, depth: u32) {
     if depth > 16 {
         return;
     }
@@ -1331,10 +1338,18 @@ fn find_recurse(path: &str, pattern: &str, count: &mut u64, depth: u32) {
             alloc::format!("{}/{}", path, entry.name)
         };
 
-        // Case-insensitive substring match.
-        let name_lower = entry.name.to_ascii_lowercase();
-        let pattern_lower = pattern.to_ascii_lowercase();
-        if name_lower.contains(&pattern_lower) {
+        // Match the entry name against the pattern.
+        let matched = if is_glob {
+            // Glob pattern matching (case-insensitive).
+            crate::fs::vfs::glob_match(&entry.name, pattern, true)
+        } else {
+            // Legacy: case-insensitive substring match.
+            let name_lower = entry.name.to_ascii_lowercase();
+            let pattern_lower = pattern.to_ascii_lowercase();
+            name_lower.contains(&pattern_lower)
+        };
+
+        if matched {
             let type_str = match entry.entry_type {
                 crate::fs::EntryType::File => "",
                 crate::fs::EntryType::Directory => "/",
@@ -1346,7 +1361,7 @@ fn find_recurse(path: &str, pattern: &str, count: &mut u64, depth: u32) {
         }
 
         if entry.entry_type == crate::fs::EntryType::Directory {
-            find_recurse(&child_path, pattern, count, depth + 1);
+            find_recurse(&child_path, pattern, is_glob, count, depth + 1);
         }
     }
 }

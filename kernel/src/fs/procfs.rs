@@ -251,11 +251,13 @@ fn gen_config() -> Vec<u8> {
 /// Format: `<mount_path> <fs_type>` per line (similar to Linux `/proc/mounts`
 /// but simplified — we don't have mount options yet).
 fn gen_mounts() -> Vec<u8> {
-    let mounts = crate::fs::Vfs::mounts();
-    let mut s = String::with_capacity(128);
+    let mounts = crate::fs::Vfs::mounts_full();
+    let mut s = String::with_capacity(256);
 
-    for (path, fs_type) in &mounts {
-        s.push_str(&format!("{path} {fs_type}\n"));
+    // Format like Linux /proc/mounts: device mountpoint fstype options 0 0
+    for (path, fs_type, options) in &mounts {
+        let opts = options.to_string();
+        s.push_str(&format!("none {path} {fs_type} {opts} 0 0\n"));
     }
 
     s.into_bytes()

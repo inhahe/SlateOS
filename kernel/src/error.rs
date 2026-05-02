@@ -84,6 +84,8 @@ pub enum KernelError {
     NotEmpty = -507,
     /// Data integrity check failed (e.g., checksum mismatch).
     CorruptedData = -508,
+    /// The filesystem is mounted read-only; write operations are denied.
+    ReadOnlyFilesystem = -509,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -129,6 +131,7 @@ impl KernelError {
             Self::TooManyLinks => "too many symbolic links",
             Self::NotEmpty => "directory not empty",
             Self::CorruptedData => "data integrity check failed",
+            Self::ReadOnlyFilesystem => "read-only filesystem",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

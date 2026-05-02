@@ -671,11 +671,88 @@ pub trait FileSystem: Send {
 // ---------------------------------------------------------------------------
 
 /// A mount point in the VFS.
+/// Per-mount options controlling filesystem behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct MountOptions {
+    /// Mounted read-only — all write operations return `ReadOnlyFilesystem`.
+    pub read_only: bool,
+    /// Don't update access timestamps on reads.
+    pub noatime: bool,
+    /// Don't allow execution from this mount (reserved for future use).
+    pub noexec: bool,
+    /// Don't honor setuid/setgid bits (reserved for future use).
+    pub nosuid: bool,
+}
+
+impl MountOptions {
+    /// Default options: rw, relatime, suid, exec.
+    pub const fn defaults() -> Self {
+        Self {
+            read_only: false,
+            noatime: false,
+            noexec: false,
+            nosuid: false,
+        }
+    }
+
+    /// Parse mount options from a comma-separated string (e.g., "ro,noatime").
+    pub fn parse(opts: &str) -> Self {
+        let mut result = Self::defaults();
+        for opt in opts.split(',') {
+            let opt = opt.trim();
+            match opt {
+                "ro" | "readonly" => result.read_only = true,
+                "rw" | "readwrite" => result.read_only = false,
+                "noatime" => result.noatime = true,
+                "atime" => result.noatime = false,
+                "noexec" => result.noexec = true,
+                "exec" => result.noexec = false,
+                "nosuid" => result.nosuid = true,
+                "suid" => result.nosuid = false,
+                "" => {}
+                _ => {
+                    crate::serial_println!("[vfs] Ignoring unknown mount option: '{}'", opt);
+                }
+            }
+        }
+        result
+    }
+
+    /// Format options as a comma-separated string for /proc/mounts.
+    pub fn to_string(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.read_only {
+            parts.push("ro");
+        } else {
+            parts.push("rw");
+        }
+        if self.noatime {
+            parts.push("noatime");
+        }
+        if self.noexec {
+            parts.push("noexec");
+        }
+        if self.nosuid {
+            parts.push("nosuid");
+        }
+        let mut s = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(part);
+        }
+        s
+    }
+}
+
 struct MountPoint {
     /// Path where this filesystem is mounted (e.g., `"/"`).
     path: String,
     /// The filesystem implementation.
     fs: Box<dyn FileSystem>,
+    /// Mount options (read-only, noatime, etc.).
+    options: MountOptions,
 }
 
 /// The global VFS state.
@@ -1063,6 +1140,15 @@ impl Vfs {
     /// `mount_path` must start with `/`.  Multiple mounts are supported;
     /// the VFS uses longest-prefix matching to route operations.
     pub fn mount(mount_path: &str, fs: Box<dyn FileSystem>) -> KernelResult<()> {
+        Self::mount_with_options(mount_path, fs, MountOptions::defaults())
+    }
+
+    /// Mount a filesystem at the given path with specific mount options.
+    pub fn mount_with_options(
+        mount_path: &str,
+        fs: Box<dyn FileSystem>,
+        options: MountOptions,
+    ) -> KernelResult<()> {
         if !mount_path.starts_with('/') {
             return Err(KernelError::InvalidArgument);
         }
@@ -1076,15 +1162,18 @@ impl Vfs {
             }
         }
 
+        let opts_str = options.to_string();
         crate::serial_println!(
-            "[vfs] Mounted {} filesystem at '{}'",
+            "[vfs] Mounted {} filesystem at '{}' ({})",
             fs.fs_type(),
-            mount_path
+            mount_path,
+            opts_str,
         );
 
         vfs.mounts.push(MountPoint {
             path: String::from(mount_path),
             fs,
+            options,
         });
 
         // Mount changes affect path resolution — invalidate entire dcache.
@@ -1457,6 +1546,7 @@ impl Vfs {
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1624,6 +1714,7 @@ impl Vfs {
     /// Does NOT follow the final symlink — removes the link itself.
     pub fn remove(path: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1643,6 +1734,7 @@ impl Vfs {
     /// new directory name (not followed if it happens to exist).
     pub fn mkdir(path: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1707,6 +1799,7 @@ impl Vfs {
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1732,6 +1825,7 @@ impl Vfs {
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1761,6 +1855,7 @@ impl Vfs {
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1779,6 +1874,7 @@ impl Vfs {
     /// cause fragmentation.
     pub fn fallocate(path: &str, size: u64) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.fallocate(relative, size)
@@ -1790,6 +1886,8 @@ impl Vfs {
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
         let from = Self::resolve_no_follow(from)?;
         let to = Self::resolve_no_follow(to)?;
+        check_writable(&from)?;
+        check_writable(&to)?;
 
         // Check if both paths are on the same mount point.
         let same_mount = {
@@ -1852,6 +1950,39 @@ impl Vfs {
             .iter()
             .map(|mp| (mp.path.clone(), String::from(mp.fs.fs_type())))
             .collect()
+    }
+
+    /// List all mount points with full information (path, fs type, options).
+    pub fn mounts_full() -> Vec<(String, String, MountOptions)> {
+        let vfs = VFS.lock();
+        vfs.mounts
+            .iter()
+            .map(|mp| (mp.path.clone(), String::from(mp.fs.fs_type()), mp.options))
+            .collect()
+    }
+
+    /// Get mount options for the filesystem containing `path`.
+    pub fn mount_options(path: &str) -> KernelResult<MountOptions> {
+        let mut vfs = VFS.lock();
+        let (mp, _) = find_mount(&mut vfs, path)?;
+        Ok(mp.options)
+    }
+
+    /// Re-mount a filesystem with new options (e.g., `remount,ro`).
+    pub fn remount(mount_path: &str, options: MountOptions) -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        for mp in &mut vfs.mounts {
+            if mp.path == mount_path {
+                crate::serial_println!(
+                    "[vfs] Remounted '{}' with options: {}",
+                    mount_path,
+                    options.to_string(),
+                );
+                mp.options = options;
+                return Ok(());
+            }
+        }
+        Err(KernelError::NotFound)
     }
 
     /// Find mount-point names that are direct children of `dir_path`.
@@ -1920,6 +2051,7 @@ impl Vfs {
     /// Set file attributes (immutable, append-only, hidden, system).
     pub fn set_attributes(path: &str, attrs: FileAttr) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1933,6 +2065,7 @@ impl Vfs {
     /// Set ownership (uid/gid).
     pub fn set_owner(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1946,6 +2079,7 @@ impl Vfs {
     /// Set Unix-style permission bits.
     pub fn set_permissions(path: &str, permissions: u16) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1980,6 +2114,7 @@ impl Vfs {
     /// Set an extended attribute.
     pub fn set_xattr(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1993,6 +2128,7 @@ impl Vfs {
     /// Remove an extended attribute.
     pub fn remove_xattr(path: &str, key: &str) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -2019,6 +2155,7 @@ impl Vfs {
     /// string it points to (stored as-is, resolved on traversal).
     pub fn symlink(path: &str, target: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
+        check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -2046,6 +2183,7 @@ impl Vfs {
     pub fn link(existing: &str, new_path: &str) -> KernelResult<()> {
         let existing = Self::resolve_follow(existing)?;
         let new_path = Self::resolve_no_follow(new_path)?;
+        check_writable(&new_path)?;
 
         {
             let mut vfs = VFS.lock();
@@ -2769,6 +2907,30 @@ fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a
     // SAFETY: We checked `best_idx` is Some and within bounds.
     let mp = &mut vfs.mounts[idx];
     Ok((mp, relative))
+}
+
+/// Check that the mount for `path` allows writes.
+///
+/// Returns `ReadOnlyFilesystem` if the mount is read-only.
+/// Does not hold the VFS lock after returning.
+fn check_writable(path: &str) -> KernelResult<()> {
+    let vfs = VFS.lock();
+    // Find mount without &mut (we only need to read options).
+    let mut best_len = 0;
+    let mut best_ro = false;
+    for mp in &vfs.mounts {
+        if mount_matches(&mp.path, path) && mp.path.len() >= best_len {
+            best_len = mp.path.len();
+            best_ro = mp.options.read_only;
+        }
+    }
+    if best_len == 0 {
+        return Err(KernelError::NotFound);
+    }
+    if best_ro {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

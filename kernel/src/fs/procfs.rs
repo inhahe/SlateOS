@@ -63,6 +63,11 @@ const ROOT_FILES: &[&str] = &[
     "stat",
 ];
 
+/// Names of virtual files inside each `/proc/<pid>/` directory.
+const PID_FILES: &[&str] = &[
+    "status",
+];
+
 // ---------------------------------------------------------------------------
 // Content generators
 //
@@ -230,6 +235,52 @@ fn gen_stat() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `/proc/<pid>/status` — per-task status information.
+fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
+    use crate::sched::task::TaskState;
+
+    let tasks = crate::sched::task_list();
+    let task = tasks.iter().find(|t| t.id == task_id)
+        .ok_or(KernelError::NotFound)?;
+
+    let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
+        .unwrap_or("???");
+    let state_str = match task.state {
+        TaskState::Running => "running",
+        TaskState::Ready => "ready",
+        TaskState::Blocked => "blocked",
+        TaskState::Suspended => "suspended",
+        TaskState::Dead => "dead",
+    };
+
+    // CPU time in milliseconds (timer ticks are 10 ms each at 100 Hz).
+    let cpu_ms = task.total_ticks.saturating_mul(10);
+
+    let mut s = String::with_capacity(256);
+    s.push_str(&format!("Name:     {name}\n"));
+    s.push_str(&format!("Pid:      {}\n", task.id));
+    s.push_str(&format!("State:    {state_str}\n"));
+    s.push_str(&format!("Priority: {}\n", task.priority));
+    s.push_str(&format!("CpuTime:  {cpu_ms} ms\n"));
+    s.push_str(&format!("Scheduled:{}\n", task.schedule_count));
+    s.push_str(&format!("LastCpu:  {}\n", task.last_cpu));
+
+    Ok(s.into_bytes())
+}
+
+/// Generate content for a per-PID virtual file.
+fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
+    match file_name {
+        "status" => gen_pid_status(task_id),
+        _ => Err(KernelError::NotFound),
+    }
+}
+
+/// Check if a task ID currently exists in the scheduler.
+fn task_exists(task_id: u64) -> bool {
+    crate::sched::task_list().iter().any(|t| t.id == task_id)
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution helpers
 // ---------------------------------------------------------------------------
@@ -239,7 +290,7 @@ fn strip_root(path: &str) -> &str {
     path.strip_prefix('/').unwrap_or(path)
 }
 
-/// Generate content for a virtual file by name.
+/// Generate content for a root-level virtual file by name.
 fn generate(name: &str) -> KernelResult<Vec<u8>> {
     match name {
         "version" => Ok(gen_version()),
@@ -250,6 +301,56 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "stat" => Ok(gen_stat()),
         _ => Err(KernelError::NotFound),
     }
+}
+
+/// Classify a relative procfs path into a typed request.
+///
+/// Returns:
+/// - `ProcPath::Root` — the root directory itself
+/// - `ProcPath::RootFile(name)` — a file in the root (e.g., "meminfo")
+/// - `ProcPath::PidDir(id)` — a per-PID directory (e.g., "1")
+/// - `ProcPath::PidFile(id, name)` — a file inside a PID dir (e.g., "1/status")
+/// - `ProcPath::NotFound` — unrecognized path
+enum ProcPath<'a> {
+    Root,
+    RootFile(&'a str),
+    PidDir(u64),
+    PidFile(u64, &'a str),
+    NotFound,
+}
+
+fn classify_path(rel: &str) -> ProcPath<'_> {
+    if rel.is_empty() {
+        return ProcPath::Root;
+    }
+
+    // Split into first component and optional remainder.
+    let (first, rest) = match rel.find('/') {
+        Some(pos) => {
+            let (a, b) = rel.split_at(pos);
+            // b starts with '/'; strip it.
+            (a, b.get(1..).unwrap_or(""))
+        }
+        None => (rel, ""),
+    };
+
+    // Try root-level file first.
+    if rest.is_empty() && ROOT_FILES.contains(&first) {
+        return ProcPath::RootFile(first);
+    }
+
+    // Try numeric PID directory.
+    if let Ok(pid) = first.parse::<u64>() {
+        if rest.is_empty() {
+            return ProcPath::PidDir(pid);
+        }
+        // File inside PID directory (no nested subdirs).
+        if !rest.contains('/') && PID_FILES.contains(&rest) {
+            return ProcPath::PidFile(pid, rest);
+        }
+    }
+
+    ProcPath::NotFound
 }
 
 // ---------------------------------------------------------------------------
@@ -264,64 +365,124 @@ impl FileSystem for ProcFs {
     fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
         let rel = strip_root(path);
 
-        if rel.is_empty() {
-            // Root directory: list all virtual files.
-            let entries: Vec<DirEntry> = ROOT_FILES
-                .iter()
-                .map(|name| {
-                    // Generate each file to get its actual size.
-                    let size = generate(name).map_or(0, |d| d.len() as u64);
-                    DirEntry {
-                        name: String::from(*name),
-                        entry_type: EntryType::File,
-                        size,
-                    }
-                })
-                .collect();
-            Ok(entries)
-        } else {
-            // No subdirectories yet (per-PID dirs are future work).
-            Err(KernelError::NotADirectory)
+        match classify_path(rel) {
+            ProcPath::Root => {
+                // Root directory: list virtual files + per-PID directories.
+                let mut entries: Vec<DirEntry> = ROOT_FILES
+                    .iter()
+                    .map(|name| {
+                        let size = generate(name).map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            name: String::from(*name),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
+
+                // Add per-PID directories for all live tasks.
+                for task in &crate::sched::task_list() {
+                    entries.push(DirEntry {
+                        name: format!("{}", task.id),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    });
+                }
+
+                Ok(entries)
+            }
+            ProcPath::PidDir(pid) => {
+                // Per-PID directory: list virtual files inside it.
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                let entries: Vec<DirEntry> = PID_FILES
+                    .iter()
+                    .map(|name| {
+                        let size = generate_pid(pid, name).map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            name: String::from(*name),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
+                Ok(entries)
+            }
+            ProcPath::RootFile(_) | ProcPath::PidFile(_, _) => {
+                Err(KernelError::NotADirectory)
+            }
+            ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
 
     fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
         let rel = strip_root(path);
 
-        if rel.is_empty() {
-            return Err(KernelError::IsADirectory);
+        match classify_path(rel) {
+            ProcPath::Root | ProcPath::PidDir(_) => {
+                Err(KernelError::IsADirectory)
+            }
+            ProcPath::RootFile(name) => generate(name),
+            ProcPath::PidFile(pid, file_name) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                generate_pid(pid, file_name)
+            }
+            ProcPath::NotFound => Err(KernelError::NotFound),
         }
-
-        generate(rel)
     }
 
     fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
         let rel = strip_root(path);
 
-        if rel.is_empty() {
-            // Root directory.
-            return Ok(DirEntry {
+        match classify_path(rel) {
+            ProcPath::Root => Ok(DirEntry {
                 name: String::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
-            });
-        }
-
-        // Check if the name is a known virtual file.
-        if ROOT_FILES.contains(&rel) {
-            let size = generate(rel).map_or(0, |d| d.len() as u64);
-            Ok(DirEntry {
-                name: String::from(rel),
-                entry_type: EntryType::File,
-                size,
-            })
-        } else {
-            Err(KernelError::NotFound)
+            }),
+            ProcPath::RootFile(name) => {
+                let size = generate(name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    name: String::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
+            ProcPath::PidDir(pid) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                Ok(DirEntry {
+                    name: format!("{pid}"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                })
+            }
+            ProcPath::PidFile(pid, file_name) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                let size = generate_pid(pid, file_name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    name: String::from(file_name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
+            ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
 
     fn debug_stats(&self) -> String {
-        format!("procfs: {} virtual files", ROOT_FILES.len())
+        let task_count = crate::sched::task_list().len();
+        format!(
+            "procfs: {} root files, {} task dirs",
+            ROOT_FILES.len(),
+            task_count
+        )
     }
 }
 
@@ -348,17 +509,27 @@ pub fn self_test() -> KernelResult<()> {
 
     let mut fs = ProcFs::new();
 
-    // Test root readdir.
+    // Test root readdir — should have root files + at least 1 PID directory.
     let entries = fs.readdir("/")?;
-    if entries.len() != ROOT_FILES.len() {
+    let min_expected = ROOT_FILES.len();
+    if entries.len() < min_expected {
         serial_println!(
-            "[procfs]   FAIL: readdir returned {} entries, expected {}",
+            "[procfs]   FAIL: readdir returned {} entries, expected >= {}",
             entries.len(),
-            ROOT_FILES.len()
+            min_expected
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[procfs]   readdir /: {} entries OK", entries.len());
+    // Count PID directories.
+    let pid_dirs = entries.iter()
+        .filter(|e| e.entry_type == EntryType::Directory)
+        .count();
+    serial_println!(
+        "[procfs]   readdir /: {} entries ({} files, {} pid dirs) OK",
+        entries.len(),
+        entries.len().saturating_sub(pid_dirs),
+        pid_dirs
+    );
 
     // Test stat on root.
     let root_stat = fs.stat("/")?;
@@ -415,6 +586,62 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   write_file: NotSupported OK");
+
+    // --- Per-PID directory tests ---
+
+    // Get the current task ID to test against a known-live PID.
+    let current_tid = crate::sched::current_task_id();
+    let pid_path = format!("/{current_tid}");
+    let status_path = format!("/{current_tid}/status");
+
+    // stat on PID directory.
+    let pid_stat = fs.stat(&pid_path)?;
+    if pid_stat.entry_type != EntryType::Directory {
+        serial_println!("[procfs]   FAIL: stat {pid_path} not a directory");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   stat {}: directory OK", pid_path);
+
+    // readdir on PID directory — should have PID_FILES entries.
+    let pid_entries = fs.readdir(&pid_path)?;
+    if pid_entries.len() != PID_FILES.len() {
+        serial_println!(
+            "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
+            pid_path, pid_entries.len(), PID_FILES.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   readdir {}: {} entries OK", pid_path, pid_entries.len());
+
+    // read_file on status.
+    let status_data = fs.read_file(&status_path)?;
+    if status_data.is_empty() {
+        serial_println!("[procfs]   FAIL: read_file {} returned empty", status_path);
+        return Err(KernelError::InternalError);
+    }
+    let status_text = core::str::from_utf8(&status_data)
+        .map_err(|_| KernelError::InternalError)?;
+    // Verify it mentions the PID.
+    let pid_str = format!("{current_tid}");
+    if !status_text.contains(&pid_str) {
+        serial_println!("[procfs]   FAIL: status doesn't contain PID {}", current_tid);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   {}/status: {} bytes OK", current_tid, status_data.len());
+
+    // read_file on PID directory should fail (IsADirectory).
+    if fs.read_file(&pid_path).is_ok() {
+        serial_println!("[procfs]   FAIL: read_file on PID dir should fail");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   read_file on PID dir: IsADirectory OK");
+
+    // stat on nonexistent PID should fail.
+    if fs.stat("/999999").is_ok() {
+        serial_println!("[procfs]   FAIL: stat on bogus PID should fail");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[procfs]   stat /999999: NotFound OK");
 
     serial_println!("[procfs] Self-test PASSED");
     Ok(())

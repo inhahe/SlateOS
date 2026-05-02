@@ -241,10 +241,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Directory traversal (linear entries; htree not yet)
   - [x] Extent tree walking (logical → physical block mapping, multi-level)
   - [x] Read-only FileSystem trait implementation (VFS integration, mount, probe, self-test)
-  - [ ] Block allocation (bitmap-based)
-  - [ ] Inode allocation
-  - [ ] File creation/deletion
-  - [ ] Directory entry insertion/removal
+  - [x] Block allocation (bitmap-based, goal-directed, contiguous-run)
+  - [x] Inode allocation (bitmap-based, group-preference)
+  - [x] File creation/deletion (write_file, remove via VFS)
+  - [x] Directory entry insertion/removal (add_dir_entry, mkdir, rmdir)
   - [ ] Journal (write-ahead log for crash recovery)
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)

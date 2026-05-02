@@ -4195,7 +4195,8 @@ fn dispatch(line: &str) {
         "lsof" => cmd_lsof(),
         "lsp" => cmd_lsp(args),
         "grep" => cmd_grep(args),
-        "cmp" | "diff" => cmd_cmp(args),
+        "cmp" => cmd_cmp(args),
+        "diff" => cmd_diff(args),
         "fallocate" => cmd_fallocate(args),
         "sort" => cmd_sort(args),
         "uniq" => cmd_uniq(args),
@@ -4349,6 +4350,7 @@ fn cmd_help() {
     crate::console_println!("  lsp [N] D Paginated ls: show N entries at a time");
     crate::console_println!("  grep P F  Search for pattern P in file F");
     crate::console_println!("  cmp F1 F2 Compare two files byte-by-byte");
+    crate::console_println!("  diff F1 F2 Line-level diff (unified format)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
     crate::console_println!("  uniq FILE Remove adjacent duplicate lines");
@@ -6333,6 +6335,215 @@ fn cmd_cmp(args: &str) {
         "{} {} differ: byte {}, {} size={}, {} size={}",
         path1, path2, diff_at, path1, data1.len(), path2, data2.len(),
     );
+}
+
+/// Line-level diff between two text files (unified format).
+///
+/// Usage: `diff <file1> <file2>`
+///
+/// Uses a simple LCS-based diff algorithm suitable for kernel context.
+/// Files are capped at 2000 lines to bound memory usage.
+fn cmd_diff(args: &str) {
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: diff <file1> <file2>");
+        return;
+    }
+
+    let path1 = resolve_path(parts[0]);
+    let path2 = resolve_path(parts[1]);
+
+    let data1 = match crate::fs::Vfs::read_file(&path1) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("diff: {}: {:?}", path1, e);
+            return;
+        }
+    };
+    let data2 = match crate::fs::Vfs::read_file(&path2) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("diff: {}: {:?}", path2, e);
+            return;
+        }
+    };
+
+    if data1 == data2 {
+        // Identical files — no output (like Unix diff).
+        return;
+    }
+
+    // Split into lines. Treat as text — invalid UTF-8 bytes get replacement chars.
+    // For a kernel shell this is acceptable; binary files should use `cmp`.
+    let text1 = String::from_utf8_lossy(&data1);
+    let text2 = String::from_utf8_lossy(&data2);
+
+    let lines1: Vec<&str> = text1.lines().collect();
+    let lines2: Vec<&str> = text2.lines().collect();
+
+    const MAX_LINES: usize = 2000;
+    if lines1.len() > MAX_LINES || lines2.len() > MAX_LINES {
+        crate::console_println!(
+            "diff: files too large for line diff ({} vs {} lines, max {}). Use cmp instead.",
+            lines1.len(), lines2.len(), MAX_LINES,
+        );
+        return;
+    }
+
+    // Compute edit script using O(NM) LCS table with space optimization.
+    // We only need the edit operations, not the full table. Use the
+    // Hirschberg-style approach: compute LCS length in O(N) space, then
+    // use the simple approach for files under our cap since O(NM) fits
+    // easily (2000×2000 = 4M entries × 2 bytes = 8 MiB, acceptable for
+    // a kernel debug tool running once).
+    let n = lines1.len();
+    let m = lines2.len();
+
+    // Build LCS length table — dp[i][j] = LCS length of lines1[0..i] and lines2[0..j].
+    // Use u16 since max lines = 2000.
+    // Allocate as flat Vec to avoid Vec<Vec<>> overhead.
+    let width = m + 1;
+    let mut dp: Vec<u16> = alloc::vec![0u16; (n + 1) * width];
+
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i * width + j] = if lines1[i - 1] == lines2[j - 1] {
+                dp[(i - 1) * width + (j - 1)] + 1
+            } else {
+                let up = dp[(i - 1) * width + j];
+                let left = dp[i * width + (j - 1)];
+                if up >= left { up } else { left }
+            };
+        }
+    }
+
+    // Backtrack to produce edit script.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Edit {
+        Keep,   // line in both
+        Remove, // line only in file1
+        Add,    // line only in file2
+    }
+
+    let mut edits: Vec<(Edit, usize)> = Vec::new(); // (kind, line_index in source)
+    let mut i = n;
+    let mut j = m;
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && lines1[i - 1] == lines2[j - 1] {
+            edits.push((Edit::Keep, i - 1));
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[i * width + (j - 1)] >= dp[(i - 1) * width + j]) {
+            edits.push((Edit::Add, j - 1));
+            j -= 1;
+        } else {
+            edits.push((Edit::Remove, i - 1));
+            i -= 1;
+        }
+    }
+    edits.reverse();
+
+    // Drop the DP table before printing to free memory.
+    drop(dp);
+
+    // Print header.
+    crate::console_println!("--- {}", path1);
+    crate::console_println!("+++ {}", path2);
+
+    // Group edits into hunks (unified diff with 3 lines context).
+    const CONTEXT: usize = 3;
+
+    // Find hunk boundaries: a hunk contains consecutive changes plus
+    // CONTEXT lines before and after. Hunks separated by more than
+    // 2*CONTEXT keep-lines are printed separately.
+    let mut hunk_start = None;
+    let mut hunk_end = 0;
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+
+    for (idx, (kind, _)) in edits.iter().enumerate() {
+        if *kind != Edit::Keep {
+            let start = idx.saturating_sub(CONTEXT);
+            let end = (idx + CONTEXT + 1).min(edits.len());
+
+            if let Some(hs) = hunk_start {
+                if start <= hunk_end {
+                    // Merge with current hunk.
+                    hunk_end = end;
+                } else {
+                    // Emit previous hunk, start new one.
+                    hunks.push((hs, hunk_end));
+                    hunk_start = Some(start);
+                    hunk_end = end;
+                }
+            } else {
+                hunk_start = Some(start);
+                hunk_end = end;
+            }
+        }
+    }
+    if let Some(hs) = hunk_start {
+        hunks.push((hs, hunk_end));
+    }
+
+    // Print each hunk.
+    for (hstart, hend) in &hunks {
+        // Count lines in this hunk for the @@ header.
+        let mut old_start = 0u32;
+        let mut old_count = 0u32;
+        let mut new_start = 0u32;
+        let mut new_count = 0u32;
+
+        // First pass: figure out old/new line numbers at hunk start.
+        // Walk from beginning of edits to hstart to count line positions.
+        let mut ol = 1u32;
+        let mut nl = 1u32;
+        for (idx, (kind, _)) in edits.iter().enumerate() {
+            if idx == *hstart {
+                old_start = ol;
+                new_start = nl;
+                break;
+            }
+            match kind {
+                Edit::Keep => { ol += 1; nl += 1; }
+                Edit::Remove => { ol += 1; }
+                Edit::Add => { nl += 1; }
+            }
+        }
+
+        // Second pass: count lines in this hunk.
+        for idx in *hstart..*hend {
+            if let Some((kind, _)) = edits.get(idx) {
+                match kind {
+                    Edit::Keep => { old_count += 1; new_count += 1; }
+                    Edit::Remove => { old_count += 1; }
+                    Edit::Add => { new_count += 1; }
+                }
+            }
+        }
+
+        crate::console_println!("@@ -{},{} +{},{} @@", old_start, old_count, new_start, new_count);
+
+        for idx in *hstart..*hend {
+            if let Some((kind, line_idx)) = edits.get(idx) {
+                let line_text = match kind {
+                    Edit::Keep | Edit::Remove => lines1.get(*line_idx).unwrap_or(&""),
+                    Edit::Add => lines2.get(*line_idx).unwrap_or(&""),
+                };
+                let prefix = match kind {
+                    Edit::Keep => ' ',
+                    Edit::Remove => '-',
+                    Edit::Add => '+',
+                };
+                crate::console_println!("{}{}", prefix, line_text);
+            }
+        }
+    }
+
+    if hunks.is_empty() {
+        // Should not happen since data1 != data2, but could if only trailing
+        // newline differs. Show a minimal note.
+        crate::console_println!("(files differ only in trailing newline)");
+    }
 }
 
 /// Pre-allocate disk space for a file.

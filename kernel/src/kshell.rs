@@ -3089,7 +3089,8 @@ const COMMANDS: &[&str] = &[
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
-    "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount", "mv",
+    "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
+    "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "rev", "rm",
@@ -4232,6 +4233,7 @@ fn dispatch(line: &str) {
         "pwd" => cmd_pwd(),
         "id" | "whoami" => cmd_id(),
         "mktemp" => cmd_mktemp(args),
+        "mkfs.fat" | "mkfs" => cmd_mkfs_fat(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -4394,6 +4396,7 @@ fn cmd_help() {
     crate::console_println!("  pwd        Print working directory");
     crate::console_println!("  id         Show current task identity");
     crate::console_println!("  mktemp [D] Create temporary file (default /tmp)");
+    crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -11923,6 +11926,46 @@ fn cmd_free() {
         "Heap:   {:>6} slab allocs  {:>6} live  {:>6} large",
         info.heap_slab_allocs, heap_live, info.heap_large_allocs
     );
+}
+
+/// Format a block device as FAT16/FAT32.
+///
+/// Usage: `mkfs.fat [-L LABEL] DEVICE`
+///
+/// Auto-selects FAT16 for volumes ≤32 MiB, FAT32 for larger.
+/// **WARNING**: this overwrites all data on the device!
+fn cmd_mkfs_fat(args: &str) {
+    let mut label: Option<&str> = None;
+    let mut device = "";
+
+    let mut words = args.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "-L" || w == "-l" || w == "--label" {
+            label = words.next();
+        } else {
+            device = w;
+        }
+    }
+
+    if device.is_empty() {
+        crate::console_println!("Usage: mkfs.fat [-L LABEL] DEVICE");
+        crate::console_println!("  Formats DEVICE as FAT (auto-selects FAT16/FAT32).");
+        crate::console_println!("  WARNING: all data on the device will be lost!");
+        set_exit(1);
+        return;
+    }
+
+    crate::console_println!("Formatting '{}' as FAT...", device);
+
+    match crate::fs::fat::mkfs_fat(device, label) {
+        Ok(()) => {
+            crate::console_println!("Done. Device '{}' formatted successfully.", device);
+        }
+        Err(e) => {
+            crate::console_println!("mkfs.fat: {:?}", e);
+            set_exit(1);
+        }
+    }
 }
 
 /// Show or set the volume label for a filesystem.

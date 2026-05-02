@@ -4668,6 +4668,16 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 }
 
+/// Write a little-endian u16 to a byte slice at the given offset.
+fn write_u16_le(data: &mut [u8], offset: usize, value: u16) {
+    if let Some(b) = data.get_mut(offset) {
+        *b = value as u8;
+    }
+    if let Some(b) = data.get_mut(offset + 1) {
+        *b = (value >> 8) as u8;
+    }
+}
+
 /// Write a little-endian u32 to a byte slice at the given offset.
 fn write_u32_le(data: &mut [u8], offset: usize, value: u32) {
     if let Some(b) = data.get_mut(offset) {
@@ -4682,4 +4692,282 @@ fn write_u32_le(data: &mut [u8], offset: usize, value: u32) {
     if let Some(b) = data.get_mut(offset + 3) {
         *b = (value >> 24) as u8;
     }
+}
+
+// ---------------------------------------------------------------------------
+// mkfs — format a FAT filesystem from scratch
+// ---------------------------------------------------------------------------
+
+/// Format a block device as FAT16 or FAT32.
+///
+/// Auto-selects FAT16 for volumes ≤32 MiB, FAT32 for larger volumes.
+/// Creates a valid boot sector, FAT tables, FSInfo sector (FAT32),
+/// and an empty root directory.
+///
+/// `device`: block device name (e.g., `"vda"`)
+/// `label`:  optional volume label (max 11 chars, uppercased)
+///
+/// # Errors
+///
+/// Returns `InvalidArgument` if the device is too small (<1 MiB) or
+/// `NoSuchDevice` if the device doesn't exist.
+///
+/// Reference: Microsoft FAT specification (fatgen103.doc), sections
+/// 3.1–3.5 (BPB), 4.1 (FAT table init), 5.1 (root directory).
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
+    use crate::blkdev;
+
+    // Get device info.
+    let info = {
+        let devices = blkdev::list_devices_full();
+        devices.into_iter().find(|d| d.name == device)
+            .ok_or(KernelError::NoSuchDevice)?
+    };
+
+    if info.read_only {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
+
+    let total_sectors = info.sector_count as u32;
+    let bytes_per_sector: u16 = info.sector_size as u16;
+
+    // Minimum 2048 sectors (1 MiB at 512 bytes/sector).
+    if total_sectors < 2048 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Determine FAT type: FAT16 for ≤65536 sectors (32 MiB), FAT32 for larger.
+    let total_mb = u64::from(total_sectors) * u64::from(bytes_per_sector) / (1024 * 1024);
+    let fat_type = if total_mb <= 32 {
+        FatType::Fat16
+    } else {
+        FatType::Fat32
+    };
+
+    // Choose sectors per cluster (power of 2, target cluster_size ≤ 32K).
+    let spc: u8 = if total_mb <= 8 { 2 }
+        else if total_mb <= 32 { 4 }
+        else if total_mb <= 256 { 8 }
+        else if total_mb <= 2048 { 16 }
+        else { 32 };
+
+    let num_fats: u8 = 2;
+    let reserved_sectors: u16 = match fat_type {
+        FatType::Fat16 => 1,  // Just the boot sector.
+        FatType::Fat32 => 32, // Standard: boot + FSInfo + backup + padding.
+    };
+
+    // Root directory entries for FAT16 (FAT32 uses cluster chain).
+    let root_entry_count: u16 = match fat_type {
+        FatType::Fat16 => 512, // 512 entries * 32 bytes = 16 KiB = 32 sectors.
+        FatType::Fat32 => 0,
+    };
+    let root_dir_sectors = (u32::from(root_entry_count) * 32 + u32::from(bytes_per_sector) - 1)
+        / u32::from(bytes_per_sector);
+
+    // Calculate sectors per FAT.
+    // The formula solves for the FAT size given the total sectors,
+    // reserved sectors, root dir sectors, and entries per FAT sector.
+    let data_sectors_available = total_sectors
+        .saturating_sub(u32::from(reserved_sectors))
+        .saturating_sub(root_dir_sectors);
+
+    let entries_per_fat_sector = match fat_type {
+        FatType::Fat16 => u32::from(bytes_per_sector) / 2,
+        FatType::Fat32 => u32::from(bytes_per_sector) / 4,
+    };
+
+    // Each cluster needs one FAT entry.  Each FAT sector holds N entries.
+    // total_data = data_available - (num_fats * sectors_per_fat)
+    // total_clusters = total_data / spc
+    // sectors_per_fat = ceil(total_clusters + 2) / entries_per_fat_sector
+    // Solve iteratively for a safe upper bound:
+    let spf = {
+        let max_clusters = data_sectors_available / u32::from(spc);
+        let needed_entries = max_clusters + 2; // +2 for reserved entries 0 and 1
+        let single_fat = (needed_entries + entries_per_fat_sector - 1) / entries_per_fat_sector;
+        single_fat
+    };
+
+    // Volume label (11 bytes, space-padded, uppercase).
+    let mut vol_label = [b' '; 11];
+    if let Some(lbl) = label {
+        let upper = lbl.to_ascii_uppercase();
+        let src = upper.as_bytes();
+        let copy_len = src.len().min(11);
+        vol_label[..copy_len].copy_from_slice(&src[..copy_len]);
+    } else {
+        vol_label = *b"NO NAME    ";
+    }
+
+    // -----------------------------------------------------------------------
+    // Build the boot sector (BPB).
+    // -----------------------------------------------------------------------
+    let mut boot = [0u8; SECTOR_SIZE];
+
+    // Jump instruction (x86: JMP short + NOP).
+    boot[0] = 0xEB;
+    boot[1] = 0x3C; // Jump over BPB (60 bytes from here).
+    boot[2] = 0x90; // NOP
+
+    // OEM name.
+    boot[3..11].copy_from_slice(b"KERNELOS");
+
+    // BPB fields.
+    write_u16_le(&mut boot, 11, bytes_per_sector);
+    boot[13] = spc;
+    write_u16_le(&mut boot, 14, reserved_sectors);
+    boot[16] = num_fats;
+    write_u16_le(&mut boot, 17, root_entry_count);
+
+    // Total sectors.
+    if total_sectors <= 0xFFFF && fat_type == FatType::Fat16 {
+        write_u16_le(&mut boot, 19, total_sectors as u16);
+        write_u32_le(&mut boot, 32, 0);
+    } else {
+        write_u16_le(&mut boot, 19, 0);
+        write_u32_le(&mut boot, 32, total_sectors);
+    }
+
+    boot[21] = 0xF8; // Media type: hard disk.
+    write_u16_le(&mut boot, 22, if fat_type == FatType::Fat16 { spf as u16 } else { 0 });
+    write_u16_le(&mut boot, 24, 63);   // Sectors per track (dummy).
+    write_u16_le(&mut boot, 26, 255);  // Number of heads (dummy).
+    write_u32_le(&mut boot, 28, 0);    // Hidden sectors.
+
+    match fat_type {
+        FatType::Fat16 => {
+            // Extended boot record (FAT16, offset 36-61).
+            boot[36] = 0x80; // Drive number.
+            boot[37] = 0;    // Reserved.
+            boot[38] = 0x29; // Extended boot signature.
+            // Volume serial number (use a simple counter).
+            write_u32_le(&mut boot, 39, 0x1234_5678);
+            boot[43..54].copy_from_slice(&vol_label);
+            boot[54..62].copy_from_slice(b"FAT16   ");
+        }
+        FatType::Fat32 => {
+            // FAT32-specific BPB (offset 36-89).
+            write_u32_le(&mut boot, 36, spf); // Sectors per FAT (32-bit).
+            write_u16_le(&mut boot, 40, 0);   // Flags.
+            write_u16_le(&mut boot, 42, 0);   // Version.
+            write_u32_le(&mut boot, 44, 2);   // Root directory cluster (always 2).
+            write_u16_le(&mut boot, 48, 1);   // FSInfo sector.
+            write_u16_le(&mut boot, 50, 6);   // Backup boot sector.
+            // Bytes 52-63: reserved (already zero).
+            boot[64] = 0x80; // Drive number.
+            boot[65] = 0;    // Reserved.
+            boot[66] = 0x29; // Extended boot signature.
+            write_u32_le(&mut boot, 67, 0x1234_5678); // Serial.
+            boot[71..82].copy_from_slice(&vol_label);
+            boot[82..90].copy_from_slice(b"FAT32   ");
+        }
+    }
+
+    // Boot signature.
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+
+    // -----------------------------------------------------------------------
+    // Write everything to the device.
+    // -----------------------------------------------------------------------
+
+    // Zero all reserved sectors first.
+    let zero = [0u8; SECTOR_SIZE];
+    for lba in 0..u64::from(reserved_sectors) {
+        super::cache::write_sector(device, lba, &zero)?;
+    }
+
+    // Write boot sector.
+    super::cache::write_sector(device, 0, &boot)?;
+
+    // FAT32: write backup boot sector at sector 6 and FSInfo at sector 1.
+    if fat_type == FatType::Fat32 {
+        super::cache::write_sector(device, 6, &boot)?;
+
+        // FSInfo sector.
+        let mut fsinfo = [0u8; SECTOR_SIZE];
+        write_u32_le(&mut fsinfo, 0, 0x4161_5252);   // Signature 1.
+        write_u32_le(&mut fsinfo, 484, 0x6141_7272);  // Signature 2.
+        // Free count: total data clusters minus 1 (root dir uses cluster 2).
+        let data_secs = total_sectors
+            .saturating_sub(u32::from(reserved_sectors))
+            .saturating_sub(u32::from(num_fats) * spf);
+        let total_clusters = data_secs / u32::from(spc);
+        write_u32_le(&mut fsinfo, 488, total_clusters.saturating_sub(1));
+        write_u32_le(&mut fsinfo, 492, 3); // Next free hint (after root dir).
+        write_u32_le(&mut fsinfo, 508, 0xAA55_0000);  // Signature 3.
+        super::cache::write_sector(device, 1, &fsinfo)?;
+    }
+
+    // Zero and initialize FAT tables.
+    let fat_start = u32::from(reserved_sectors);
+    for fat_idx in 0..u32::from(num_fats) {
+        let fat_base = fat_start + fat_idx * spf;
+        // Zero all FAT sectors.
+        for s in 0..spf {
+            super::cache::write_sector(device, u64::from(fat_base + s), &zero)?;
+        }
+
+        // Write FAT entries 0 and 1 in the first sector.
+        let mut first_sector = [0u8; SECTOR_SIZE];
+        match fat_type {
+            FatType::Fat16 => {
+                // Entry 0: media type.  Entry 1: end-of-chain + clean bit.
+                write_u16_le(&mut first_sector, 0, 0xFFF8); // Entry 0.
+                write_u16_le(&mut first_sector, 2, 0xFFFF); // Entry 1 (clean + no error).
+            }
+            FatType::Fat32 => {
+                write_u32_le(&mut first_sector, 0, 0x0FFF_FFF8); // Entry 0.
+                write_u32_le(&mut first_sector, 4, 0x0FFF_FFFF); // Entry 1 (clean).
+                // Entry 2: end-of-chain (root directory cluster).
+                write_u32_le(&mut first_sector, 8, 0x0FFF_FFF8);
+            }
+        }
+        super::cache::write_sector(device, u64::from(fat_base), &first_sector)?;
+    }
+
+    // Initialize root directory.
+    match fat_type {
+        FatType::Fat16 => {
+            // Fixed root directory area: just after the FAT tables.
+            let root_start = fat_start + u32::from(num_fats) * spf;
+            for s in 0..root_dir_sectors {
+                super::cache::write_sector(device, u64::from(root_start + s), &zero)?;
+            }
+            // Write volume label entry at the start of the root directory.
+            let mut root_sector = [0u8; SECTOR_SIZE];
+            root_sector[..11].copy_from_slice(&vol_label);
+            root_sector[11] = ATTR_VOLUME_ID;
+            super::cache::write_sector(device, u64::from(root_start), &root_sector)?;
+        }
+        FatType::Fat32 => {
+            // Root directory is cluster 2.  Zero its sectors.
+            let data_start = fat_start + u32::from(num_fats) * spf;
+            // Cluster 2 starts at data_start + 0 (since cluster 2 is the first data cluster).
+            for s in 0..u32::from(spc) {
+                super::cache::write_sector(device, u64::from(data_start + s), &zero)?;
+            }
+            // Write volume label entry.
+            let mut root_sector = [0u8; SECTOR_SIZE];
+            root_sector[..11].copy_from_slice(&vol_label);
+            root_sector[11] = ATTR_VOLUME_ID;
+            super::cache::write_sector(device, u64::from(data_start), &root_sector)?;
+        }
+    }
+
+    // Flush the buffer cache.
+    super::cache::flush(device)?;
+
+    crate::serial_println!(
+        "[fat] mkfs: formatted '{}' as {} ({} sectors, {} bytes/sector, {} sectors/cluster)",
+        device,
+        if fat_type == FatType::Fat32 { "FAT32" } else { "FAT16" },
+        total_sectors,
+        bytes_per_sector,
+        spc,
+    );
+
+    Ok(())
 }

@@ -28,5 +28,7 @@
 //!
 //! Currently: Phase 1 (on-disk structures and superblock parsing).
 
+pub mod driver;
+pub mod io;
 pub mod ondisk;
 pub mod superblock;

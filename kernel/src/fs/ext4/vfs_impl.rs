@@ -421,8 +421,19 @@ impl FileSystem for Ext4Fs {
             );
 
             let mut dir_inode_copy = src_inode;
-            self.driver.invalidate_extent_cache(src_ino);
-            self.driver.write_file_data(&mut dir_inode_copy, &dir_data)?;
+            // Write modified data to existing blocks — only the ".."
+            // entry changed, no size change, so no reallocation needed.
+            match self.driver.write_to_existing_blocks(src_ino, &dir_inode_copy, &dir_data) {
+                Ok(()) => {},
+                Err(KernelError::NotSupported) => {
+                    // Deep extent tree — fall back to full rewrite.
+                    let old_inode = dir_inode_copy;
+                    self.driver.invalidate_extent_cache(src_ino);
+                    self.driver.write_file_data(&mut dir_inode_copy, &dir_data)?;
+                    self.driver.free_inode_data(src_ino, &old_inode)?;
+                },
+                Err(e) => return Err(e),
+            }
 
             // Old parent loses a link (the moved dir's ".." no longer
             // points here), new parent gains one.
@@ -1093,13 +1104,25 @@ impl Ext4Fs {
                             &mut dir_data,
                         );
 
-                        // Write modified directory data back.
-                        let mut dir_inode_copy = *dir_inode;
-                        self.driver.invalidate_extent_cache(dir_ino);
-                        self.driver.write_file_data(
-                            &mut dir_inode_copy,
-                            &dir_data,
-                        )?;
+                        // Write modified data to existing blocks — only
+                        // an entry was zeroed/merged, no size change.
+                        match self.driver.write_to_existing_blocks(
+                            dir_ino, dir_inode, &dir_data,
+                        ) {
+                            Ok(()) => {},
+                            Err(KernelError::NotSupported) => {
+                                // Deep extent tree — fall back to full rewrite.
+                                let old_inode = *dir_inode;
+                                let mut dir_inode_copy = *dir_inode;
+                                self.driver.invalidate_extent_cache(dir_ino);
+                                self.driver.write_file_data(
+                                    &mut dir_inode_copy,
+                                    &dir_data,
+                                )?;
+                                self.driver.free_inode_data(dir_ino, &old_inode)?;
+                            },
+                            Err(e) => return Err(e),
+                        }
                         return Ok(());
                     }
                 }

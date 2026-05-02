@@ -866,6 +866,46 @@ pub const SYS_FS_RMDIR: u64 = 605;
 /// Returns: 0 on success, or negative error code.
 pub const SYS_FS_STAT: u64 = 606;
 
+/// Create a hard link (new directory entry pointing to existing file).
+///
+/// `arg0`: pointer to existing path string.
+/// `arg1`: existing path length (bytes).
+/// `arg2`: pointer to new link path string.
+/// `arg3`: new link path length (bytes).
+///
+/// Both paths must resolve to the same mount point.  The existing
+/// path is followed through symlinks (the link points to the underlying
+/// file, not the symlink).  Only regular files can be hard-linked;
+/// directories return `IsADirectory`.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_LINK: u64 = 607;
+
+/// Query filesystem space and configuration info (statvfs).
+///
+/// `arg0`: pointer to path string (any path on the target filesystem).
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to output `FsStatvfsResult` buffer (64 bytes).
+///
+/// ## Output layout (64 bytes, all little-endian)
+///
+/// | Offset | Size | Field         | Description                          |
+/// |--------|------|---------------|--------------------------------------|
+/// | 0      | 8    | block_size    | Fundamental block size (bytes)       |
+/// | 8      | 8    | total_blocks  | Total blocks on filesystem           |
+/// | 16     | 8    | free_blocks   | Free (available) blocks              |
+/// | 24     | 8    | total_inodes  | Total inodes (0 if N/A)              |
+/// | 32     | 8    | free_inodes   | Free inodes (0 if N/A)               |
+/// | 40     | 8    | max_name_len  | Maximum filename length              |
+/// | 48     | 1    | read_only     | 1 if mounted read-only, 0 otherwise  |
+/// | 49     | 15   | reserved      | Padding (zeros)                      |
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_STATVFS: u64 = 608;
+
+/// Size of the output buffer for `SYS_FS_STATVFS`.
+pub const FS_STATVFS_SIZE: usize = 64;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

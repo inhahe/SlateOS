@@ -30,7 +30,7 @@ use super::number::{
     SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
-    SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_WRITE_FILE,
+    SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS, SYS_FS_WRITE_FILE,
     SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
     SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
     SYS_FS_TRASH, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRASH_EMPTY,
@@ -281,6 +281,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_MKDIR as usize] = Some(handlers::sys_fs_mkdir);
     handlers[SYS_FS_RMDIR as usize] = Some(handlers::sys_fs_rmdir);
     handlers[SYS_FS_STAT as usize] = Some(handlers::sys_fs_stat);
+    handlers[SYS_FS_LINK as usize] = Some(handlers::sys_fs_link);
+    handlers[SYS_FS_STATVFS as usize] = Some(handlers::sys_fs_statvfs);
 
     // Filesystem — handle-based (610–699).
     handlers[SYS_FS_OPEN as usize] = Some(handlers::sys_fs_open);

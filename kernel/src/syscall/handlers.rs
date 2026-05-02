@@ -3761,6 +3761,107 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_FS_LINK` — create a hard link.
+///
+/// `arg0`: pointer to existing path string.
+/// `arg1`: existing path length.
+/// `arg2`: pointer to new link path string.
+/// `arg3`: new link path length.
+pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::CREATE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated in read_user_path.
+    let existing = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    // Read the new link path (arg2=ptr, arg3=len).
+    let new_ptr = args.arg2 as *const u8;
+    let new_len = (args.arg3 as usize).min(4096);
+    if new_ptr.is_null() || new_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, new_len) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated above — new_ptr is in user space and mapped.
+    let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr, new_len) };
+    let new_path = match core::str::from_utf8(new_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::link(existing, new_path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_STATVFS` — query filesystem space and configuration info.
+///
+/// `arg0`: pointer to path string (any path on the target filesystem).
+/// `arg1`: path length.
+/// `arg2`: pointer to 64-byte output buffer.
+#[allow(clippy::cast_possible_truncation)]
+pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    let out_ptr = args.arg2 as *mut u8;
+    if out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(
+        args.arg2,
+        crate::syscall::number::FS_STATVFS_SIZE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let info = match crate::fs::Vfs::statvfs(path) {
+        Ok(i) => i,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Write the 64-byte output buffer.
+    // SAFETY: Validated above — out_ptr is in user space, mapped, and writable.
+    unsafe {
+        core::ptr::write_bytes(out_ptr, 0, 64);
+        // block_size: u64 at offset 0
+        core::ptr::write(out_ptr as *mut u64, info.block_size);
+        // total_blocks: u64 at offset 8
+        core::ptr::write(out_ptr.add(8) as *mut u64, info.total_blocks);
+        // free_blocks: u64 at offset 16
+        core::ptr::write(out_ptr.add(16) as *mut u64, info.free_blocks);
+        // total_inodes: u64 at offset 24
+        core::ptr::write(out_ptr.add(24) as *mut u64, info.total_inodes);
+        // free_inodes: u64 at offset 32
+        core::ptr::write(out_ptr.add(32) as *mut u64, info.free_inodes);
+        // max_name_len: u64 at offset 40
+        core::ptr::write(out_ptr.add(40) as *mut u64, info.max_name_len);
+        // read_only: u8 at offset 48
+        core::ptr::write(out_ptr.add(48), u8::from(info.read_only));
+    }
+
+    SyscallResult::ok(0)
+}
+
 // ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------

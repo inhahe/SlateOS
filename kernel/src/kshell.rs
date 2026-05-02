@@ -152,6 +152,9 @@ fn execute(line: &str) {
         "rm" | "del" => cmd_rm(args),
         "mkdir" => cmd_mkdir(args),
         "rmdir" => cmd_rmdir(args),
+        "stat" => cmd_stat(args),
+        "ln" | "link" => cmd_ln(args),
+        "df" => cmd_df(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -189,6 +192,9 @@ fn cmd_help() {
     crate::console_println!("  rm FILE   Delete a file");
     crate::console_println!("  mkdir DIR Create a directory");
     crate::console_println!("  rmdir DIR Remove an empty directory");
+    crate::console_println!("  stat FILE Show detailed file metadata");
+    crate::console_println!("  ln S D    Create hard link D pointing to S");
+    crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -631,6 +637,180 @@ fn cmd_rmdir(args: &str) {
         Err(e) => {
             crate::console_println!("rmdir: {}: {:?}", path, e);
         }
+    }
+}
+
+/// Show detailed file/directory metadata.
+#[allow(clippy::cast_possible_truncation)]
+fn cmd_stat(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: stat <path>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    match crate::fs::Vfs::metadata(&path) {
+        Ok(meta) => {
+            let type_str = match meta.entry_type {
+                crate::fs::EntryType::File => "regular file",
+                crate::fs::EntryType::Directory => "directory",
+                crate::fs::EntryType::Symlink => "symbolic link",
+                crate::fs::EntryType::VolumeLabel => "volume label",
+            };
+            crate::console_println!("  File: {}", path);
+            crate::console_println!("  Size: {}  Type: {}", meta.size, type_str);
+            crate::console_println!("  Links: {}", meta.nlinks);
+            if meta.permissions != 0 {
+                crate::console_println!("  Perms: {:04o}  Uid: {}  Gid: {}",
+                    meta.permissions, meta.uid, meta.gid);
+            }
+            if meta.attributes != crate::fs::FileAttr::NONE {
+                crate::console_println!("  Attrs: {:?}", meta.attributes);
+            }
+
+            // Format timestamps (nanoseconds to seconds for readability).
+            let ns_to_display = |ns: u64| -> alloc::string::String {
+                if ns == 0 {
+                    alloc::string::String::from("-")
+                } else {
+                    // Show as seconds since epoch (or boot, depending on source).
+                    let secs = ns / 1_000_000_000;
+                    let frac = (ns % 1_000_000_000) / 1_000_000;
+                    alloc::format!("{}.{:03}s", secs, frac)
+                }
+            };
+            crate::console_println!("  Created:  {}", ns_to_display(meta.created_ns));
+            crate::console_println!("  Modified: {}", ns_to_display(meta.modified_ns));
+            crate::console_println!("  Accessed: {}", ns_to_display(meta.accessed_ns));
+            crate::console_println!("  Changed:  {}", ns_to_display(meta.changed_ns));
+        }
+        Err(e) => {
+            crate::console_println!("stat: {}: {:?}", path, e);
+        }
+    }
+}
+
+/// Create a hard link.
+fn cmd_ln(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: ln <source> <link-name>");
+        return;
+    }
+
+    let src = parts[0];
+    let dst = parts[1];
+
+    let src_path = if src.starts_with('/') {
+        alloc::string::String::from(src)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(src);
+        s
+    };
+    let dst_path = if dst.starts_with('/') {
+        alloc::string::String::from(dst)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(dst);
+        s
+    };
+
+    match crate::fs::Vfs::link(&src_path, &dst_path) {
+        Ok(()) => {
+            crate::console_println!("{} -> {}", dst_path, src_path);
+        }
+        Err(e) => {
+            crate::console_println!("ln: {:?}", e);
+        }
+    }
+}
+
+/// Show filesystem disk usage (like Unix `df`).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_df(args: &str) {
+    if args.is_empty() {
+        // Show all mounts.
+        match crate::fs::Vfs::mount_info() {
+            Ok(mounts) => {
+                crate::console_println!(
+                    "{:<12} {:>10} {:>10} {:>10} {:>5}  {}",
+                    "Filesystem", "Size", "Used", "Avail", "Use%", "Mounted on"
+                );
+                for (mount_path, info) in &mounts {
+                    let total = info.total_bytes();
+                    let free = info.free_bytes();
+                    let used = info.used_bytes();
+                    let pct = info.usage_percent();
+                    crate::console_println!(
+                        "{:<12} {:>10} {:>10} {:>10} {:>4}%  {}",
+                        info.fs_type,
+                        format_bytes(total),
+                        format_bytes(used),
+                        format_bytes(free),
+                        pct,
+                        mount_path
+                    );
+                }
+            }
+            Err(e) => {
+                crate::console_println!("df: {:?}", e);
+            }
+        }
+    } else {
+        // Show info for specific path.
+        let path = if args.starts_with('/') {
+            alloc::string::String::from(args)
+        } else {
+            let mut s = alloc::string::String::from("/");
+            s.push_str(args);
+            s
+        };
+        match crate::fs::Vfs::statvfs(&path) {
+            Ok(info) => {
+                crate::console_println!(
+                    "{:<12} {:>10} {:>10} {:>10} {:>5}  {}",
+                    "Filesystem", "Size", "Used", "Avail", "Use%", "Path"
+                );
+                let total = info.total_bytes();
+                let free = info.free_bytes();
+                let used = info.used_bytes();
+                let pct = info.usage_percent();
+                crate::console_println!(
+                    "{:<12} {:>10} {:>10} {:>10} {:>4}%  {}",
+                    info.fs_type,
+                    format_bytes(total),
+                    format_bytes(used),
+                    format_bytes(free),
+                    pct,
+                    path
+                );
+            }
+            Err(e) => {
+                crate::console_println!("df: {:?}", e);
+            }
+        }
+    }
+}
+
+/// Format a byte count as human-readable (K/M/G).
+#[allow(clippy::arithmetic_side_effects)]
+fn format_bytes(bytes: u64) -> alloc::string::String {
+    if bytes < 1024 {
+        alloc::format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        alloc::format!("{}K", bytes / 1024)
+    } else if bytes < 1024 * 1024 * 1024 {
+        alloc::format!("{}M", bytes / (1024 * 1024))
+    } else {
+        alloc::format!("{}G", bytes / (1024 * 1024 * 1024))
     }
 }
 

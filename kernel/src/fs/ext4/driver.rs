@@ -492,6 +492,163 @@ impl Ext4Driver {
         Ok(())
     }
 
+    /// Collect all physical block ranges referenced by an inode's extent tree.
+    ///
+    /// Returns a list of `(physical_block, block_count)` pairs covering
+    /// all data extents.  For multi-level trees, also includes the
+    /// intermediate index (internal) blocks so they can be freed too.
+    ///
+    /// Only handles extent-based inodes.  Returns an empty list for
+    /// inodes with no data or non-extent inodes.
+    pub fn collect_extent_blocks(
+        &self,
+        inode: &Ext4Inode,
+    ) -> KernelResult<Vec<(u64, u32)>> {
+        let mut result = Vec::new();
+
+        // Empty file or non-extent inode — nothing to free.
+        if (inode.i_flags & inode_flags::EXTENTS) == 0 {
+            return Ok(result);
+        }
+
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+        if header.eh_magic != EXT4_EXTENT_MAGIC {
+            return Ok(result);
+        }
+        if header.eh_entries == 0 {
+            return Ok(result);
+        }
+
+        self.collect_extents_recursive(block_bytes, &header, &mut result)?;
+        Ok(result)
+    }
+
+    /// Recursively walk an extent tree node and collect all block ranges.
+    fn collect_extents_recursive(
+        &self,
+        node_data: &[u8],
+        header: &Ext4ExtentHeader,
+        result: &mut Vec<(u64, u32)>,
+    ) -> KernelResult<()> {
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+
+        if header.eh_depth == 0 {
+            // Leaf node — collect data extents.
+            let extent_size = core::mem::size_of::<Ext4Extent>();
+            for i in 0..header.eh_entries as usize {
+                let offset = header_size.saturating_add(i.saturating_mul(extent_size));
+                let ext_bytes = node_data
+                    .get(offset..offset.saturating_add(extent_size))
+                    .ok_or(KernelError::IoError)?;
+                let extent = read_struct::<Ext4Extent>(ext_bytes)?;
+
+                let phys = u64::from(extent.ee_start_lo)
+                    | (u64::from(extent.ee_start_hi) << 32);
+                // Mask off uninitialized-extent flag.
+                let len = u32::from(extent.ee_len & 0x7FFF);
+
+                if phys != 0 && len > 0 {
+                    result.push((phys, len));
+                }
+            }
+        } else {
+            // Internal node — follow index entries, and remember that the
+            // child blocks themselves need freeing too.
+            let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
+            let block_size = self.sb.block_size as usize;
+
+            for i in 0..header.eh_entries as usize {
+                let offset = header_size.saturating_add(i.saturating_mul(idx_size));
+                let idx_bytes = node_data
+                    .get(offset..offset.saturating_add(idx_size))
+                    .ok_or(KernelError::IoError)?;
+                let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
+
+                let child_block = u64::from(idx.ei_leaf_lo)
+                    | (u64::from(idx.ei_leaf_hi) << 32);
+
+                if child_block == 0 {
+                    continue;
+                }
+
+                // Read the child block.
+                let mut child_data = vec![0u8; block_size];
+                self.reader.read_block(child_block, &mut child_data)?;
+
+                let child_header = read_struct::<Ext4ExtentHeader>(&child_data)?;
+                if child_header.eh_magic != EXT4_EXTENT_MAGIC {
+                    continue;
+                }
+
+                // Recurse into the child.
+                self.collect_extents_recursive(&child_data, &child_header, result)?;
+
+                // The index block itself is also allocated and needs freeing.
+                result.push((child_block, 1));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Free all data blocks referenced by an inode's extent tree.
+    ///
+    /// Walks the extent tree, collects all block ranges, and frees them
+    /// via the block allocator.  Does NOT free the inode itself — call
+    /// `free_inode_number` separately.
+    pub fn free_inode_data(&mut self, inode: &Ext4Inode) -> KernelResult<()> {
+        let ranges = self.collect_extent_blocks(inode)?;
+
+        for (start, count) in ranges {
+            // Free each range.  We tolerate individual errors (e.g., double-free
+            // from a corrupted extent tree) and continue freeing remaining ranges.
+            if let Err(e) = super::balloc::free_blocks(
+                &self.reader,
+                &mut self.sb,
+                &mut self.group_descs,
+                start,
+                count,
+            ) {
+                serial_println!(
+                    "[ext4] warning: failed to free block range {}-{}: {:?}",
+                    start,
+                    start.saturating_add(u64::from(count)),
+                    e,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Free an inode number back to the inode bitmap.
+    ///
+    /// Also decrements the used_dirs count if the inode is a directory.
+    pub fn free_inode_number(
+        &mut self,
+        inode_nr: u32,
+        is_directory: bool,
+    ) -> KernelResult<()> {
+        super::balloc::free_inode(
+            &self.reader,
+            &mut self.sb,
+            &mut self.group_descs,
+            inode_nr,
+        )?;
+
+        // Decrement the used_dirs count in the group descriptor.
+        if is_directory {
+            let group = self.sb.inode_group(inode_nr) as usize;
+            if let Some(gd) = self.group_descs.get_mut(group) {
+                gd.bg_used_dirs_count_lo =
+                    gd.bg_used_dirs_count_lo.saturating_sub(1);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Flush all cached writes for this filesystem to disk.
     pub fn flush(&self) -> KernelResult<()> {
         self.reader.flush()

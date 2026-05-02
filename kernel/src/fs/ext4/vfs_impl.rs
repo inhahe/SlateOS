@@ -3,8 +3,9 @@
 //! Bridges the ext4 driver to the VFS layer, allowing ext4 filesystems
 //! to be mounted alongside FAT, memfs, procfs, etc.
 //!
-//! Currently read-only.  Write operations return `NotSupported` until
-//! the block allocation and journal modules are implemented.
+//! Supports full read-write operations: file create/overwrite/delete,
+//! directory create/delete, with proper block and inode reclamation
+//! via the bitmap allocator.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -129,9 +130,9 @@ impl FileSystem for Ext4Fs {
                     return Err(KernelError::NotSupported);
                 }
 
-                // TODO: Free the old blocks before writing new ones.
-                // For now, we allocate new blocks without freeing old ones.
-                // This leaks blocks but avoids data loss during the transition.
+                // Free the old blocks before writing new ones.
+                // This prevents block leaks on overwrite.
+                self.driver.free_inode_data(&inode)?;
 
                 self.driver.write_file_data(&mut inode, data)?;
                 self.driver.write_inode(ino, &inode)?;
@@ -169,12 +170,19 @@ impl FileSystem for Ext4Fs {
         let mut inode = inode;
         inode.i_links_count = inode.i_links_count.saturating_sub(1);
         if inode.i_links_count == 0 {
-            // TODO: Free the inode's data blocks.
-            // TODO: Free the inode itself via balloc::free_inode.
+            // Free all data blocks owned by this file.
+            self.driver.free_inode_data(&inode)?;
+
             inode.i_size_lo = 0;
             inode.i_size_high = 0;
+            inode.i_blocks_lo = 0;
+
+            // Write the zeroed inode first, then free the inode number.
+            self.driver.write_inode(ino, &inode)?;
+            self.driver.free_inode_number(ino, false)?;
+        } else {
+            self.driver.write_inode(ino, &inode)?;
         }
-        self.driver.write_inode(ino, &inode)?;
         self.driver.write_superblock()?;
         self.driver.write_group_descs()?;
         self.driver.flush()?;
@@ -263,14 +271,19 @@ impl FileSystem for Ext4Fs {
         parent_inode.i_links_count = parent_inode.i_links_count.saturating_sub(1);
         self.driver.write_inode(parent_ino, &parent_inode)?;
 
+        // Free the directory's data blocks.
+        self.driver.free_inode_data(&inode)?;
+
         // Mark directory inode as deleted.
         let mut inode = inode;
         inode.i_links_count = 0;
         inode.i_size_lo = 0;
         inode.i_size_high = 0;
+        inode.i_blocks_lo = 0;
         self.driver.write_inode(ino, &inode)?;
 
-        // TODO: Free the directory's data blocks and inode.
+        // Free the inode itself (is_directory=true to update used_dirs count).
+        self.driver.free_inode_number(ino, true)?;
 
         self.driver.write_superblock()?;
         self.driver.write_group_descs()?;

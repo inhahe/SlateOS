@@ -354,6 +354,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell array variables: arr=(words), ${arr[N]}, ${arr[@]}, ${#arr[@]}, arr[N]=val, arr+=(more), unset arr/arr[N], declare -a, type recognition
   - [x] Kshell local variable scoping: proper save/restore in functions via LOCAL_VARS stack, `local VAR=VALUE` saves and restores on function return
   - [x] Kshell string expansions: ${VAR:N:L} substring, ${VAR/pat/rep} replace first, ${VAR//pat/rep} replace all, ${VAR^}/${VAR^^} uppercase, ${VAR,}/${VAR,,} lowercase
+  - [x] Kshell input redirection: `cmd < file` reads file as piped input, combines with output redirection
+  - [x] Kshell shell options: `set -e` (errexit: abort scripts/functions on failure), `set -x` (xtrace: print commands before execution), `set +e`/`+x` to disable
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

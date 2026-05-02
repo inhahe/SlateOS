@@ -554,6 +554,15 @@ impl Vfs {
 
     /// Resolve a path following all symlinks, including cross-mount ones.
     ///
+    /// Returns the canonical absolute path with all symlinks resolved.
+    /// This is the public API for callers (like file handles) that need
+    /// to resolve a path once and reuse the result.
+    pub fn resolve_path(path: &str) -> KernelResult<String> {
+        Self::resolve_follow(path)
+    }
+
+    /// Internal: resolve following all symlinks.
+    ///
     /// Walks path components one at a time, checking each for symlink
     /// status via the underlying filesystem's `lstat()`.  When a symlink
     /// is found, reads the target and re-resolves through the VFS, which

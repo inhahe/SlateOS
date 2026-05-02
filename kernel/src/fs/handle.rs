@@ -158,8 +158,11 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
         return Err(KernelError::InvalidArgument);
     }
 
-    // Normalize path.
-    let norm = super::vfs::normalize_path(path);
+    // Resolve symlinks at open time so the handle refers to the
+    // underlying file, not the symlink.  This matches Unix semantics:
+    // if the symlink is later changed, existing handles still point
+    // to the original target.
+    let norm = crate::fs::Vfs::resolve_path(path)?;
 
     // Check if the file exists.
     let stat_result = crate::fs::Vfs::stat(&norm);

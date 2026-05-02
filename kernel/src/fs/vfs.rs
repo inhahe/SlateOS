@@ -1520,6 +1520,24 @@ impl Vfs {
 }
 
 // ---------------------------------------------------------------------------
+// Lock table dump (for procfs)
+// ---------------------------------------------------------------------------
+
+/// Dump all active advisory locks for display in `/proc/locks`.
+///
+/// Returns `(path, lock_type, owner)` for each active lock.
+pub fn lock_table_dump() -> Vec<(String, LockType, u64)> {
+    let table = LOCK_TABLE.lock();
+    let mut result = Vec::new();
+    for entry in table.iter() {
+        for lock in &entry.locks {
+            result.push((entry.path.clone(), lock.lock_type, lock.owner));
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Path validation
 // ---------------------------------------------------------------------------
 

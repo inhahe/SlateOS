@@ -67,6 +67,8 @@ const ROOT_FILES: &[&str] = &[
     "filesystems",
     "cmdline",
     "loadavg",
+    "cacheinfo",
+    "locks",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -303,6 +305,61 @@ fn gen_loadavg() -> Vec<u8> {
     text.into_bytes()
 }
 
+/// `/proc/cacheinfo` — buffer cache statistics.
+#[allow(clippy::arithmetic_side_effects)]
+fn gen_cacheinfo() -> Vec<u8> {
+    let stats = super::cache::stats();
+    let hit_rate = if stats.reads > 0 {
+        (stats.hits as f64 / stats.reads as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let text = format!(
+        "reads:        {}\n\
+         hits:         {}\n\
+         misses:       {}\n\
+         hit_rate:     {:.1}%\n\
+         writes:       {}\n\
+         writebacks:   {}\n\
+         entries_used: {}\n\
+         entries_dirty:{}\n",
+        stats.reads,
+        stats.hits,
+        stats.misses,
+        hit_rate,
+        stats.writes,
+        stats.writebacks,
+        stats.entries_used,
+        stats.entries_dirty,
+    );
+    text.into_bytes()
+}
+
+/// `/proc/locks` — advisory file lock information.
+fn gen_locks() -> Vec<u8> {
+    // Query the lock table directly via Vfs internal.
+    // We can use lock_query for individual paths, but for a full dump
+    // we need to access the table.  Use a simpler approach: just report
+    // that the lock subsystem is active.
+    let mut text = String::from("LOCK  TYPE       OWNER    PATH\n");
+
+    // Access the global lock table through a helper on Vfs.
+    let lock_info = super::vfs::lock_table_dump();
+    if lock_info.is_empty() {
+        text.push_str("(no active locks)\n");
+    } else {
+        for (path, lock_type, owner) in &lock_info {
+            let type_str = match lock_type {
+                super::vfs::LockType::Shared => "SHARED   ",
+                super::vfs::LockType::Exclusive => "EXCLUSIVE",
+            };
+            text.push_str(&format!("FLOCK {} {:>8}  {}\n", type_str, owner, path));
+        }
+    }
+    text.into_bytes()
+}
+
 /// `/proc/<pid>/status` — per-task status information.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     use crate::sched::task::TaskState;
@@ -370,6 +427,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "filesystems" => Ok(gen_filesystems()),
         "cmdline" => Ok(gen_cmdline()),
         "loadavg" => Ok(gen_loadavg()),
+        "cacheinfo" => Ok(gen_cacheinfo()),
+        "locks" => Ok(gen_locks()),
         _ => Err(KernelError::NotFound),
     }
 }

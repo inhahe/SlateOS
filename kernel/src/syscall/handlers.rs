@@ -2782,14 +2782,18 @@ pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
     }
 
     match crate::fs::handle::fstat(handle) {
-        Ok((size, entry_type)) => {
-            // Write 16-byte FsStatResult (same format as SYS_FS_STAT).
+        Ok(result) => {
+            // Write 16-byte FsStatResult:
+            //   [0..8]:   size (u64, LE)
+            //   [8]:      entry_type (u8)
+            //   [9..12]:  padding
+            //   [12..16]: nlinks (u32, LE)
             // SAFETY: Validated above.
             unsafe {
                 core::ptr::write_bytes(out_ptr, 0, 16);
-                let size_ptr = out_ptr as *mut u64;
-                core::ptr::write(size_ptr, size);
-                core::ptr::write(out_ptr.add(8), entry_type);
+                core::ptr::write(out_ptr as *mut u64, result.size);
+                core::ptr::write(out_ptr.add(8), result.entry_type);
+                core::ptr::write(out_ptr.add(12) as *mut u32, result.nlinks);
             }
             SyscallResult::ok(0)
         }

@@ -340,14 +340,34 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
 /// Stat a file by handle (avoids redundant path lookup).
 ///
 /// Returns `(size, entry_type_byte)` where entry_type_byte is 0=file.
-pub fn fstat(handle: u64) -> KernelResult<(u64, u8)> {
+/// Result of fstat on a file handle.
+pub struct FstatResult {
+    /// File size in bytes.
+    pub size: u64,
+    /// Entry type (0=file, 1=directory, 2=volume_label, 3=symlink).
+    pub entry_type: u8,
+    /// Number of hard links pointing to this file.
+    pub nlinks: u32,
+}
+
+/// Stat an open file handle, returning size, type, and link count.
+pub fn fstat(handle: u64) -> KernelResult<FstatResult> {
     let table = OPEN_FILES.lock();
     let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    // Refresh size from VFS in case another handle modified the file.
-    let entry = crate::fs::Vfs::stat(&file.path)?;
-    // File handles only refer to files, not directories.
-    Ok((entry.size, 0))
+    // Use metadata() for richer info including nlinks.
+    let meta = crate::fs::Vfs::metadata(&file.path)?;
+    let entry_type = match meta.entry_type {
+        crate::fs::EntryType::File => 0,
+        crate::fs::EntryType::Directory => 1,
+        crate::fs::EntryType::VolumeLabel => 2,
+        crate::fs::EntryType::Symlink => 3,
+    };
+    Ok(FstatResult {
+        size: meta.size,
+        entry_type,
+        nlinks: meta.nlinks,
+    })
 }
 
 /// Truncate a file to a given size by handle.
@@ -555,27 +575,30 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[fs::handle]   write + read-back: OK");
 
     // 10. fstat.
-    let (size, etype) = fstat(hw)?;
-    if size != write_data.len() as u64 || etype != 0 {
+    let stat_result = fstat(hw)?;
+    if stat_result.size != write_data.len() as u64 || stat_result.entry_type != 0 {
         crate::serial_println!(
             "[fs::handle]   FAIL: fstat size={} type={}, expected size={} type=0",
-            size,
-            etype,
+            stat_result.size,
+            stat_result.entry_type,
             write_data.len()
         );
         close(hw).ok();
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[fs::handle]   fstat: OK (size={}, type=file)", size);
+    crate::serial_println!(
+        "[fs::handle]   fstat: OK (size={}, type=file, nlinks={})",
+        stat_result.size, stat_result.nlinks
+    );
 
     // 11. ftruncate.
     let trunc_size = 7u64;
     ftruncate(hw, trunc_size)?;
-    let (new_size, _) = fstat(hw)?;
-    if new_size != trunc_size {
+    let trunc_stat = fstat(hw)?;
+    if trunc_stat.size != trunc_size {
         crate::serial_println!(
             "[fs::handle]   FAIL: ftruncate to {} but fstat shows {}",
-            trunc_size, new_size
+            trunc_size, trunc_stat.size
         );
         close(hw).ok();
         return Err(KernelError::InternalError);

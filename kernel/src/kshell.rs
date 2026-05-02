@@ -164,6 +164,10 @@ fn execute(line: &str) {
         "du" => cmd_du(args),
         "find" => cmd_find(args),
         "sync" => cmd_sync(),
+        "wc" => cmd_wc(args),
+        "head" => cmd_head(args),
+        "tail" => cmd_tail(args),
+        "hexdump" | "xxd" => cmd_hexdump(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -213,6 +217,10 @@ fn cmd_help() {
     crate::console_println!("  find [D]P Search for files matching pattern");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
+    crate::console_println!("  wc FILE   Count lines, words, and bytes");
+    crate::console_println!("  head N F  Show first N lines of file");
+    crate::console_println!("  tail N F  Show last N lines of file");
+    crate::console_println!("  hexdump F Hex dump of file contents");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -1228,6 +1236,197 @@ fn find_recurse(path: &str, pattern: &str, count: &mut u64, depth: u32) {
         if entry.entry_type == crate::fs::EntryType::Directory {
             find_recurse(&child_path, pattern, count, depth + 1);
         }
+    }
+}
+
+/// Count lines, words, and bytes in a file (like Unix `wc`).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_wc(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: wc <file>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("wc: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    let bytes = data.len();
+    let mut lines: usize = 0;
+    let mut words: usize = 0;
+    let mut in_word = false;
+
+    for &b in &data {
+        if b == b'\n' {
+            lines += 1;
+        }
+        let is_ws = b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
+        if is_ws {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            words += 1;
+        }
+    }
+
+    crate::console_println!("  {} lines  {} words  {} bytes  {}", lines, words, bytes, path);
+}
+
+/// Show the first N lines of a file (like Unix `head`).
+fn cmd_head(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    let (count, file) = if parts.len() >= 2 {
+        match parts[0].parse::<usize>() {
+            Ok(n) => (n, parts[1]),
+            Err(_) => (10, args), // Default to 10 lines if first arg isn't a number.
+        }
+    } else {
+        crate::console_println!("Usage: head [N] <file>");
+        return;
+    };
+
+    let path = if file.starts_with('/') {
+        alloc::string::String::from(file)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(file);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("head: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
+    let mut printed = 0;
+    for line in text.lines() {
+        if printed >= count {
+            break;
+        }
+        crate::console_println!("{}", line);
+        printed += 1;
+    }
+}
+
+/// Show the last N lines of a file (like Unix `tail`).
+fn cmd_tail(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    let (count, file) = if parts.len() >= 2 {
+        match parts[0].parse::<usize>() {
+            Ok(n) => (n, parts[1]),
+            Err(_) => (10, args),
+        }
+    } else {
+        crate::console_println!("Usage: tail [N] <file>");
+        return;
+    };
+
+    let path = if file.starts_with('/') {
+        alloc::string::String::from(file)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(file);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("tail: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
+    let lines: alloc::vec::Vec<&str> = text.lines().collect();
+    let start = if lines.len() > count { lines.len() - count } else { 0 };
+    for line in &lines[start..] {
+        crate::console_println!("{}", line);
+    }
+}
+
+/// Hex dump of a file (like `hexdump -C` or `xxd`).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_hexdump(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: hexdump <file>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("hexdump: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    // Limit output to first 512 bytes to avoid flooding the console.
+    let limit = data.len().min(512);
+    let data = &data[..limit];
+
+    for offset in (0..data.len()).step_by(16) {
+        // Offset.
+        let mut line = alloc::format!("{:08x}  ", offset);
+
+        // Hex bytes.
+        for i in 0..16 {
+            if offset + i < data.len() {
+                line.push_str(&alloc::format!("{:02x} ", data[offset + i]));
+            } else {
+                line.push_str("   ");
+            }
+            if i == 7 {
+                line.push(' ');
+            }
+        }
+
+        line.push_str(" |");
+
+        // ASCII printable characters.
+        for i in 0..16 {
+            if offset + i < data.len() {
+                let b = data[offset + i];
+                if (0x20..=0x7e).contains(&b) {
+                    line.push(b as char);
+                } else {
+                    line.push('.');
+                }
+            }
+        }
+        line.push('|');
+
+        crate::console_println!("{}", line);
+    }
+
+    if data.len() < limit {
+        crate::console_println!("{:08x}", data.len());
+    } else {
+        crate::console_println!("... ({} bytes total, showing first {})", data.len(), limit);
     }
 }
 

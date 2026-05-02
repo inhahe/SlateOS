@@ -3740,6 +3740,107 @@ pub fn self_test() -> KernelResult<()> {
     crate::fs::Vfs::remove("/METATST.TXT")?;
 
     // ---------------------------------------------------------------
+    // set_attributes test
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing set_attributes...");
+
+    // Create a test file.
+    let attr_test_data = b"Attribute test.\n";
+    let _ = crate::fs::Vfs::remove("/ATTRTST.TXT");
+    crate::fs::Vfs::write_file("/ATTRTST.TXT", attr_test_data)?;
+
+    // Initially, no special attributes should be set.
+    let m1 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
+    if m1.attributes != FileAttr::NONE {
+        crate::serial_println!(
+            "[fat]   set_attributes FAILED: new file has attrs={:?}, expected NONE",
+            m1.attributes
+        );
+        crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   new file attributes = NONE (correct)");
+
+    // Set immutable + hidden.
+    let new_attrs = FileAttr::IMMUTABLE.union(FileAttr::HIDDEN);
+    crate::fs::Vfs::set_attributes("/ATTRTST.TXT", new_attrs)?;
+
+    let m2 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
+    if !m2.attributes.contains(FileAttr::IMMUTABLE)
+        || !m2.attributes.contains(FileAttr::HIDDEN)
+    {
+        crate::serial_println!(
+            "[fat]   set_attributes FAILED: expected IMMUTABLE|HIDDEN, got {:?}",
+            m2.attributes
+        );
+        // Clear before cleanup (immutable files can't be deleted on some FSes).
+        let _ = crate::fs::Vfs::set_attributes("/ATTRTST.TXT", FileAttr::NONE);
+        crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   set IMMUTABLE|HIDDEN verified");
+
+    // Clear all attributes.
+    crate::fs::Vfs::set_attributes("/ATTRTST.TXT", FileAttr::NONE)?;
+
+    let m3 = crate::fs::Vfs::metadata("/ATTRTST.TXT")?;
+    if m3.attributes != FileAttr::NONE {
+        crate::serial_println!(
+            "[fat]   set_attributes FAILED: clear returned {:?}, expected NONE",
+            m3.attributes
+        );
+        crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   clear attributes verified");
+
+    // Test set_permissions and set_owner return NotSupported (as expected for FAT).
+    match crate::fs::Vfs::set_permissions("/ATTRTST.TXT", 0o644) {
+        Err(KernelError::NotSupported) => {
+            crate::serial_println!("[fat]   set_permissions correctly returns NotSupported");
+        }
+        other => {
+            crate::serial_println!("[fat]   set_permissions FAILED: expected NotSupported, got {:?}", other);
+            crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+            return Err(KernelError::IoError);
+        }
+    }
+    match crate::fs::Vfs::set_owner("/ATTRTST.TXT", 1000, 1000) {
+        Err(KernelError::NotSupported) => {
+            crate::serial_println!("[fat]   set_owner correctly returns NotSupported");
+        }
+        other => {
+            crate::serial_println!("[fat]   set_owner FAILED: expected NotSupported, got {:?}", other);
+            crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+            return Err(KernelError::IoError);
+        }
+    }
+
+    // Clean up.
+    crate::fs::Vfs::remove("/ATTRTST.TXT")?;
+    crate::serial_println!("[fat]   set_attributes tests passed");
+
+    // ---------------------------------------------------------------
+    // ns_to_dos_datetime round-trip test
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing ns_to_dos_datetime round-trip...");
+    {
+        // 2000-06-15 14:30:00 → ns → dos → ns should be idempotent.
+        let orig_date: u16 = (20 << 9) | (6 << 5) | 15;
+        let orig_time: u16 = (14 << 11) | (30 << 5) | 0;
+        let ns = dos_datetime_to_ns(orig_date, orig_time);
+        let (rt_date, rt_time) = ns_to_dos_datetime(ns);
+        if rt_date != orig_date || rt_time != orig_time {
+            crate::serial_println!(
+                "[fat]   ns_to_dos_datetime round-trip FAILED: ({:#06X},{:#06X}) → ns → ({:#06X},{:#06X})",
+                orig_date, orig_time, rt_date, rt_time
+            );
+            return Err(KernelError::IoError);
+        }
+        crate::serial_println!("[fat]   ns_to_dos_datetime round-trip verified");
+    }
+
+    // ---------------------------------------------------------------
     // Long Filename (LFN) tests
     // ---------------------------------------------------------------
     crate::serial_println!("[fat]   Testing LFN support...");

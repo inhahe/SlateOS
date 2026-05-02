@@ -3651,6 +3651,18 @@ fn find_dir_insert_point(
             break;
         }
 
+        // Skip the dirent tail (metadata_csum checksum entry).
+        // It looks like a deleted entry but must not be reclaimed.
+        if hdr.inode == 0
+            && hdr.rec_len == 12
+            && hdr.name_len == 0
+            && hdr.file_type == super::ondisk::EXT4_DIRENT_TAIL_MARKER
+        {
+            // Don't update last_offset — the tail is not usable space.
+            offset = offset.saturating_add(hdr.rec_len as usize);
+            continue;
+        }
+
         // The actual size of this entry (header + name, 4-byte aligned).
         let actual = if hdr.inode == 0 {
             // Deleted entry — the whole rec_len is free.

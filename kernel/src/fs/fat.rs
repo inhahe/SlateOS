@@ -3110,8 +3110,6 @@ impl FileSystem for FatFs {
         }
 
         let (parent_path, filename) = split_path(path);
-        let name83 = Self::to_83_name(filename)
-            .ok_or(KernelError::InvalidArgument)?;
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
         let cluster_bytes = u64::from(self.bpb.sectors_per_cluster)
@@ -3121,25 +3119,35 @@ impl FileSystem for FatFs {
         }
         let needed_clusters = (size + cluster_bytes - 1) / cluster_bytes;
 
-        // Find the file entry (or create it if it doesn't exist).
-        let (dir_lba, dir_offset, exists) =
-            self.find_or_create_slot_in(parent_cluster, &name83)?;
+        // Try to resolve the file via path (handles both LFN and 8.3).
+        let existing = {
+            let (_pc, entry_opt) = self.resolve_path(path)?;
+            entry_opt
+        };
 
-        // Read existing first cluster and file size.
-        let (mut first_cluster, old_size) = if exists {
-            let mut sector_buf = [0u8; SECTOR_SIZE];
-            self.read_sector(dir_lba, &mut sector_buf)?;
-            let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
-            if attr & ATTR_DIRECTORY != 0 {
+        let (dir_lba, dir_offset, exists, name83);
+        let mut first_cluster;
+
+        if let Some(entry) = existing {
+            if entry.is_directory() {
                 return Err(KernelError::IsADirectory);
             }
-            let clo = u32::from(read_u16(&sector_buf, dir_offset + 26));
-            let chi = u32::from(read_u16(&sector_buf, dir_offset + 20));
-            let cluster = (chi << 16) | clo;
-            let sz = read_u32(&sector_buf, dir_offset + 28);
-            (cluster, sz)
+            name83 = entry.name;
+            first_cluster = entry.first_cluster;
+
+            let (lba, off, found) = self.find_or_create_slot_in(
+                parent_cluster, &name83,
+            )?;
+            dir_lba = lba;
+            dir_offset = off;
+            exists = found;
         } else {
-            (0u32, 0u32)
+            // File doesn't exist — will create it.
+            first_cluster = 0;
+            name83 = [0u8; 11]; // Unused for new-file path.
+            dir_lba = 0;
+            dir_offset = 0;
+            exists = false;
         };
 
         // Count existing clusters.
@@ -3189,9 +3197,9 @@ impl FileSystem for FatFs {
 
         // Update the directory entry's first cluster (size stays the same).
         if !exists {
-            // Create a new zero-length entry with the allocated chain.
-            self.write_dir_entry(
-                dir_lba, dir_offset, &name83,
+            // Create a new zero-length entry with the allocated chain (LFN-aware).
+            self.create_entry_with_lfn(
+                parent_cluster, filename,
                 first_cluster, 0, ATTR_ARCHIVE,
             )?;
         } else {
@@ -3663,29 +3671,42 @@ impl FileSystem for FatFs {
         }
 
         let (parent_path, filename) = split_path(path);
-        let name83 = Self::to_83_name(filename)
-            .ok_or(KernelError::InvalidArgument)?;
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
-        // Find or create the directory entry.
-        let (dir_lba, dir_offset, exists) =
-            self.find_or_create_slot_in(parent_cluster, &name83)?;
+        // Try to resolve the file via path (handles both LFN and 8.3).
+        let existing = {
+            let (_pc, entry_opt) = self.resolve_path(path)?;
+            entry_opt
+        };
 
-        // Read existing metadata.
-        let (old_cluster, old_size) = if exists {
-            let mut sector_buf = [0u8; SECTOR_SIZE];
-            self.read_sector(dir_lba, &mut sector_buf)?;
-            let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
-            if attr & ATTR_DIRECTORY != 0 {
+        let dir_lba;
+        let dir_offset;
+        let exists;
+        let name83;
+        let old_cluster;
+        let old_size;
+
+        if let Some(entry) = existing {
+            if entry.is_directory() {
                 return Err(KernelError::IsADirectory);
             }
-            let clo = u32::from(read_u16(&sector_buf, dir_offset + 26));
-            let chi = u32::from(read_u16(&sector_buf, dir_offset + 20));
-            let cluster = (chi << 16) | clo;
-            let size = read_u32(&sector_buf, dir_offset + 28);
-            (cluster, size)
+            name83 = entry.name;
+            old_cluster = entry.first_cluster;
+            old_size = entry.file_size;
+            let (lba, off, found) = self.find_or_create_slot_in(
+                parent_cluster, &name83,
+            )?;
+            dir_lba = lba;
+            dir_offset = off;
+            exists = found;
         } else {
-            (0u32, 0u32)
+            // File doesn't exist — will be created.
+            name83 = [0u8; 11];
+            old_cluster = 0;
+            old_size = 0;
+            dir_lba = 0;
+            dir_offset = 0;
+            exists = false;
         };
 
         let new_end = offset as usize + data.len();
@@ -3805,10 +3826,18 @@ impl FileSystem for FatFs {
         }
 
         // Update directory entry with new first cluster and size.
-        self.write_dir_entry(
-            dir_lba, dir_offset, &name83,
-            first_cluster, new_size as u32, 0x20,
-        )?;
+        if !exists {
+            // New file — create with LFN support.
+            self.create_entry_with_lfn(
+                parent_cluster, filename,
+                first_cluster, new_size as u32, ATTR_ARCHIVE,
+            )?;
+        } else {
+            self.write_dir_entry(
+                dir_lba, dir_offset, &name83,
+                first_cluster, new_size as u32, ATTR_ARCHIVE,
+            )?;
+        }
 
         // Invalidate dcache: file metadata (size, cluster chain) changed.
         self.dcache_invalidate_prefix(path);
@@ -3828,11 +3857,18 @@ impl FileSystem for FatFs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let (parent_path, filename) = split_path(path);
-        let name83 = Self::to_83_name(filename)
-            .ok_or(KernelError::InvalidArgument)?;
+        let (parent_path, _filename) = split_path(path);
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
+        // Resolve via path to handle both LFN and 8.3 names.
+        let (_pc, entry_opt) = self.resolve_path(path)?;
+        let entry = entry_opt.ok_or(KernelError::NotFound)?;
+
+        if entry.is_directory() {
+            return Err(KernelError::IsADirectory);
+        }
+
+        let name83 = entry.name;
         let (dir_lba, dir_offset, exists) =
             self.find_or_create_slot_in(parent_cluster, &name83)?;
         if !exists {

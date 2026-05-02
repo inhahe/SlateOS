@@ -705,6 +705,161 @@ impl Ext4Driver {
         Ok(())
     }
 
+    /// Look up the physical block number for a given logical block.
+    ///
+    /// Walks the extent tree and returns the physical block that
+    /// corresponds to `logical_block`, or `None` if the block is
+    /// sparse (not allocated, e.g., in a file with holes).
+    pub fn lookup_physical_block(
+        &self,
+        inode: &Ext4Inode,
+        logical_block: u64,
+    ) -> KernelResult<Option<u64>> {
+        if (inode.i_flags & inode_flags::EXTENTS) == 0 {
+            return Err(KernelError::NotSupported);
+        }
+
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+        if header.eh_magic != EXT4_EXTENT_MAGIC || header.eh_entries == 0 {
+            return Ok(None);
+        }
+
+        self.lookup_in_tree(block_bytes, &header, logical_block)
+    }
+
+    /// Recursively look up a logical block in an extent tree node.
+    fn lookup_in_tree(
+        &self,
+        node_data: &[u8],
+        header: &Ext4ExtentHeader,
+        logical_block: u64,
+    ) -> KernelResult<Option<u64>> {
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+        let block_size_usize = self.sb.block_size as usize;
+
+        if header.eh_depth == 0 {
+            // Leaf — search extents.
+            let extent_size = core::mem::size_of::<Ext4Extent>();
+            for i in 0..header.eh_entries as usize {
+                let off = header_size.saturating_add(i.saturating_mul(extent_size));
+                let ext_bytes = node_data
+                    .get(off..off.saturating_add(extent_size))
+                    .ok_or(KernelError::IoError)?;
+                let extent = read_struct::<Ext4Extent>(ext_bytes)?;
+
+                let ext_logical = u64::from(extent.ee_block);
+                let ext_len = u64::from(extent.ee_len & 0x7FFF);
+                let ext_phys = u64::from(extent.ee_start_lo)
+                    | (u64::from(extent.ee_start_hi) << 32);
+
+                if logical_block >= ext_logical
+                    && logical_block < ext_logical.saturating_add(ext_len)
+                {
+                    let offset_in_ext = logical_block.saturating_sub(ext_logical);
+                    return Ok(Some(ext_phys.saturating_add(offset_in_ext)));
+                }
+            }
+            Ok(None)
+        } else {
+            // Internal node — find the right child.
+            let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
+            // Find the index entry whose range includes our block.
+            // Index entries are sorted by ei_block.  The right child is
+            // the last one with ei_block <= logical_block.
+            let mut best_idx: Option<super::ondisk::Ext4ExtentIdx> = None;
+            for i in 0..header.eh_entries as usize {
+                let off = header_size.saturating_add(i.saturating_mul(idx_size));
+                let idx_bytes = node_data
+                    .get(off..off.saturating_add(idx_size))
+                    .ok_or(KernelError::IoError)?;
+                let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
+
+                if u64::from(idx.ei_block) <= logical_block {
+                    best_idx = Some(idx);
+                } else {
+                    break;
+                }
+            }
+
+            if let Some(idx) = best_idx {
+                let child_block = u64::from(idx.ei_leaf_lo)
+                    | (u64::from(idx.ei_leaf_hi) << 32);
+                if child_block == 0 {
+                    return Ok(None);
+                }
+
+                let mut child_data = vec![0u8; block_size_usize];
+                self.reader.read_block(child_block, &mut child_data)?;
+
+                let child_header = read_struct::<Ext4ExtentHeader>(&child_data)?;
+                if child_header.eh_magic != EXT4_EXTENT_MAGIC {
+                    return Ok(None);
+                }
+
+                self.lookup_in_tree(&child_data, &child_header, logical_block)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    /// Write data at a byte offset within an existing file, in place.
+    ///
+    /// Only modifies the disk blocks that are affected by the write.
+    /// Does NOT extend the file — writes past the end are truncated.
+    /// Caller should fall back to read-modify-write for extending writes.
+    pub fn write_at_inplace(
+        &self,
+        inode: &Ext4Inode,
+        offset: u64,
+        data: &[u8],
+    ) -> KernelResult<usize> {
+        let file_size = self.inode_size(inode);
+        if offset >= file_size || data.is_empty() {
+            return Ok(0);
+        }
+
+        let block_size = u64::from(self.sb.block_size);
+        let block_size_usize = self.sb.block_size as usize;
+
+        // Clamp write to file size.
+        let actual_len = data.len().min(file_size.saturating_sub(offset) as usize);
+        let mut written = 0usize;
+
+        while written < actual_len {
+            let cur_offset = offset.saturating_add(written as u64);
+            let logical_block = cur_offset / block_size;
+            let offset_in_block = (cur_offset % block_size) as usize;
+
+            // Look up the physical block.
+            let phys = self.lookup_physical_block(inode, logical_block)?
+                .ok_or(KernelError::IoError)?;
+
+            // Read the existing block.
+            let mut buf = vec![0u8; block_size_usize];
+            self.reader.read_block(phys, &mut buf)?;
+
+            // Calculate how much to write in this block.
+            let space_in_block = block_size_usize.saturating_sub(offset_in_block);
+            let chunk_len = space_in_block.min(actual_len.saturating_sub(written));
+
+            if let (Some(dest), Some(src)) = (
+                buf.get_mut(offset_in_block..offset_in_block.saturating_add(chunk_len)),
+                data.get(written..written.saturating_add(chunk_len)),
+            ) {
+                dest.copy_from_slice(src);
+            }
+
+            // Write the modified block back.
+            self.reader.write_block(phys, &buf)?;
+
+            written = written.saturating_add(chunk_len);
+        }
+
+        Ok(written)
+    }
+
     /// Read data from an extent tree, only reading blocks in
     /// the logical block range `[first_logical, last_logical]`.
     fn read_range_from_tree(

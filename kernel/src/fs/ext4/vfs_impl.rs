@@ -390,6 +390,42 @@ impl FileSystem for Ext4Fs {
         self.driver.read_file_range(&inode, offset, len)
     }
 
+    fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode = inode.i_mode & file_type::S_IFMT;
+        if mode != file_type::S_IFREG {
+            return Err(KernelError::NotSupported);
+        }
+
+        let file_size = inode_file_size(&inode);
+        let end = offset.saturating_add(data.len() as u64);
+
+        if end <= file_size {
+            // Write is within existing file bounds — modify blocks in place.
+            // No block allocation needed, no extent tree changes.
+            self.driver.write_at_inplace(&inode, offset, data)?;
+            self.driver.flush()?;
+            Ok(())
+        } else {
+            // Write extends past file end — fall back to read-modify-write.
+            // A production implementation would extend the extent tree
+            // incrementally; for now, the safe approach avoids complexity.
+            let mut contents = self.driver.read_file_data(&inode)?;
+            let start = offset as usize;
+            let end_usize = end as usize;
+
+            if end_usize > contents.len() {
+                contents.resize(end_usize, 0);
+            }
+            if let Some(dest) = contents.get_mut(start..start.saturating_add(data.len())) {
+                dest.copy_from_slice(data);
+            }
+            self.write_file(path, &contents)
+        }
+    }
+
     fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;

@@ -1210,3 +1210,159 @@ fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a
     let mp = &mut vfs.mounts[idx];
     Ok((mp, relative))
 }
+
+// ---------------------------------------------------------------------------
+// VFS self-test
+// ---------------------------------------------------------------------------
+
+/// Test VFS path resolution, symlinks, and cross-mount operations.
+///
+/// Requires at least a root mount (`/`) and `/tmp` (memfs) to be mounted.
+pub fn self_test() -> KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[vfs] Running self-test...");
+
+    // Check that we have at least root and /tmp mounts.
+    let mounts = Vfs::mounts();
+    if mounts.is_empty() {
+        serial_println!("[vfs]   No mounts — skipping self-test.");
+        return Ok(());
+    }
+    serial_println!("[vfs]   {} mount(s) active", mounts.len());
+    for (path, fs_type) in &mounts {
+        serial_println!("[vfs]     {} -> {}", path, fs_type);
+    }
+
+    let has_tmp = mounts.iter().any(|(p, _)| p == "/tmp");
+
+    // --- Basic path validation ---
+    match Vfs::stat("relative/path") {
+        Err(KernelError::InvalidArgument) => {
+            serial_println!("[vfs]   validate_path rejects relative: OK");
+        }
+        other => {
+            serial_println!("[vfs]   FAIL: relative path should be InvalidArgument, got {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // --- normalize_path ---
+    let norm = normalize_path("/a/b/../c/./d");
+    if norm != "/a/c/d" {
+        serial_println!("[vfs]   FAIL: normalize '/a/b/../c/./d' = '{}', expected '/a/c/d'", norm);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[vfs]   normalize_path: /a/b/../c/./d → {} OK", norm);
+
+    // --- Intra-mount symlink resolution (on /tmp memfs) ---
+    if has_tmp {
+        serial_println!("[vfs]   Testing intra-mount symlink resolution on /tmp...");
+
+        // Create a target file and a symlink to it within /tmp.
+        Vfs::write_file("/tmp/_vfs_test_target", b"vfs target")?;
+        Vfs::symlink("/tmp/_vfs_test_link", "/tmp/_vfs_test_target")?;
+
+        // stat through the symlink should return File.
+        let stat_via_link = Vfs::stat("/tmp/_vfs_test_link")?;
+        if stat_via_link.entry_type != EntryType::File {
+            serial_println!("[vfs]   FAIL: stat through symlink should be File, got {:?}", stat_via_link.entry_type);
+            let _ = Vfs::remove("/tmp/_vfs_test_link");
+            let _ = Vfs::remove("/tmp/_vfs_test_target");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     stat through intra-mount symlink: File OK");
+
+        // lstat on the symlink itself should return Symlink.
+        let lstat_link = Vfs::lstat("/tmp/_vfs_test_link")?;
+        if lstat_link.entry_type != EntryType::Symlink {
+            serial_println!("[vfs]   FAIL: lstat on symlink should be Symlink, got {:?}", lstat_link.entry_type);
+            let _ = Vfs::remove("/tmp/_vfs_test_link");
+            let _ = Vfs::remove("/tmp/_vfs_test_target");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     lstat on symlink: Symlink OK");
+
+        // Read through the symlink should return target content.
+        let content = Vfs::read_file("/tmp/_vfs_test_link")?;
+        if content != b"vfs target" {
+            serial_println!("[vfs]   FAIL: read through symlink returned wrong data");
+            let _ = Vfs::remove("/tmp/_vfs_test_link");
+            let _ = Vfs::remove("/tmp/_vfs_test_target");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     read through symlink: content matches OK");
+
+        // readlink should return the raw target.
+        let target = Vfs::readlink("/tmp/_vfs_test_link")?;
+        if target != "/tmp/_vfs_test_target" {
+            serial_println!("[vfs]   FAIL: readlink = '{}', expected '/tmp/_vfs_test_target'", target);
+            let _ = Vfs::remove("/tmp/_vfs_test_link");
+            let _ = Vfs::remove("/tmp/_vfs_test_target");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readlink: '{}' OK", target);
+
+        // --- Cross-mount symlink resolution ---
+        // Create a symlink on root (/) that points to /tmp/file.
+        // This exercises VFS-level resolution across mount boundaries.
+        serial_println!("[vfs]   Testing cross-mount symlink resolution...");
+
+        let cross_link = "/_vfs_cross_link";
+        Vfs::symlink(cross_link, "/tmp/_vfs_test_target")?;
+
+        // stat through the cross-mount symlink should follow to the
+        // file on /tmp and return File.
+        match Vfs::stat(cross_link) {
+            Ok(entry) if entry.entry_type == EntryType::File => {
+                serial_println!("[vfs]     stat through cross-mount symlink: File OK");
+            }
+            Ok(entry) => {
+                serial_println!("[vfs]   FAIL: cross-mount stat type={:?}, expected File", entry.entry_type);
+                let _ = Vfs::remove(cross_link);
+                let _ = Vfs::remove("/tmp/_vfs_test_link");
+                let _ = Vfs::remove("/tmp/_vfs_test_target");
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                serial_println!("[vfs]   FAIL: cross-mount stat failed: {:?}", e);
+                let _ = Vfs::remove(cross_link);
+                let _ = Vfs::remove("/tmp/_vfs_test_link");
+                let _ = Vfs::remove("/tmp/_vfs_test_target");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Read through the cross-mount symlink.
+        match Vfs::read_file(cross_link) {
+            Ok(data) if data == b"vfs target" => {
+                serial_println!("[vfs]     read through cross-mount symlink: content OK");
+            }
+            Ok(data) => {
+                serial_println!("[vfs]   FAIL: cross-mount read returned {} bytes, wrong content", data.len());
+                let _ = Vfs::remove(cross_link);
+                let _ = Vfs::remove("/tmp/_vfs_test_link");
+                let _ = Vfs::remove("/tmp/_vfs_test_target");
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                serial_println!("[vfs]   FAIL: cross-mount read failed: {:?}", e);
+                let _ = Vfs::remove(cross_link);
+                let _ = Vfs::remove("/tmp/_vfs_test_link");
+                let _ = Vfs::remove("/tmp/_vfs_test_target");
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Clean up all test files.
+        let _ = Vfs::remove(cross_link);
+        let _ = Vfs::remove("/tmp/_vfs_test_link");
+        let _ = Vfs::remove("/tmp/_vfs_test_target");
+        serial_println!("[vfs]     test files cleaned up OK");
+    } else {
+        serial_println!("[vfs]   /tmp not mounted — skipping symlink tests");
+    }
+
+    serial_println!("[vfs] Self-test PASSED");
+    Ok(())
+}

@@ -620,6 +620,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::ext4::self_test() {
                 serial_println!("WARNING: ext4 self-test failed: {:?}", e);
             }
+            // Run VFS-level self-test (symlinks, cross-mount resolution).
+            if let Err(e) = fs::vfs::self_test() {
+                serial_println!("WARNING: VFS self-test failed: {:?}", e);
+            }
             // Flush buffer cache to disk so data survives power loss / QEMU kill.
             if let Err(e) = fs::cache::flush_all() {
                 serial_println!("WARNING: Buffer cache flush failed: {:?}", e);

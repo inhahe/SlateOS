@@ -803,32 +803,74 @@ impl FileSystem for Ext4Fs {
             attrs = attrs.union(FileAttr::APPEND_ONLY);
         }
 
-        // ext4 stores Unix timestamps as seconds since epoch.
-        // Our FileMeta uses nanoseconds — convert.
+        // ext4 extra inode fields provide nanosecond precision and epoch
+        // extension bits.  Layout of each *_extra field (u32, LE):
+        //   bits [31:2] = nanoseconds (0..999_999_999)
+        //   bits [1:0]  = epoch extension (adds 0..3 × 2^32 seconds)
+        //
+        // Full timestamp = base_seconds + epoch_ext * 2^32, nanoseconds from upper 30 bits.
+        //
+        // Offsets in raw inode bytes:
+        //   0x84 = i_ctime_extra    0x88 = i_mtime_extra
+        //   0x8C = i_atime_extra    0x90 = i_crtime (base secs)
+        //   0x94 = i_crtime_extra
+        let raw_inode = if self.driver.ondisk_inode_size() > 128 {
+            self.driver.read_inode_raw(ino).ok()
+        } else {
+            None
+        };
+
+        // Combine base seconds + extra field → nanoseconds since epoch.
+        let combine_ts = |base_secs: u32, extra_offset: usize| -> u64 {
+            let extra = raw_inode.as_ref()
+                .and_then(|raw| raw.get(extra_offset..extra_offset.wrapping_add(4)))
+                .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                .map_or(0u32, u32::from_le_bytes);
+            // Epoch extension: lower 2 bits extend the 32-bit seconds.
+            let epoch_ext = u64::from(extra & 3);
+            let total_secs = u64::from(base_secs).saturating_add(epoch_ext.wrapping_shl(32));
+            let ns = u64::from(extra >> 2);
+            total_secs.saturating_mul(1_000_000_000).saturating_add(ns)
+        };
+
+        // Simple second→nanosecond fallback for when no extra fields exist.
         let sec_to_ns = |s: u32| u64::from(s).saturating_mul(1_000_000_000);
 
-        // Read creation time from the extra inode area (i_crtime at offset 0x90).
-        // Only available if inode_size > 128 and i_extra_isize covers offset 0x90.
-        let created_ns = if self.driver.ondisk_inode_size() > 128 {
-            self.driver.read_inode_raw(ino).ok()
-                .and_then(|raw| {
-                    // i_crtime is at byte 0x90 (4 bytes, LE).
-                    raw.get(0x90..0x94)
-                        .and_then(|s| <[u8; 4]>::try_from(s).ok())
-                        .map(u32::from_le_bytes)
-                })
-                .map_or(0, sec_to_ns)
+        // Creation time: base at 0x90, extra at 0x94.
+        let created_ns = raw_inode.as_ref()
+            .and_then(|raw| raw.get(0x90..0x94))
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+            .map_or(0u32, u32::from_le_bytes);
+        let created_ns = if created_ns > 0 {
+            combine_ts(created_ns, 0x94)
         } else {
             0
+        };
+
+        // For mtime/atime/ctime, use extra fields if raw bytes available.
+        let modified_ns = if raw_inode.is_some() {
+            combine_ts(inode.i_mtime, 0x88)
+        } else {
+            sec_to_ns(inode.i_mtime)
+        };
+        let accessed_ns = if raw_inode.is_some() {
+            combine_ts(inode.i_atime, 0x8C)
+        } else {
+            sec_to_ns(inode.i_atime)
+        };
+        let changed_ns = if raw_inode.is_some() {
+            combine_ts(inode.i_ctime, 0x84)
+        } else {
+            sec_to_ns(inode.i_ctime)
         };
 
         Ok(FileMeta {
             size,
             entry_type,
             created_ns,
-            modified_ns: sec_to_ns(inode.i_mtime),
-            accessed_ns: sec_to_ns(inode.i_atime),
-            changed_ns: sec_to_ns(inode.i_ctime),
+            modified_ns,
+            accessed_ns,
+            changed_ns,
             uid: u32::from(inode.i_uid),
             gid: u32::from(inode.i_gid),
             permissions,

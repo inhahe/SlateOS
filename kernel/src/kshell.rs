@@ -205,6 +205,20 @@ static OPT_XTRACE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
+// Trap handlers
+// ---------------------------------------------------------------------------
+
+/// Signal trap handlers: maps signal name → command to execute.
+///
+/// Supported signals in kshell:
+/// - EXIT: runs when the shell exits or a script finishes
+/// - ERR:  runs when a command returns non-zero (if not in `|| / && / if`)
+/// - INT:  runs on interrupt (Ctrl+C)
+///
+/// Set with `trap 'commands' SIGNAL`.  Clear with `trap - SIGNAL`.
+static TRAP_HANDLERS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+// ---------------------------------------------------------------------------
 // Environment variables
 // ---------------------------------------------------------------------------
 
@@ -1041,6 +1055,8 @@ static CONTROL_STACK: Mutex<Vec<ControlState>> = Mutex::new(Vec::new());
 enum LoopKind {
     /// `while CONDITION; do ... done` — repeats while condition exits 0.
     While { condition: String },
+    /// `until CONDITION; do ... done` — repeats until condition exits 0.
+    Until { condition: String },
     /// `for VAR in WORDS...; do ... done` — iterates over a word list.
     For { variable: String, words_raw: String },
     /// `for ((INIT; COND; STEP)); do ... done` — C-style arithmetic loop.
@@ -1487,9 +1503,9 @@ fn handle_control_flow(line: &str) -> bool {
         let mut lc = LOOP_COLLECTOR.lock();
         if let Some(ref mut state) = *lc {
             match first_word {
-                // Both `while` and `for` open a new do..done block,
-                // so both increment nesting when seen inside a loop body.
-                "while" | "for" => {
+                // while/until/for all open a new do..done block,
+                // so all increment nesting when seen inside a loop body.
+                "while" | "until" | "for" => {
                     state.nesting = state.nesting.saturating_add(1);
                     state.body.push(String::from(trimmed));
                     return true;
@@ -1514,6 +1530,9 @@ fn handle_control_flow(line: &str) -> bool {
                         LoopKind::While { condition } => {
                             execute_while_loop(&condition, &body);
                         }
+                        LoopKind::Until { condition } => {
+                            execute_until_loop(&condition, &body);
+                        }
                         LoopKind::For { variable, words_raw } => {
                             execute_for_loop(&variable, &words_raw, &body);
                         }
@@ -1537,8 +1556,9 @@ fn handle_control_flow(line: &str) -> bool {
     }
 
     match first_word {
-        "while" => {
-            let condition = trimmed.get(5..).unwrap_or("").trim();
+        "while" | "until" => {
+            let skip = if first_word == "while" { 5 } else { 5 };
+            let condition = trimmed.get(skip..).unwrap_or("").trim();
             // Remove trailing "do" if present (allow `while test -f /x; do`).
             let condition = condition.strip_suffix("do")
                 .unwrap_or(condition)
@@ -1547,13 +1567,19 @@ fn handle_control_flow(line: &str) -> bool {
                 .trim();
 
             if condition.is_empty() {
-                crate::console_println!("Syntax error: while requires a condition");
+                crate::console_println!("Syntax error: {} requires a condition", first_word);
                 return true;
             }
 
+            let kind = if first_word == "until" {
+                LoopKind::Until { condition: String::from(condition) }
+            } else {
+                LoopKind::While { condition: String::from(condition) }
+            };
+
             // Start collecting body lines.
             *LOOP_COLLECTOR.lock() = Some(LoopCollector {
-                kind: LoopKind::While { condition: String::from(condition) },
+                kind,
                 body: Vec::new(),
                 nesting: 0,
             });
@@ -1856,6 +1882,43 @@ fn execute_while_loop(condition: &str, body: &[String]) {
         LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
 
         // Execute the body lines.
+        for line in body {
+            execute(line);
+            if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+                || LOOP_CONTINUE.load(core::sync::atomic::Ordering::Relaxed)
+                || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+        }
+
+        if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+            || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            break;
+        }
+    }
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+    LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Execute an until loop: inverse of while — repeats until condition succeeds.
+fn execute_until_loop(condition: &str, body: &[String]) {
+    const MAX_ITERATIONS: u32 = 1000;
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+
+    for _ in 0..MAX_ITERATIONS {
+        // Evaluate the condition.
+        execute(condition);
+        if last_exit() == 0 {
+            // Condition succeeded — exit the loop.
+            break;
+        }
+
+        LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+
         for line in body {
             execute(line);
             if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
@@ -2882,8 +2945,8 @@ const COMMANDS: &[&str] = &[
     "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
     "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
     // Scripting keywords and commands
-    "break", "case", "continue", "declare", "for", "function", "in",
-    "local", "read", "return", "shift", "typeof",
+    "break", "case", "command", "continue", "declare", "for", "function", "in",
+    "local", "read", "return", "shift", "trap", "typeof", "until",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -3419,6 +3482,11 @@ fn execute_single(line: &str) {
     }
 
     dispatch(line);
+
+    // Fire ERR trap if the command failed.
+    if last_exit() != 0 {
+        fire_trap("ERR");
+    }
 }
 
 /// Output redirection descriptor.
@@ -4009,6 +4077,8 @@ fn dispatch(line: &str) {
         "mapfile" | "readarray" => cmd_mapfile(args),
         "readonly" => cmd_readonly(args),
         "let" => cmd_let(args),
+        "trap" => cmd_trap(args),
+        "command" => cmd_command(args),
         "which" | "typeof" => cmd_type(args),
         "return" => {
             // `return [N]` — set exit status and signal function return.
@@ -7488,6 +7558,101 @@ fn cmd_let(args: &str) {
     set_exit(if val == 0 { 1 } else { 0 });
 }
 
+/// `trap 'COMMAND' SIGNAL` — set a handler for a shell event.
+///
+/// Supported signals: EXIT, ERR, INT.
+/// `trap - SIGNAL` clears the handler.
+/// `trap` with no arguments lists current handlers.
+fn cmd_trap(args: &str) {
+    if args.is_empty() {
+        // List all trap handlers.
+        let handlers = TRAP_HANDLERS.lock();
+        if handlers.is_empty() {
+            crate::console_println!("No trap handlers set.");
+        } else {
+            for (sig, cmd) in handlers.iter() {
+                crate::console_println!("trap -- '{}' {}", cmd, sig);
+            }
+        }
+        return;
+    }
+
+    // Split: trap 'COMMAND' SIGNAL [SIGNAL...]
+    // or:    trap - SIGNAL
+    let trimmed = args.trim();
+
+    if trimmed == "-" || trimmed.starts_with("- ") {
+        // Clear handler(s).
+        let signals = trimmed.get(1..).unwrap_or("").trim();
+        for sig in signals.split_whitespace() {
+            let sig_upper = sig.to_uppercase();
+            TRAP_HANDLERS.lock().remove(&sig_upper);
+        }
+        return;
+    }
+
+    // Parse: first argument is the command (possibly quoted), rest are signals.
+    let (command, rest) = if trimmed.starts_with('\'') || trimmed.starts_with('"') {
+        // Quoted command.
+        let quote = trimmed.as_bytes()[0] as char;
+        if let Some(end) = trimmed.get(1..).and_then(|s| s.find(quote)) {
+            let cmd = trimmed.get(1..end.saturating_add(1)).unwrap_or("");
+            let rest = trimmed.get(end.saturating_add(2)..).unwrap_or("").trim();
+            (cmd, rest)
+        } else {
+            (trimmed, "")
+        }
+    } else {
+        // Unquoted: first word is command.
+        let mut parts = trimmed.splitn(2, ' ');
+        let cmd = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+        (cmd, rest)
+    };
+
+    if rest.is_empty() {
+        crate::console_println!("Usage: trap 'COMMAND' SIGNAL [SIGNAL...]");
+        set_exit(1);
+        return;
+    }
+
+    // Set the handler for each signal.
+    for sig in rest.split_whitespace() {
+        let sig_upper = sig.to_uppercase();
+        match sig_upper.as_str() {
+            "EXIT" | "ERR" | "INT" => {
+                TRAP_HANDLERS.lock().insert(sig_upper, String::from(command));
+            }
+            _ => {
+                crate::console_println!("trap: unsupported signal '{}'", sig);
+                set_exit(1);
+            }
+        }
+    }
+}
+
+/// Execute any trap handler registered for the given signal.
+fn fire_trap(signal: &str) {
+    let cmd = TRAP_HANDLERS.lock().get(signal).cloned();
+    if let Some(cmd) = cmd {
+        execute(&cmd);
+    }
+}
+
+/// `command CMD [ARGS...]` — run CMD bypassing aliases and functions.
+///
+/// Executes only built-in shell commands, ignoring any alias or function
+/// with the same name.
+fn cmd_command(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: command CMD [args...]");
+        set_exit(1);
+        return;
+    }
+    // Dispatch directly without alias expansion.
+    dispatch(args);
+}
+
 fn cmd_export(args: &str) {
     if args.is_empty() {
         // List all variables.
@@ -7703,7 +7868,7 @@ fn cmd_type(args: &str) {
         }
 
         // Check keywords.
-        if matches!(name, "if" | "then" | "elif" | "else" | "fi" | "while" | "for"
+        if matches!(name, "if" | "then" | "elif" | "else" | "fi" | "while" | "until" | "for"
             | "do" | "done" | "case" | "esac" | "function" | "in")
         {
             crate::console_println!("{} is a shell keyword", name);
@@ -7733,9 +7898,9 @@ fn is_builtin(name: &str) -> bool {
         | "wget" | "http" | "version" | "ver" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
-        | "readonly" | "let" | "which" | "typeof" | "export" | "set"
-        | "unset" | "alias" | "unalias" | "return" | "break" | "continue"
-        | "shift" | "local" | "printf"
+        | "readonly" | "let" | "trap" | "command" | "which" | "typeof"
+        | "export" | "set" | "unset" | "alias" | "unalias" | "return"
+        | "break" | "continue" | "shift" | "local" | "printf"
     )
 }
 

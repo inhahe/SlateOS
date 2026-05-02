@@ -7371,34 +7371,78 @@ fn cmd_lsp(args: &str) {
 /// List mounted filesystems or mount a new one.
 fn cmd_mount(args: &str) {
     if args.is_empty() {
-        // List all mounts.
-        let mounts = crate::fs::Vfs::mounts();
+        // List all mounts with options.
+        let mounts = crate::fs::Vfs::mounts_full();
         if mounts.is_empty() {
             crate::console_println!("No filesystems mounted.");
         } else {
-            crate::console_println!("{:<12} {}", "Type", "Mount point");
-            for (path, fs_type) in &mounts {
-                crate::console_println!("{:<12} {}", fs_type, path);
+            crate::console_println!("{:<12} {:<16} {}", "Type", "Mount point", "Options");
+            for (path, fs_type, options) in &mounts {
+                crate::console_println!("{:<12} {:<16} {}", fs_type, path, options.to_string());
             }
         }
         return;
     }
 
-    // Parse: mount [-t type] <device|none> <mount-path>
+    // Parse: mount [-t type] [-o options] <device|none> <mount-path>
+    //        mount -o remount,ro <mount-path>   (remount only)
     let words: Vec<&str> = args.split_whitespace().collect();
 
-    let (fs_type, device, mount_path) = if words.len() >= 4
-        && words.first() == Some(&"-t")
-    {
-        // mount -t <type> <device> <path>
-        (Some(words[1]), words[2], words[3])
-    } else if words.len() >= 2 {
-        // mount <device> <path> — auto-detect type
-        (None, words[0], words[1])
+    let mut fs_type: Option<&str> = None;
+    let mut opts_str: Option<&str> = None;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        if words[i] == "-t" && i + 1 < words.len() {
+            fs_type = Some(words[i + 1]);
+            i += 2;
+        } else if words[i] == "-o" && i + 1 < words.len() {
+            opts_str = Some(words[i + 1]);
+            i += 2;
+        } else {
+            positional.push(words[i]);
+            i += 1;
+        }
+    }
+
+    // Handle remount: "mount -o remount,ro /path"
+    if let Some(opts) = opts_str {
+        if opts.contains("remount") {
+            if positional.is_empty() {
+                crate::console_println!("mount: remount requires a mount point");
+                set_exit(1);
+                return;
+            }
+            let mount_path_resolved = resolve_path(positional[0]);
+            let mount_opts = crate::fs::vfs::MountOptions::parse(opts);
+            match crate::fs::Vfs::remount(&mount_path_resolved, mount_opts) {
+                Ok(()) => crate::console_println!(
+                    "Remounted {} with options: {}",
+                    mount_path_resolved,
+                    mount_opts.to_string(),
+                ),
+                Err(e) => {
+                    crate::console_println!("mount: remount failed: {:?}", e);
+                    set_exit(1);
+                }
+            }
+            return;
+        }
+    }
+
+    let (device, mount_path) = if positional.len() >= 2 {
+        (positional[0], positional[1])
+    } else if positional.len() == 1 && fs_type.is_some() {
+        // mount -t type <device-or-path> — missing mount path
+        crate::console_println!("Usage: mount [-t type] [-o options] <device|none> <mount-path>");
+        crate::console_println!("       mount -o remount[,ro|rw|noatime] <mount-path>");
+        set_exit(1);
+        return;
     } else {
-        crate::console_println!("Usage: mount [-t type] <device|none> <mount-path>");
+        crate::console_println!("Usage: mount [-t type] [-o options] <device|none> <mount-path>");
+        crate::console_println!("       mount -o remount[,ro|rw|noatime] <mount-path>");
         crate::console_println!("Types: ext4, memfs, procfs, devfs, sysfs, iso9660");
-        crate::console_println!("Use 'none' as device for virtual filesystems.");
+        crate::console_println!("Options: ro, rw, noatime, noexec, nosuid");
         set_exit(1);
         return;
     };
@@ -7435,7 +7479,26 @@ fn cmd_mount(args: &str) {
     };
 
     match result {
-        Ok(()) => crate::console_println!("Mounted {} at {}", device, mount_path_resolved),
+        Ok(()) => {
+            // Apply mount options if -o was specified.
+            if let Some(opts) = opts_str {
+                let mount_opts = crate::fs::vfs::MountOptions::parse(opts);
+                // Only apply if non-default options were requested.
+                if mount_opts.read_only || mount_opts.noatime
+                    || mount_opts.noexec || mount_opts.nosuid
+                {
+                    let _ = crate::fs::Vfs::remount(&mount_path_resolved, mount_opts);
+                }
+            }
+            let opts_display = if let Ok(mo) = crate::fs::Vfs::mount_options(&mount_path_resolved) {
+                mo.to_string()
+            } else {
+                String::from("rw")
+            };
+            crate::console_println!(
+                "Mounted {} at {} ({})", device, mount_path_resolved, opts_display
+            );
+        }
         Err(e) => {
             crate::console_println!(
                 "mount: failed to mount {} at {}: {:?}",

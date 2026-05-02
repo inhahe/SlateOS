@@ -171,6 +171,7 @@ fn execute(line: &str) {
         "head" => cmd_head(args),
         "tail" => cmd_tail(args),
         "hexdump" | "xxd" => cmd_hexdump(args),
+        "lsof" => cmd_lsof(),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -227,6 +228,7 @@ fn cmd_help() {
     crate::console_println!("  head N F  Show first N lines of file");
     crate::console_println!("  tail N F  Show last N lines of file");
     crate::console_println!("  hexdump F Hex dump of file contents");
+    crate::console_println!("  lsof      List open file handles");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -1458,6 +1460,38 @@ fn cmd_hexdump(args: &str) {
     } else {
         crate::console_println!("... ({} bytes total, showing first {})", data.len(), limit);
     }
+}
+
+/// List open file handles (like `lsof`).
+fn cmd_lsof() {
+    let handles = crate::fs::handle::list_handles();
+    if handles.is_empty() {
+        crate::console_println!("No open file handles.");
+        return;
+    }
+
+    crate::console_println!(
+        "{:<7} {:<5} {:<12} {:<12} {}",
+        "HANDLE", "FLAGS", "OFFSET", "SIZE", "PATH"
+    );
+
+    for h in &handles {
+        // Decode flags into a compact string.
+        let mut flags = alloc::string::String::new();
+        if h.flags & 0x01 != 0 { flags.push('R'); }
+        if h.flags & 0x02 != 0 { flags.push('W'); }
+        if h.flags & 0x04 != 0 { flags.push('C'); }
+        if h.flags & 0x08 != 0 { flags.push('T'); }
+        if h.flags & 0x10 != 0 { flags.push('A'); }
+        if flags.is_empty() { flags.push('-'); }
+
+        crate::console_println!(
+            "{:<7} {:<5} {:<12} {:<12} {}",
+            h.id, flags, h.offset, h.size, h.path,
+        );
+    }
+
+    crate::console_println!("\nTotal: {} open handles", handles.len());
 }
 
 /// List mounted filesystems or mount a new one.

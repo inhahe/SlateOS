@@ -213,15 +213,27 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
 
 /// Close an open file handle.
 ///
-/// Frees the handle ID.  Further operations on this handle will
-/// return `InvalidHandle`.
+/// Frees the handle ID and releases any advisory locks held with
+/// this handle ID as owner.  Further operations on this handle
+/// will return `InvalidHandle`.
 pub fn close(handle: u64) -> KernelResult<()> {
-    let mut table = OPEN_FILES.lock();
-    if table.remove(&handle).is_some() {
-        Ok(())
-    } else {
-        Err(KernelError::InvalidHandle)
+    let path = {
+        let mut table = OPEN_FILES.lock();
+        match table.remove(&handle) {
+            Some(file) => Some(file.path),
+            None => return Err(KernelError::InvalidHandle),
+        }
+    };
+
+    // Release any advisory lock this handle holds on the file path.
+    // Using the handle ID as the owner (consistent with how flock
+    // syscalls pass owner IDs).
+    if let Some(ref p) = path {
+        // Best-effort: ignore errors from lock release.
+        let _ = crate::fs::Vfs::funlock(p, handle);
     }
+
+    Ok(())
 }
 
 /// Read up to `buf_len` bytes from the file at the current offset.
@@ -424,9 +436,40 @@ pub fn handle_path(handle: u64) -> KernelResult<String> {
 }
 
 /// Get the current number of open file handles (for diagnostics).
-#[allow(dead_code)]
 pub fn open_count() -> usize {
     OPEN_FILES.lock().len()
+}
+
+/// Snapshot of an open file handle's state (for /proc/fdinfo).
+pub struct HandleInfo {
+    /// Handle ID.
+    pub id: u64,
+    /// VFS path.
+    pub path: String,
+    /// Current offset.
+    pub offset: u64,
+    /// Cached file size.
+    pub size: u64,
+    /// Open flags (raw bits).
+    pub flags: u32,
+}
+
+/// Enumerate all open file handles for diagnostics.
+///
+/// Returns a snapshot of every open handle.  Used by `/proc/fdinfo`.
+pub fn list_handles() -> alloc::vec::Vec<HandleInfo> {
+    let table = OPEN_FILES.lock();
+    let mut result = alloc::vec::Vec::with_capacity(table.len());
+    for (&id, file) in table.iter() {
+        result.push(HandleInfo {
+            id,
+            path: file.path.clone(),
+            offset: file.offset,
+            size: file.size,
+            flags: file.flags.bits(),
+        });
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

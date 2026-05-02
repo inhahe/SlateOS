@@ -69,6 +69,7 @@ const ROOT_FILES: &[&str] = &[
     "loadavg",
     "cacheinfo",
     "locks",
+    "fdinfo",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -363,6 +364,35 @@ fn gen_locks() -> Vec<u8> {
     text.into_bytes()
 }
 
+/// `/proc/fdinfo` — open file handle information.
+fn gen_fdinfo() -> Vec<u8> {
+    let handles = super::handle::list_handles();
+    let mut text = format!("HANDLE  FLAGS  OFFSET       SIZE         PATH\n");
+
+    if handles.is_empty() {
+        text.push_str("(no open handles)\n");
+    } else {
+        for h in &handles {
+            // Decode flags into a compact string.
+            let mut flags_str = String::new();
+            if h.flags & 0x01 != 0 { flags_str.push('R'); }
+            if h.flags & 0x02 != 0 { flags_str.push('W'); }
+            if h.flags & 0x04 != 0 { flags_str.push('C'); }
+            if h.flags & 0x08 != 0 { flags_str.push('T'); }
+            if h.flags & 0x10 != 0 { flags_str.push('A'); }
+            if flags_str.is_empty() { flags_str.push('-'); }
+
+            text.push_str(&format!(
+                "{:<7} {:<5} {:<12} {:<12} {}\n",
+                h.id, flags_str, h.offset, h.size, h.path,
+            ));
+        }
+    }
+
+    text.push_str(&format!("\nTotal: {} open handles\n", handles.len()));
+    text.into_bytes()
+}
+
 /// `/proc/<pid>/status` — per-task status information.
 fn gen_pid_status(task_id: u64) -> KernelResult<Vec<u8>> {
     use crate::sched::task::TaskState;
@@ -432,6 +462,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "loadavg" => Ok(gen_loadavg()),
         "cacheinfo" => Ok(gen_cacheinfo()),
         "locks" => Ok(gen_locks()),
+        "fdinfo" => Ok(gen_fdinfo()),
         _ => Err(KernelError::NotFound),
     }
 }

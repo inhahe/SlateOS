@@ -839,7 +839,11 @@ fn current_dos_datetime() -> (u16, u16) {
 // ---------------------------------------------------------------------------
 
 /// Maximum number of cached path resolution results.
-const DCACHE_MAX_ENTRIES: usize = 64;
+///
+/// Increased from 64 to 256 to handle larger directory trees
+/// without frequent evictions.  Each entry is ~300 bytes (path
+/// string + FatDirEntry clone), so 256 entries ≈ 75 KiB.
+const DCACHE_MAX_ENTRIES: usize = 256;
 
 /// A cached path resolution result.
 ///

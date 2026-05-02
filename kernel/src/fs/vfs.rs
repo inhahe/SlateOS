@@ -1890,7 +1890,7 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_attributes(relative, attrs)?;
         }
-        super::notify::emit_modified(&path);
+        super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
@@ -1903,7 +1903,7 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_owner(relative, uid, gid)?;
         }
-        super::notify::emit_modified(&path);
+        super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
@@ -1916,7 +1916,7 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_permissions(relative, permissions)?;
         }
-        super::notify::emit_modified(&path);
+        super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
@@ -1950,7 +1950,7 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.set_xattr(relative, key, value)?;
         }
-        super::notify::emit_modified(&path);
+        super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
@@ -1963,7 +1963,7 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.remove_xattr(relative, key)?;
         }
-        super::notify::emit_modified(&path);
+        super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }

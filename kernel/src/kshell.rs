@@ -3096,7 +3096,7 @@ const COMMANDS: &[&str] = &[
     "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
-    "then", "time", "touch", "tree", "true", "truncate", "type", "umount",
+    "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
     "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
     // Scripting keywords and commands
@@ -4211,6 +4211,7 @@ fn dispatch(line: &str) {
         "readlink" => cmd_readlink(args),
         "symlink" | "mklink" => cmd_symlink(args),
         "xattr" => cmd_xattr(args),
+        "trash" => cmd_trash(args),
         "basename" => cmd_basename(args),
         "dirname" => cmd_dirname(args),
         "realpath" => cmd_realpath(args),
@@ -9100,7 +9101,7 @@ fn is_builtin(name: &str) -> bool {
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "lsblk" | "blkdev" | "glob"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "trash" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -9529,6 +9530,102 @@ fn cmd_xattr(args: &str) {
         }
         _ => {
             crate::console_println!("xattr: unknown subcommand '{}'. Use list/get/set/rm.", subcmd);
+        }
+    }
+}
+
+/// `trash [FILE | --list | --restore NAME | --empty | --purge NAME | --prune]`
+///
+/// Manage the recycle bin.  Without arguments, shows usage.
+/// - `trash FILE` — move FILE to the recycle bin
+/// - `trash --list` / `trash -l` — list trash contents
+/// - `trash --restore NAME` — restore a trashed file to its original location
+/// - `trash --empty` — permanently delete all trash items
+/// - `trash --purge NAME` — permanently delete one trash item
+/// - `trash --prune` — run auto-prune (delete oldest items if disk is full)
+fn cmd_trash(args: &str) {
+    let args = args.trim();
+    if args.is_empty() {
+        crate::console_println!(
+            "Usage: trash <file>            Move file to recycle bin\n\
+             \x20      trash --list / -l       List trash contents\n\
+             \x20      trash --restore <name>  Restore file to original location\n\
+             \x20      trash --empty           Permanently delete all trash\n\
+             \x20      trash --purge <name>    Permanently delete one item\n\
+             \x20      trash --prune           Auto-prune if disk space low"
+        );
+        return;
+    }
+
+    match args {
+        "--list" | "-l" => {
+            match crate::fs::trash::list() {
+                Ok(items) => {
+                    if items.is_empty() {
+                        crate::console_println!("(recycle bin is empty)");
+                    } else {
+                        crate::console_println!(
+                            "{:<20} {:>10}  {}",
+                            "TRASH NAME", "SIZE", "ORIGINAL PATH"
+                        );
+                        for item in &items {
+                            let size_str = format_bytes(item.size);
+                            let type_prefix = if item.is_directory { "D " } else { "  " };
+                            crate::console_println!(
+                                "{}{:<18} {:>10}  {}",
+                                type_prefix, item.trash_name, size_str, item.original_path
+                            );
+                        }
+                        crate::console_println!("\n{} item(s) in recycle bin", items.len());
+                    }
+                }
+                Err(e) => crate::console_println!("trash: list failed: {:?}", e),
+            }
+        }
+        "--empty" => {
+            match crate::fs::trash::empty() {
+                Ok(()) => crate::console_println!("Recycle bin emptied."),
+                Err(e) => crate::console_println!("trash: empty failed: {:?}", e),
+            }
+        }
+        "--prune" => {
+            match crate::fs::trash::auto_prune() {
+                Ok(0) => crate::console_println!("No pruning needed (disk space OK)."),
+                Ok(n) => crate::console_println!("Auto-pruned {} item(s).", n),
+                Err(e) => crate::console_println!("trash: prune failed: {:?}", e),
+            }
+        }
+        _ if args.starts_with("--restore ") => {
+            let name = args.get(10..).unwrap_or("").trim();
+            if name.is_empty() {
+                crate::console_println!("Usage: trash --restore <name>");
+                return;
+            }
+            match crate::fs::trash::restore(name) {
+                Ok(original) => {
+                    crate::console_println!("Restored '{}' to '{}'", name, original);
+                }
+                Err(e) => crate::console_println!("trash: restore '{}': {:?}", name, e),
+            }
+        }
+        _ if args.starts_with("--purge ") => {
+            let name = args.get(8..).unwrap_or("").trim();
+            if name.is_empty() {
+                crate::console_println!("Usage: trash --purge <name>");
+                return;
+            }
+            match crate::fs::trash::purge_one(name) {
+                Ok(()) => crate::console_println!("Permanently deleted '{}'", name),
+                Err(e) => crate::console_println!("trash: purge '{}': {:?}", name, e),
+            }
+        }
+        _ => {
+            // Default: move file to trash.
+            let path = resolve_path(args);
+            match crate::fs::trash::trash(&path) {
+                Ok(()) => crate::console_println!("Moved '{}' to recycle bin", path),
+                Err(e) => crate::console_println!("trash: '{}': {:?}", path, e),
+            }
         }
     }
 }

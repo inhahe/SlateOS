@@ -44,13 +44,24 @@
 //!
 //! - Currently only supports the root mount (`/`).  When multiple mount
 //!   points are added, each will get its own `/_TRASH/` directory.
-//! - No auto-prune yet (will be added when disk space reporting is available).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, Vfs};
+
+/// Disk usage percentage (0–100) above which auto-prune activates.
+///
+/// When the root filesystem exceeds this threshold, the oldest trash
+/// items are permanently deleted until usage drops below the target
+/// or the trash is empty.
+const AUTO_PRUNE_THRESHOLD: u64 = 90;
+
+/// Disk usage percentage that auto-prune tries to reach.
+///
+/// Slightly below the threshold to avoid flip-flopping.
+const AUTO_PRUNE_TARGET: u64 = 85;
 
 /// Name of the trash directory on each filesystem.
 ///
@@ -116,6 +127,10 @@ pub fn trash(path: &str) -> KernelResult<()> {
     index_add(&trash_name, path)?;
 
     crate::serial_println!("[trash] Moved '{}' to trash as '{}'", path, trash_name);
+
+    // Check disk space and prune oldest trash items if needed.
+    let _ = auto_prune();
+
     Ok(())
 }
 
@@ -250,6 +265,81 @@ pub fn purge_one(trash_name: &str) -> KernelResult<()> {
 
     crate::serial_println!("[trash] Permanently deleted '{}'", trash_name);
     Ok(())
+}
+
+/// Automatically prune oldest trash items when disk space is low.
+///
+/// Checks the root filesystem's usage percentage.  If it exceeds
+/// [`AUTO_PRUNE_THRESHOLD`], permanently deletes trash items (smallest
+/// first, to maximize freed items) until usage drops below
+/// [`AUTO_PRUNE_TARGET`] or the trash is empty.
+///
+/// Called automatically after each `trash()` operation and can also
+/// be invoked manually via the `trash --prune` kshell command.
+///
+/// Returns the number of items pruned, or 0 if no pruning was needed.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn auto_prune() -> KernelResult<usize> {
+    // Check root filesystem usage.
+    let info = match Vfs::statvfs("/") {
+        Ok(i) => i,
+        Err(_) => return Ok(0), // Can't check — skip pruning.
+    };
+
+    let usage = info.usage_percent();
+    if usage < AUTO_PRUNE_THRESHOLD {
+        return Ok(0); // Plenty of space.
+    }
+
+    crate::serial_println!(
+        "[trash] Disk usage {}% >= {}% threshold, starting auto-prune",
+        usage, AUTO_PRUNE_THRESHOLD
+    );
+
+    // Get all trash items.
+    let mut items = list()?;
+    if items.is_empty() {
+        crate::serial_println!("[trash] Auto-prune: trash is empty, nothing to free");
+        return Ok(0);
+    }
+
+    // Sort by size ascending — delete smallest items first to maximize
+    // the number of items freed per prune cycle.  This heuristic prefers
+    // freeing many small items over one large one, which is usually what
+    // users expect (they remember the large files they trashed, not the
+    // small ones).
+    items.sort_by_key(|item| item.size);
+
+    let mut pruned = 0usize;
+    for item in &items {
+        // Re-check usage after each deletion.
+        let current = match Vfs::statvfs("/") {
+            Ok(i) => i.usage_percent(),
+            Err(_) => break,
+        };
+        if current < AUTO_PRUNE_TARGET {
+            break; // Reached target.
+        }
+
+        // Permanently delete this trash item.
+        if purge_one(&item.trash_name).is_ok() {
+            pruned = pruned.wrapping_add(1);
+            crate::serial_println!(
+                "[trash] Auto-pruned '{}' ({} bytes, was: {})",
+                item.trash_name, item.size, item.original_path
+            );
+        }
+    }
+
+    if pruned > 0 {
+        let final_usage = Vfs::statvfs("/").map_or(0, |i| i.usage_percent());
+        crate::serial_println!(
+            "[trash] Auto-prune complete: {} items deleted, disk usage now {}%",
+            pruned, final_usage
+        );
+    }
+
+    Ok(pruned)
 }
 
 // ---------------------------------------------------------------------------

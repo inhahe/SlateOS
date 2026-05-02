@@ -384,6 +384,16 @@ pub fn emit_renamed(old_path: &str, new_path: &str) {
     emit(FsEventType::Renamed, old_path, Some(new_path));
 }
 
+/// Convenience: emit a "metadata changed" event.
+///
+/// Used for permission changes, ownership changes, attribute changes,
+/// and xattr modifications — operations that affect file metadata but
+/// not file content.
+#[inline]
+pub fn emit_metadata(path: &str) {
+    emit(FsEventType::MetadataChanged, path, None);
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -490,6 +500,38 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[notify]   Rename event with new_path verified ✓");
+
+    // Test metadata changed event.
+    emit_metadata("/TEST.TXT");
+    let events = read_events(watch_id, 10)?;
+    if events.len() != 1 || events[0].event_type != FsEventType::MetadataChanged {
+        crate::serial_println!(
+            "[notify]   FAIL: metadata event not received (got {} events)",
+            events.len()
+        );
+        close_watch(watch_id)?;
+        close_watch(rec_id)?;
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   Metadata changed event verified ✓");
+
+    // Test event mask filtering: watch with only CREATE mask should
+    // ignore METADATA events.
+    let create_only_id = create_watch("/", FsEventMask::CREATE, false)?;
+    emit_metadata("/TEST.TXT");
+    let events = read_events(create_only_id, 10)?;
+    if !events.is_empty() {
+        crate::serial_println!(
+            "[notify]   FAIL: CREATE-only watch got metadata event ({} events)",
+            events.len()
+        );
+        close_watch(watch_id)?;
+        close_watch(rec_id)?;
+        close_watch(create_only_id)?;
+        return Err(KernelError::InternalError);
+    }
+    close_watch(create_only_id)?;
+    crate::serial_println!("[notify]   Event mask filtering verified ✓");
 
     // Clean up.
     close_watch(watch_id)?;

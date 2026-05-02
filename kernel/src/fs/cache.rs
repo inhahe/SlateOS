@@ -200,6 +200,14 @@ struct BufferCacheInner {
 
     /// Per-device sequential access tracker for read-ahead.
     readahead: [ReadAheadTracker; MAX_DEVICES],
+
+    // --- O(1) counters for valid/dirty entries ---
+    // OPT: Avoids O(n) scan in stats().  Maintained on every
+    // entry state transition (alloc, free, mark-dirty, writeback).
+    /// Number of currently valid (occupied) cache entries.
+    valid_count: usize,
+    /// Number of currently dirty (needs-writeback) entries.
+    dirty_count: usize,
 }
 
 impl BufferCacheInner {
@@ -220,6 +228,8 @@ impl BufferCacheInner {
             index: BTreeMap::new(),
             free_slots: Vec::new(),
             readahead: [RA_INIT; MAX_DEVICES],
+            valid_count: 0,
+            dirty_count: 0,
         }
     }
 
@@ -344,6 +354,9 @@ impl BufferCacheInner {
 
         match result {
             Some(Ok(())) => {
+                if self.entries[idx].dirty {
+                    self.dirty_count = self.dirty_count.saturating_sub(1);
+                }
                 self.entries[idx].dirty = false;
                 self.writebacks = self.writebacks.wrapping_add(1);
                 Ok(())
@@ -359,6 +372,10 @@ impl BufferCacheInner {
             let dev_id = self.entries[idx].device_id;
             let lba = self.entries[idx].lba;
             self.index.remove(&(dev_id, lba));
+            self.valid_count = self.valid_count.saturating_sub(1);
+            if self.entries[idx].dirty {
+                self.dirty_count = self.dirty_count.saturating_sub(1);
+            }
         }
         self.entries[idx].valid = false;
         // Note: the slot is NOT pushed to free_slots here because
@@ -390,19 +407,9 @@ impl BufferCacheInner {
         Ok(idx)
     }
 
-    /// Collect statistics snapshot.
+    // OPT: stats() is now O(1) — uses pre-maintained counters instead
+    // of scanning all entries.  Called by /proc/cacheinfo on every read.
     fn stats(&self) -> CacheStats {
-        let mut used = 0usize;
-        let mut dirty = 0usize;
-        for e in &self.entries {
-            if e.valid {
-                used = used.wrapping_add(1);
-                if e.dirty {
-                    dirty = dirty.wrapping_add(1);
-                }
-            }
-        }
-
         CacheStats {
             reads: self.reads,
             hits: self.hits,
@@ -410,8 +417,8 @@ impl BufferCacheInner {
             writes: self.writes,
             writebacks: self.writebacks,
             readaheads: self.readaheads,
-            entries_used: used,
-            entries_dirty: dirty,
+            entries_used: self.valid_count,
+            entries_dirty: self.dirty_count,
             capacity: MAX_ENTRIES,
         }
     }
@@ -497,6 +504,7 @@ pub fn read_sector(
     cache.entries[idx].data.copy_from_slice(buf);
     cache.entries[idx].dirty = false;
     cache.entries[idx].valid = true;
+    cache.valid_count = cache.valid_count.wrapping_add(1);
     cache.index.insert((dev_id, lba), idx);
     cache.touch(idx);
 
@@ -529,6 +537,7 @@ pub fn read_sector(
                         cache.entries[slot].data.copy_from_slice(&ahead_buf);
                         cache.entries[slot].dirty = false;
                         cache.entries[slot].valid = true;
+                        cache.valid_count = cache.valid_count.wrapping_add(1);
                         cache.index.insert((dev_id, ahead_lba), slot);
                         cache.touch(slot);
                     }
@@ -566,6 +575,9 @@ pub fn write_sector(
     // Check if already cached — update in place.
     if let Some(idx) = cache.find_index(dev_id, lba) {
         cache.entries[idx].data.copy_from_slice(buf);
+        if !cache.entries[idx].dirty {
+            cache.dirty_count = cache.dirty_count.wrapping_add(1);
+        }
         cache.entries[idx].dirty = true;
         cache.touch(idx);
         return Ok(());
@@ -578,6 +590,8 @@ pub fn write_sector(
     cache.entries[idx].data.copy_from_slice(buf);
     cache.entries[idx].dirty = true;
     cache.entries[idx].valid = true;
+    cache.valid_count = cache.valid_count.wrapping_add(1);
+    cache.dirty_count = cache.dirty_count.wrapping_add(1);
     cache.index.insert((dev_id, lba), idx);
     cache.touch(idx);
 
@@ -652,6 +666,10 @@ pub fn invalidate(device: &str) -> KernelResult<()> {
         if cache.entries[i].valid && cache.entries[i].device_id == dev_id {
             let lba = cache.entries[i].lba;
             cache.index.remove(&(dev_id, lba));
+            cache.valid_count = cache.valid_count.saturating_sub(1);
+            if cache.entries[i].dirty {
+                cache.dirty_count = cache.dirty_count.saturating_sub(1);
+            }
             cache.entries[i].valid = false;
             cache.free_slots.push(i);
         }
@@ -673,6 +691,8 @@ pub fn invalidate_all_no_flush() {
         entry.valid = false;
         entry.dirty = false;
     }
+    cache.valid_count = 0;
+    cache.dirty_count = 0;
     // Rebuild free list (reverse order so index 0 is allocated first).
     for i in (0..len).rev() {
         cache.free_slots.push(i);

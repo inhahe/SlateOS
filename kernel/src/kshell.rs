@@ -241,11 +241,22 @@ pub fn run() -> ! {
 // Line input with history support
 // ---------------------------------------------------------------------------
 
-/// Erase the current line from the console (prompt + text) and
-/// reprint it with new content.
-fn replace_line(buf: &mut String, new_content: &str) {
-    // Erase current content by sending backspaces.
+/// Erase the current line from the console and reprint with new
+/// content, placing the cursor at the end.
+fn replace_line(buf: &mut String, cursor: &mut usize, new_content: &str) {
+    // Move cursor to end of current text (so erase works from the end).
+    let tail_len = buf.len().saturating_sub(*cursor);
+    for _ in 0..tail_len {
+        crate::console::putchar(b' '); // advance to end
+    }
+    // Erase everything from end to start.
     for _ in 0..buf.len() {
+        crate::console::putchar(b'\x08');
+        crate::console::putchar(b' ');
+        crate::console::putchar(b'\x08');
+    }
+    // Also erase the chars we printed moving to the end.
+    for _ in 0..tail_len {
         crate::console::putchar(b'\x08');
         crate::console::putchar(b' ');
         crate::console::putchar(b'\x08');
@@ -254,6 +265,7 @@ fn replace_line(buf: &mut String, new_content: &str) {
     // Replace buffer.
     buf.clear();
     buf.push_str(new_content);
+    *cursor = buf.len();
 
     // Print new content.
     for &b in buf.as_bytes() {
@@ -261,35 +273,67 @@ fn replace_line(buf: &mut String, new_content: &str) {
     }
 }
 
-/// Read a line from the keyboard with history support.
+/// Redraw the line from the cursor position to the end, then move the
+/// console cursor back to the correct position.
 ///
-/// Handles printable characters, backspace, delete, and arrow keys
-/// (Up/Down for history browsing).  Returns when Enter is pressed.
+/// Used after inserting or deleting a character in the middle of the line.
+fn redraw_from_cursor(buf: &str, cursor: usize) {
+    // Print everything from cursor to end.
+    if let Some(tail) = buf.as_bytes().get(cursor..) {
+        for &b in tail {
+            crate::console::putchar(b);
+        }
+    }
+    // Print one extra space to erase any trailing character from a
+    // deletion, then move back.
+    crate::console::putchar(b' ');
+    let move_back = buf.len().saturating_sub(cursor) + 1;
+    for _ in 0..move_back {
+        crate::console::putchar(b'\x08');
+    }
+}
+
+/// Read a line from the keyboard with cursor editing and history.
+///
+/// Supports: printable character insertion at cursor, backspace/delete,
+/// left/right arrow cursor movement, Home/End, Up/Down history browsing,
+/// ESC to clear line.  Returns when Enter is pressed.
 fn read_line(buf: &mut String, history: &mut History) {
     use crate::keyboard;
 
+    // Cursor position within buf (0 = before first char, buf.len() = after last).
+    let mut cursor: usize = 0;
+
     // Start in "live" mode (not browsing history).
     history.reset_browse("");
+
+    // Disable keyboard echo — we handle all display ourselves to support
+    // cursor-aware editing (insert/delete at any position).
+    keyboard::set_echo(false);
 
     loop {
         let ch = keyboard::read_char();
 
         match ch {
             b'\n' => {
+                keyboard::set_echo(true);
                 crate::console::putchar(b'\n');
                 return;
             }
             b'\x08' | 0x7F => {
-                // Backspace / DEL — remove last character.
-                if buf.pop().is_some() {
+                // Backspace / DEL — delete character before cursor.
+                if cursor > 0 {
+                    cursor -= 1;
+                    buf.remove(cursor);
+                    // Move console cursor back one.
                     crate::console::putchar(b'\x08');
-                    crate::console::putchar(b' ');
-                    crate::console::putchar(b'\x08');
+                    // Redraw from cursor to end (shift chars left).
+                    redraw_from_cursor(buf, cursor);
                 }
             }
             0x1B => {
                 // ESC — clear the current line.
-                replace_line(buf, "");
+                replace_line(buf, &mut cursor, "");
             }
             keyboard::KEY_UP => {
                 // Save current line if this is the first Up press.
@@ -298,26 +342,61 @@ fn read_line(buf: &mut String, history: &mut History) {
                     history.saved_line.push_str(buf.as_str());
                 }
                 if let Some(cmd) = history.up() {
-                    let cmd = String::from(cmd); // Copy to avoid borrow conflict.
-                    replace_line(buf, &cmd);
+                    let cmd = String::from(cmd);
+                    replace_line(buf, &mut cursor, &cmd);
                 }
             }
             keyboard::KEY_DOWN => {
                 if let Some(cmd) = history.down() {
                     let cmd = String::from(cmd);
-                    replace_line(buf, &cmd);
+                    replace_line(buf, &mut cursor, &cmd);
                 }
             }
-            keyboard::KEY_LEFT | keyboard::KEY_RIGHT |
-            keyboard::KEY_HOME | keyboard::KEY_END => {
-                // Cursor movement within the line — not yet supported.
-                // Would require tracking a cursor position within `buf`.
+            keyboard::KEY_LEFT => {
+                if cursor > 0 {
+                    cursor -= 1;
+                    crate::console::putchar(b'\x08');
+                }
+            }
+            keyboard::KEY_RIGHT => {
+                if cursor < buf.len() {
+                    // Print the char at cursor position to advance.
+                    if let Some(&b) = buf.as_bytes().get(cursor) {
+                        crate::console::putchar(b);
+                    }
+                    cursor += 1;
+                }
+            }
+            keyboard::KEY_HOME => {
+                // Move cursor to start of line.
+                for _ in 0..cursor {
+                    crate::console::putchar(b'\x08');
+                }
+                cursor = 0;
+            }
+            keyboard::KEY_END => {
+                // Move cursor to end of line.
+                if let Some(tail) = buf.as_bytes().get(cursor..) {
+                    for &b in tail {
+                        crate::console::putchar(b);
+                    }
+                }
+                cursor = buf.len();
             }
             ch if ch >= 0x20 && ch < 0x7F => {
-                // Printable ASCII — add to buffer if room.
+                // Printable ASCII — insert at cursor position.
                 if buf.len() < MAX_LINE {
-                    buf.push(ch as char);
-                    // Character is already echoed by the keyboard driver.
+                    buf.insert(cursor, ch as char);
+                    cursor += 1;
+
+                    if cursor == buf.len() {
+                        // Appending at end ��� just echo the char.
+                        crate::console::putchar(ch);
+                    } else {
+                        // Inserted in middle — echo char then redraw tail.
+                        crate::console::putchar(ch);
+                        redraw_from_cursor(buf, cursor);
+                    }
                 }
             }
             _ => {

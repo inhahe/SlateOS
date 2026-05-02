@@ -92,6 +92,12 @@ static INPUT_HEAD: AtomicU32 = AtomicU32::new(0);
 /// Read index (next slot a consumer will read from).
 static INPUT_TAIL: AtomicU32 = AtomicU32::new(0);
 
+/// When false, the keyboard driver does not echo characters to the console.
+///
+/// The kshell sets this to false and handles all display output itself,
+/// enabling cursor-aware line editing (insert/delete at any position).
+static ECHO_ENABLED: AtomicBool = AtomicBool::new(true);
+
 /// Whether the driver has been initialized.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -467,14 +473,15 @@ fn push_char(ch: u8) {
     INPUT_BUF[idx].store(ch, Ordering::Release);
     INPUT_HEAD.store(next_head, Ordering::Release);
 
-    // Also echo the character to the framebuffer console for immediate
-    // visual feedback.  This is a temporary measure until a proper
-    // terminal emulator exists.
+    // Echo to the framebuffer console for immediate visual feedback,
+    // unless the consumer has disabled echo (e.g., kshell handles its
+    // own display for cursor-aware line editing).
+    if !ECHO_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     match ch {
         b'\x08' => {
-            // Backspace: move cursor back, overwrite with space, move back again.
-            // The console doesn't natively support cursor-back, so for now
-            // just print the character and let the future shell handle it.
+            // Backspace: the consumer handles the visual effect.
         }
         0x1B => {} // Don't echo ESC
         // Don't echo extended key codes (arrow keys, home/end) — the
@@ -518,6 +525,16 @@ pub fn read_char() -> u8 {
         // will wake us).
         crate::cpu::hlt();
     }
+}
+
+/// Enable or disable keyboard echo.
+///
+/// When echo is disabled, the keyboard driver pushes characters into the
+/// ring buffer but does not print them to the console.  The consumer
+/// (e.g., kshell) is responsible for all display output, enabling
+/// cursor-aware line editing.
+pub fn set_echo(enabled: bool) {
+    ECHO_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------

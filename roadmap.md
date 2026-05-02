@@ -332,6 +332,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell command chaining: ; (sequential), && (on success), || (on failure), exit status tracking ($?), test command (POSIX-compatible file/string/integer tests)
   - [x] CRC32C (Castagnoli) implementation: 256-entry lookup table (compile-time), crc32c/crc32c_seed/crc32c_raw API, self-test with 4 vectors
   - [x] ext4 metadata checksum validation: superblock CRC32C on mount, group descriptor checksums (all groups validated), inode checksums (validated on every read), CorruptedData error on mismatch
+  - [x] ext4 write-path checksums: superblock, group descriptor, and inode checksums computed and embedded on all write operations when metadata_csum is enabled
+  - [x] Kshell if/then/elif/else/fi: stack-based control flow (16 nesting levels), condition evaluation via exit status
+  - [x] Kshell while/do/done: line-buffering loop body, nested while tracking, 1000-iteration safety limit
+  - [x] Kshell arithmetic: $((expr)) expansion and expr command, recursive-descent parser (+ - * / % parentheses, i64 wrapping)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

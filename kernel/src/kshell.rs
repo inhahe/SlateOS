@@ -548,6 +548,20 @@ static POSITIONAL_PARAMS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
 static FUNC_RETURN: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Flag: set by `break` inside a loop body to exit the loop early.
+///
+/// Checked after each line in execute_while_loop / execute_for_loop.
+/// Cleared by the loop runner after exiting the loop.
+static LOOP_BREAK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Flag: set by `continue` inside a loop body to skip to the next iteration.
+///
+/// Checked after each line in execute_while_loop / execute_for_loop.
+/// Cleared at the start of each iteration.
+static LOOP_CONTINUE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Maximum function call depth (prevents infinite recursion in the
 /// kernel debug shell, which has a limited stack).
 const MAX_FUNC_DEPTH: usize = 32;
@@ -992,6 +1006,9 @@ fn handle_control_flow(line: &str) -> bool {
 fn execute_while_loop(condition: &str, body: &[String]) {
     const MAX_ITERATIONS: u32 = 1000;
 
+    // Clear loop control flags before entering the loop.
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+
     for _ in 0..MAX_ITERATIONS {
         // Evaluate the condition.
         execute(condition);
@@ -1000,11 +1017,29 @@ fn execute_while_loop(condition: &str, body: &[String]) {
             break;
         }
 
+        // Clear continue flag at the start of each iteration.
+        LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+
         // Execute the body lines.
         for line in body {
             execute(line);
+            if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+                || LOOP_CONTINUE.load(core::sync::atomic::Ordering::Relaxed)
+                || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+        }
+
+        if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+            || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            break;
         }
     }
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+    LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Execute a for loop: expand the word list, iterate, set the variable,
@@ -1028,15 +1063,36 @@ fn execute_for_loop(variable: &str, words_raw: &str, body: &[String]) {
         return;
     }
 
+    // Clear loop control flags before entering the loop.
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+
     for word in &words {
         // Set the loop variable.
         ENV_VARS.lock().insert(String::from(variable), word.clone());
 
+        // Clear continue flag at the start of each iteration.
+        LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+
         // Execute the body lines.
         for line in body {
             execute(line);
+            if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+                || LOOP_CONTINUE.load(core::sync::atomic::Ordering::Relaxed)
+                || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+        }
+
+        if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+            || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            break;
         }
     }
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+    LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Split a string into words, respecting single and double quotes.
@@ -2417,6 +2473,7 @@ fn dispatch(line: &str) {
         "expr" => cmd_expr(args),
         "printenv" | "env" => cmd_printenv(),
         "declare" => cmd_declare(args),
+        "read" => cmd_read(args),
         "return" => {
             // `return [N]` — set exit status and signal function return.
             if !args.is_empty() {
@@ -2428,6 +2485,28 @@ fn dispatch(line: &str) {
                 }
             }
             FUNC_RETURN.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+        "break" => {
+            LOOP_BREAK.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+        "continue" => {
+            LOOP_CONTINUE.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+        "shift" => {
+            // `shift [N]` — discard the first N positional params (default 1).
+            let n: usize = if args.is_empty() {
+                1
+            } else {
+                args.parse().unwrap_or(1)
+            };
+            let mut stack = POSITIONAL_PARAMS.lock();
+            if let Some(frame) = stack.last_mut() {
+                for _ in 0..n {
+                    if !frame.is_empty() {
+                        frame.remove(0);
+                    }
+                }
+            }
         }
         "local" => {
             // `local VAR=VALUE` — set a variable (currently just a
@@ -5205,6 +5284,87 @@ fn cmd_printenv() {
 ///
 /// Usage: `export NAME=VALUE` or `export NAME VALUE`.
 /// With no arguments, lists all variables (same as `printenv`).
+/// Read a line from the keyboard and store it in a variable.
+///
+/// Usage:
+///   `read VAR`         — read a line into VAR
+///   `read -p "msg" VAR` — print prompt, then read
+///   `read`             — read into $REPLY
+fn cmd_read(args: &str) {
+    let mut prompt: Option<&str> = None;
+    let mut var_name = "REPLY";
+    let mut rest = args;
+
+    // Parse -p "prompt" flag.
+    if rest.starts_with("-p ") || rest.starts_with("-p\t") {
+        rest = rest.get(3..).unwrap_or("").trim_start();
+        // Extract the prompt string (may be quoted).
+        if rest.starts_with('"') {
+            if let Some(end) = rest.get(1..).and_then(|s| s.find('"')) {
+                prompt = rest.get(1..end.saturating_add(1));
+                rest = rest.get(end.saturating_add(2)..).unwrap_or("").trim_start();
+            }
+        } else if rest.starts_with('\'') {
+            if let Some(end) = rest.get(1..).and_then(|s| s.find('\'')) {
+                prompt = rest.get(1..end.saturating_add(1));
+                rest = rest.get(end.saturating_add(2)..).unwrap_or("").trim_start();
+            }
+        } else {
+            // Unquoted: first word is the prompt.
+            let end = rest.find(' ').unwrap_or(rest.len());
+            prompt = rest.get(..end);
+            rest = rest.get(end..).unwrap_or("").trim_start();
+        }
+    }
+
+    if !rest.is_empty() {
+        var_name = rest.split_whitespace().next().unwrap_or("REPLY");
+    }
+
+    // Print prompt if specified.
+    if let Some(p) = prompt {
+        shell_print!("{}", p);
+    }
+
+    // Read a line from keyboard input.
+    let mut buf = [0u8; MAX_LINE];
+    let mut len = 0;
+
+    loop {
+        let byte = crate::keyboard::read_char();
+        match byte {
+            b'\r' | b'\n' => {
+                shell_println!();
+                break;
+            }
+            0x7F | 0x08 => {
+                // Backspace.
+                if len > 0 {
+                    len -= 1;
+                    shell_print!("\x08 \x08");
+                }
+            }
+            3 => {
+                // Ctrl+C — cancel.
+                shell_println!();
+                set_exit(1);
+                return;
+            }
+            _ => {
+                if len < MAX_LINE {
+                    buf[len] = byte;
+                    len += 1;
+                    shell_print!("{}", byte as char);
+                }
+            }
+        }
+    }
+
+    let value = core::str::from_utf8(buf.get(..len).unwrap_or(&[]))
+        .unwrap_or("");
+    env_set(var_name, value);
+}
+
 fn cmd_export(args: &str) {
     if args.is_empty() {
         // List all variables.

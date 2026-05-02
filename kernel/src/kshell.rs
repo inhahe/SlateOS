@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "cp", "cpuinfo",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
-    "fsck", "fsck.fat", "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
+    "flock", "fsck", "fsck.fat", "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
+    "split", "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
     "watch", "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
@@ -4220,6 +4220,8 @@ fn dispatch(line: &str) {
         "dd" => cmd_dd(args),
         "free" => cmd_free(),
         "label" => cmd_label(args),
+        "flock" => cmd_flock(args),
+        "split" => cmd_split(args),
         "lsblk" | "blkdev" => cmd_lsblk(),
         "glob" => cmd_glob(args),
         "readlink" => cmd_readlink(args),
@@ -4382,8 +4384,10 @@ fn cmd_help() {
     crate::console_println!("  sha256 F  Compute SHA-256 hash of file contents");
     crate::console_println!("  sysctl .. List/get/set kernel parameters");
     crate::console_println!("  hostname  Show or set system hostname");
-    crate::console_println!("  dd ..     Copy blocks between files (if=/of=/bs=/count=)");
+    crate::console_println!("  dd ..     Copy blocks between files (if=/of=/bs=/count=/skip=/seek=)");
     crate::console_println!("  free      Show memory usage summary");
+    crate::console_println!("  flock [-s|-x|-u] FILE  Query/acquire/release advisory file locks");
+    crate::console_println!("  split [-l N|-b SIZE] FILE [PREFIX]  Split file into pieces");
     crate::console_println!("  label [PATH] [NAME]  Show or set volume label for filesystem at PATH");
     crate::console_println!("  lsblk     List block devices with sizes");
     crate::console_println!("  glob P    Expand glob pattern (e.g., /tmp/*.txt)");
@@ -10874,7 +10878,8 @@ fn is_builtin(name: &str) -> bool {
         | "du" | "file" | "find" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
-        | "sysctl" | "hostname" | "dd" | "free" | "lsblk" | "blkdev" | "glob"
+        | "sysctl" | "hostname" | "dd" | "free" | "flock" | "split"
+        | "lsblk" | "blkdev" | "glob"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
@@ -11777,6 +11782,8 @@ fn cmd_dd(args: &str) {
     let mut output: Option<&str> = None;
     let mut bs: usize = 512;
     let mut count: Option<u64> = None;
+    let mut skip: u64 = 0;  // Input blocks to skip.
+    let mut seek: u64 = 0;  // Output blocks to skip (write position).
 
     // Parse key=value pairs.
     for token in args.split_whitespace() {
@@ -11785,7 +11792,6 @@ fn cmd_dd(args: &str) {
         } else if let Some(val) = token.strip_prefix("of=") {
             output = Some(val);
         } else if let Some(val) = token.strip_prefix("bs=") {
-            // Parse block size with optional K/M suffix.
             bs = match parse_size_suffix(val) {
                 Some(n) => n as usize,
                 None => {
@@ -11801,9 +11807,25 @@ fn cmd_dd(args: &str) {
                     return;
                 }
             };
+        } else if let Some(val) = token.strip_prefix("skip=") {
+            skip = match val.parse::<u64>() {
+                Ok(n) => n,
+                Err(_) => {
+                    crate::console_println!("dd: invalid skip '{}'", val);
+                    return;
+                }
+            };
+        } else if let Some(val) = token.strip_prefix("seek=") {
+            seek = match val.parse::<u64>() {
+                Ok(n) => n,
+                Err(_) => {
+                    crate::console_println!("dd: invalid seek '{}'", val);
+                    return;
+                }
+            };
         } else {
             crate::console_println!("dd: unknown option '{}'", token);
-            crate::console_println!("Usage: dd if=<input> of=<output> [bs=N] [count=N]");
+            crate::console_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
             return;
         }
     }
@@ -11811,69 +11833,105 @@ fn cmd_dd(args: &str) {
     let input = match input {
         Some(p) => p,
         None => {
-            crate::console_println!("Usage: dd if=<input> of=<output> [bs=N] [count=N]");
+            crate::console_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
+            crate::console_println!("  bs=N     Block size (default 512, supports K/M/G suffix)");
+            crate::console_println!("  count=N  Copy only N input blocks");
+            crate::console_println!("  skip=N   Skip N input blocks before reading");
+            crate::console_println!("  seek=N   Skip N output blocks before writing (uses write_at)");
+            set_exit(1);
             return;
         }
     };
     let output = match output {
         Some(p) => p,
         None => {
-            crate::console_println!("Usage: dd if=<input> of=<output> [bs=N] [count=N]");
+            crate::console_println!("Usage: dd if=FILE of=FILE [bs=N] [count=N] [skip=N] [seek=N]");
+            set_exit(1);
             return;
         }
     };
 
-    // Clamp block size to something reasonable.
     if bs == 0 || bs > 1024 * 1024 {
         crate::console_println!("dd: block size must be 1..1M");
+        set_exit(1);
         return;
     }
+
+    let start_ns = crate::hpet::elapsed_ns();
 
     // Read input file.
     let data = match crate::fs::Vfs::read_file(input) {
         Ok(d) => d,
         Err(e) => {
             crate::console_println!("dd: cannot read '{}': {:?}", input, e);
+            set_exit(1);
             return;
         }
+    };
+
+    // Apply skip (input offset in blocks).
+    let skip_bytes = (skip as usize).saturating_mul(bs);
+    let data_after_skip = if skip_bytes < data.len() {
+        data.get(skip_bytes..).unwrap_or(&[])
+    } else {
+        &[]
     };
 
     // Apply count limit.
     let max_bytes = match count {
         Some(n) => (n as usize).saturating_mul(bs),
-        None => data.len(),
+        None => data_after_skip.len(),
     };
-    let to_write = if max_bytes < data.len() {
-        data.get(..max_bytes).unwrap_or(&data)
+    let to_write = if max_bytes < data_after_skip.len() {
+        data_after_skip.get(..max_bytes).unwrap_or(data_after_skip)
     } else {
-        &data
+        data_after_skip
     };
 
-    // Write output file.
-    match crate::fs::Vfs::write_file(output, to_write) {
+    // Write output file, using seek offset if specified.
+    let write_result = if seek > 0 {
+        let seek_bytes = (seek as usize).saturating_mul(bs);
+        crate::fs::Vfs::write_at(output, seek_bytes as u64, to_write)
+    } else {
+        crate::fs::Vfs::write_file(output, to_write)
+    };
+
+    match write_result {
         Ok(()) => {
+            let elapsed_ns = crate::hpet::elapsed_ns().saturating_sub(start_ns);
             let blocks = to_write.len() / bs;
             let remainder = to_write.len() % bs;
-            let total_blocks = if remainder > 0 { blocks + 1 } else { blocks };
+            let partial = if remainder > 0 { 1 } else { 0 };
             crate::console_println!(
-                "{}+{} records in",
-                blocks,
-                if remainder > 0 { 1 } else { 0 }
+                "{}+{} records in", blocks, partial
             );
             crate::console_println!(
-                "{}+{} records out",
-                blocks,
-                if remainder > 0 { 1 } else { 0 }
+                "{}+{} records out", blocks, partial
             );
-            crate::console_println!(
-                "{} bytes ({} blocks of {} bytes) copied",
-                to_write.len(),
-                total_blocks,
-                bs
-            );
+
+            // Format throughput.
+            let bytes_copied = to_write.len() as u64;
+            if elapsed_ns > 0 {
+                // Speed in KiB/s.
+                let kib_per_sec = bytes_copied
+                    .saturating_mul(1_000_000_000)
+                    / elapsed_ns
+                    / 1024;
+                let ms = elapsed_ns / 1_000_000;
+                crate::console_println!(
+                    "{} bytes copied, {}.{:03} s, {} KiB/s",
+                    bytes_copied,
+                    ms / 1000,
+                    ms % 1000,
+                    kib_per_sec,
+                );
+            } else {
+                crate::console_println!("{} bytes copied", bytes_copied);
+            }
         }
         Err(e) => {
             crate::console_println!("dd: cannot write '{}': {:?}", output, e);
+            set_exit(1);
         }
     }
 }
@@ -12061,6 +12119,255 @@ fn cmd_label(args: &str) {
             }
         }
     }
+}
+
+/// `flock` — query, acquire, or release advisory file locks.
+///
+/// Usage:
+///   `flock FILE`       — query lock status
+///   `flock -s FILE`    — acquire shared (read) lock
+///   `flock -x FILE`    — acquire exclusive (write) lock
+///   `flock -u FILE`    — release lock
+fn cmd_flock(args: &str) {
+    let mut mode: Option<&str> = None;
+    let mut path_arg = "";
+
+    for w in args.split_whitespace() {
+        match w {
+            "-s" | "--shared" => mode = Some("shared"),
+            "-x" | "--exclusive" => mode = Some("exclusive"),
+            "-u" | "--unlock" => mode = Some("unlock"),
+            "-q" | "--query" => mode = Some("query"),
+            _ => path_arg = w,
+        }
+    }
+
+    if path_arg.is_empty() {
+        crate::console_println!("Usage: flock [-s|-x|-u|-q] FILE");
+        crate::console_println!("  -s  Acquire shared (read) lock");
+        crate::console_println!("  -x  Acquire exclusive (write) lock");
+        crate::console_println!("  -u  Release lock");
+        crate::console_println!("  -q  Query lock status (default)");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(path_arg);
+    // Use task ID 0 for kernel/shell locks.
+    let owner: u64 = 0;
+
+    match mode.unwrap_or("query") {
+        "shared" => {
+            match crate::fs::Vfs::flock(&path, owner, crate::fs::vfs::LockType::Shared) {
+                Ok(()) => crate::console_println!("{}: shared lock acquired", path_arg),
+                Err(crate::error::KernelError::WouldBlock) => {
+                    crate::console_println!("{}: lock denied (would block)", path_arg);
+                    set_exit(1);
+                }
+                Err(e) => {
+                    crate::console_println!("flock: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        "exclusive" => {
+            match crate::fs::Vfs::flock(&path, owner, crate::fs::vfs::LockType::Exclusive) {
+                Ok(()) => crate::console_println!("{}: exclusive lock acquired", path_arg),
+                Err(crate::error::KernelError::WouldBlock) => {
+                    crate::console_println!("{}: lock denied (would block)", path_arg);
+                    set_exit(1);
+                }
+                Err(e) => {
+                    crate::console_println!("flock: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        "unlock" => {
+            match crate::fs::Vfs::funlock(&path, owner) {
+                Ok(()) => crate::console_println!("{}: lock released", path_arg),
+                Err(e) => {
+                    crate::console_println!("flock: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        _ => {
+            // Query mode.
+            match crate::fs::Vfs::lock_query(&path) {
+                Ok(Some((lock_type, count))) => {
+                    let type_str = match lock_type {
+                        crate::fs::vfs::LockType::Shared => "SHARED",
+                        crate::fs::vfs::LockType::Exclusive => "EXCLUSIVE",
+                    };
+                    crate::console_println!("{}: {} ({} holder(s))", path_arg, type_str, count);
+                }
+                Ok(None) => {
+                    crate::console_println!("{}: unlocked", path_arg);
+                }
+                Err(e) => {
+                    crate::console_println!("flock: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+    }
+}
+
+/// `split` — split a file into pieces.
+///
+/// Usage: `split [-l N] [-b SIZE] FILE [PREFIX]`
+///   -l N     Split by N lines per piece (default 1000)
+///   -b SIZE  Split by byte size per piece (K/M/G suffix)
+fn cmd_split(args: &str) {
+    let mut line_count: Option<usize> = None;
+    let mut byte_size: Option<usize> = None;
+    let mut file_path = "";
+    let mut prefix = "x";
+
+    let mut words = args.split_whitespace();
+    while let Some(w) = words.next() {
+        match w {
+            "-l" | "--lines" => {
+                if let Some(val) = words.next() {
+                    match val.parse::<usize>() {
+                        Ok(n) if n > 0 => line_count = Some(n),
+                        _ => {
+                            crate::console_println!("split: invalid line count '{}'", val);
+                            set_exit(1);
+                            return;
+                        }
+                    }
+                }
+            }
+            "-b" | "--bytes" => {
+                if let Some(val) = words.next() {
+                    match parse_size_suffix(val) {
+                        Some(n) if n > 0 => byte_size = Some(n as usize),
+                        _ => {
+                            crate::console_println!("split: invalid byte size '{}'", val);
+                            set_exit(1);
+                            return;
+                        }
+                    }
+                }
+            }
+            _ => {
+                if file_path.is_empty() {
+                    file_path = w;
+                } else {
+                    prefix = w;
+                }
+            }
+        }
+    }
+
+    if file_path.is_empty() {
+        crate::console_println!("Usage: split [-l N] [-b SIZE] FILE [PREFIX]");
+        crate::console_println!("  -l N     Lines per piece (default 1000)");
+        crate::console_println!("  -b SIZE  Bytes per piece (K/M/G suffix)");
+        crate::console_println!("  PREFIX   Output file prefix (default 'x', produces xaa, xab, ...)");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(file_path);
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("split: cannot read '{}': {:?}", file_path, e);
+            set_exit(1);
+            return;
+        }
+    };
+
+    // Determine the parent directory for output files.
+    let out_dir = get_cwd();
+    let mut piece_num: u32 = 0;
+    let mut total_written: usize = 0;
+
+    // Generate suffix: aa, ab, ac, ..., az, ba, bb, ...
+    let suffix_for = |n: u32| -> alloc::string::String {
+        let a = (n / 26) as u8;
+        let b = (n % 26) as u8;
+        let mut s = alloc::string::String::with_capacity(2);
+        s.push((b'a' + a) as char);
+        s.push((b'a' + b) as char);
+        s
+    };
+
+    if let Some(bsize) = byte_size {
+        // Split by byte size.
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + bsize).min(data.len());
+            let chunk = data.get(offset..end).unwrap_or(&[]);
+            let suf = suffix_for(piece_num);
+            let out_path = alloc::format!("{}/{}{}", out_dir, prefix, suf);
+            match crate::fs::Vfs::write_file(&out_path, chunk) {
+                Ok(()) => {}
+                Err(e) => {
+                    crate::console_println!("split: cannot write '{}': {:?}", out_path, e);
+                    set_exit(1);
+                    return;
+                }
+            }
+            piece_num = piece_num.saturating_add(1);
+            total_written = total_written.saturating_add(chunk.len());
+            offset = end;
+        }
+    } else {
+        // Split by line count (default 1000).
+        let lines_per = line_count.unwrap_or(1000);
+        let mut lines_in_piece = 0;
+        let mut piece_start = 0;
+
+        for (i, &b) in data.iter().enumerate() {
+            if b == b'\n' {
+                lines_in_piece += 1;
+                if lines_in_piece >= lines_per {
+                    let end = i + 1; // Include the newline.
+                    let chunk = data.get(piece_start..end).unwrap_or(&[]);
+                    let suf = suffix_for(piece_num);
+                    let out_path = alloc::format!("{}/{}{}", out_dir, prefix, suf);
+                    match crate::fs::Vfs::write_file(&out_path, chunk) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            crate::console_println!("split: cannot write '{}': {:?}", out_path, e);
+                            set_exit(1);
+                            return;
+                        }
+                    }
+                    piece_num = piece_num.saturating_add(1);
+                    total_written = total_written.saturating_add(chunk.len());
+                    piece_start = end;
+                    lines_in_piece = 0;
+                }
+            }
+        }
+
+        // Write remaining data (last piece, possibly less than lines_per lines).
+        if piece_start < data.len() {
+            let chunk = data.get(piece_start..).unwrap_or(&[]);
+            let suf = suffix_for(piece_num);
+            let out_path = alloc::format!("{}/{}{}", out_dir, prefix, suf);
+            match crate::fs::Vfs::write_file(&out_path, chunk) {
+                Ok(()) => {}
+                Err(e) => {
+                    crate::console_println!("split: cannot write '{}': {:?}", out_path, e);
+                    set_exit(1);
+                    return;
+                }
+            }
+            piece_num = piece_num.saturating_add(1);
+            total_written = total_written.saturating_add(chunk.len());
+        }
+    }
+
+    crate::console_println!(
+        "Split '{}' into {} pieces ({} bytes total)",
+        file_path, piece_num, total_written
+    );
 }
 
 /// `lsblk` — list block devices with capacity.

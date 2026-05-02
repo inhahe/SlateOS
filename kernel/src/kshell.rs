@@ -190,6 +190,21 @@ fn resolve_path(path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Shell options (set -e, set -x, etc.)
+// ---------------------------------------------------------------------------
+
+/// `set -e`: exit script/function on any command failure (non-zero exit).
+///
+/// Only affects `source` scripts and function bodies, not the interactive
+/// prompt (which always continues).
+static OPT_ERREXIT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// `set -x`: trace mode — print each command before execution.
+static OPT_XTRACE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+// ---------------------------------------------------------------------------
 // Environment variables
 // ---------------------------------------------------------------------------
 
@@ -2029,6 +2044,11 @@ fn execute_function(body: &[String], args: &[String]) {
             break;
         }
         execute(line);
+
+        // `set -e` (errexit): abort function on non-zero exit status.
+        if OPT_ERREXIT.load(core::sync::atomic::Ordering::Relaxed) && last_exit() != 0 {
+            break;
+        }
     }
 
     // Clear return flag and pop parameter frame.
@@ -2733,6 +2753,11 @@ fn execute(line: &str) {
         return;
     }
 
+    // Trace: print expanded command if `set -x` is active.
+    if OPT_XTRACE.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::console_println!("+ {}", line);
+    }
+
     // Phase 2: Split on chain operators (;, &&, ||).
     // These have the lowest precedence — each segment gets its own
     // alias expansion, pipe/redirect handling, and dispatch.
@@ -3020,7 +3045,8 @@ fn execute_single(line: &str) {
         let cmd = parts.next().unwrap_or("");
         let args = parts.next().unwrap_or("").trim();
         match cmd {
-            "export" | "set" => { cmd_export(args); set_exit(0); return; }
+            "export" => { cmd_export(args); set_exit(0); return; }
+            "set" => { cmd_set(args); set_exit(0); return; }
             "unset" => { cmd_unset(args); set_exit(0); return; }
             "alias" => { cmd_alias(args); set_exit(0); return; }
             "unalias" => { cmd_unalias(args); set_exit(0); return; }
@@ -3047,6 +3073,12 @@ fn execute_single(line: &str) {
     if let Some(redir) = parse_redirect(line) {
         execute_redirect(&redir.command, &redir.path, redir.append);
         set_exit(0);
+        return;
+    }
+
+    // Check for input redirection (cmd < file).
+    if let Some((command, path)) = parse_input_redirect(line) {
+        execute_input_redirect(&command, &path);
         return;
     }
 
@@ -3089,6 +3121,89 @@ fn parse_redirect(line: &str) -> Option<Redirect<'_>> {
         i = i.saturating_add(1);
     }
     None
+}
+
+/// Parse a command line for `< file` input redirection.
+///
+/// Returns `Some((command, file_path))` if found.
+/// Only detects bare `<` (not `<<` heredoc or `<(` process subst).
+fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    let mut in_quote = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'"' || b == b'\'' {
+            in_quote = !in_quote;
+        } else if !in_quote && b == b'<' {
+            // Make sure this isn't `<<` (heredoc) or `<(` (process subst).
+            let next = bytes.get(i.saturating_add(1));
+            if next == Some(&b'<') || next == Some(&b'(') {
+                i = i.saturating_add(2);
+                continue;
+            }
+            let command = line.get(..i).unwrap_or("").trim();
+            let path = line.get(i.saturating_add(1)..).unwrap_or("").trim();
+            if command.is_empty() || path.is_empty() {
+                return None;
+            }
+            return Some((command, path));
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
+/// Execute a command with input redirected from a file.
+///
+/// Reads the file contents and feeds them as piped input to the command.
+fn execute_input_redirect(command: &str, path: &str) {
+    let resolved = resolve_path(path);
+    let data = match crate::fs::vfs::Vfs::read_file(&resolved) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("{}: {:?}", path, e);
+            set_exit(1);
+            return;
+        }
+    };
+    let text = match core::str::from_utf8(&data) {
+        Ok(s) => s,
+        Err(_) => {
+            crate::console_println!("{}: not a text file", path);
+            set_exit(1);
+            return;
+        }
+    };
+
+    // If the command itself has output redirection, handle it.
+    if let Some(redir) = parse_redirect(command) {
+        capture_start();
+        dispatch_with_input(&redir.command, text);
+        let output = capture_stop();
+        if !output.is_empty() {
+            use crate::fs::vfs::Vfs;
+            let result = if redir.append {
+                let existing = Vfs::read_file(redir.path).unwrap_or_default();
+                let mut combined = match core::str::from_utf8(&existing) {
+                    Ok(s) => String::from(s),
+                    Err(_) => String::new(),
+                };
+                combined.push_str(&output);
+                Vfs::write_file(redir.path, combined.as_bytes())
+            } else {
+                Vfs::write_file(redir.path, output.as_bytes())
+            };
+            if let Err(e) = result {
+                crate::console_println!("Redirect error: {:?}", e);
+                set_exit(1);
+                return;
+            }
+        }
+    } else {
+        dispatch_with_input(command, text);
+    }
+    set_exit(0);
 }
 
 /// Find the position of the first un-quoted `|` character.
@@ -3518,6 +3633,7 @@ fn cmd_help() {
     crate::console_println!("  cmd > file   Write output to file (overwrite)");
     crate::console_println!("  cmd >> file  Append output to file");
     crate::console_println!("  cmd1 | cmd2  Pipe output of cmd1 into cmd2");
+    crate::console_println!("  cmd < file   Read input from file");
     crate::console_println!("  cmd <<DELIM  Here-document (multi-line input to cmd)");
     crate::console_println!("  cmd <<-DELIM Here-doc with leading tab stripping");
     crate::console_println!("  cmd <<'D'    Here-doc without variable expansion");
@@ -5914,6 +6030,17 @@ fn cmd_source(args: &str) {
         }
         crate::serial_println!("[source] {}:{}: {}", path, line_num.saturating_add(1), trimmed);
         execute(trimmed);
+
+        // `set -e` (errexit): abort script on non-zero exit status.
+        if OPT_ERREXIT.load(core::sync::atomic::Ordering::Relaxed) && last_exit() != 0 {
+            crate::console_println!(
+                "{}:{}: command failed (exit {}), aborting (set -e)",
+                path,
+                line_num.saturating_add(1),
+                last_exit(),
+            );
+            break;
+        }
     }
 
     // Decrement depth.
@@ -6472,6 +6599,59 @@ fn cmd_export(args: &str) {
 
     // Keep PWD in sync.
     sync_env_pwd();
+}
+
+/// Set shell options or variables.
+///
+/// Flags:
+///   `set -e` — exit on error (errexit)
+///   `set +e` — disable exit on error
+///   `set -x` — trace commands before execution
+///   `set +x` — disable tracing
+///   `set NAME=VALUE` or `set NAME VALUE` — set variable (like export)
+fn cmd_set(args: &str) {
+    if args.is_empty() {
+        // Show current options and variables.
+        let errexit = OPT_ERREXIT.load(core::sync::atomic::Ordering::Relaxed);
+        let xtrace = OPT_XTRACE.load(core::sync::atomic::Ordering::Relaxed);
+        crate::console_println!("Shell options:");
+        crate::console_println!("  errexit (-e): {}", if errexit { "on" } else { "off" });
+        crate::console_println!("  xtrace  (-x): {}", if xtrace { "on" } else { "off" });
+        return;
+    }
+
+    match args {
+        "-e" => {
+            OPT_ERREXIT.store(true, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        "+e" => {
+            OPT_ERREXIT.store(false, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        "-x" => {
+            OPT_XTRACE.store(true, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        "+x" => {
+            OPT_XTRACE.store(false, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        "-ex" | "-xe" => {
+            OPT_ERREXIT.store(true, core::sync::atomic::Ordering::Relaxed);
+            OPT_XTRACE.store(true, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        "+ex" | "+xe" => {
+            OPT_ERREXIT.store(false, core::sync::atomic::Ordering::Relaxed);
+            OPT_XTRACE.store(false, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        _ => {}
+    }
+
+    // Fall back to variable-setting behavior.
+    cmd_export(args);
 }
 
 /// Declare a local variable inside a function.

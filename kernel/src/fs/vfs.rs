@@ -112,6 +112,17 @@ pub type Timestamp = u64;
 /// One day in nanoseconds (for relatime threshold).
 const ONE_DAY_NS: u64 = 86_400_000_000_000;
 
+// ----- Access mode flags (POSIX access() equivalent) -----
+
+/// Check existence only (no permission bits tested).
+pub const F_OK: u32 = 0;
+/// Check read permission.
+pub const R_OK: u32 = 4;
+/// Check write permission.
+pub const W_OK: u32 = 2;
+/// Check execute permission.
+pub const X_OK: u32 = 1;
+
 /// Rich file metadata beyond what [`DirEntry`] carries.
 ///
 /// Filesystem implementations fill in what they can; unsupported
@@ -2176,6 +2187,73 @@ impl Vfs {
         Ok(entry.size)
     }
 
+    /// Check if a path is readable.
+    ///
+    /// Returns `Ok(())` if the file exists and has read permission,
+    /// or an appropriate error (`NotFound`, `PermissionDenied`).
+    pub fn is_readable(path: &str) -> KernelResult<()> {
+        let meta = Self::metadata(path)?;
+        // Check any read permission bit (owner/group/other).
+        if meta.permissions & 0o444 != 0 {
+            Ok(())
+        } else {
+            Err(KernelError::PermissionDenied)
+        }
+    }
+
+    /// Check if a path is writable.
+    ///
+    /// Returns `Ok(())` if the file exists and has write permission,
+    /// or an appropriate error (`NotFound`, `PermissionDenied`).
+    /// Also checks the immutable attribute.
+    pub fn is_writable(path: &str) -> KernelResult<()> {
+        let meta = Self::metadata(path)?;
+        if meta.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+        // Check any write permission bit (owner/group/other).
+        if meta.permissions & 0o222 != 0 {
+            Ok(())
+        } else {
+            Err(KernelError::PermissionDenied)
+        }
+    }
+
+    /// Check file accessibility (POSIX `access()` equivalent).
+    ///
+    /// `mode` is a bitmask of [`F_OK`], [`R_OK`], [`W_OK`], [`X_OK`].
+    /// `F_OK` (0) just checks existence.
+    ///
+    /// Returns `Ok(())` when every requested access is permitted, or
+    /// `NotFound` / `PermissionDenied` on failure.
+    pub fn access(path: &str, mode: u32) -> KernelResult<()> {
+        let meta = Self::metadata(path)?; // NotFound propagated here
+
+        // F_OK (0) — existence only; metadata() already succeeded.
+        if mode == F_OK {
+            return Ok(());
+        }
+
+        // Immutable files deny write regardless of permission bits.
+        if mode & W_OK != 0 && meta.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+
+        // For each class of permission requested, at least one
+        // owner/group/other bit must be set (same logic as is_readable/is_writable).
+        if mode & R_OK != 0 && meta.permissions & 0o444 == 0 {
+            return Err(KernelError::PermissionDenied);
+        }
+        if mode & W_OK != 0 && meta.permissions & 0o222 == 0 {
+            return Err(KernelError::PermissionDenied);
+        }
+        if mode & X_OK != 0 && meta.permissions & 0o111 == 0 {
+            return Err(KernelError::PermissionDenied);
+        }
+
+        Ok(())
+    }
+
     /// Return VFS dcache statistics: (hits, misses, valid_entries).
     ///
     /// Used by procfs to report cache performance.
@@ -3380,6 +3458,69 @@ pub fn self_test() -> KernelResult<()> {
 
         let _ = Vfs::remove_recursive(pg_dir);
         serial_println!("[vfs]     readdir_at pagination test PASSED");
+    }
+
+    // ── VFS access() tests ──
+    {
+        serial_println!("[vfs]   --- access() tests ---");
+
+        // Existing file should be accessible with F_OK.
+        if Vfs::access("/tmp", F_OK).is_err() {
+            serial_println!("[vfs]     FAIL: access /tmp F_OK should succeed");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     access /tmp F_OK: OK");
+
+        // Non-existent path should fail.
+        if Vfs::access("/tmp/__no_such_file__", F_OK).is_ok() {
+            serial_println!("[vfs]     FAIL: access non-existent should fail");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     access non-existent: NotFound OK");
+
+        // /tmp directory should be readable and writable (memfs default perms).
+        if Vfs::access("/tmp", R_OK).is_err() {
+            serial_println!("[vfs]     FAIL: access /tmp R_OK should succeed");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     access /tmp R_OK: OK");
+
+        if Vfs::access("/tmp", W_OK).is_err() {
+            serial_println!("[vfs]     FAIL: access /tmp W_OK should succeed");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     access /tmp W_OK: OK");
+
+        // Combined mode check.
+        if Vfs::access("/tmp", R_OK | W_OK).is_err() {
+            serial_println!("[vfs]     FAIL: access /tmp R_OK|W_OK should succeed");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     access /tmp R_OK|W_OK: OK");
+
+        // Convenience helpers.
+        if Vfs::is_readable("/tmp").is_err() {
+            serial_println!("[vfs]     FAIL: is_readable /tmp should succeed");
+            return Err(KernelError::InternalError);
+        }
+        if Vfs::is_writable("/tmp").is_err() {
+            serial_println!("[vfs]     FAIL: is_writable /tmp should succeed");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     is_readable + is_writable: OK");
+
+        // Read-only filesystem entries (procfs) should fail W_OK.
+        if Vfs::access("/proc/version", R_OK).is_err() {
+            serial_println!("[vfs]     FAIL: access /proc/version R_OK should succeed");
+            return Err(KernelError::InternalError);
+        }
+        if Vfs::access("/proc/version", W_OK).is_ok() {
+            serial_println!("[vfs]     FAIL: access /proc/version W_OK should fail");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     access /proc/version R_OK ok, W_OK denied: OK");
+
+        serial_println!("[vfs]     access() tests PASSED");
     }
 
     // ── Glob pattern matching tests ──

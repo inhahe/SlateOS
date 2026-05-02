@@ -88,6 +88,26 @@ const MAX_LINE: usize = 256;
 const HISTORY_SIZE: usize = 64;
 
 // ---------------------------------------------------------------------------
+// Exit status
+// ---------------------------------------------------------------------------
+
+/// Last command's exit status.  0 = success, non-zero = failure.
+///
+/// Used by `$?` expansion, `&&` / `||` chaining operators, and the
+/// `true`/`false` built-in commands.
+static LAST_EXIT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Set the last command's exit status.
+fn set_exit(code: u8) {
+    LAST_EXIT.store(code, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Get the last command's exit status.
+fn last_exit() -> u8 {
+    LAST_EXIT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
 // Working directory
 // ---------------------------------------------------------------------------
 
@@ -176,7 +196,7 @@ fn env_remove(name: &str) -> bool {
 /// - `$NAME` expands the longest run of alphanumeric/underscore chars.
 /// - `${NAME}` expands the text between braces.
 /// - `$$` produces a literal `$`.
-/// - `$?` expands to the last exit status (always "0" for now).
+/// - `$?` expands to the last command's exit status (0=success, 1=failure).
 /// - Unknown variables expand to empty string.
 /// - Single-quoted strings (`'...'`) are not expanded.
 fn expand_vars(input: &str) -> String {
@@ -222,8 +242,9 @@ fn expand_vars(input: &str) -> String {
                 result.push('$');
                 i = i.saturating_add(1);
             } else if next == b'?' {
-                // `$?` → last exit status (stub: always 0).
-                result.push('0');
+                // `$?` → last command's exit status.
+                let code = last_exit();
+                result.push_str(&alloc::format!("{}", code));
                 i = i.saturating_add(1);
             } else if next == b'{' {
                 // `${NAME}` form.
@@ -961,21 +982,148 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
 
 /// Parse a command line and execute the matching command.
 ///
-/// Supports output redirection (`> file`, `>> file`) and piping
-/// (`cmd1 | cmd2`).  Redirection writes the command's output to a
-/// file via the VFS.  Piping captures the left side's output and
-/// feeds it as virtual input to the right side (for commands that
-/// accept piped input: sort, grep, uniq, head, tail, wc, cat).
+/// Supports:
+/// - Command chaining: `cmd1 ; cmd2`, `cmd1 && cmd2`, `cmd1 || cmd2`
+/// - Output redirection: `cmd > file`, `cmd >> file`
+/// - Piping: `cmd1 | cmd2`
+/// - Variable expansion: `$VAR`, `${VAR}`
+/// - Alias expansion (first word only)
 fn execute(line: &str) {
     // Phase 1: Expand environment variables ($VAR, ${VAR}).
     let expanded = expand_vars(line);
     let line = expanded.trim();
 
-    // Phase 2: Expand aliases (first word only).
+    if line.is_empty() {
+        return;
+    }
+
+    // Phase 2: Split on chain operators (;, &&, ||).
+    // These have the lowest precedence — each segment gets its own
+    // alias expansion, pipe/redirect handling, and dispatch.
+    let segments = split_chain_operators(line);
+    if segments.len() > 1 {
+        for seg in &segments {
+            let cmd = seg.command.trim();
+            if cmd.is_empty() {
+                continue;
+            }
+            match seg.operator {
+                ChainOp::None | ChainOp::Semicolon => {
+                    execute_single(cmd);
+                }
+                ChainOp::And => {
+                    // Run only if previous command succeeded.
+                    if last_exit() == 0 {
+                        execute_single(cmd);
+                    }
+                }
+                ChainOp::Or => {
+                    // Run only if previous command failed.
+                    if last_exit() != 0 {
+                        execute_single(cmd);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // No chaining operators — execute as a single command.
+    execute_single(line);
+}
+
+/// A segment in a chained command line.
+struct ChainSegment<'a> {
+    /// The operator that precedes this segment.
+    /// The first segment has `ChainOp::None`.
+    operator: ChainOp,
+    /// The command text.
+    command: &'a str,
+}
+
+/// Chain operators connecting command segments.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChainOp {
+    /// First segment (no preceding operator).
+    None,
+    /// `;` — unconditional sequencing.
+    Semicolon,
+    /// `&&` — run if previous succeeded.
+    And,
+    /// `||` — run if previous failed.
+    Or,
+}
+
+/// Split a command line on chain operators (`;`, `&&`, `||`).
+///
+/// Respects quoting — operators inside single or double quotes are ignored.
+/// Returns a single-element Vec if no operators are found.
+fn split_chain_operators(line: &str) -> Vec<ChainSegment<'_>> {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut pending_op = ChainOp::None;
+    let mut in_sq = false;
+    let mut in_dq = false;
+
+    while i < len {
+        let b = bytes[i];
+
+        if b == b'\'' && !in_dq { in_sq = !in_sq; i = i.saturating_add(1); continue; }
+        if b == b'"' && !in_sq { in_dq = !in_dq; i = i.saturating_add(1); continue; }
+        if in_sq || in_dq { i = i.saturating_add(1); continue; }
+
+        if b == b'&' && bytes.get(i.saturating_add(1)) == Some(&b'&') {
+            let cmd = line.get(start..i).unwrap_or("");
+            segments.push(ChainSegment { operator: pending_op, command: cmd });
+            pending_op = ChainOp::And;
+            i = i.saturating_add(2);
+            start = i;
+            continue;
+        }
+        if b == b'|' && bytes.get(i.saturating_add(1)) == Some(&b'|') {
+            let cmd = line.get(start..i).unwrap_or("");
+            segments.push(ChainSegment { operator: pending_op, command: cmd });
+            pending_op = ChainOp::Or;
+            i = i.saturating_add(2);
+            start = i;
+            continue;
+        }
+        if b == b';' {
+            let cmd = line.get(start..i).unwrap_or("");
+            segments.push(ChainSegment { operator: pending_op, command: cmd });
+            pending_op = ChainOp::Semicolon;
+            i = i.saturating_add(1);
+            start = i;
+            continue;
+        }
+
+        i = i.saturating_add(1);
+    }
+
+    // Push the final tail segment.
+    let tail = line.get(start..).unwrap_or("");
+    segments.push(ChainSegment { operator: pending_op, command: tail });
+
+    segments
+}
+
+/// Execute a single command segment (after chain-operator splitting).
+///
+/// Handles alias expansion, pipe/redirect parsing, and dispatch.
+fn execute_single(line: &str) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+
+    // Expand aliases (first word only).
     let aliased = expand_aliases(line);
     let line = aliased.trim();
 
-    // Phase 3: Check for `export`/`unset`/`alias`/`unalias` before
+    // Check for `export`/`unset`/`alias`/`unalias` before
     // pipe/redirect parsing — these are variable-setting commands that
     // should not be piped.
     {
@@ -983,29 +1131,33 @@ fn execute(line: &str) {
         let cmd = parts.next().unwrap_or("");
         let args = parts.next().unwrap_or("").trim();
         match cmd {
-            "export" | "set" => { cmd_export(args); return; }
-            "unset" => { cmd_unset(args); return; }
-            "alias" => { cmd_alias(args); return; }
-            "unalias" => { cmd_unalias(args); return; }
+            "export" | "set" => { cmd_export(args); set_exit(0); return; }
+            "unset" => { cmd_unset(args); set_exit(0); return; }
+            "alias" => { cmd_alias(args); set_exit(0); return; }
+            "unalias" => { cmd_unalias(args); set_exit(0); return; }
             _ => {}
         }
     }
 
     // Check for pipe first (highest-level operator).
+    // Note: single `|` only — `||` was already handled as chain operator.
     if let Some(pipe_pos) = find_pipe(line) {
         let left = line.get(..pipe_pos).unwrap_or("").trim();
         let right = line.get(pipe_pos.saturating_add(1)..).unwrap_or("").trim();
         if left.is_empty() || right.is_empty() {
             crate::console_println!("Syntax error: empty pipe operand");
+            set_exit(1);
             return;
         }
         execute_pipe(left, right);
+        set_exit(0);
         return;
     }
 
     // Check for output redirection (> file, >> file).
     if let Some(redir) = parse_redirect(line) {
         execute_redirect(&redir.command, &redir.path, redir.append);
+        set_exit(0);
         return;
     }
 
@@ -1160,10 +1312,16 @@ fn dispatch_with_input(line: &str, input: &str) {
 }
 
 /// Core command dispatch (no redirection/pipe parsing).
+///
+/// Sets exit status: 0 for recognized commands, 1 for unknown commands.
+/// Individual commands may also set the exit status on error.
 fn dispatch(line: &str) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("").trim();
+
+    // Default to success; commands that fail will set_exit(1).
+    set_exit(0);
 
     match cmd {
         "help" | "?" => cmd_help(),
@@ -1242,11 +1400,12 @@ fn dispatch(line: &str) {
         "nl" => cmd_nl(args),
         "rev" => cmd_rev(args),
         "sleep" => cmd_sleep(args),
-        "true" => {} // no-op, always succeeds
-        "false" => crate::console_println!("false"),
+        "true" => { set_exit(0); }
+        "false" => { set_exit(1); }
         "printenv" | "env" => cmd_printenv(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
+            set_exit(1);
         }
     }
 }

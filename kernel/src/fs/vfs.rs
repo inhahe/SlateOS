@@ -2138,6 +2138,44 @@ impl Vfs {
 
     // ----- Path resolution cache stats -----
 
+    // ----- Convenience helpers -----
+
+    /// Check if a path exists (file, directory, or symlink).
+    ///
+    /// Follows symlinks.  Returns `false` for broken symlinks.
+    pub fn exists(path: &str) -> bool {
+        Self::stat(path).is_ok()
+    }
+
+    /// Check if a path exists and is a directory.
+    ///
+    /// Follows symlinks.  Returns `false` if the path doesn't exist
+    /// or is not a directory.
+    pub fn is_directory(path: &str) -> bool {
+        Self::stat(path)
+            .map(|e| e.entry_type == EntryType::Directory)
+            .unwrap_or(false)
+    }
+
+    /// Check if a path exists and is a regular file.
+    pub fn is_file(path: &str) -> bool {
+        Self::stat(path)
+            .map(|e| e.entry_type == EntryType::File)
+            .unwrap_or(false)
+    }
+
+    /// Get the size of a file in bytes.
+    ///
+    /// Returns `NotFound` if the path doesn't exist, `NotSupported` if
+    /// it's a directory (use `readdir` to count entries).
+    pub fn file_size(path: &str) -> KernelResult<u64> {
+        let entry = Self::stat(path)?;
+        if entry.entry_type == EntryType::Directory {
+            return Err(KernelError::NotSupported);
+        }
+        Ok(entry.size)
+    }
+
     /// Return VFS dcache statistics: (hits, misses, valid_entries).
     ///
     /// Used by procfs to report cache performance.

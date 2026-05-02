@@ -3138,9 +3138,9 @@ impl Ext4Driver {
                     old_block,
                 )?;
                 inode.i_file_acl_lo = 0;
-                // Clear high bits in i_osd2.
-                if let Some(b) = inode.i_osd2.get_mut(4) { *b = 0; }
-                if let Some(b) = inode.i_osd2.get_mut(5) { *b = 0; }
+                // Clear i_file_acl_high in i_osd2[2..4].
+                if let Some(b) = inode.i_osd2.get_mut(2) { *b = 0; }
+                if let Some(b) = inode.i_osd2.get_mut(3) { *b = 0; }
                 self.write_inode(inode_nr, inode)?;
             }
             return Ok(0);

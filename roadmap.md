@@ -260,8 +260,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
 - [x] ISO 9660 (optical media, read-only, Joliet detection)
 - [x] Filesystem infrastructure:
-  - [x] Buffer cache (512-sector LRU, write-back, 90% hit rate on FAT workloads)
-  - [x] File handle system (open/close/read/write/seek/fstat, global handle table)
+  - [x] Buffer cache (512-sector LRU, write-back, BTreeMap index for O(log n) sector lookup, O(1) free-slot allocation)
+  - [x] File handle system (open/close/read/write/seek/fstat/ftruncate/dup/handle_path, symlink-resolved at open time)
   - [x] Path resolution cache (dcache, 64-entry LRU with prefix invalidation)
   - [x] Efficient partial I/O (FAT read_at/write_at/truncate override default read-all-rewrite-all)
   - [x] Filesystem change notification system (inotify equivalent, async watches with bounded queues)
@@ -277,7 +277,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths
   - [x] Journaling (via ext4 jbd2)
   - [x] File metadata: owner, group, permissions, created/modified/accessed (relatime), immutable flag, append-only flag, extended attributes (key-value, 255-byte key / 64 KiB value)
-  - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639)
+  - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639), VFS-level cross-mount symlink resolution
   - [-] File metadata: capabilities per file (needs security zone), content hash (SHA-256 via Vfs::content_hash)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 

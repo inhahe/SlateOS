@@ -385,21 +385,9 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::IsADirectory);
         }
 
-        // For extent-based files, we can read only the blocks we need
-        // rather than reading the entire file.  For now, use the default
-        // read-full-then-slice approach — still correct but will be
-        // optimized when we add per-extent seek.
-        let data = self.driver.read_file_data(&inode)?;
-        let file_size = data.len() as u64;
-
-        if offset >= file_size {
-            return Ok(Vec::new());
-        }
-
-        let start = offset as usize;
-        let end = start.saturating_add(len).min(data.len());
-        let slice = data.get(start..end).unwrap_or(&[]);
-        Ok(slice.to_vec())
+        // Use extent-aware range read — only reads the blocks spanning
+        // the requested byte range, not the entire file.
+        self.driver.read_file_range(&inode, offset, len)
     }
 
     fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {

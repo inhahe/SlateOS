@@ -146,6 +146,62 @@ impl Ext4Driver {
         self.read_extent_data(inode, file_size)
     }
 
+    /// Read a byte range from a file's extent tree.
+    ///
+    /// Only reads the blocks that overlap `[offset, offset+len)`,
+    /// avoiding reading the entire file for large-file partial reads.
+    pub fn read_file_range(
+        &self,
+        inode: &Ext4Inode,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<Vec<u8>> {
+        let file_size = self.inode_size(inode);
+
+        if offset >= file_size {
+            return Ok(Vec::new());
+        }
+
+        // Clamp to file size.
+        let actual_len = len.min(file_size.saturating_sub(offset) as usize);
+        if actual_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        if (inode.i_flags & inode_flags::EXTENTS) == 0 {
+            return Err(KernelError::NotSupported);
+        }
+
+        let block_size = u64::from(self.sb.block_size);
+
+        // Determine which logical blocks we need.
+        let first_logical = offset / block_size;
+        let last_logical = (offset.saturating_add(actual_len as u64).saturating_sub(1)) / block_size;
+
+        // Walk the extent tree and read only blocks in our range.
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+        if header.eh_magic != EXT4_EXTENT_MAGIC {
+            return Err(KernelError::IoError);
+        }
+
+        let mut result = Vec::with_capacity(actual_len);
+
+        // Walk the extent tree and read only blocks in our range.
+        self.read_range_from_tree(
+            block_bytes,
+            &header,
+            first_logical,
+            last_logical,
+            offset,
+            actual_len,
+            &mut result,
+        )?;
+
+        result.truncate(actual_len);
+        Ok(result)
+    }
+
     /// Read directory entries from a directory inode.
     ///
     /// Returns a vector of (inode_number, file_type, name) tuples.
@@ -643,6 +699,119 @@ impl Ext4Driver {
             if let Some(gd) = self.group_descs.get_mut(group) {
                 gd.bg_used_dirs_count_lo =
                     gd.bg_used_dirs_count_lo.saturating_sub(1);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read data from an extent tree, only reading blocks in
+    /// the logical block range `[first_logical, last_logical]`.
+    fn read_range_from_tree(
+        &self,
+        node_data: &[u8],
+        header: &Ext4ExtentHeader,
+        first_logical: u64,
+        last_logical: u64,
+        byte_offset: u64,
+        byte_len: usize,
+        result: &mut Vec<u8>,
+    ) -> KernelResult<()> {
+        let block_size = u64::from(self.sb.block_size);
+        let block_size_usize = self.sb.block_size as usize;
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+
+        if header.eh_depth == 0 {
+            // Leaf node — read matching extents.
+            let extent_size = core::mem::size_of::<Ext4Extent>();
+            for i in 0..header.eh_entries as usize {
+                if result.len() >= byte_len {
+                    return Ok(());
+                }
+
+                let off = header_size.saturating_add(i.saturating_mul(extent_size));
+                let ext_bytes = node_data
+                    .get(off..off.saturating_add(extent_size))
+                    .ok_or(KernelError::IoError)?;
+                let extent = read_struct::<Ext4Extent>(ext_bytes)?;
+
+                let ext_logical = u64::from(extent.ee_block);
+                let ext_len = u64::from(extent.ee_len & 0x7FFF);
+                let ext_phys = u64::from(extent.ee_start_lo)
+                    | (u64::from(extent.ee_start_hi) << 32);
+                let ext_end = ext_logical.saturating_add(ext_len);
+
+                // Skip extents that don't overlap our range.
+                if ext_end <= first_logical || ext_logical > last_logical {
+                    continue;
+                }
+
+                // Read blocks within this extent that overlap our range.
+                for b in 0..ext_len {
+                    let logical = ext_logical.saturating_add(b);
+                    if logical < first_logical || logical > last_logical {
+                        continue;
+                    }
+                    if result.len() >= byte_len {
+                        return Ok(());
+                    }
+
+                    let phys = ext_phys.saturating_add(b);
+                    let mut buf = vec![0u8; block_size_usize];
+                    self.reader.read_block(phys, &mut buf)?;
+
+                    // Calculate how much of this block to copy.
+                    let block_start_byte = logical.saturating_mul(block_size);
+                    let copy_start = if block_start_byte < byte_offset {
+                        (byte_offset.saturating_sub(block_start_byte)) as usize
+                    } else {
+                        0
+                    };
+                    let remaining = byte_len.saturating_sub(result.len());
+                    let copy_end = block_size_usize.min(copy_start.saturating_add(remaining));
+
+                    if let Some(data) = buf.get(copy_start..copy_end) {
+                        result.extend_from_slice(data);
+                    }
+                }
+            }
+        } else {
+            // Internal node — recurse into child blocks.
+            let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
+            for i in 0..header.eh_entries as usize {
+                if result.len() >= byte_len {
+                    return Ok(());
+                }
+
+                let off = header_size.saturating_add(i.saturating_mul(idx_size));
+                let idx_bytes = node_data
+                    .get(off..off.saturating_add(idx_size))
+                    .ok_or(KernelError::IoError)?;
+                let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
+
+                let child_block = u64::from(idx.ei_leaf_lo)
+                    | (u64::from(idx.ei_leaf_hi) << 32);
+                if child_block == 0 {
+                    continue;
+                }
+
+                let mut child_data = vec![0u8; block_size_usize];
+                self.reader.read_block(child_block, &mut child_data)?;
+
+                let child_header = read_struct::<Ext4ExtentHeader>(&child_data)?;
+                if child_header.eh_magic != EXT4_EXTENT_MAGIC {
+                    continue;
+                }
+
+                self.read_range_from_tree(
+                    &child_data,
+                    &child_header,
+                    first_logical,
+                    last_logical,
+                    byte_offset,
+                    byte_len,
+                    result,
+                )?;
             }
         }
 

@@ -667,6 +667,17 @@ pub trait FileSystem: Send {
     fn sync(&mut self) -> KernelResult<()> {
         Ok(())
     }
+
+    /// Set the filesystem volume label.
+    ///
+    /// Updates the on-disk volume label metadata.  Not all filesystems
+    /// support labels — the default returns `NotSupported`.
+    ///
+    /// FAT: updates both the BPB boot sector and the root directory
+    /// volume label entry.  Label is truncated to 11 bytes (8.3 format).
+    fn set_volume_label(&mut self, _label: &str) -> KernelResult<()> {
+        Err(KernelError::NotSupported)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2528,6 +2539,18 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, _relative) = find_mount(&mut vfs, &path)?;
         mp.fs.sync()
+    }
+
+    /// Set the volume label of the filesystem containing `path`.
+    ///
+    /// Dispatches to the underlying filesystem's `set_volume_label()`
+    /// method.  Returns `NotSupported` for filesystems without labels.
+    pub fn set_volume_label(path: &str, label: &str) -> KernelResult<()> {
+        check_writable(path)?;
+        let path = Self::resolve_follow(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, _relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.set_volume_label(label)
     }
 
     // ----- Advisory file locking -----

@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "irq", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
@@ -4218,6 +4218,7 @@ fn dispatch(line: &str) {
         "hostname" => cmd_hostname(args),
         "dd" => cmd_dd(args),
         "free" => cmd_free(),
+        "label" => cmd_label(args),
         "lsblk" | "blkdev" => cmd_lsblk(),
         "glob" => cmd_glob(args),
         "readlink" => cmd_readlink(args),
@@ -4380,6 +4381,7 @@ fn cmd_help() {
     crate::console_println!("  hostname  Show or set system hostname");
     crate::console_println!("  dd ..     Copy blocks between files (if=/of=/bs=/count=)");
     crate::console_println!("  free      Show memory usage summary");
+    crate::console_println!("  label [PATH] [NAME]  Show or set volume label for filesystem at PATH");
     crate::console_println!("  lsblk     List block devices with sizes");
     crate::console_println!("  glob P    Expand glob pattern (e.g., /tmp/*.txt)");
     crate::console_println!("  readlink P Show symlink target");
@@ -11614,6 +11616,50 @@ fn cmd_free() {
         "Heap:   {:>6} slab allocs  {:>6} live  {:>6} large",
         info.heap_slab_allocs, heap_live, info.heap_large_allocs
     );
+}
+
+/// Show or set the volume label for a filesystem.
+///
+/// Usage: `label` or `label PATH` — show the label
+///        `label PATH NAME` — set the label
+fn cmd_label(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+
+    let path = if parts.is_empty() || parts[0].is_empty() {
+        get_cwd()
+    } else {
+        resolve_path(parts[0])
+    };
+
+    if parts.len() < 2 || parts[1].is_empty() {
+        // Show the current label.
+        match crate::fs::Vfs::statvfs(&path) {
+            Ok(info) => {
+                let label = if info.volume_label.is_empty() {
+                    "(none)"
+                } else {
+                    &info.volume_label
+                };
+                crate::console_println!("{}: {} [{}]", path, label, info.fs_type);
+            }
+            Err(e) => {
+                crate::console_println!("label: {}: {:?}", path, e);
+                set_exit(1);
+            }
+        }
+    } else {
+        // Set the label.
+        let new_label = parts[1];
+        match crate::fs::Vfs::set_volume_label(&path, new_label) {
+            Ok(()) => {
+                crate::console_println!("Label set to '{}'", new_label);
+            }
+            Err(e) => {
+                crate::console_println!("label: {:?}", e);
+                set_exit(1);
+            }
+        }
+    }
 }
 
 /// `lsblk` — list block devices with capacity.

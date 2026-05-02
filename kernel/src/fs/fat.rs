@@ -1081,6 +1081,42 @@ impl FatFs {
         Ok(fs)
     }
 
+    /// Collect the LBA addresses of all sectors in the root directory.
+    ///
+    /// FAT16: returns the fixed root directory sectors.
+    /// FAT32: follows the root cluster chain and returns all data sectors.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn root_dir_sector_lbas(&mut self) -> KernelResult<Vec<u64>> {
+        let mut lbas = Vec::new();
+
+        if self.bpb.fat_type == FatType::Fat32 {
+            // Follow the root cluster chain.
+            let spc = u32::from(self.bpb.sectors_per_cluster);
+            let mut cluster = self.bpb.root_cluster;
+            let mut iterations = 0u32;
+            while self.bpb.is_valid_cluster(cluster) && iterations < 65536 {
+                iterations += 1;
+                let base = self.bpb.cluster_to_lba(cluster);
+                for s in 0..spc {
+                    lbas.push(u64::from(base + s));
+                }
+                match self.fat_entry(cluster)? {
+                    Some(next) => cluster = next,
+                    None => break,
+                }
+            }
+        } else {
+            // FAT16: fixed root directory area.
+            let start = self.bpb.root_dir_start_lba();
+            let count = self.bpb.root_dir_sectors();
+            for s in 0..count {
+                lbas.push(u64::from(start + s));
+            }
+        }
+
+        Ok(lbas)
+    }
+
     // -- Clean-shutdown bit in FAT entry 1 --
     //
     // The FAT spec reserves FAT entry 1 for volume status bits:
@@ -2682,6 +2718,91 @@ impl FileSystem for FatFs {
         }
 
         super::cache::flush(&self.device_name)
+    }
+
+    /// Set the FAT volume label.
+    ///
+    /// Updates both the BPB boot sector label field and the root directory
+    /// volume label entry.  The label is truncated/padded to 11 bytes and
+    /// uppercased (FAT spec requirement).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn set_volume_label(&mut self, label: &str) -> KernelResult<()> {
+        // Build the 11-byte label: uppercase, space-padded.
+        let mut label_bytes = [b' '; 11];
+        let upper_label = label.to_ascii_uppercase();
+        let src = upper_label.as_bytes();
+        let copy_len = src.len().min(11);
+        label_bytes[..copy_len].copy_from_slice(&src[..copy_len]);
+
+        // 1. Update the BPB boot sector label field.
+        let label_offset = if self.bpb.fat_type == FatType::Fat32 { 71 } else { 43 };
+        let mut boot_sector = [0u8; SECTOR_SIZE];
+        self.read_sector(0, &mut boot_sector)?;
+        boot_sector[label_offset..label_offset + 11].copy_from_slice(&label_bytes);
+        self.write_sector(0, &boot_sector)?;
+
+        // Update our in-memory BPB copy.
+        self.bpb.volume_label = label_bytes;
+
+        // 2. Update or create the root directory volume label entry.
+        // Scan root directory sectors directly for the volume label entry
+        // or a free slot to create one.
+        let sectors_and_lbas = self.root_dir_sector_lbas()?;
+        let entries_per_sector = usize::from(self.bpb.bytes_per_sector) / 32;
+        let mut found = false;
+        let mut first_free: Option<(u64, usize)> = None;
+
+        'outer: for &lba in &sectors_and_lbas {
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            self.read_sector(lba, &mut sector_buf)?;
+
+            for i in 0..entries_per_sector {
+                let off = i * 32;
+                let first_byte = sector_buf.get(off).copied().unwrap_or(0);
+
+                if first_byte == 0x00 {
+                    // End of directory — no more entries.
+                    if first_free.is_none() {
+                        first_free = Some((lba, off));
+                    }
+                    break 'outer;
+                }
+                if first_byte == 0xE5 {
+                    // Deleted entry — candidate for reuse.
+                    if first_free.is_none() {
+                        first_free = Some((lba, off));
+                    }
+                    continue;
+                }
+
+                let attr = sector_buf.get(off + 11).copied().unwrap_or(0);
+                if attr == ATTR_VOLUME_ID {
+                    // Found existing volume label — overwrite it.
+                    sector_buf[off..off + 11].copy_from_slice(&label_bytes);
+                    self.write_sector(lba, &sector_buf)?;
+                    found = true;
+                    break 'outer;
+                }
+            }
+        }
+
+        // No existing label — create one in the first free slot.
+        if !found {
+            if let Some((lba, off)) = first_free {
+                let mut sector_buf = [0u8; SECTOR_SIZE];
+                self.read_sector(lba, &mut sector_buf)?;
+                for b in &mut sector_buf[off..off + 32] {
+                    *b = 0;
+                }
+                sector_buf[off..off + 11].copy_from_slice(&label_bytes);
+                sector_buf[off + 11] = ATTR_VOLUME_ID;
+                self.write_sector(lba, &sector_buf)?;
+            }
+        }
+
+        self.modified = true;
+        self.dcache_invalidate_all();
+        Ok(())
     }
 
     fn statvfs(&mut self) -> KernelResult<FsInfo> {

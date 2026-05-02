@@ -301,6 +301,19 @@ fn expand_vars(input: &str) -> String {
                 if i < len && bytes[i] == b'}' {
                     i = i.saturating_add(1); // skip `}`
                 }
+            } else if next.is_ascii_digit() {
+                // `$0`..`$9` → positional parameter.
+                let n = (next - b'0') as usize;
+                result.push_str(&get_positional(n));
+                i = i.saturating_add(1);
+            } else if next == b'#' {
+                // `$#` → number of positional parameters.
+                result.push_str(&alloc::format!("{}", positional_count()));
+                i = i.saturating_add(1);
+            } else if next == b'@' || next == b'*' {
+                // `$@` / `$*` → all positional parameters (space-separated).
+                result.push_str(&positional_all());
+                i = i.saturating_add(1);
             } else if next.is_ascii_alphabetic() || next == b'_' {
                 // `$NAME` form — longest alphanumeric/underscore run.
                 let start = i;
@@ -445,6 +458,92 @@ struct LoopCollector {
 /// When `done` is seen at nesting depth 0, the loop executes.
 static LOOP_COLLECTOR: Mutex<Option<LoopCollector>> = Mutex::new(None);
 
+// ---------------------------------------------------------------------------
+// Shell functions
+// ---------------------------------------------------------------------------
+
+/// User-defined shell functions: name → body lines.
+///
+/// Functions are defined with `name() { ... }` or `function name { ... }`.
+/// Called like any built-in: `name arg1 arg2` — arguments become $1, $2, etc.
+static FUNCTIONS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
+
+/// Function body collector.
+///
+/// When `Some`, we are collecting lines for a function body (multi-line
+/// definition).  Tracks brace nesting so nested `{ }` inside the body
+/// are handled correctly.
+struct FuncCollector {
+    /// The function's name.
+    name: String,
+    /// Buffered body lines.
+    body: Vec<String>,
+    /// Brace nesting depth.  Starts at 1 (the opening `{`).
+    /// When it reaches 0 (matching `}`), the function is stored.
+    brace_depth: u32,
+}
+
+/// Active function body collector (only one at a time).
+static FUNC_COLLECTOR: Mutex<Option<FuncCollector>> = Mutex::new(None);
+
+/// Positional parameter stack.
+///
+/// Each function call pushes a frame containing its arguments ($1, $2, ...),
+/// and pops it on return.  The topmost frame is the current scope.
+/// Outside any function, the stack is empty (positional params expand
+/// to empty string).
+static POSITIONAL_PARAMS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+/// Flag: set by `return` inside a function body to short-circuit execution.
+///
+/// Checked after each line in execute_function_body().  Cleared when the
+/// function finishes.
+static FUNC_RETURN: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Maximum function call depth (prevents infinite recursion in the
+/// kernel debug shell, which has a limited stack).
+const MAX_FUNC_DEPTH: usize = 32;
+
+/// Get a positional parameter from the current function scope.
+///
+/// $0 is always "kshell".  $1..$N are function arguments.
+/// Returns empty string if out of range or outside a function.
+fn get_positional(n: usize) -> String {
+    if n == 0 {
+        return String::from("kshell");
+    }
+    let stack = POSITIONAL_PARAMS.lock();
+    if let Some(frame) = stack.last() {
+        frame.get(n.wrapping_sub(1)).cloned().unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// Get the number of positional parameters in the current scope.
+fn positional_count() -> usize {
+    let stack = POSITIONAL_PARAMS.lock();
+    stack.last().map_or(0, Vec::len)
+}
+
+/// Get all positional parameters joined with spaces ($@ / $*).
+fn positional_all() -> String {
+    let stack = POSITIONAL_PARAMS.lock();
+    if let Some(frame) = stack.last() {
+        let mut result = String::new();
+        for (i, p) in frame.iter().enumerate() {
+            if i > 0 {
+                result.push(' ');
+            }
+            result.push_str(p);
+        }
+        result
+    } else {
+        String::new()
+    }
+}
+
 /// Check whether execution is currently active (not skipped by an
 /// outer control-flow block).
 fn control_should_execute() -> bool {
@@ -460,6 +559,44 @@ fn control_should_execute() -> bool {
 fn handle_control_flow(line: &str) -> bool {
     let trimmed = line.trim();
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
+
+    // If we're collecting function body lines, buffer them.
+    {
+        let mut fc = FUNC_COLLECTOR.lock();
+        if let Some(ref mut state) = *fc {
+            // Count braces to track nesting.
+            for ch in trimmed.chars() {
+                if ch == '{' {
+                    state.brace_depth = state.brace_depth.saturating_add(1);
+                } else if ch == '}' {
+                    state.brace_depth = state.brace_depth.saturating_sub(1);
+                    if state.brace_depth == 0 {
+                        // Matching closing brace — store the function.
+                        // Don't include the final `}` line in the body.
+                        // But if there's content before `}`, include it.
+                        let before_brace = trimmed.trim_end_matches('}').trim();
+                        if !before_brace.is_empty() {
+                            state.body.push(String::from(before_brace));
+                        }
+                        let name = state.name.clone();
+                        let body = state.body.clone();
+                        *fc = None;
+                        drop(fc);
+                        FUNCTIONS.lock().insert(name, body);
+                        return true;
+                    }
+                }
+            }
+            // Still inside function body — buffer the line.
+            state.body.push(String::from(trimmed));
+            return true;
+        }
+    }
+
+    // Check for function definition: `name() {` or `function name {`.
+    if is_function_definition(trimmed) {
+        return true;
+    }
 
     // If we're collecting loop body lines (while or for), buffer them.
     {
@@ -821,6 +958,136 @@ fn split_words(s: &str) -> Vec<String> {
     }
 
     words
+}
+
+/// Detect and handle function definitions.
+///
+/// Recognizes two forms:
+/// - `name() { BODY }` or `name() {` (multi-line)
+/// - `function name { BODY }` or `function name {` (multi-line)
+///
+/// Returns `true` if the line was a function definition (or the start of one).
+fn is_function_definition(line: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Form 1: `name() { ... }` or `name() {`
+    if let Some(paren_pos) = trimmed.find("()") {
+        let name = trimmed.get(..paren_pos).unwrap_or("").trim();
+        if !name.is_empty() && is_valid_func_name(name) {
+            let after = trimmed.get(paren_pos.saturating_add(2)..).unwrap_or("").trim();
+            return start_func_collection(name, after);
+        }
+    }
+
+    // Form 2: `function name { ... }` or `function name {`
+    if trimmed.starts_with("function ") {
+        let rest = trimmed.get(9..).unwrap_or("").trim();
+        // The name is the next token; everything after is the body opener.
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let name = parts.next().unwrap_or("").trim();
+        let after = parts.next().unwrap_or("").trim();
+        // Also allow `function name()` syntax.
+        let name = name.strip_suffix("()").unwrap_or(name);
+        if !name.is_empty() && is_valid_func_name(name) {
+            return start_func_collection(name, after);
+        }
+    }
+
+    false
+}
+
+/// Check if a name is a valid function identifier (alphanumeric + underscore + hyphen).
+fn is_valid_func_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+}
+
+/// Begin collecting a function body.
+///
+/// `after_name` is everything after the function name/parens, e.g. `{ echo hi; }`.
+/// Returns `true` (the line was handled).
+fn start_func_collection(name: &str, after_name: &str) -> bool {
+    let body_text = after_name.strip_prefix('{').unwrap_or("").trim();
+
+    // Check for one-liner: `name() { echo hi; }`
+    if let Some(before_close) = body_text.strip_suffix('}') {
+        let body_line = before_close.trim();
+        let body = if body_line.is_empty() {
+            Vec::new()
+        } else {
+            // Split on `;` for one-liners with multiple statements.
+            body_line.split(';')
+                .map(|s| String::from(s.trim()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        FUNCTIONS.lock().insert(String::from(name), body);
+        return true;
+    }
+
+    // Multi-line: the opening `{` starts collection.
+    if after_name.trim_start().starts_with('{') {
+        let mut initial_body = Vec::new();
+        // If there's content after `{` on the same line, buffer it.
+        if !body_text.is_empty() {
+            initial_body.push(String::from(body_text));
+        }
+        *FUNC_COLLECTOR.lock() = Some(FuncCollector {
+            name: String::from(name),
+            body: initial_body,
+            brace_depth: 1,
+        });
+        return true;
+    }
+
+    // No `{` — syntax error.
+    if after_name.is_empty() {
+        // Bare `name()` without `{` — we could require it, but let's
+        // be lenient: start collecting, expect `{` on next line.
+        // Actually, the POSIX way expects `{`, so error.
+        crate::console_println!("Syntax error: function '{}' requires a body (use {{ }})", name);
+    } else {
+        crate::console_println!("Syntax error: unexpected '{}' in function definition", after_name);
+    }
+    true
+}
+
+/// Execute a user-defined function with the given arguments.
+///
+/// Pushes a positional parameter frame, executes each body line,
+/// then pops the frame.  Respects `return` to short-circuit.
+fn execute_function(body: &[String], args: &[String]) {
+    // Check recursion depth.
+    {
+        let stack = POSITIONAL_PARAMS.lock();
+        if stack.len() >= MAX_FUNC_DEPTH {
+            crate::console_println!(
+                "Error: function call depth exceeded ({} levels)",
+                MAX_FUNC_DEPTH,
+            );
+            set_exit(1);
+            return;
+        }
+    }
+
+    // Push parameter frame.
+    POSITIONAL_PARAMS.lock().push(args.to_vec());
+
+    // Clear the return flag.
+    FUNC_RETURN.store(false, core::sync::atomic::Ordering::Relaxed);
+
+    // Execute body lines.
+    for line in body {
+        if FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        execute(line);
+    }
+
+    // Clear return flag and pop parameter frame.
+    FUNC_RETURN.store(false, core::sync::atomic::Ordering::Relaxed);
+    POSITIONAL_PARAMS.lock().pop();
 }
 
 // ---------------------------------------------------------------------------
@@ -1900,9 +2167,33 @@ fn dispatch(line: &str) {
         "test" | "[" => cmd_test(args),
         "expr" => cmd_expr(args),
         "printenv" | "env" => cmd_printenv(),
+        "return" => {
+            // `return [N]` — set exit status and signal function return.
+            if !args.is_empty() {
+                if let Ok(code) = args.parse::<u8>() {
+                    set_exit(code);
+                } else {
+                    crate::console_println!("return: invalid status '{}'", args);
+                    set_exit(1);
+                }
+            }
+            FUNC_RETURN.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+        "local" => {
+            // `local VAR=VALUE` — set a variable (currently just a
+            // synonym for export; true local scoping would need a
+            // separate per-frame variable map).
+            cmd_export(args);
+        }
         _ => {
-            crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
-            set_exit(1);
+            // Check user-defined functions before reporting unknown.
+            if let Some(body) = FUNCTIONS.lock().get(cmd).cloned() {
+                let func_args: Vec<String> = split_words(args);
+                execute_function(&body, &func_args);
+            } else {
+                crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
+                set_exit(1);
+            }
         }
     }
 }

@@ -711,6 +711,34 @@ pub struct Ext4DirEntry2 {
 
 const _: () = assert!(core::mem::size_of::<Ext4DirEntry2>() == 8);
 
+/// Directory entry tail for metadata checksums.
+///
+/// In ext4 with metadata_csum, each directory data block ends with a
+/// 12-byte fake directory entry containing a CRC32C checksum.
+/// Identified by `inode == 0`, `rec_len == 12`, `name_len == 0`,
+/// `file_type == 0xDE`.
+///
+/// Based on Linux `struct ext4_dir_entry_tail` in fs/ext4/ext4.h.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Ext4DirEntryTail {
+    /// Must be 0 (mimics inode=0 deleted entry).
+    pub det_reserved_zero1: u32,
+    /// Always 12 (sizeof this struct).
+    pub det_rec_len: u16,
+    /// Must be 0 (name_len).
+    pub det_reserved_zero2: u8,
+    /// Magic marker: 0xDE identifies this as a checksum tail.
+    pub det_reserved_ft: u8,
+    /// CRC32C checksum of the directory block.
+    pub det_checksum: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<Ext4DirEntryTail>() == 12);
+
+/// Magic value in `det_reserved_ft` that marks a directory entry tail.
+pub const EXT4_DIRENT_TAIL_MARKER: u8 = 0xDE;
+
 /// Directory entry file type codes (`file_type` field).
 #[allow(dead_code)]
 pub mod dir_type {

@@ -392,6 +392,15 @@ pub fn htree_lookup(
     };
 
     let leaf_data = driver.read_block(leaf_phys)?;
+
+    // Validate directory block checksum before scanning entries.
+    super::driver::validate_dirent_checksum(
+        driver.superblock(),
+        dir_ino,
+        dir_inode.i_generation,
+        &leaf_data,
+    )?;
+
     scan_leaf_block(&leaf_data, name)
 }
 

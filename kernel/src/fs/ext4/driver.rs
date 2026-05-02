@@ -1107,12 +1107,35 @@ impl Ext4Driver {
     /// Read directory entries from a directory inode.
     ///
     /// Returns a vector of (inode_number, file_type, name) tuples.
+    /// If metadata checksums are enabled, validates each directory block's
+    /// CRC32C checksum before parsing entries.
     pub fn read_dir_entries(
         &self,
+        dir_ino: u32,
         dir_inode: &Ext4Inode,
     ) -> KernelResult<Vec<(u32, u8, String)>> {
         // Read directory data.
         let data = self.read_file_data(dir_inode)?;
+
+        // Validate per-block checksums if metadata_csum is enabled.
+        if self.sb.has_metadata_csum {
+            let bs = self.sb.block_size as usize;
+            if bs > 0 {
+                let mut block_start: usize = 0;
+                while block_start.saturating_add(bs) <= data.len() {
+                    if let Some(block) = data.get(block_start..block_start.saturating_add(bs)) {
+                        validate_dirent_checksum(
+                            &self.sb,
+                            dir_ino,
+                            dir_inode.i_generation,
+                            block,
+                        )?;
+                    }
+                    block_start = block_start.saturating_add(bs);
+                }
+            }
+        }
+
         parse_dir_entries(&data)
     }
 
@@ -1147,7 +1170,7 @@ impl Ext4Driver {
         }
 
         // Fallback: linear scan of all directory entries.
-        let entries = self.read_dir_entries(dir_inode)?;
+        let entries = self.read_dir_entries(dir_ino, dir_inode)?;
         for (ino, ftype, entry_name) in &entries {
             if entry_name == name {
                 // Cache this lookup for next time.
@@ -3019,6 +3042,129 @@ fn stamp_superblock_checksum(buf: &mut [u8]) {
     buf[CSUM_OFFSET.saturating_add(1)] = csum_bytes[1];
     buf[CSUM_OFFSET.saturating_add(2)] = csum_bytes[2];
     buf[CSUM_OFFSET.saturating_add(3)] = csum_bytes[3];
+}
+
+// ---------------------------------------------------------------------------
+// Directory block checksums
+// ---------------------------------------------------------------------------
+
+/// Validate a directory data block's checksum (if present).
+///
+/// ext4 with metadata_csum places a 12-byte `ext4_dir_entry_tail` at the
+/// end of each directory data block.  The tail is identified by
+/// `inode == 0, rec_len == 12, name_len == 0, file_type == 0xDE`.
+///
+/// The checksum is CRC32C(csum_seed + inode_nr_le32 + gen_le32 + block_data),
+/// where block_data has the tail's checksum field zeroed.
+///
+/// Returns Ok(()) if no tail is present or if the checksum matches.
+pub(super) fn validate_dirent_checksum(
+    sb: &ParsedSuperblock,
+    dir_inode_nr: u32,
+    dir_inode_gen: u32,
+    block_data: &[u8],
+) -> KernelResult<()> {
+    if !sb.has_metadata_csum {
+        return Ok(());
+    }
+
+    let tail_size = core::mem::size_of::<super::ondisk::Ext4DirEntryTail>();
+    if block_data.len() < tail_size {
+        return Ok(()); // Block too small for a tail.
+    }
+
+    // Check if the last 12 bytes look like a dirent tail.
+    let tail_offset = block_data.len().saturating_sub(tail_size);
+    let tail_bytes = block_data.get(tail_offset..).ok_or(KernelError::IoError)?;
+    let tail = read_struct::<super::ondisk::Ext4DirEntryTail>(tail_bytes)?;
+
+    if tail.det_reserved_zero1 != 0
+        || tail.det_rec_len != 12
+        || tail.det_reserved_zero2 != 0
+        || tail.det_reserved_ft != super::ondisk::EXT4_DIRENT_TAIL_MARKER
+    {
+        // Not a dirent tail — block doesn't have a checksum.
+        return Ok(());
+    }
+
+    // Compute the checksum.
+    let ino_le = dir_inode_nr.to_le_bytes();
+    let gen_le = dir_inode_gen.to_le_bytes();
+
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &ino_le);
+    let crc = crate::crypto::crc32c_raw(crc, &gen_le);
+
+    // Feed the block data, zeroing the checksum field (last 4 bytes of the tail).
+    let data_before_csum = block_data.get(..tail_offset.saturating_add(8))
+        .ok_or(KernelError::IoError)?;
+    let crc = crate::crypto::crc32c_raw(crc, data_before_csum);
+    // Final segment with inversion (consistent with inode/GD checksum convention).
+    let computed = crate::crypto::crc32c_seed(crc, &[0u8; 4]);
+
+    if computed != tail.det_checksum {
+        serial_println!(
+            "[ext4] directory block checksum MISMATCH for inode {}: stored={:#010x} computed={:#010x}",
+            dir_inode_nr, tail.det_checksum, computed,
+        );
+        return Err(KernelError::CorruptedData);
+    }
+
+    Ok(())
+}
+
+/// Compute and stamp a directory block checksum tail.
+///
+/// The block must have a valid dirent tail structure at the end.
+/// Updates the `det_checksum` field in-place.
+fn stamp_dirent_checksum(
+    sb: &ParsedSuperblock,
+    dir_inode_nr: u32,
+    dir_inode_gen: u32,
+    block_data: &mut [u8],
+) {
+    if !sb.has_metadata_csum {
+        return;
+    }
+
+    let tail_size = core::mem::size_of::<super::ondisk::Ext4DirEntryTail>();
+    if block_data.len() < tail_size {
+        return;
+    }
+
+    let tail_offset = block_data.len().saturating_sub(tail_size);
+
+    // Check that this block has a tail.
+    if let Some(tail_bytes) = block_data.get(tail_offset..) {
+        if let Ok(tail) = read_struct::<super::ondisk::Ext4DirEntryTail>(tail_bytes) {
+            if tail.det_reserved_ft != super::ondisk::EXT4_DIRENT_TAIL_MARKER {
+                return; // No tail to stamp.
+            }
+        } else {
+            return;
+        }
+    } else {
+        return;
+    }
+
+    // Compute checksum.
+    let ino_le = dir_inode_nr.to_le_bytes();
+    let gen_le = dir_inode_gen.to_le_bytes();
+
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &ino_le);
+    let crc = crate::crypto::crc32c_raw(crc, &gen_le);
+
+    // Feed block data with zeroed checksum field.
+    let data_before_csum = block_data.get(..tail_offset.saturating_add(8)).unwrap_or(&[]);
+    let crc = crate::crypto::crc32c_raw(crc, data_before_csum);
+    // Final segment with inversion (consistent with inode/GD checksum convention).
+    let computed = crate::crypto::crc32c_seed(crc, &[0u8; 4]);
+
+    // Stamp the checksum into the tail.
+    let csum_offset = tail_offset.saturating_add(8);
+    let csum_bytes = computed.to_le_bytes();
+    if let Some(dest) = block_data.get_mut(csum_offset..csum_offset.saturating_add(4)) {
+        dest.copy_from_slice(&csum_bytes);
+    }
 }
 
 // ---------------------------------------------------------------------------

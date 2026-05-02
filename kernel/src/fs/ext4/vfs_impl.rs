@@ -56,7 +56,7 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::NotADirectory);
         }
 
-        let raw_entries = self.driver.read_dir_entries(&inode)?;
+        let raw_entries = self.driver.read_dir_entries(ino, &inode)?;
 
         let entries = raw_entries
             .into_iter()
@@ -92,7 +92,7 @@ impl FileSystem for Ext4Fs {
         }
 
         // Read raw directory entries (cheap — just parses names/types, no inode reads).
-        let raw_entries = self.driver.read_dir_entries(&inode)?;
+        let raw_entries = self.driver.read_dir_entries(ino, &inode)?;
 
         // Filter . and .. and count total.
         let filtered: Vec<_> = raw_entries
@@ -317,7 +317,7 @@ impl FileSystem for Ext4Fs {
         }
 
         // Check that the directory is empty (only . and ..).
-        let entries = self.driver.read_dir_entries(&inode)?;
+        let entries = self.driver.read_dir_entries(ino, &inode)?;
         let real_entries = entries.iter()
             .filter(|(_, _, name)| name != "." && name != "..")
             .count();

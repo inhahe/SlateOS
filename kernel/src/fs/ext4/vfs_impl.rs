@@ -602,14 +602,55 @@ impl FileSystem for Ext4Fs {
             return Ok(());
         }
 
-        // Only handle pre-allocation for empty files (no existing extents).
-        // For files with existing data, the write path will extend as needed.
-        // Supporting mixed written/unwritten extents requires extent tree
-        // surgery that isn't worth the complexity for the common use case.
+        // For non-empty files, append an UNWRITTEN extent covering the
+        // new blocks.  This requires a depth-0 extent tree with room for
+        // one more entry.  If that fails (depth>0 or full), silently
+        // succeed — blocks will be allocated on demand when data is written.
         if current_size != 0 {
-            // Non-empty file — silently succeed (blocks will be allocated
-            // on demand when data is written).  This matches the default
-            // VFS fallocate behavior.
+            let extra_blocks = needed_blocks.saturating_sub(current_blocks);
+            if extra_blocks == 0 || extra_blocks > u64::from(u16::MAX & 0x7FFF) {
+                return Ok(());
+            }
+
+            let mut new_inode = inode;
+
+            // Goal: allocate adjacent to last existing extent for contiguity.
+            // Parse the extent tree to find the last physical block.
+            let last_extent_end = self.driver.last_extent_end(&new_inode)
+                .unwrap_or(u64::from(self.driver.superblock().raw.s_first_data_block));
+
+            #[allow(clippy::cast_possible_truncation)]
+            let extra_u16 = extra_blocks as u16;
+            #[allow(clippy::cast_possible_truncation)]
+            let logical_start = current_blocks as u32;
+
+            match self.driver.append_unwritten_extent(
+                &mut new_inode,
+                logical_start,
+                extra_u16,
+                last_extent_end,
+            ) {
+                Ok(_first_block) => {
+                    // Update block count (not file size — that's the point
+                    // of fallocate).
+                    #[allow(clippy::cast_possible_truncation)]
+                    let total_sectors = (needed_blocks as u32)
+                        .saturating_mul(self.driver.superblock().block_size / 512);
+                    new_inode.i_blocks_lo = total_sectors;
+
+                    self.driver.write_inode(ino, &new_inode)?;
+                    self.driver.invalidate_extent_cache(ino);
+                    self.driver.write_superblock()?;
+                    self.driver.write_group_descs()?;
+                    self.driver.flush()?;
+                }
+                Err(KernelError::NotSupported) => {
+                    // Can't add extent (tree too deep or full) — silently
+                    // succeed; blocks will be allocated on write.
+                }
+                Err(e) => return Err(e),
+            }
+
             return Ok(());
         }
 

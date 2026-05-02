@@ -2889,6 +2889,36 @@ impl Ext4Driver {
         )
     }
 
+    /// Return the physical block number one past the last extent in the
+    /// inode.  Used as allocation goal for adjacency.  Returns an error
+    /// if the extent tree can't be parsed.
+    pub fn last_extent_end(&self, inode: &Ext4Inode) -> KernelResult<u64> {
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+
+        if header.eh_magic != EXT4_EXTENT_MAGIC || header.eh_depth != 0 {
+            return Err(KernelError::NotSupported);
+        }
+
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+        let extent_size = core::mem::size_of::<Ext4Extent>();
+        let entries = header.eh_entries as usize;
+
+        if entries == 0 {
+            return Err(KernelError::NotFound);
+        }
+
+        let idx = entries.saturating_sub(1);
+        let offset = header_size.saturating_add(idx.saturating_mul(extent_size));
+        let ext_bytes = block_bytes.get(offset..)
+            .ok_or(KernelError::IoError)?;
+        let extent = read_struct::<Ext4Extent>(ext_bytes)?;
+        let phys = u64::from(extent.ee_start_lo)
+            | (u64::from(extent.ee_start_hi) << 32);
+        let len = u64::from(extent.ee_len & 0x7FFF);
+        Ok(phys.saturating_add(len))
+    }
+
     /// Flush all cached writes for this filesystem to disk.
     pub fn flush(&self) -> KernelResult<()> {
         self.reader.flush()
@@ -2975,6 +3005,75 @@ impl Ext4Driver {
         inode.i_block[base + 1] = ee_len_with_uninit
             | ((physical_block >> 32) as u32) << 16;
         inode.i_block[base + 2] = physical_block as u32;
+    }
+
+    /// Append an UNWRITTEN extent to an existing depth-0 extent tree.
+    ///
+    /// Pre-allocates `block_count` blocks starting at `logical_start`
+    /// and adds them as an UNWRITTEN extent.  Returns the physical
+    /// start block of the allocation.
+    ///
+    /// Requirements:
+    /// - Inode must have a valid depth-0 extent tree
+    /// - There must be room for one more extent entry
+    ///
+    /// Returns `NotSupported` if the tree is depth>0 or full.
+    /// Does NOT update file size — caller must update i_blocks_lo.
+    pub fn append_unwritten_extent(
+        &mut self,
+        inode: &mut Ext4Inode,
+        logical_start: u32,
+        block_count: u16,
+        goal: u64,
+    ) -> KernelResult<u64> {
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+
+        if header.eh_magic != EXT4_EXTENT_MAGIC {
+            return Err(KernelError::IoError);
+        }
+        if header.eh_depth != 0 {
+            return Err(KernelError::NotSupported);
+        }
+
+        let entries = header.eh_entries as usize;
+        let max_entries = header.eh_max as usize;
+
+        if entries >= max_entries {
+            return Err(KernelError::NotSupported);
+        }
+
+        // Allocate physical blocks.
+        let first_block = self.fallocate_blocks(goal, u32::from(block_count))?;
+
+        // Add new UNWRITTEN extent at index `entries`.
+        let new_entries = (entries as u16).saturating_add(1);
+        // Update eh_entries in the header (i_block[0]).
+        inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
+            | (u32::from(new_entries) << 16);
+
+        let base = 3_usize.saturating_add(entries.saturating_mul(3));
+        if base.saturating_add(2) < inode.i_block.len() {
+            inode.i_block[base] = logical_start;
+            // ee_len with UNWRITTEN flag (bit 15) | ee_start_hi in high 16 bits
+            let ee_len_unwritten = u32::from(block_count | 0x8000);
+            inode.i_block[base + 1] =
+                ee_len_unwritten | (((first_block >> 32) as u32) << 16);
+            inode.i_block[base + 2] = first_block as u32;
+        } else {
+            // Out of i_block space — free blocks and bail.
+            for i in 0..u64::from(block_count) {
+                let _ = super::balloc::free_block(
+                    &self.reader,
+                    &mut self.sb,
+                    &mut self.group_descs,
+                    first_block.saturating_add(i),
+                );
+            }
+            return Err(KernelError::NotSupported);
+        }
+
+        Ok(first_block)
     }
 
     /// Get the full 64-bit size of an inode.

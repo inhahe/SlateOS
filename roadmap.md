@@ -374,6 +374,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ext4 fallocate: real block pre-allocation with UNWRITTEN extents (empty files only; reads return zeros, blocks reserved on disk)
   - [x] VFS access() check: POSIX-style access(path, mode) with F_OK/R_OK/W_OK/X_OK, is_readable(), is_writable() convenience helpers, immutable-file check, self-test
   - [x] Kshell `uname` command: POSIX-compatible flags (-s/-n/-r/-v/-m/-o/-a), combined flags, RTC-based version date
+  - [x] ext4 efficient append (extend_file_data): patches last partial block in place, allocates adjacent blocks to extend existing extent or adds new extent entry (depth-0 trees), avoids O(file_size) read-modify-write
+  - [x] ext4 mixed write_at optimization: writes crossing EOF split into in-place write + extend_file_data, avoiding full file read for overwrite-and-append pattern
+  - [x] Kshell `ls -l` long format: type + rwxrwxrwx permissions, link count, uid, gid, size (with -h human readable), modification time, -a for hidden files
+  - [x] Procfs `/proc/config`: kernel build configuration (arch, page size, max CPUs, enabled subsystems, limits)
+  - [x] Kshell `file` command: file type identification using lstat (directory, symlink with target, regular file with extension-based type hints, ~40 extensions)
+  - [x] ext4 journal byte order fix: all jbd2 fields now correctly read/written as big-endian (network byte order) per spec, compatible with Linux-formatted ext4 images
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

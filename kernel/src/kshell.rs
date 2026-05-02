@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "cp", "cpuinfo",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
-    "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
+    "fsck", "fsck.fat", "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4234,6 +4234,7 @@ fn dispatch(line: &str) {
         "id" | "whoami" => cmd_id(),
         "mktemp" => cmd_mktemp(args),
         "mkfs.fat" | "mkfs" => cmd_mkfs_fat(args),
+        "fsck.fat" | "fsck" => cmd_fsck_fat(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -4397,6 +4398,7 @@ fn cmd_help() {
     crate::console_println!("  id         Show current task identity");
     crate::console_println!("  mktemp [D] Create temporary file (default /tmp)");
     crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
+    crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -11963,6 +11965,55 @@ fn cmd_mkfs_fat(args: &str) {
         }
         Err(e) => {
             crate::console_println!("mkfs.fat: {:?}", e);
+            set_exit(1);
+        }
+    }
+}
+
+/// Check (and optionally repair) a FAT filesystem.
+///
+/// Usage: `fsck.fat [-a] DEVICE`
+/// -a: automatically repair errors
+fn cmd_fsck_fat(args: &str) {
+    let mut repair = false;
+    let mut device = "";
+
+    for w in args.split_whitespace() {
+        if w == "-a" || w == "--repair" || w == "-y" {
+            repair = true;
+        } else if w == "-n" || w == "--no-repair" {
+            repair = false;
+        } else {
+            device = w;
+        }
+    }
+
+    if device.is_empty() {
+        crate::console_println!("Usage: fsck.fat [-a] DEVICE");
+        crate::console_println!("  Check FAT filesystem consistency.");
+        crate::console_println!("  -a  Automatically repair errors");
+        crate::console_println!("  -n  Check only, do not repair (default)");
+        set_exit(1);
+        return;
+    }
+
+    if repair {
+        crate::console_println!("fsck.fat: checking and repairing '{}'...", device);
+    } else {
+        crate::console_println!("fsck.fat: checking '{}'...", device);
+    }
+
+    match crate::fs::fat::fsck_fat(device, repair) {
+        Ok(report) => {
+            for msg in &report.messages {
+                crate::console_println!("  {}", msg);
+            }
+            if report.errors > 0 && !repair {
+                set_exit(1);
+            }
+        }
+        Err(e) => {
+            crate::console_println!("fsck.fat: {:?}", e);
             set_exit(1);
         }
     }

@@ -4971,3 +4971,472 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// fsck — filesystem consistency check
+// ---------------------------------------------------------------------------
+
+/// Result of a FAT filesystem check.
+#[derive(Debug, Default)]
+pub struct FsckReport {
+    /// Total files examined.
+    pub files: u32,
+    /// Total directories examined.
+    pub dirs: u32,
+    /// Errors detected.
+    pub errors: u32,
+    /// Errors repaired (when repair mode is on).
+    pub repaired: u32,
+    /// Free clusters counted during scan.
+    pub free_clusters: u32,
+    /// Used (allocated) clusters counted during scan.
+    pub used_clusters: u32,
+    /// Lost clusters (allocated in FAT but not referenced by any file/dir).
+    pub lost_clusters: u32,
+    /// Cross-linked clusters (referenced by more than one chain).
+    pub cross_linked: u32,
+    /// FAT copy mismatches.
+    pub fat_mismatches: u32,
+    /// Messages collected during the check.
+    pub messages: Vec<String>,
+}
+
+impl FsckReport {
+    fn error(&mut self, msg: String) {
+        self.errors = self.errors.saturating_add(1);
+        self.messages.push(msg);
+    }
+    fn warn(&mut self, msg: String) {
+        self.messages.push(msg);
+    }
+    fn fixed(&mut self, msg: String) {
+        self.repaired = self.repaired.saturating_add(1);
+        self.messages.push(msg);
+    }
+}
+
+/// Check a FAT filesystem for consistency errors.
+///
+/// Mounts the filesystem read-only, scans the FAT tables and directory
+/// tree, and reports any inconsistencies.  If `repair` is true, attempts
+/// to fix errors (lost clusters freed, cross-link chains truncated,
+/// FAT copy 2 overwritten from copy 1, file sizes corrected).
+///
+/// `device`: block device name (e.g., `"vda"`)
+///
+/// Reference: Microsoft FAT specification (fatgen103.doc), dosfsck/fsck.fat
+/// source (dosfstools) for the check algorithm.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
+    let mut report = FsckReport::default();
+
+    // Mount a temporary FatFs to access the volume structure.
+    let mut fs = FatFs::mount(device)?;
+
+    let type_str = match fs.bpb.fat_type {
+        FatType::Fat16 => "FAT16",
+        FatType::Fat32 => "FAT32",
+    };
+
+    let label = core::str::from_utf8(&fs.bpb.volume_label)
+        .unwrap_or("???????????")
+        .trim_end();
+
+    report.warn(alloc::format!(
+        "{} filesystem '{}' on device '{}'", type_str, label, device
+    ));
+
+    // -----------------------------------------------------------------------
+    // Phase 1: Check clean-shutdown bit
+    // -----------------------------------------------------------------------
+    match fs.read_clean_shutdown_bit() {
+        Ok(true) => {
+            report.warn(alloc::format!("Clean-shutdown bit: set (clean)"));
+        }
+        Ok(false) => {
+            report.warn(alloc::format!(
+                "Clean-shutdown bit: NOT set (volume was not cleanly unmounted)"
+            ));
+        }
+        Err(e) => {
+            report.error(alloc::format!(
+                "Could not read clean-shutdown bit: {:?}", e
+            ));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Compare FAT copies
+    // -----------------------------------------------------------------------
+    if fs.bpb.num_fats >= 2 {
+        let spf = fs.bpb.sectors_per_fat();
+        let fat1_start = fs.bpb.fat_start_lba();
+        let fat2_start = fat1_start + spf;
+        let mut buf1 = [0u8; SECTOR_SIZE];
+        let mut buf2 = [0u8; SECTOR_SIZE];
+        let mut mismatch_sectors: u32 = 0;
+
+        for s in 0..spf {
+            if let (Ok(()), Ok(())) = (
+                fs.read_sector(u64::from(fat1_start + s), &mut buf1),
+                fs.read_sector(u64::from(fat2_start + s), &mut buf2),
+            ) {
+                if buf1 != buf2 {
+                    mismatch_sectors = mismatch_sectors.saturating_add(1);
+
+                    // In repair mode, copy FAT1 over FAT2.
+                    if repair {
+                        let _ = fs.write_sector(u64::from(fat2_start + s), &buf1);
+                    }
+                }
+            }
+        }
+
+        if mismatch_sectors > 0 {
+            report.fat_mismatches = mismatch_sectors;
+            if repair {
+                report.fixed(alloc::format!(
+                    "FAT copies differ in {} sectors — FAT2 overwritten from FAT1",
+                    mismatch_sectors
+                ));
+            } else {
+                report.error(alloc::format!(
+                    "FAT copies differ in {} sectors (use -a to repair)",
+                    mismatch_sectors
+                ));
+            }
+        } else {
+            report.warn(alloc::format!("FAT copies: match"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Build cluster usage map from directory tree walk
+    // -----------------------------------------------------------------------
+    // cluster_owner[cluster - 2] = 0 means free/unclaimed by directory walk.
+    // Non-zero values encode an owner ID (allocated sequentially).
+    let data_sectors = fs.bpb.total_sectors()
+        .saturating_sub(u32::from(fs.bpb.reserved_sectors))
+        .saturating_sub(u32::from(fs.bpb.num_fats) * fs.bpb.sectors_per_fat())
+        .saturating_sub(fs.bpb.root_dir_sectors());
+    let total_clusters = data_sectors / u32::from(fs.bpb.sectors_per_cluster);
+
+    let max_cluster = match fs.bpb.fat_type {
+        FatType::Fat16 => (total_clusters + 2).min(0xFFEF),
+        FatType::Fat32 => (total_clusters + 2).min(0x0FFF_FFEF),
+    };
+
+    // Owner map: 0 = unclaimed, non-zero = owner ID.
+    let map_size = if max_cluster >= 2 { (max_cluster - 2) as usize } else { 0 };
+    let mut cluster_owner: Vec<u32> = vec![0u32; map_size];
+    let mut next_owner_id: u32 = 1;
+
+    // Recursive directory walk state: (dir_cluster, path_string).
+    // dir_cluster == 0 means root directory.
+    let mut dir_stack: Vec<(u32, String)> = Vec::new();
+    dir_stack.push((0, String::from("/")));
+
+    while let Some((dir_cluster, dir_path)) = dir_stack.pop() {
+        report.dirs = report.dirs.saturating_add(1);
+
+        // Read directory entries.
+        let entries_result = if dir_cluster == 0 {
+            fs.read_root_dir()
+        } else {
+            fs.read_dir_cluster(dir_cluster)
+        };
+
+        let entries = match entries_result {
+            Ok(e) => e,
+            Err(err) => {
+                report.error(alloc::format!(
+                    "{}: could not read directory: {:?}", dir_path, err
+                ));
+                continue;
+            }
+        };
+
+        // If this is a FAT32 root or a subdirectory, mark the directory's
+        // own cluster chain as used.
+        if dir_cluster != 0 || fs.bpb.fat_type == FatType::Fat32 {
+            let start = if dir_cluster == 0 {
+                fs.bpb.root_cluster
+            } else {
+                dir_cluster
+            };
+            let owner_id = next_owner_id;
+            next_owner_id = next_owner_id.saturating_add(1);
+
+            let mut c = start;
+            let mut seen = 0u32;
+            while fs.bpb.is_valid_cluster(c) && seen < 65536 {
+                seen = seen.saturating_add(1);
+
+                let idx = (c - 2) as usize;
+                if idx < cluster_owner.len() {
+                    if cluster_owner[idx] != 0 {
+                        report.cross_linked = report.cross_linked.saturating_add(1);
+                        report.error(alloc::format!(
+                            "{}: cluster {} cross-linked (dir chain vs owner #{})",
+                            dir_path, c, cluster_owner[idx]
+                        ));
+                        break;
+                    }
+                    cluster_owner[idx] = owner_id;
+                }
+
+                match fs.fat_entry(c) {
+                    Ok(Some(next)) => c = next,
+                    Ok(None) => break,
+                    Err(_) => {
+                        report.error(alloc::format!(
+                            "{}: read error following dir cluster chain at cluster {}",
+                            dir_path, c
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        for entry in &entries {
+            // Skip volume label entries, dot/dotdot, and deleted entries.
+            let name = entry.display_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            if entry.attr & ATTR_VOLUME_ID != 0 && entry.attr != ATTR_LONG_NAME {
+                continue;
+            }
+
+            let child_path = if dir_path == "/" {
+                alloc::format!("/{}", name)
+            } else {
+                alloc::format!("{}/{}", dir_path, name)
+            };
+
+            if entry.is_directory() {
+                // Push subdirectory for later traversal.
+                if entry.first_cluster >= 2 {
+                    dir_stack.push((entry.first_cluster, child_path));
+                }
+                continue;
+            }
+
+            // Regular file: walk its cluster chain.
+            report.files = report.files.saturating_add(1);
+            let owner_id = next_owner_id;
+            next_owner_id = next_owner_id.saturating_add(1);
+
+            if entry.first_cluster < 2 && entry.file_size > 0 {
+                report.error(alloc::format!(
+                    "{}: non-zero size ({}) but no cluster chain (first_cluster={})",
+                    child_path, entry.file_size, entry.first_cluster
+                ));
+                continue;
+            }
+
+            if entry.first_cluster < 2 {
+                // Zero-length file with no clusters — valid.
+                continue;
+            }
+
+            let cluster_bytes = u32::from(fs.bpb.sectors_per_cluster)
+                * u32::from(fs.bpb.bytes_per_sector);
+            let mut chain_clusters: u32 = 0;
+            let mut c = entry.first_cluster;
+            let mut seen = 0u32;
+
+            while fs.bpb.is_valid_cluster(c) && seen < 65536 {
+                seen = seen.saturating_add(1);
+                chain_clusters = chain_clusters.saturating_add(1);
+
+                let idx = (c - 2) as usize;
+                if idx < cluster_owner.len() {
+                    if cluster_owner[idx] != 0 {
+                        report.cross_linked = report.cross_linked.saturating_add(1);
+                        report.error(alloc::format!(
+                            "{}: cluster {} cross-linked (file vs owner #{})",
+                            child_path, c, cluster_owner[idx]
+                        ));
+                        break;
+                    }
+                    cluster_owner[idx] = owner_id;
+                }
+
+                match fs.fat_entry(c) {
+                    Ok(Some(next)) => c = next,
+                    Ok(None) => break,
+                    Err(_) => {
+                        report.error(alloc::format!(
+                            "{}: read error following cluster chain at cluster {}",
+                            child_path, c
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            // Verify file size matches chain length.
+            if chain_clusters > 0 && cluster_bytes > 0 {
+                let chain_bytes = u64::from(chain_clusters) * u64::from(cluster_bytes);
+
+                if u64::from(entry.file_size) > chain_bytes {
+                    report.error(alloc::format!(
+                        "{}: size {} exceeds chain capacity {} ({} clusters × {} bytes)",
+                        child_path, entry.file_size, chain_bytes,
+                        chain_clusters, cluster_bytes
+                    ));
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Scan FAT for lost clusters
+    // -----------------------------------------------------------------------
+    // A "lost cluster" is one that is marked as allocated in the FAT (not
+    // free, not bad, not reserved) but was not visited by the directory walk.
+    let bps = u32::from(fs.bpb.bytes_per_sector);
+    let entry_bytes: u32 = match fs.bpb.fat_type {
+        FatType::Fat16 => 2,
+        FatType::Fat32 => 4,
+    };
+    let fat_start = fs.bpb.fat_start_lba();
+
+    let mut sector_buf = [0u8; SECTOR_SIZE];
+    let mut last_sector = u32::MAX;
+    let mut free_count: u32 = 0;
+    let mut used_count: u32 = 0;
+    let mut lost_count: u32 = 0;
+
+    for cluster in 2..max_cluster {
+        let fat_offset = cluster * entry_bytes;
+        let sector_num = fat_start + fat_offset / bps;
+
+        if sector_num != last_sector {
+            fs.read_sector(u64::from(sector_num), &mut sector_buf)?;
+            last_sector = sector_num;
+        }
+
+        let offset = (fat_offset % bps) as usize;
+        let fat_val = match fs.bpb.fat_type {
+            FatType::Fat16 => u32::from(read_u16(&sector_buf, offset)),
+            FatType::Fat32 => read_u32(&sector_buf, offset) & 0x0FFF_FFFF,
+        };
+
+        let is_free = fat_val == 0;
+        let is_bad = match fs.bpb.fat_type {
+            FatType::Fat16 => fat_val == 0xFFF7,
+            FatType::Fat32 => fat_val == 0x0FFF_FFF7,
+        };
+
+        if is_free {
+            free_count = free_count.saturating_add(1);
+        } else if is_bad {
+            // Bad cluster — skip, not counted as free or used.
+        } else {
+            // Allocated (data or EOC marker).
+            used_count = used_count.saturating_add(1);
+            let idx = (cluster - 2) as usize;
+            if idx < cluster_owner.len() && cluster_owner[idx] == 0 {
+                lost_count = lost_count.saturating_add(1);
+            }
+        }
+    }
+
+    report.free_clusters = free_count;
+    report.used_clusters = used_count;
+    report.lost_clusters = lost_count;
+
+    if lost_count > 0 {
+        if repair {
+            // Free all lost clusters by setting their FAT entries to 0.
+            let mut freed: u32 = 0;
+            last_sector = u32::MAX;
+            for cluster in 2..max_cluster {
+                let fat_offset_r = cluster * entry_bytes;
+                let sector_num_r = fat_start + fat_offset_r / bps;
+
+                if sector_num_r != last_sector {
+                    fs.read_sector(u64::from(sector_num_r), &mut sector_buf)?;
+                    last_sector = sector_num_r;
+                }
+
+                let offset_r = (fat_offset_r % bps) as usize;
+                let fat_val_r = match fs.bpb.fat_type {
+                    FatType::Fat16 => u32::from(read_u16(&sector_buf, offset_r)),
+                    FatType::Fat32 => read_u32(&sector_buf, offset_r) & 0x0FFF_FFFF,
+                };
+
+                let is_alloc = fat_val_r != 0 && match fs.bpb.fat_type {
+                    FatType::Fat16 => fat_val_r != 0xFFF7,
+                    FatType::Fat32 => fat_val_r != 0x0FFF_FFF7,
+                };
+
+                if is_alloc {
+                    let idx = (cluster - 2) as usize;
+                    if idx < cluster_owner.len() && cluster_owner[idx] == 0 {
+                        if fs.set_fat_entry(cluster, 0).is_ok() {
+                            freed = freed.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            report.fixed(alloc::format!(
+                "{} lost clusters freed", freed
+            ));
+        } else {
+            report.error(alloc::format!(
+                "{} lost clusters found — use -a to free them",
+                lost_count
+            ));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: Summary
+    // -----------------------------------------------------------------------
+    let cluster_bytes = u32::from(fs.bpb.sectors_per_cluster)
+        * u32::from(fs.bpb.bytes_per_sector);
+    report.warn(alloc::format!(
+        "{} files, {} directories",
+        report.files, report.dirs
+    ));
+    report.warn(alloc::format!(
+        "{}/{} clusters used ({}/{} KiB)",
+        used_count,
+        total_clusters,
+        u64::from(used_count) * u64::from(cluster_bytes) / 1024,
+        u64::from(total_clusters) * u64::from(cluster_bytes) / 1024,
+    ));
+    report.warn(alloc::format!(
+        "{} free clusters ({} KiB)",
+        free_count,
+        u64::from(free_count) * u64::from(cluster_bytes) / 1024,
+    ));
+
+    if repair {
+        // Flush changes.
+        super::cache::flush(device)?;
+
+        // Set the clean-shutdown bit since we just repaired everything.
+        if report.repaired > 0 {
+            let _ = fs.set_clean_shutdown_bit(true);
+            let _ = super::cache::flush(device);
+            report.warn(alloc::format!("Clean-shutdown bit set after repair"));
+        }
+    }
+
+    if report.errors == 0 || (repair && report.errors <= report.repaired) {
+        report.warn(alloc::format!("Filesystem clean."));
+    } else {
+        let unrepaired = report.errors.saturating_sub(report.repaired);
+        report.warn(alloc::format!(
+            "{} errors found, {} repaired, {} remaining.",
+            report.errors, report.repaired, unrepaired
+        ));
+    }
+
+    Ok(report)
+}

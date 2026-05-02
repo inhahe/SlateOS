@@ -331,6 +331,118 @@ fn read_line(buf: &mut String, history: &mut History) {
                     redraw_from_cursor(buf, cursor);
                 }
             }
+            0x01 => {
+                // Ctrl+A — move cursor to start of line (same as Home).
+                for _ in 0..cursor {
+                    crate::console::putchar(b'\x08');
+                }
+                cursor = 0;
+            }
+            0x03 => {
+                // Ctrl+C — cancel the current line (print ^C and start fresh).
+                keyboard::set_echo(true);
+                crate::console::write_str("^C\n");
+                buf.clear();
+                return;
+            }
+            0x05 => {
+                // Ctrl+E — move cursor to end of line (same as End).
+                if let Some(tail) = buf.as_bytes().get(cursor..) {
+                    for &b in tail {
+                        crate::console::putchar(b);
+                    }
+                }
+                cursor = buf.len();
+            }
+            0x0B => {
+                // Ctrl+K — kill from cursor to end of line.
+                if cursor < buf.len() {
+                    // Erase the on-screen text from cursor to end.
+                    let tail_len = buf.len() - cursor;
+                    for _ in 0..tail_len {
+                        crate::console::putchar(b' ');
+                    }
+                    for _ in 0..tail_len {
+                        crate::console::putchar(b'\x08');
+                    }
+                    buf.truncate(cursor);
+                }
+            }
+            0x0C => {
+                // Ctrl+L — clear screen and reprint prompt + line.
+                crate::console::clear();
+                crate::console::write_str(PROMPT);
+                for &b in buf.as_bytes() {
+                    crate::console::putchar(b);
+                }
+                // Move cursor back to the correct position.
+                let tail_len = buf.len() - cursor;
+                for _ in 0..tail_len {
+                    crate::console::putchar(b'\x08');
+                }
+            }
+            0x15 => {
+                // Ctrl+U — kill from start of line to cursor.
+                if cursor > 0 {
+                    let old_len = buf.len();
+                    // Move console cursor to start of line.
+                    for _ in 0..cursor {
+                        crate::console::putchar(b'\x08');
+                    }
+                    // Remove characters [0..cursor] from the buffer.
+                    let remaining: String = buf.get(cursor..).unwrap_or("").into();
+                    buf.clear();
+                    buf.push_str(&remaining);
+                    cursor = 0;
+                    // Reprint the remaining text.
+                    for &b in buf.as_bytes() {
+                        crate::console::putchar(b);
+                    }
+                    // Erase leftover characters from the old longer line.
+                    let erase = old_len.saturating_sub(buf.len());
+                    for _ in 0..erase {
+                        crate::console::putchar(b' ');
+                    }
+                    // Move cursor back to position 0.
+                    let move_back = buf.len() + erase;
+                    for _ in 0..move_back {
+                        crate::console::putchar(b'\x08');
+                    }
+                }
+            }
+            0x17 => {
+                // Ctrl+W — delete word before cursor.
+                if cursor > 0 {
+                    let old_cursor = cursor;
+                    // Skip trailing whitespace.
+                    while cursor > 0 {
+                        let c = buf.as_bytes().get(cursor - 1).copied().unwrap_or(0);
+                        if c != b' ' && c != b'\t' {
+                            break;
+                        }
+                        cursor -= 1;
+                    }
+                    // Delete word chars.
+                    while cursor > 0 {
+                        let c = buf.as_bytes().get(cursor - 1).copied().unwrap_or(0);
+                        if c == b' ' || c == b'\t' {
+                            break;
+                        }
+                        cursor -= 1;
+                    }
+                    // Remove chars [cursor..old_cursor] from buffer.
+                    let removed = old_cursor - cursor;
+                    for _ in 0..removed {
+                        buf.remove(cursor);
+                    }
+                    // Move console cursor back.
+                    for _ in 0..removed {
+                        crate::console::putchar(b'\x08');
+                    }
+                    // Redraw from cursor to end.
+                    redraw_from_cursor(buf, cursor);
+                }
+            }
             0x1B => {
                 // ESC — clear the current line.
                 replace_line(buf, &mut cursor, "");

@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
 use super::driver::Ext4Driver;
 use super::ondisk::{file_type, inode_flags};
@@ -799,6 +799,23 @@ impl FileSystem for Ext4Fs {
 
     fn debug_stats(&self) -> String {
         self.driver.superblock().summary()
+    }
+
+    /// Report ext4 filesystem capacity and free space.
+    ///
+    /// Reads block count and free block count from the superblock.
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        let sb = self.driver.superblock();
+        Ok(FsInfo {
+            fs_type: String::from("ext4"),
+            block_size: u64::from(sb.block_size),
+            total_blocks: sb.block_count,
+            free_blocks: sb.free_block_count,
+            total_inodes: u64::from(sb.raw.s_inodes_count),
+            free_inodes: u64::from(sb.raw.s_free_inodes_count),
+            max_name_len: 255,
+            read_only: !sb.can_write,
+        })
     }
 }
 

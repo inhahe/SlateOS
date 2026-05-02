@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{
-    normalize_path, DirEntry, EntryType, FileAttr, FileMeta, FileSystem, Timestamp,
+    normalize_path, DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp,
 };
 
 /// Maximum number of symlinks followed during a single path resolution.
@@ -984,6 +984,42 @@ impl FileSystem for MemFs {
         let name = components[components.len() - 1];
         let node = self.resolve_no_follow(path)?;
         Ok(node.to_dir_entry(name))
+    }
+
+    /// Report memfs usage.
+    ///
+    /// Since memfs is RAM-backed, total capacity is essentially unlimited
+    /// (bounded by heap size).  We report the current used byte count.
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        fn count_nodes(node: &MemFsNode) -> (u64, u64) {
+            match &node.kind {
+                MemFsNodeKind::File(data) => (data.len() as u64, 1),
+                MemFsNodeKind::Dir(children) => {
+                    let mut bytes = 0u64;
+                    let mut count = 1u64; // Count this dir.
+                    for child in children.values() {
+                        let (b, c) = count_nodes(child);
+                        bytes = bytes.wrapping_add(b);
+                        count = count.wrapping_add(c);
+                    }
+                    (bytes, count)
+                }
+                MemFsNodeKind::Symlink(_) => (0, 1),
+            }
+        }
+
+        let (_used_bytes, node_count) = count_nodes(&self.root);
+
+        Ok(FsInfo {
+            fs_type: String::from("memfs"),
+            block_size: 1, // Byte-granular allocation.
+            total_blocks: 0, // Unlimited (bounded by heap).
+            free_blocks: 0,
+            total_inodes: node_count,
+            free_inodes: 0, // Unlimited.
+            max_name_len: 255,
+            read_only: false,
+        })
     }
 }
 

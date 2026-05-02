@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
 // ---------------------------------------------------------------------------
 // FAT type detection
@@ -1040,6 +1040,57 @@ impl FatFs {
     /// Check if a cluster number is valid for data access.
     fn is_valid_cluster(&self, cluster: u32) -> bool {
         self.bpb.is_valid_cluster(cluster)
+    }
+
+    /// Count the number of free and total data clusters.
+    ///
+    /// Scans the FAT to count entries with value 0 (free).
+    /// Returns `(free_clusters, total_clusters)`.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn count_clusters(&mut self) -> KernelResult<(u64, u64)> {
+        let bps = u32::from(self.bpb.bytes_per_sector);
+        let entry_bytes: u32 = match self.bpb.fat_type {
+            FatType::Fat16 => 2,
+            FatType::Fat32 => 4,
+        };
+        let fat_start = self.bpb.fat_start_lba();
+
+        let data_sectors = self.bpb.total_sectors()
+            .saturating_sub(u32::from(self.bpb.reserved_sectors))
+            .saturating_sub(u32::from(self.bpb.num_fats) * self.bpb.sectors_per_fat())
+            .saturating_sub(self.bpb.root_dir_sectors());
+        let total_clusters = data_sectors / u32::from(self.bpb.sectors_per_cluster);
+
+        let max_cluster = match self.bpb.fat_type {
+            FatType::Fat16 => (total_clusters + 2).min(0xFFEF),
+            FatType::Fat32 => (total_clusters + 2).min(0x0FFF_FFEF),
+        };
+
+        let mut free_count: u64 = 0;
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        let mut last_sector = u32::MAX;
+
+        for cluster in 2..max_cluster {
+            let fat_offset = cluster * entry_bytes;
+            let sector_num = fat_start + fat_offset / bps;
+
+            if sector_num != last_sector {
+                self.read_sector(u64::from(sector_num), &mut sector_buf)?;
+                last_sector = sector_num;
+            }
+
+            let offset = (fat_offset % bps) as usize;
+            let is_free = match self.bpb.fat_type {
+                FatType::Fat16 => read_u16(&sector_buf, offset) == 0x0000,
+                FatType::Fat32 => (read_u32(&sector_buf, offset) & 0x0FFF_FFFF) == 0,
+            };
+
+            if is_free {
+                free_count += 1;
+            }
+        }
+
+        Ok((free_count, u64::from(total_clusters)))
     }
 
     /// Read the root directory entries.
@@ -2232,6 +2283,31 @@ impl FileSystem for FatFs {
             let _ = write!(s, " ({}% hit rate)", pct);
         }
         s
+    }
+
+    /// Report filesystem capacity and free space.
+    ///
+    /// Scans the FAT to count free clusters and computes byte totals.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        let cluster_bytes = u64::from(self.bpb.sectors_per_cluster)
+            * u64::from(self.bpb.bytes_per_sector);
+
+        let (free_clusters, total_clusters) = self.count_clusters()?;
+
+        // FAT max filename: 255 chars (LFN) or 12 chars (8.3).
+        let max_name_len = if true { 255 } else { 12 }; // LFN is always supported now.
+
+        Ok(FsInfo {
+            fs_type: String::from(self.fs_type()),
+            block_size: cluster_bytes,
+            total_blocks: total_clusters,
+            free_blocks: free_clusters,
+            total_inodes: 0, // FAT doesn't have inodes.
+            free_inodes: 0,
+            max_name_len,
+            read_only: false,
+        })
     }
 
     fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {

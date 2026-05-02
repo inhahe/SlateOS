@@ -242,6 +242,61 @@ impl FileMeta {
 }
 
 // ---------------------------------------------------------------------------
+// Filesystem info (statvfs)
+// ---------------------------------------------------------------------------
+
+/// Filesystem space and configuration information.
+///
+/// Returned by [`FileSystem::statvfs`].  Similar to POSIX `struct statvfs`.
+/// Filesystems fill in what they can; unsupported fields stay at 0.
+#[derive(Debug, Clone)]
+pub struct FsInfo {
+    /// Filesystem type name (e.g., `"fat16"`, `"ext4"`, `"memfs"`).
+    pub fs_type: String,
+    /// Fundamental block size in bytes (the allocation unit).
+    pub block_size: u64,
+    /// Total number of blocks on the filesystem.
+    pub total_blocks: u64,
+    /// Number of free (available) blocks.
+    pub free_blocks: u64,
+    /// Total number of inodes (or directory entries, for FAT).
+    /// 0 if the concept doesn't apply.
+    pub total_inodes: u64,
+    /// Number of free inodes.
+    pub free_inodes: u64,
+    /// Maximum filename length in bytes.
+    pub max_name_len: u64,
+    /// Whether the filesystem is read-only.
+    pub read_only: bool,
+}
+
+impl FsInfo {
+    /// Total capacity in bytes.
+    pub fn total_bytes(&self) -> u64 {
+        self.total_blocks.saturating_mul(self.block_size)
+    }
+
+    /// Free space in bytes.
+    pub fn free_bytes(&self) -> u64 {
+        self.free_blocks.saturating_mul(self.block_size)
+    }
+
+    /// Used space in bytes.
+    pub fn used_bytes(&self) -> u64 {
+        self.total_bytes().saturating_sub(self.free_bytes())
+    }
+
+    /// Usage percentage (0-100).
+    pub fn usage_percent(&self) -> u64 {
+        let total = self.total_bytes();
+        if total == 0 {
+            return 0;
+        }
+        self.used_bytes().saturating_mul(100) / total
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Filesystem trait
 // ---------------------------------------------------------------------------
 
@@ -500,6 +555,23 @@ pub trait FileSystem: Send {
     /// Default implementation falls back to `stat()`.
     fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
         self.stat(path)
+    }
+
+    /// Return filesystem space and configuration information.
+    ///
+    /// Default returns a minimal struct with only the type name set.
+    /// Filesystems that can report capacity/usage should override this.
+    fn statvfs(&mut self) -> KernelResult<FsInfo> {
+        Ok(FsInfo {
+            fs_type: String::from(self.fs_type()),
+            block_size: 0,
+            total_blocks: 0,
+            free_blocks: 0,
+            total_inodes: 0,
+            free_inodes: 0,
+            max_name_len: 255,
+            read_only: false,
+        })
     }
 }
 
@@ -1082,6 +1154,39 @@ impl Vfs {
         }
         Err(KernelError::NotFound)
     }
+
+    /// Query filesystem space and configuration for the mount at `path`.
+    ///
+    /// Returns capacity, free space, block size, and other filesystem
+    /// metadata.  Analogous to POSIX `statvfs()`.
+    pub fn statvfs(path: &str) -> KernelResult<FsInfo> {
+        let path = Self::resolve_follow(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, _relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.statvfs()
+    }
+
+    /// List all mount points with their filesystem info.
+    ///
+    /// Returns `(mount_path, FsInfo)` for each mounted filesystem.
+    pub fn mount_info() -> KernelResult<Vec<(String, FsInfo)>> {
+        let mut vfs = VFS.lock();
+        let mut result = Vec::new();
+        for mp in vfs.mounts.iter_mut() {
+            let info = mp.fs.statvfs().unwrap_or(FsInfo {
+                fs_type: String::from(mp.fs.fs_type()),
+                block_size: 0,
+                total_blocks: 0,
+                free_blocks: 0,
+                total_inodes: 0,
+                free_inodes: 0,
+                max_name_len: 255,
+                read_only: false,
+            });
+            result.push((mp.path.clone(), info));
+        }
+        Ok(result)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1387,6 +1492,57 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[vfs]     test files cleaned up OK");
     } else {
         serial_println!("[vfs]   /tmp not mounted — skipping symlink tests");
+    }
+
+    // ---------------------------------------------------------------
+    // statvfs test
+    // ---------------------------------------------------------------
+    serial_println!("[vfs]   Testing statvfs...");
+
+    match Vfs::statvfs("/") {
+        Ok(info) => {
+            serial_println!(
+                "[vfs]   / : type={}, block_size={}, total={}, free={} ({} bytes total, {} free)",
+                info.fs_type,
+                info.block_size,
+                info.total_blocks,
+                info.free_blocks,
+                info.total_bytes(),
+                info.free_bytes(),
+            );
+            serial_println!(
+                "[vfs]   / : usage={}%, read_only={}, max_name_len={}",
+                info.usage_percent(),
+                info.read_only,
+                info.max_name_len,
+            );
+        }
+        Err(e) => {
+            serial_println!("[vfs]   statvfs(/) failed: {:?}", e);
+        }
+    }
+
+    // Test mount_info to list all mounts.
+    match Vfs::mount_info() {
+        Ok(mounts) => {
+            serial_println!("[vfs]   {} mount(s):", mounts.len());
+            for (path, info) in &mounts {
+                serial_println!(
+                    "[vfs]     {} → {} ({})",
+                    path,
+                    info.fs_type,
+                    if info.total_bytes() > 0 {
+                        let mb = info.total_bytes() / (1024 * 1024);
+                        alloc::format!("{} MiB, {}% used", mb, info.usage_percent())
+                    } else {
+                        alloc::format!("ram-backed")
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            serial_println!("[vfs]   mount_info failed: {:?}", e);
+        }
     }
 
     serial_println!("[vfs] Self-test PASSED");

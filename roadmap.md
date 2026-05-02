@@ -233,7 +233,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 ### 2.3 Filesystem
 _Port ext4 first. Don't write a custom filesystem._
 - [x] VFS (virtual filesystem) layer — FileSystem trait, mount table, path resolution
-- [-] Port ext4 (primary filesystem, read-write)
+- [x] Port ext4 (primary filesystem, read-write)
   - [x] On-disk structure definitions (superblock, group descriptors, inodes, extents, directory entries)
   - [x] Superblock parser with feature flag validation and derived value computation
   - [x] Block group descriptor table reading
@@ -245,7 +245,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Inode allocation (bitmap-based, group-preference)
   - [x] File creation/deletion (write_file, remove via VFS)
   - [x] Directory entry insertion/removal (add_dir_entry, mkdir, rmdir)
-  - [ ] Journal (write-ahead log for crash recovery)
+  - [x] Journal (jbd2 write-ahead log: transaction begin/log/commit, circular replay)
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
@@ -266,7 +266,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [-] Filesystem features:
   - [x] Case-sensitive paths, forward slash separator (VFS is case-sensitive; FAT case-insensitive by nature)
   - [x] Path validation: reject null bytes, enforce 255-byte component limit, require absolute paths
-  - [ ] Journaling (via ext4)
+  - [x] Journaling (via ext4 jbd2)
   - [x] File metadata: owner, group, permissions, created/modified/accessed (relatime), immutable flag, append-only flag, extended attributes (key-value, 255-byte key / 64 KiB value)
   - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639)
   - [ ] File metadata: capabilities per file, content hash (per-file/per-block)

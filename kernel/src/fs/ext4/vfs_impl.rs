@@ -426,6 +426,93 @@ impl FileSystem for Ext4Fs {
         }
     }
 
+    fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode = inode.i_mode & file_type::S_IFMT;
+        if mode != file_type::S_IFREG {
+            return Err(KernelError::NotSupported);
+        }
+
+        let current_size = inode_file_size(&inode);
+
+        if size == current_size {
+            return Ok(());
+        }
+
+        if size == 0 {
+            // Truncate to zero: free all data blocks, reset inode.
+            let old_inode = inode;
+            let mut new_inode = inode;
+
+            // Clear size.
+            new_inode.i_size_lo = 0;
+            new_inode.i_size_high = 0;
+            new_inode.i_blocks_lo = 0;
+
+            // Initialize an empty extent header.
+            self.driver.init_extent_header_pub(&mut new_inode, 0);
+
+            // Write the new inode first (crash-safe: inode points to
+            // nothing, so the old blocks are just leaked on crash).
+            self.driver.write_inode(ino, &new_inode)?;
+
+            // Now free the old blocks.
+            self.driver.free_inode_data(&old_inode)?;
+
+            self.driver.write_superblock()?;
+            self.driver.write_group_descs()?;
+            self.driver.flush()?;
+            return Ok(());
+        }
+
+        if size < current_size {
+            // Shrink: read existing data, truncate, rewrite.
+            // A fully optimized version would walk the extent tree and
+            // free trailing blocks, but that requires extent tree surgery
+            // (splitting the last extent).  The read-truncate-rewrite
+            // approach is correct and the data volume is bounded by the
+            // current file size (which we're shrinking).
+            //
+            // Crash-safe ordering: write new data first, free old blocks.
+            let old_inode = inode;
+            let mut data = self.driver.read_file_data(&inode)?;
+            data.truncate(size as usize);
+
+            let mut new_inode = inode;
+            self.driver.write_file_data(&mut new_inode, &data)?;
+            self.driver.write_inode(ino, &new_inode)?;
+
+            // Free old blocks now that inode points to new data.
+            self.driver.free_inode_data(&old_inode)?;
+
+            self.driver.write_superblock()?;
+            self.driver.write_group_descs()?;
+            self.driver.flush()?;
+            Ok(())
+        } else {
+            // Extend: read, resize with zeros, rewrite.
+            // Growing in place would require extending the extent tree,
+            // which uses the same write_file_data path anyway.
+            let mut data = self.driver.read_file_data(&inode)?;
+            let old_inode = inode;
+
+            data.resize(size as usize, 0);
+
+            let mut new_inode = inode;
+            self.driver.write_file_data(&mut new_inode, &data)?;
+            self.driver.write_inode(ino, &new_inode)?;
+
+            self.driver.free_inode_data(&old_inode)?;
+
+            self.driver.write_superblock()?;
+            self.driver.write_group_descs()?;
+            self.driver.flush()?;
+            Ok(())
+        }
+    }
+
     fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
@@ -485,6 +572,36 @@ impl FileSystem for Ext4Fs {
         // We only set the low 16 bits for now.
         inode.i_uid = uid as u16;
         inode.i_gid = gid as u16;
+
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    fn set_times(
+        &mut self,
+        path: &str,
+        accessed_ns: crate::fs::vfs::Timestamp,
+        modified_ns: crate::fs::vfs::Timestamp,
+    ) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Convert nanoseconds to seconds (ext4 core inode stores seconds).
+        // Pass 0 to leave a timestamp unchanged.
+        let ns_to_sec = |ns: u64| -> u32 {
+            if ns == 0 { return 0; }
+            (ns / 1_000_000_000) as u32
+        };
+
+        if accessed_ns != 0 {
+            inode.i_atime = ns_to_sec(accessed_ns);
+        }
+        if modified_ns != 0 {
+            inode.i_mtime = ns_to_sec(modified_ns);
+            // Also update ctime (metadata change time) when mtime changes.
+            inode.i_ctime = ns_to_sec(modified_ns);
+        }
 
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;
@@ -572,33 +689,32 @@ impl FileSystem for Ext4Fs {
     }
 
     fn readlink(&mut self, path: &str) -> KernelResult<String> {
-        let ino = self.driver.resolve_path(path)?;
+        // Use resolve_path_no_follow so we get the symlink inode itself,
+        // not whatever it points to.
+        let ino = self.driver.resolve_path_no_follow(path)?;
         let inode = self.driver.read_inode(ino)?;
 
         if (inode.i_mode & file_type::S_IFMT) != file_type::S_IFLNK {
             return Err(KernelError::InvalidArgument);
         }
 
-        let target_bytes = self.read_symlink_target(&inode)?;
-        // Convert to string — symlink targets should be valid paths.
+        let target_bytes = self.driver.read_symlink_target(&inode)?;
         String::from_utf8(target_bytes)
             .map_err(|_| KernelError::IoError)
     }
 
     fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
-        // lstat is like stat but doesn't follow the final symlink.
-        // Since our resolve_path follows symlinks, we need to resolve
-        // the parent and then look up the final component directly.
-        let (parent_path, name) = split_parent_name(path)?;
-        let parent_ino = self.driver.resolve_path(parent_path)?;
-        let parent_inode = self.driver.read_inode(parent_ino)?;
-
-        let ino = self.driver.dir_lookup(&parent_inode, name)?;
+        // lstat doesn't follow the final symlink.  resolve_path_no_follow
+        // follows all intermediate symlinks but stops at the last component.
+        let ino = self.driver.resolve_path_no_follow(path)?;
         let inode = self.driver.read_inode(ino)?;
 
         let mode = inode.i_mode & file_type::S_IFMT;
         let entry_type = mode_to_entry_type(mode);
         let size = inode_file_size(&inode);
+
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let name = if name.is_empty() { "/" } else { name };
 
         Ok(DirEntry {
             name: String::from(name),
@@ -723,18 +839,12 @@ impl Ext4Fs {
     }
 
     /// Read a symlink target from an inode.
+    ///
+    /// Delegates to the driver's `read_symlink_target` which handles
+    /// both fast symlinks (≤60 bytes in i_block) and slow symlinks
+    /// (target stored in data blocks).
     fn read_symlink_target(&self, inode: &super::ondisk::Ext4Inode) -> KernelResult<Vec<u8>> {
-        let size = inode_file_size(inode) as usize;
-
-        if size <= 60 {
-            // Fast symlink: target stored in i_block.
-            let block_bytes = super::driver::inode_block_as_bytes(inode);
-            let target = block_bytes.get(..size).ok_or(KernelError::IoError)?;
-            Ok(target.to_vec())
-        } else {
-            // Slow symlink: target stored in data blocks.
-            self.driver.read_file_data(inode)
-        }
+        self.driver.read_symlink_target(inode)
     }
 }
 

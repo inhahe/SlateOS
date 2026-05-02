@@ -229,34 +229,137 @@ impl Ext4Driver {
         Err(KernelError::NotFound)
     }
 
-    /// Resolve a path to an inode number, starting from the root.
+    /// Maximum number of symlinks followed during a single path resolution.
+    ///
+    /// Matches Linux's `MAXSYMLINKS` (40) and our memfs implementation.
+    /// Prevents infinite loops from circular symlinks.
+    const MAX_SYMLINK_DEPTH: usize = 40;
+
+    /// Resolve a path to an inode number, following all symlinks.
     ///
     /// `path` must be absolute (starting with `/`).
     pub fn resolve_path(&self, path: &str) -> KernelResult<u32> {
-        let path = path.strip_prefix('/').unwrap_or(path);
+        self.resolve_path_from(EXT4_ROOT_INO, path, true, 0)
+    }
 
-        let mut current_ino = EXT4_ROOT_INO;
+    /// Resolve a path without following the final symlink.
+    ///
+    /// Intermediate symlinks ARE followed; only the last component is
+    /// left unresolved if it happens to be a symlink.  Used for `lstat`.
+    pub fn resolve_path_no_follow(&self, path: &str) -> KernelResult<u32> {
+        self.resolve_path_from(EXT4_ROOT_INO, path, false, 0)
+    }
+
+    /// Core path resolution with symlink following.
+    ///
+    /// `start_ino` is the directory inode to start from.  For absolute
+    /// paths this is `EXT4_ROOT_INO`; for relative symlink targets it
+    /// is the directory containing the symlink.
+    ///
+    /// `follow_last` controls whether the final component is followed
+    /// if it is a symlink.
+    ///
+    /// `depth` tracks symlink recursion to prevent infinite loops.
+    fn resolve_path_from(
+        &self,
+        start_ino: u32,
+        path: &str,
+        follow_last: bool,
+        depth: usize,
+    ) -> KernelResult<u32> {
+        if depth > Self::MAX_SYMLINK_DEPTH {
+            return Err(KernelError::TooManyLinks);
+        }
+
+        // Handle absolute vs relative paths.
+        let (mut current_ino, path) = if path.starts_with('/') {
+            (EXT4_ROOT_INO, path.strip_prefix('/').unwrap_or(path))
+        } else {
+            (start_ino, path)
+        };
 
         if path.is_empty() {
             return Ok(current_ino);
         }
 
-        for component in path.split('/') {
-            if component.is_empty() || component == "." {
-                continue;
-            }
+        // Collect components so we can index into them for building
+        // remaining paths when we encounter a symlink.
+        let components: Vec<&str> = path
+            .split('/')
+            .filter(|c| !c.is_empty() && *c != ".")
+            .collect();
+
+        if components.is_empty() {
+            return Ok(current_ino);
+        }
+
+        for (i, component) in components.iter().enumerate() {
+            let is_last = i == components.len() - 1;
 
             let dir_inode = self.read_inode(current_ino)?;
 
-            // Verify it's a directory.
+            // Current inode must be a directory to traverse into.
             if (dir_inode.i_mode & file_type::S_IFMT) != file_type::S_IFDIR {
                 return Err(KernelError::NotADirectory);
             }
 
-            current_ino = self.dir_lookup(&dir_inode, component)?;
+            let child_ino = self.dir_lookup(&dir_inode, component)?;
+            let child_inode = self.read_inode(child_ino)?;
+
+            // Check if the child is a symlink.
+            if (child_inode.i_mode & file_type::S_IFMT) == file_type::S_IFLNK {
+                if is_last && !follow_last {
+                    // Don't follow the final component — return the
+                    // symlink inode itself (for lstat/readlink).
+                    return Ok(child_ino);
+                }
+
+                // Read the symlink target.
+                let target = self.read_symlink_target(&child_inode)?;
+                let target_str = core::str::from_utf8(&target)
+                    .map_err(|_| KernelError::IoError)?;
+
+                // Build the new path: target + remaining components.
+                let mut new_path = String::from(target_str);
+                for rem in &components[i + 1..] {
+                    new_path.push('/');
+                    new_path.push_str(rem);
+                }
+
+                // Recurse.  For absolute targets, start_ino is ignored
+                // (resolve_path_from detects the leading `/`).  For
+                // relative targets, continue from the current directory
+                // (the symlink's parent).
+                return self.resolve_path_from(
+                    current_ino,
+                    &new_path,
+                    follow_last,
+                    depth + 1,
+                );
+            }
+
+            current_ino = child_ino;
         }
 
         Ok(current_ino)
+    }
+
+    /// Read a symlink's target bytes from its inode.
+    ///
+    /// Fast symlinks (≤60 bytes) store the target in `i_block`.
+    /// Slow symlinks store it in data blocks via the extent tree.
+    pub fn read_symlink_target(&self, inode: &Ext4Inode) -> KernelResult<Vec<u8>> {
+        let size = self.inode_size(inode) as usize;
+
+        if size <= 60 && (inode.i_flags & inode_flags::EXTENTS) == 0 {
+            // Fast symlink: target stored directly in i_block.
+            let block_bytes = inode_block_as_bytes(inode);
+            let target = block_bytes.get(..size).ok_or(KernelError::IoError)?;
+            Ok(target.to_vec())
+        } else {
+            // Slow symlink: target stored in data blocks.
+            self.read_file_data(inode)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -999,6 +1102,13 @@ impl Ext4Driver {
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
+
+    /// Initialize the extent header in an inode's i_block field (public).
+    ///
+    /// Used by the VFS layer for truncate-to-zero (resets extent tree).
+    pub fn init_extent_header_pub(&self, inode: &mut Ext4Inode, entries: u16) {
+        self.init_extent_header(inode, entries);
+    }
 
     /// Initialize the extent header in an inode's i_block field.
     fn init_extent_header(&self, inode: &mut Ext4Inode, entries: u16) {

@@ -28,6 +28,7 @@
 //!
 //! Currently: Phase 1 (on-disk structures and superblock parsing).
 
+pub mod balloc;
 pub mod driver;
 pub mod io;
 pub mod ondisk;
@@ -35,6 +36,7 @@ pub mod superblock;
 pub mod vfs_impl;
 
 use alloc::boxed::Box;
+use alloc::format;
 use crate::error::KernelResult;
 use crate::serial_println;
 
@@ -111,9 +113,9 @@ pub fn self_test() -> KernelResult<()> {
     // Try to read the first regular file we find (if any).
     if let Some(first_file) = entries.iter().find(|e| e.entry_type == crate::fs::EntryType::File) {
         let file_path = if root == "/" {
-            alloc::format!("/{}", first_file.name)
+            format!("/{}", first_file.name)
         } else {
-            alloc::format!("{}/{}", root, first_file.name)
+            format!("{}/{}", root, first_file.name)
         };
         match crate::fs::Vfs::read_file(&file_path) {
             Ok(data) => {

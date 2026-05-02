@@ -107,6 +107,83 @@ impl BlockReader {
             .ok_or(KernelError::IoError)
     }
 
+    /// Write a single ext4 block from `buf`.
+    ///
+    /// `buf` must be at least `block_size` bytes.
+    /// Writes go through the buffer cache (write-back).
+    pub fn write_block(&self, block_nr: u64, buf: &[u8]) -> KernelResult<()> {
+        let bs = self.block_size as usize;
+        if buf.len() < bs {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let start_lba = block_nr.saturating_mul(u64::from(self.sectors_per_block));
+
+        for i in 0..self.sectors_per_block {
+            let lba = start_lba.saturating_add(u64::from(i));
+            let offset = (i as usize).saturating_mul(SECTOR_SIZE);
+            let end = offset.saturating_add(SECTOR_SIZE);
+            let src = buf.get(offset..end).ok_or(KernelError::IoError)?;
+
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            sector_buf.copy_from_slice(src);
+            crate::fs::cache::write_sector(&self.device, lba, &sector_buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write a range of bytes to the device at an absolute byte offset.
+    ///
+    /// Uses read-modify-write for sectors that are partially overwritten.
+    /// Writes go through the buffer cache (write-back).
+    pub fn write_bytes(&self, byte_offset: u64, data: &[u8]) -> KernelResult<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let sector_size = SECTOR_SIZE as u64;
+        let start_lba = byte_offset / sector_size;
+        let offset_in_sector = (byte_offset % sector_size) as usize;
+
+        let mut remaining = data;
+        let mut lba = start_lba;
+        let mut pos_in_sector = offset_in_sector;
+
+        while !remaining.is_empty() {
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+
+            // If we're writing a partial sector, read the existing content first.
+            let write_start = pos_in_sector;
+            let write_len = remaining.len().min(SECTOR_SIZE.saturating_sub(pos_in_sector));
+
+            if write_start > 0 || write_len < SECTOR_SIZE {
+                // Partial sector — read-modify-write.
+                crate::fs::cache::read_sector(&self.device, lba, &mut sector_buf)?;
+            }
+
+            if let (Some(dest), Some(src)) = (
+                sector_buf.get_mut(write_start..write_start.saturating_add(write_len)),
+                remaining.get(..write_len),
+            ) {
+                dest.copy_from_slice(src);
+            }
+
+            crate::fs::cache::write_sector(&self.device, lba, &sector_buf)?;
+
+            remaining = remaining.get(write_len..).unwrap_or(&[]);
+            lba = lba.saturating_add(1);
+            pos_in_sector = 0; // Subsequent sectors start at offset 0.
+        }
+
+        Ok(())
+    }
+
+    /// Flush all cached writes for this device to disk.
+    pub fn flush(&self) -> KernelResult<()> {
+        crate::fs::cache::flush(&self.device)
+    }
+
     /// The ext4 block size in bytes.
     #[must_use]
     #[allow(dead_code)]

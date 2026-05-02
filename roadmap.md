@@ -340,6 +340,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell for/in/do/done loops: unified LoopCollector for while+for, variable expansion in word lists, quote-aware word splitting, 1000-word safety limit
   - [x] Kshell user-defined functions: name() { body }, function name { body }, positional params ($1-$9, $#, $@), return, declare -f, unset -f, 32-level recursion limit
   - [x] Kshell case/esac: glob-style pattern matching (*, ?, [abc]), pipe-separated alternatives, nested case/esac, multi-line clauses
+  - [x] ext4 unwritten extents: read paths return zeros for uninitialized (pre-allocated) extents instead of reading actual block data
+  - [x] Kshell $(command) substitution: capture command output inline, recursive capture support, POSIX trailing-newline stripping
+  - [x] Kshell break/continue: loop control for while and for loops, interacts correctly with nested function return
+  - [x] Kshell read command: interactive keyboard input into variables, -p prompt flag, backspace editing, Ctrl+C cancel
+  - [x] Kshell shift command: discard positional params, which/typeof for command type inspection, expanded tab completion
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

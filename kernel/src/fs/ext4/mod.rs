@@ -31,6 +31,7 @@
 pub mod balloc;
 pub mod driver;
 pub mod io;
+pub mod journal;
 pub mod ondisk;
 pub mod superblock;
 pub mod vfs_impl;

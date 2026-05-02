@@ -86,8 +86,63 @@ const MAX_LINE: usize = 256;
 /// Maximum number of commands stored in the history ring buffer.
 const HISTORY_SIZE: usize = 64;
 
-/// The shell prompt string.
-const PROMPT: &str = "kernel> ";
+// ---------------------------------------------------------------------------
+// Working directory
+// ---------------------------------------------------------------------------
+
+/// The shell's current working directory.
+///
+/// Used to resolve relative paths.  Changed by `cd`.  Starts as "/".
+static CWD: Mutex<String> = Mutex::new(String::new());
+
+/// Get the current working directory as a new String.
+fn get_cwd() -> String {
+    let guard = CWD.lock();
+    if guard.is_empty() {
+        String::from("/")
+    } else {
+        guard.clone()
+    }
+}
+
+/// Resolve a path that may be relative against the current working directory.
+///
+/// - Absolute paths (starting with `/`) are returned normalized.
+/// - Relative paths are joined with the cwd and normalized.
+/// - Handles `.` (current dir) and `..` (parent dir) components.
+fn resolve_path(path: &str) -> String {
+    let abs = if path.starts_with('/') {
+        String::from(path)
+    } else {
+        let cwd = get_cwd();
+        if cwd.ends_with('/') {
+            alloc::format!("{}{}", cwd, path)
+        } else {
+            alloc::format!("{}/{}", cwd, path)
+        }
+    };
+
+    // Normalize: split into components, resolve . and ..
+    let mut parts: Vec<&str> = Vec::new();
+    for component in abs.split('/') {
+        match component {
+            "" | "." => {} // skip empty and current-dir
+            ".." => { parts.pop(); }
+            other => parts.push(other),
+        }
+    }
+
+    if parts.is_empty() {
+        String::from("/")
+    } else {
+        let mut result = String::with_capacity(abs.len());
+        for p in &parts {
+            result.push('/');
+            result.push_str(p);
+        }
+        result
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Command history
@@ -213,12 +268,21 @@ pub fn run() -> ! {
     crate::console_println!("Kernel debug shell. Type 'help' for commands.");
     crate::console_println!("");
 
+    // Initialize cwd.
+    {
+        let mut cwd = CWD.lock();
+        if cwd.is_empty() {
+            cwd.push('/');
+        }
+    }
+
     let mut line_buf = String::with_capacity(MAX_LINE);
     let mut history = History::new();
 
     loop {
-        // Print prompt.
-        crate::console_print!("{}", PROMPT);
+        // Print prompt with current working directory.
+        let cwd = get_cwd();
+        crate::console_print!("{}> ", cwd);
 
         // Read a line (blocking on keyboard).
         line_buf.clear();
@@ -371,7 +435,8 @@ fn read_line(buf: &mut String, history: &mut History) {
             0x0C => {
                 // Ctrl+L — clear screen and reprint prompt + line.
                 crate::console::clear();
-                crate::console::write_str(PROMPT);
+                let prompt = alloc::format!("{}> ", get_cwd());
+                crate::console::write_str(&prompt);
                 for &b in buf.as_bytes() {
                     crate::console::putchar(b);
                 }
@@ -510,7 +575,8 @@ fn read_line(buf: &mut String, history: &mut History) {
                     }
                     crate::console::putchar(b'\n');
                     // Reprint the prompt and current line.
-                    crate::console::write_str(PROMPT);
+                    let prompt = alloc::format!("{}> ", get_cwd());
+                    crate::console::write_str(&prompt);
                     for &b in buf.as_bytes() {
                         crate::console::putchar(b);
                     }
@@ -570,7 +636,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "append", "basename", "blkdev", "blkinfo", "blkread", "cat", "chmod",
+    "append", "basename", "blkdev", "blkinfo", "blkread", "cat", "cd", "chmod",
     "chown", "clear", "cls", "cmp", "copy", "cp", "date", "dd", "del",
     "df", "dhcp", "diff", "dir", "dirname", "dns", "du", "echo", "env",
     "exec", "fallocate", "false", "find", "free", "glob", "grep", "hash",
@@ -647,16 +713,17 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
         let partial_path = text_before.get(word_start..).unwrap_or("");
 
         // Determine the directory to search and the prefix to match.
+        // For relative paths, resolve against the current working directory.
         let (dir, name_prefix) = if let Some(slash_pos) = partial_path.rfind('/') {
             let dir_part = partial_path.get(..=slash_pos).unwrap_or("/");
             let name_part = partial_path.get(slash_pos + 1..).unwrap_or("");
-            (dir_part, name_part)
+            (resolve_path(dir_part), name_part)
         } else {
-            ("/", partial_path)
+            (get_cwd(), partial_path)
         };
 
         // List the directory and filter by prefix.
-        let entries = match crate::fs::Vfs::readdir(dir) {
+        let entries = match crate::fs::Vfs::readdir(&dir) {
             Ok(e) => e,
             Err(_) => return (String::new(), Vec::new()),
         };
@@ -887,6 +954,7 @@ fn dispatch(line: &str) {
 
     match cmd {
         "help" | "?" => cmd_help(),
+        "cd" => cmd_cd(args),
         "meminfo" | "mem" => cmd_meminfo(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -987,6 +1055,7 @@ fn cmd_help() {
     crate::console_println!("  pci       List PCI devices");
     crate::console_println!("  disk      Show block device info");
     crate::console_println!("  blkread N Hex-dump sector N from disk");
+    crate::console_println!("  cd [dir]  Change working directory");
     crate::console_println!("  ls [path] List files in directory");
     crate::console_println!("  cat FILE  Print file contents");
     crate::console_println!("  write F T Write text T to file F");
@@ -1317,9 +1386,13 @@ fn parse_blkread_args(args: &str) -> (alloc::string::String, Option<u64>) {
 }
 
 fn cmd_ls(args: &str) {
-    let path = if args.is_empty() { "/" } else { args };
+    let path = if args.is_empty() {
+        get_cwd()
+    } else {
+        resolve_path(args)
+    };
 
-    match crate::fs::Vfs::readdir(path) {
+    match crate::fs::Vfs::readdir(&path) {
         Ok(entries) => {
             if entries.is_empty() {
                 shell_println!("(empty directory)");
@@ -1351,14 +1424,7 @@ fn cmd_cat(args: &str) {
         return;
     }
 
-    // Prepend "/" if the path doesn't start with one.
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     match crate::fs::Vfs::read_file(&path) {
         Ok(data) => {
@@ -1396,14 +1462,7 @@ fn cmd_write(args: &str) {
         }
     };
     let text = parts.next().unwrap_or("");
-
-    let path = if filename.starts_with('/') {
-        alloc::string::String::from(filename)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(filename);
-        s
-    };
+    let path = resolve_path(filename);
 
     // Append a newline if the text doesn't have one.
     let mut data = alloc::vec::Vec::from(text.as_bytes());
@@ -1437,13 +1496,7 @@ fn cmd_rm(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     if recursive {
         match crate::fs::Vfs::remove_recursive(&path) {
@@ -1472,13 +1525,7 @@ fn cmd_mkdir(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     match crate::fs::Vfs::mkdir(&path) {
         Ok(()) => {
@@ -1496,13 +1543,7 @@ fn cmd_rmdir(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     match crate::fs::Vfs::rmdir(&path) {
         Ok(()) => {
@@ -1522,13 +1563,7 @@ fn cmd_stat(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     match crate::fs::Vfs::metadata(&path) {
         Ok(meta) => {
@@ -1883,13 +1918,7 @@ fn cmd_touch(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     // Check if file exists.
     match crate::fs::Vfs::stat(&path) {
@@ -1956,13 +1985,9 @@ fn cmd_append(args: &str) {
 /// Recursive directory tree listing.
 fn cmd_tree(args: &str) {
     let path = if args.is_empty() {
-        alloc::string::String::from("/")
-    } else if args.starts_with('/') {
-        alloc::string::String::from(args)
+        get_cwd()
     } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
+        resolve_path(args)
     };
 
     crate::console_println!("{}", path);
@@ -3909,9 +3934,35 @@ fn cmd_realpath(args: &str) {
 
 /// `pwd` — print working directory (always / in kernel shell).
 fn cmd_pwd() {
-    // The kernel shell has no concept of a current working directory;
-    // all paths are absolute.  Report "/" as the logical cwd.
-    crate::console_println!("/");
+    shell_println!("{}", get_cwd());
+}
+
+/// `cd [dir]` — change the current working directory.
+fn cmd_cd(args: &str) {
+    let target = if args.is_empty() {
+        "/".into()
+    } else {
+        resolve_path(args)
+    };
+
+    // Verify the target is a directory.
+    match crate::fs::Vfs::stat(&target) {
+        Ok(meta) => {
+            if meta.entry_type != crate::fs::EntryType::Directory {
+                crate::console_println!("cd: not a directory: {}", target);
+                return;
+            }
+        }
+        Err(e) => {
+            crate::console_println!("cd: {}: {:?}", target, e);
+            return;
+        }
+    }
+
+    // Update the working directory.
+    let mut cwd = CWD.lock();
+    cwd.clear();
+    cwd.push_str(&target);
 }
 
 /// `id` / `whoami` — show the current task's identity.

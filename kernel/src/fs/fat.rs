@@ -67,6 +67,8 @@ struct FatBpb {
     sectors_per_fat_32: u32,
     /// First cluster of root directory (FAT32 only; 0 for FAT16).
     root_cluster: u32,
+    /// FSInfo sector number (FAT32 only; 0 for FAT16 or if absent).
+    fsinfo_sector: u16,
     /// Volume label from extended boot record.
     volume_label: [u8; 11],
 }
@@ -100,6 +102,7 @@ impl FatBpb {
         // FAT32-specific fields (offset 36-51 of boot sector).
         let sectors_per_fat_32 = read_u32(sector, 36);
         let root_cluster = read_u32(sector, 44);
+        let fsinfo_sector_raw = read_u16(sector, 48);
 
         // Determine actual sectors per FAT.
         let sectors_per_fat = if sectors_per_fat_16 != 0 {
@@ -170,6 +173,7 @@ impl FatBpb {
             total_sectors_32,
             sectors_per_fat_32,
             root_cluster: if fat_type == FatType::Fat32 { root_cluster } else { 0 },
+            fsinfo_sector: if fat_type == FatType::Fat32 { fsinfo_sector_raw } else { 0 },
             volume_label,
         })
     }
@@ -962,6 +966,12 @@ pub struct FatFs {
     /// Dcache statistics.
     dcache_hits: u64,
     dcache_misses: u64,
+    /// Cached free cluster count.  `None` means unknown — must scan.
+    /// Updated on alloc/free, loaded from FSInfo sector for FAT32.
+    free_clusters: Option<u32>,
+    /// Hint: next free cluster number (start scanning from here).
+    /// `0` means unknown — scan from cluster 2.
+    next_free_hint: u32,
 }
 
 impl FatFs {
@@ -1010,6 +1020,31 @@ impl FatFs {
             dcache.push(DcacheEntry::empty());
         }
 
+        // Read FSInfo sector for FAT32 to get cached free count + next-free hint.
+        let (free_clusters, next_free_hint) = if bpb.fat_type == FatType::Fat32
+            && bpb.fsinfo_sector > 0
+            && bpb.fsinfo_sector < bpb.reserved_sectors
+        {
+            let mut fsinfo_buf = [0u8; SECTOR_SIZE];
+            match super::cache::read_sector(
+                device_name,
+                u64::from(bpb.fsinfo_sector),
+                &mut fsinfo_buf,
+            ) {
+                Ok(()) => Self::parse_fsinfo(&fsinfo_buf),
+                Err(_) => (None, 0),
+            }
+        } else {
+            (None, 0)
+        };
+
+        if let Some(fc) = free_clusters {
+            crate::serial_println!(
+                "[fat]   FSInfo: {} free clusters, next-free hint: {}",
+                fc, next_free_hint,
+            );
+        }
+
         Ok(Self {
             device_name: String::from(device_name),
             bpb,
@@ -1017,7 +1052,88 @@ impl FatFs {
             dcache_counter: 0,
             dcache_hits: 0,
             dcache_misses: 0,
+            free_clusters,
+            next_free_hint,
         })
+    }
+
+    // -- FSInfo sector (FAT32) --
+
+    /// FSInfo signature constants.
+    const FSINFO_SIG1: u32 = 0x4161_5252; // "RRaA"
+    const FSINFO_SIG2: u32 = 0x6141_7272; // "rrAa"
+    const FSINFO_SIG3: u32 = 0xAA55_0000;
+
+    /// Parse an FSInfo sector.  Returns `(free_clusters, next_free_hint)`.
+    ///
+    /// Returns `(None, 0)` if signatures are invalid or values are 0xFFFFFFFF
+    /// (unknown).
+    fn parse_fsinfo(sector: &[u8; SECTOR_SIZE]) -> (Option<u32>, u32) {
+        let sig1 = read_u32(sector, 0);
+        let sig2 = read_u32(sector, 484);
+        let sig3 = read_u32(sector, 508);
+
+        if sig1 != Self::FSINFO_SIG1
+            || sig2 != Self::FSINFO_SIG2
+            || sig3 != Self::FSINFO_SIG3
+        {
+            return (None, 0);
+        }
+
+        let free_count = read_u32(sector, 488);
+        let next_free = read_u32(sector, 492);
+
+        let fc = if free_count == 0xFFFF_FFFF {
+            None
+        } else {
+            Some(free_count)
+        };
+        let hint = if next_free == 0xFFFF_FFFF || next_free < 2 {
+            0
+        } else {
+            next_free
+        };
+
+        (fc, hint)
+    }
+
+    /// Write the FSInfo sector with updated free count and next-free hint.
+    ///
+    /// Preserves all existing data in the sector; only patches the two
+    /// 4-byte fields at offsets 488 and 492.
+    fn write_fsinfo(&self) -> KernelResult<()> {
+        if self.bpb.fat_type != FatType::Fat32
+            || self.bpb.fsinfo_sector == 0
+            || self.bpb.fsinfo_sector >= self.bpb.reserved_sectors
+        {
+            return Ok(());
+        }
+
+        let lba = u64::from(self.bpb.fsinfo_sector);
+        let mut buf = [0u8; SECTOR_SIZE];
+        super::cache::read_sector(&self.device_name, lba, &mut buf)?;
+
+        // Verify signatures before writing.
+        let sig1 = read_u32(&buf, 0);
+        let sig2 = read_u32(&buf, 484);
+        if sig1 != Self::FSINFO_SIG1 || sig2 != Self::FSINFO_SIG2 {
+            // Not a valid FSInfo sector — don't corrupt it.
+            return Ok(());
+        }
+
+        // Write free cluster count.
+        let fc = self.free_clusters.unwrap_or(0xFFFF_FFFF);
+        write_u32_le(&mut buf, 488, fc);
+
+        // Write next-free hint.
+        let hint = if self.next_free_hint >= 2 {
+            self.next_free_hint
+        } else {
+            0xFFFF_FFFF
+        };
+        write_u32_le(&mut buf, 492, hint);
+
+        super::cache::write_sector(&self.device_name, lba, &buf)
     }
 
     // -- Dcache (path resolution cache) --
@@ -1107,23 +1223,31 @@ impl FatFs {
 
     /// Count the number of free and total data clusters.
     ///
-    /// Scans the FAT to count entries with value 0 (free).
+    /// Uses the cached value from FSInfo / alloc tracking when available.
+    /// Falls back to a full FAT scan if the cache is empty, and populates
+    /// the cache on completion to avoid future scans.
+    ///
     /// Returns `(free_clusters, total_clusters)`.
     #[allow(clippy::arithmetic_side_effects)]
     fn count_clusters(&mut self) -> KernelResult<(u64, u64)> {
-        let bps = u32::from(self.bpb.bytes_per_sector);
-        let entry_bytes: u32 = match self.bpb.fat_type {
-            FatType::Fat16 => 2,
-            FatType::Fat32 => 4,
-        };
-        let fat_start = self.bpb.fat_start_lba();
-
         let data_sectors = self.bpb.total_sectors()
             .saturating_sub(u32::from(self.bpb.reserved_sectors))
             .saturating_sub(u32::from(self.bpb.num_fats) * self.bpb.sectors_per_fat())
             .saturating_sub(self.bpb.root_dir_sectors());
         let total_clusters = data_sectors / u32::from(self.bpb.sectors_per_cluster);
 
+        // Use cached value if available.
+        if let Some(fc) = self.free_clusters {
+            return Ok((u64::from(fc), u64::from(total_clusters)));
+        }
+
+        // Full scan (first call only, or if FSInfo was absent/invalid).
+        let bps = u32::from(self.bpb.bytes_per_sector);
+        let entry_bytes: u32 = match self.bpb.fat_type {
+            FatType::Fat16 => 2,
+            FatType::Fat32 => 4,
+        };
+        let fat_start = self.bpb.fat_start_lba();
         let max_cluster = match self.bpb.fat_type {
             FatType::Fat16 => (total_clusters + 2).min(0xFFEF),
             FatType::Fat32 => (total_clusters + 2).min(0x0FFF_FFEF),
@@ -1152,6 +1276,10 @@ impl FatFs {
                 free_count += 1;
             }
         }
+
+        // Populate the cache so future calls are O(1).
+        // Safe truncation: free_count ≤ total_clusters ≤ 0x0FFFFFE6 < u32::MAX.
+        self.free_clusters = Some(free_count as u32);
 
         Ok((free_count, u64::from(total_clusters)))
     }
@@ -1600,17 +1728,23 @@ impl FatFs {
 
     /// Find a free cluster in the FAT.
     ///
-    /// Scans from cluster 2 upward.  Returns `DiskFull` if none found.
+    /// Uses the `next_free_hint` to start scanning near the last allocation
+    /// instead of always from cluster 2.  If no free cluster is found from
+    /// the hint onward, wraps around and scans from 2 up to the hint.
+    /// Updates `free_clusters` and `next_free_hint` on success.
     #[allow(clippy::arithmetic_side_effects)]
     fn alloc_cluster(&mut self) -> KernelResult<u32> {
-        // Total data clusters.
+        // Quick reject if we know there are no free clusters.
+        if self.free_clusters == Some(0) {
+            return Err(KernelError::DiskFull);
+        }
+
         let data_sectors = self.bpb.total_sectors()
             - u32::from(self.bpb.reserved_sectors)
             - u32::from(self.bpb.num_fats) * self.bpb.sectors_per_fat()
             - self.bpb.root_dir_sectors();
         let total_clusters = data_sectors / u32::from(self.bpb.sectors_per_cluster);
 
-        // Scan FAT for a free entry (value == 0).
         let bps = u32::from(self.bpb.bytes_per_sector);
         let entry_bytes: u32 = match self.bpb.fat_type {
             FatType::Fat16 => 2,
@@ -1620,40 +1754,92 @@ impl FatFs {
         let mut sector_buf = [0u8; SECTOR_SIZE];
         let mut last_sector = u32::MAX;
 
-        // Clusters are numbered 2..total_clusters+2.
         let max_cluster = match self.bpb.fat_type {
             FatType::Fat16 => (total_clusters + 2).min(0xFFEF),
             FatType::Fat32 => (total_clusters + 2).min(0x0FFF_FFEF),
         };
 
-        for cluster in 2..max_cluster {
+        // Start from the hint (or 2 if no hint).
+        let start = if self.next_free_hint >= 2 && self.next_free_hint < max_cluster {
+            self.next_free_hint
+        } else {
+            2
+        };
+
+        // Scan from hint to end, then wrap around from 2 to hint.
+        let found = self.scan_free_cluster(
+            start, max_cluster, fat_start, bps, entry_bytes,
+            &mut sector_buf, &mut last_sector,
+        )?.or(
+            if start > 2 {
+                self.scan_free_cluster(
+                    2, start, fat_start, bps, entry_bytes,
+                    &mut sector_buf, &mut last_sector,
+                )?
+            } else {
+                None
+            }
+        );
+
+        match found {
+            Some(cluster) => {
+                // Update caches.
+                self.next_free_hint = cluster + 1;
+                if let Some(ref mut fc) = self.free_clusters {
+                    *fc = fc.saturating_sub(1);
+                }
+                Ok(cluster)
+            }
+            None => {
+                self.free_clusters = Some(0);
+                Err(KernelError::DiskFull)
+            }
+        }
+    }
+
+    /// Scan a range of clusters for a free entry.  Returns the first free
+    /// cluster number, or `None` if the range has no free entries.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    fn scan_free_cluster(
+        &mut self,
+        from: u32,
+        to: u32,
+        fat_start: u32,
+        bps: u32,
+        entry_bytes: u32,
+        sector_buf: &mut [u8; SECTOR_SIZE],
+        last_sector: &mut u32,
+    ) -> KernelResult<Option<u32>> {
+        for cluster in from..to {
             let fat_offset = cluster * entry_bytes;
             let sector_num = fat_start + fat_offset / bps;
 
-            // Only read the sector if we haven't already.
-            if sector_num != last_sector {
-                self.read_sector(u64::from(sector_num), &mut sector_buf)?;
-                last_sector = sector_num;
+            if sector_num != *last_sector {
+                self.read_sector(u64::from(sector_num), sector_buf)?;
+                *last_sector = sector_num;
             }
 
             let offset = (fat_offset % bps) as usize;
             let is_free = match self.bpb.fat_type {
-                FatType::Fat16 => read_u16(&sector_buf, offset) == 0x0000,
-                FatType::Fat32 => (read_u32(&sector_buf, offset) & 0x0FFF_FFFF) == 0,
+                FatType::Fat16 => read_u16(sector_buf, offset) == 0x0000,
+                FatType::Fat32 => (read_u32(sector_buf, offset) & 0x0FFF_FFFF) == 0,
             };
 
             if is_free {
-                return Ok(cluster);
+                return Ok(Some(cluster));
             }
         }
-
-        Err(KernelError::DiskFull)
+        Ok(None)
     }
 
     /// Free the cluster chain starting at `first_cluster`.
+    ///
+    /// Updates the free cluster count cache and next-free hint.
     fn free_chain(&mut self, first_cluster: u32) -> KernelResult<()> {
         let mut cluster = first_cluster;
         let mut iterations = 0u32;
+        let mut freed = 0u32;
+        let mut lowest_freed = u32::MAX;
 
         while self.is_valid_cluster(cluster) {
             iterations = iterations.wrapping_add(1);
@@ -1663,10 +1849,26 @@ impl FatFs {
 
             let next = self.fat_entry(cluster)?;
             self.set_fat_entry(cluster, 0x0000)?; // Mark free.
+            freed = freed.wrapping_add(1);
+            if cluster < lowest_freed {
+                lowest_freed = cluster;
+            }
 
             match next {
                 Some(n) => cluster = n,
                 None => break,
+            }
+        }
+
+        // Update free cluster count.
+        if freed > 0 {
+            if let Some(ref mut fc) = self.free_clusters {
+                *fc = fc.saturating_add(freed);
+            }
+            // Update hint: if we freed clusters before the current hint,
+            // move the hint backward so the freed space is found first.
+            if lowest_freed < self.next_free_hint || self.next_free_hint < 2 {
+                self.next_free_hint = lowest_freed;
             }
         }
         Ok(())
@@ -2353,6 +2555,8 @@ impl FileSystem for FatFs {
     /// Scans the FAT to count free clusters and computes byte totals.
     #[allow(clippy::arithmetic_side_effects)]
     fn sync(&mut self) -> KernelResult<()> {
+        // Persist the FSInfo sector with updated free count / next-free hint.
+        let _ = self.write_fsinfo();
         super::cache::flush(&self.device_name)
     }
 
@@ -3417,8 +3621,19 @@ impl FileSystem for FatFs {
             // Shrink: mark the last-kept cluster as EOC, free the rest.
             let keep = clusters_needed;
             self.set_fat_entry(chain[keep - 1], eoc)?;
+            let mut lowest_freed = u32::MAX;
             for &c in &chain[keep..] {
                 self.set_fat_entry(c, 0)?;
+                if let Some(ref mut fc) = self.free_clusters {
+                    *fc = fc.saturating_add(1);
+                }
+                if c < lowest_freed {
+                    lowest_freed = c;
+                }
+            }
+            // Update next-free hint if we freed clusters before current hint.
+            if lowest_freed < self.next_free_hint || self.next_free_hint < 2 {
+                self.next_free_hint = lowest_freed;
             }
         } else if clusters_needed > chain.len() {
             // Grow: allocate more clusters, zero-fill.

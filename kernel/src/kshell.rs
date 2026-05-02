@@ -6262,6 +6262,39 @@ fn eval_test(args: &str) -> bool {
                     .map(|m| m.size > 0)
                     .unwrap_or(false);
             }
+            "-L" | "-h" => {
+                // Is symbolic link.
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::lstat(&path)
+                    .map(|m| m.entry_type == crate::fs::EntryType::Symlink)
+                    .unwrap_or(false);
+            }
+            "-r" => {
+                // File is readable (exists with read permission).
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::metadata(&path)
+                    .map(|m| m.permissions & 0o400 != 0)
+                    .unwrap_or(false);
+            }
+            "-w" => {
+                // File is writable (exists with write permission).
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::metadata(&path)
+                    .map(|m| m.permissions & 0o200 != 0)
+                    .unwrap_or(false);
+            }
+            "-x" => {
+                // File is executable (exists with execute permission).
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::metadata(&path)
+                    .map(|m| m.permissions & 0o100 != 0)
+                    .unwrap_or(false);
+            }
+            "-v" => {
+                // Variable is set (non-empty).
+                return env_get(operand).is_some_and(|v| !v.is_empty())
+                    || is_array(operand);
+            }
             "-z" => {
                 // String is empty.
                 return operand.is_empty();
@@ -6283,6 +6316,8 @@ fn eval_test(args: &str) -> bool {
         match op {
             "=" | "==" => return left == right,
             "!=" => return left != right,
+            "<" => return left < right,  // Lexicographic string comparison.
+            ">" => return left > right,
             "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
                 let l = left.parse::<i64>().unwrap_or(0);
                 let r = right.parse::<i64>().unwrap_or(0);
@@ -6497,7 +6532,18 @@ fn cmd_printenv() {
 fn cmd_read(args: &str) {
     let mut prompt: Option<&str> = None;
     let mut var_name = "REPLY";
+    let mut into_array = false;
     let mut rest = args;
+
+    // Parse flags: -p "prompt", -a (array mode).
+    loop {
+        if rest.starts_with("-a ") || rest.starts_with("-a\t") {
+            into_array = true;
+            rest = rest.get(3..).unwrap_or("").trim_start();
+            continue;
+        }
+        break;
+    }
 
     // Parse -p "prompt" flag.
     if rest.starts_with("-p ") || rest.starts_with("-p\t") {
@@ -6566,7 +6612,16 @@ fn cmd_read(args: &str) {
 
     let value = core::str::from_utf8(buf.get(..len).unwrap_or(&[]))
         .unwrap_or("");
-    env_set(var_name, value);
+
+    if into_array {
+        // Split input into words and store as array.
+        let words: Vec<String> = value.split_whitespace()
+            .map(String::from)
+            .collect();
+        array_set(var_name, words);
+    } else {
+        env_set(var_name, value);
+    }
 }
 
 fn cmd_export(args: &str) {

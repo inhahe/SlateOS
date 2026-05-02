@@ -1902,7 +1902,7 @@ const COMMANDS: &[&str] = &[
     "id", "ifconfig", "irq", "ln", "link", "ls", "lsblk", "lsof", "lsp",
     "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount",
     "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
-    "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
+    "printf", "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
     "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
@@ -2401,6 +2401,7 @@ fn dispatch(line: &str) {
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
         "echo" => cmd_echo(args),
+        "printf" => cmd_printf(args),
         "time" | "date" => cmd_time(),
         "reboot" => cmd_reboot(),
         "irq" => cmd_irq(),
@@ -2767,6 +2768,162 @@ fn cmd_uptime() {
 
 fn cmd_echo(args: &str) {
     shell_println!("{}", args);
+}
+
+/// `printf FORMAT [ARG ...]` — formatted output (subset of POSIX printf).
+///
+/// Supported format specifiers:
+///   `%s` — string
+///   `%d` / `%i` — signed decimal integer
+///   `%u` — unsigned decimal integer
+///   `%x` — lowercase hexadecimal
+///   `%X` — uppercase hexadecimal
+///   `%o` — octal
+///   `%c` — first character of argument
+///   `%%` — literal percent sign
+///   `%0Nd` — zero-padded to N digits (e.g., `%05d`)
+///
+/// Escape sequences: `\n`, `\t`, `\\`, `\0`.
+fn cmd_printf(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: printf FORMAT [ARGS...]");
+        return;
+    }
+
+    // Split format string from arguments.
+    // The format string may be quoted.
+    let (format, rest) = if args.starts_with('"') {
+        // Find closing quote.
+        if let Some(end) = args.get(1..).and_then(|s| s.find('"')) {
+            let fmt = args.get(1..end.saturating_add(1)).unwrap_or("");
+            let rest = args.get(end.saturating_add(2)..).unwrap_or("").trim_start();
+            (fmt, rest)
+        } else {
+            (args.get(1..).unwrap_or(""), "")
+        }
+    } else if args.starts_with('\'') {
+        if let Some(end) = args.get(1..).and_then(|s| s.find('\'')) {
+            let fmt = args.get(1..end.saturating_add(1)).unwrap_or("");
+            let rest = args.get(end.saturating_add(2)..).unwrap_or("").trim_start();
+            (fmt, rest)
+        } else {
+            (args.get(1..).unwrap_or(""), "")
+        }
+    } else {
+        // Unquoted: first word is the format string.
+        let end = args.find(' ').unwrap_or(args.len());
+        let fmt = args.get(..end).unwrap_or("");
+        let rest = args.get(end..).unwrap_or("").trim_start();
+        (fmt, rest)
+    };
+
+    // Parse arguments (space-separated, quote-aware).
+    let arg_list = split_words(rest);
+    let mut arg_iter = arg_list.iter();
+
+    // Process format string.
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            // Escape sequence.
+            match chars.next() {
+                Some('n') => shell_print!("\n"),
+                Some('t') => shell_print!("\t"),
+                Some('\\') => shell_print!("\\"),
+                Some('0') => shell_print!("\0"),
+                Some(c) => shell_print!("\\{}", c),
+                None => shell_print!("\\"),
+            }
+        } else if ch == '%' {
+            // Format specifier.
+            // Check for flags: zero-padding and width.
+            let mut zero_pad = false;
+            let mut width: usize = 0;
+
+            if chars.peek() == Some(&'0') {
+                zero_pad = true;
+                chars.next();
+            }
+            while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                if let Some(d) = chars.next() {
+                    width = width.saturating_mul(10).saturating_add(
+                        (d as u8).saturating_sub(b'0') as usize,
+                    );
+                }
+            }
+
+            match chars.next() {
+                Some('s') => {
+                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("");
+                    if width > 0 {
+                        shell_print!("{:>width$}", arg, width = width);
+                    } else {
+                        shell_print!("{}", arg);
+                    }
+                }
+                Some('d') | Some('i') => {
+                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
+                    let val: i64 = arg.parse().unwrap_or(0);
+                    if zero_pad && width > 0 {
+                        shell_print!("{:0>width$}", val, width = width);
+                    } else if width > 0 {
+                        shell_print!("{:>width$}", val, width = width);
+                    } else {
+                        shell_print!("{}", val);
+                    }
+                }
+                Some('u') => {
+                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
+                    let val: u64 = arg.parse().unwrap_or(0);
+                    if zero_pad && width > 0 {
+                        shell_print!("{:0>width$}", val, width = width);
+                    } else if width > 0 {
+                        shell_print!("{:>width$}", val, width = width);
+                    } else {
+                        shell_print!("{}", val);
+                    }
+                }
+                Some('x') => {
+                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
+                    let val: u64 = arg.parse().unwrap_or(0);
+                    if zero_pad && width > 0 {
+                        shell_print!("{:0>width$x}", val, width = width);
+                    } else {
+                        shell_print!("{:x}", val);
+                    }
+                }
+                Some('X') => {
+                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
+                    let val: u64 = arg.parse().unwrap_or(0);
+                    if zero_pad && width > 0 {
+                        shell_print!("{:0>width$X}", val, width = width);
+                    } else {
+                        shell_print!("{:X}", val);
+                    }
+                }
+                Some('o') => {
+                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("0");
+                    let val: u64 = arg.parse().unwrap_or(0);
+                    if zero_pad && width > 0 {
+                        shell_print!("{:0>width$o}", val, width = width);
+                    } else {
+                        shell_print!("{:o}", val);
+                    }
+                }
+                Some('c') => {
+                    let arg = arg_iter.next().map(|s| s.as_str()).unwrap_or("");
+                    if let Some(c) = arg.chars().next() {
+                        shell_print!("{}", c);
+                    }
+                }
+                Some('%') => shell_print!("%"),
+                Some(c) => shell_print!("%{}", c),
+                None => shell_print!("%"),
+            }
+        } else {
+            shell_print!("{}", ch);
+        }
+    }
 }
 
 fn cmd_time() {

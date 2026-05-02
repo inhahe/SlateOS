@@ -964,6 +964,11 @@ impl Ext4Driver {
             return Ok(Vec::new());
         }
 
+        // Inline data: file content stored directly in the inode's i_block[].
+        if (inode.i_flags & inode_flags::INLINE_DATA) != 0 {
+            return self.read_inline_data(inode, file_size);
+        }
+
         if (inode.i_flags & inode_flags::EXTENTS) != 0 {
             // Extent-based file.
             self.read_extent_data(inode, file_size)
@@ -971,6 +976,32 @@ impl Ext4Driver {
             // Indirect-block-based file (ext2/ext3 compat).
             self.read_indirect_data(inode, file_size)
         }
+    }
+
+    /// Read inline data from an inode's i_block[] field.
+    ///
+    /// ext4 inline data stores up to 60 bytes of file content directly
+    /// in the inode's `i_block[0..14]` array (which is 60 bytes when
+    /// interpreted as raw data instead of block pointers).
+    ///
+    /// Files larger than 60 bytes with inline data also store overflow
+    /// in a "system.data" extended attribute, but we don't support that
+    /// yet — only the first 60 bytes are handled.
+    fn read_inline_data(&self, inode: &Ext4Inode, file_size: u64) -> KernelResult<Vec<u8>> {
+        // i_block is [u32; 15] = 60 bytes of raw data.
+        // Reinterpret as a byte array.
+        let raw_bytes: &[u8] = {
+            let ptr = inode.i_block.as_ptr().cast::<u8>();
+            // SAFETY: i_block is 15 * 4 = 60 bytes, all initialized.
+            // We're reinterpreting the same memory as bytes.
+            unsafe { core::slice::from_raw_parts(ptr, 60) }
+        };
+
+        let data_len = file_size.min(60) as usize;
+        let data = raw_bytes.get(..data_len)
+            .ok_or(KernelError::IoError)?;
+
+        Ok(Vec::from(data))
     }
 
     /// Read a byte range from a file's extent tree.
@@ -993,6 +1024,14 @@ impl Ext4Driver {
         let actual_len = len.min(file_size.saturating_sub(offset) as usize);
         if actual_len == 0 {
             return Ok(Vec::new());
+        }
+
+        // Inline data: slice into the inode's i_block[] interpreted as bytes.
+        if (inode.i_flags & inode_flags::INLINE_DATA) != 0 {
+            let full = self.read_inline_data(inode, file_size)?;
+            let start = offset as usize;
+            let end = start.saturating_add(actual_len).min(full.len());
+            return Ok(Vec::from(full.get(start..end).unwrap_or(&[])));
         }
 
         let block_size = u64::from(self.sb.block_size);

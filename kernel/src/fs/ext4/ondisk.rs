@@ -382,7 +382,9 @@ pub const SUPPORTED_INCOMPAT: u32 =
     | incompat::EXTENTS
     | incompat::BIT64
     | incompat::FLEX_BG
-    | incompat::RECOVER; // We handle RECOVER by requiring journal replay.
+    | incompat::RECOVER     // We handle RECOVER by requiring journal replay.
+    | incompat::INLINE_DATA // Small files/dirs store data in the inode.
+    | incompat::CSUM_SEED;  // Pre-computed checksum seed in superblock.
 
 /// Read-only compat features we support for read-write mounting.
 ///

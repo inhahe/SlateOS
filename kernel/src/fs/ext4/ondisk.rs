@@ -686,6 +686,23 @@ pub struct Ext4ExtentIdx {
 
 const _: () = assert!(core::mem::size_of::<Ext4ExtentIdx>() == 12);
 
+/// Extent tree block tail containing a CRC32C checksum.
+///
+/// In ext4 with metadata_csum, each non-root extent tree block has a
+/// 4-byte tail at offset `sizeof(header) + sizeof(extent) * eh_max`.
+/// The root extent (stored inline in the inode's i_block) does not have
+/// this tail — it's covered by the inode checksum instead.
+///
+/// Based on Linux `struct ext4_extent_tail` in fs/ext4/ext4_extents.h.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Ext4ExtentTail {
+    /// CRC32C checksum of the extent block.
+    pub et_checksum: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<Ext4ExtentTail>() == 4);
+
 // ---------------------------------------------------------------------------
 // Directory entry
 // ---------------------------------------------------------------------------

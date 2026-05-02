@@ -130,13 +130,13 @@ impl FileSystem for Ext4Fs {
         let mode = inode.i_mode & file_type::S_IFMT;
         match mode {
             file_type::S_IFREG => {
-                self.driver.read_file_data(&inode)
+                self.driver.read_file_data(ino, &inode)
             }
             file_type::S_IFLNK => {
                 // For symlinks, the target path is stored:
                 // - In i_block if the target is <= 60 bytes (fast symlink)
                 // - In data blocks otherwise
-                self.read_symlink_target(&inode)
+                self.read_symlink_target(ino, &inode)
             }
             file_type::S_IFDIR => Err(KernelError::IsADirectory),
             _ => Err(KernelError::NotSupported),
@@ -195,7 +195,7 @@ impl FileSystem for Ext4Fs {
 
                 // Now safe to free old blocks — on-disk inode points to new data.
                 // Use old_inode which still has the old extent tree.
-                self.driver.free_inode_data(&old_inode)?;
+                self.driver.free_inode_data(ino, &old_inode)?;
 
                 self.driver.write_superblock()?;
                 self.driver.write_group_descs()?;
@@ -233,7 +233,7 @@ impl FileSystem for Ext4Fs {
         if inode.i_links_count == 0 {
             // Free all data blocks owned by this file.
             self.driver.invalidate_extent_cache(ino);
-            self.driver.free_inode_data(&inode)?;
+            self.driver.free_inode_data(ino, &inode)?;
             // Free the external xattr block if present.
             self.driver.free_xattr_block(&inode)?;
 
@@ -338,7 +338,7 @@ impl FileSystem for Ext4Fs {
 
         // Free the directory's data blocks and external xattr block.
         self.driver.invalidate_extent_cache(ino);
-        self.driver.free_inode_data(&inode)?;
+        self.driver.free_inode_data(ino, &inode)?;
         self.driver.free_xattr_block(&inode)?;
 
         // Mark directory inode as deleted.
@@ -405,7 +405,7 @@ impl FileSystem for Ext4Fs {
         if src_mode == file_type::S_IFDIR && src_parent_ino != dst_parent_ino {
             // Update the ".." entry in the moved directory to point to
             // the new parent.
-            let mut dir_data = self.driver.read_file_data(&src_inode)?;
+            let mut dir_data = self.driver.read_file_data(src_ino, &src_inode)?;
             // ".." is the second entry (at offset 12 after the "." entry).
             // Its inode field is at bytes 12..16.
             if let Some(dest) = dir_data.get_mut(12..16) {
@@ -443,7 +443,7 @@ impl FileSystem for Ext4Fs {
 
         // Use extent-aware range read — only reads the blocks spanning
         // the requested byte range, not the entire file.
-        self.driver.read_file_range(&inode, offset, len)
+        self.driver.read_file_range(ino, &inode, offset, len)
     }
 
     fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
@@ -468,7 +468,7 @@ impl FileSystem for Ext4Fs {
             // Write extends past file end — fall back to read-modify-write.
             // A production implementation would extend the extent tree
             // incrementally; for now, the safe approach avoids complexity.
-            let mut contents = self.driver.read_file_data(&inode)?;
+            let mut contents = self.driver.read_file_data(ino, &inode)?;
             let start = offset as usize;
             let end_usize = end as usize;
 
@@ -515,7 +515,7 @@ impl FileSystem for Ext4Fs {
             self.driver.write_inode(ino, &new_inode)?;
 
             // Now free the old blocks.
-            self.driver.free_inode_data(&old_inode)?;
+            self.driver.free_inode_data(ino, &old_inode)?;
 
             self.driver.write_superblock()?;
             self.driver.write_group_descs()?;
@@ -533,7 +533,7 @@ impl FileSystem for Ext4Fs {
             //
             // Crash-safe ordering: write new data first, free old blocks.
             let old_inode = inode;
-            let mut data = self.driver.read_file_data(&inode)?;
+            let mut data = self.driver.read_file_data(ino, &inode)?;
             data.truncate(size as usize);
 
             let mut new_inode = inode;
@@ -542,7 +542,7 @@ impl FileSystem for Ext4Fs {
             self.driver.write_inode(ino, &new_inode)?;
 
             // Free old blocks now that inode points to new data.
-            self.driver.free_inode_data(&old_inode)?;
+            self.driver.free_inode_data(ino, &old_inode)?;
 
             self.driver.write_superblock()?;
             self.driver.write_group_descs()?;
@@ -552,7 +552,7 @@ impl FileSystem for Ext4Fs {
             // Extend: read, resize with zeros, rewrite.
             // Growing in place would require extending the extent tree,
             // which uses the same write_file_data path anyway.
-            let mut data = self.driver.read_file_data(&inode)?;
+            let mut data = self.driver.read_file_data(ino, &inode)?;
             let old_inode = inode;
 
             data.resize(size as usize, 0);
@@ -562,7 +562,7 @@ impl FileSystem for Ext4Fs {
             self.driver.write_file_data(&mut new_inode, &data)?;
             self.driver.write_inode(ino, &new_inode)?;
 
-            self.driver.free_inode_data(&old_inode)?;
+            self.driver.free_inode_data(ino, &old_inode)?;
 
             self.driver.write_superblock()?;
             self.driver.write_group_descs()?;
@@ -826,7 +826,7 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let target_bytes = self.driver.read_symlink_target(&inode)?;
+        let target_bytes = self.driver.read_symlink_target(ino, &inode)?;
         String::from_utf8(target_bytes)
             .map_err(|_| KernelError::IoError)
     }
@@ -1033,7 +1033,7 @@ impl Ext4Fs {
     ) -> KernelResult<()> {
         // Invalidate the dcache entry for this name.
         self.driver.dcache.invalidate_entry(dir_ino, name);
-        let mut dir_data = self.driver.read_file_data(dir_inode)?;
+        let mut dir_data = self.driver.read_file_data(dir_ino, dir_inode)?;
         let entry_header_size = core::mem::size_of::<super::ondisk::Ext4DirEntry2>();
         let mut offset = 0usize;
         let mut prev_offset: Option<usize> = None;
@@ -1100,8 +1100,8 @@ impl Ext4Fs {
     /// Delegates to the driver's `read_symlink_target` which handles
     /// both fast symlinks (≤60 bytes in i_block) and slow symlinks
     /// (target stored in data blocks).
-    fn read_symlink_target(&self, inode: &super::ondisk::Ext4Inode) -> KernelResult<Vec<u8>> {
-        self.driver.read_symlink_target(inode)
+    fn read_symlink_target(&self, inode_nr: u32, inode: &super::ondisk::Ext4Inode) -> KernelResult<Vec<u8>> {
+        self.driver.read_symlink_target(inode_nr, inode)
     }
 }
 

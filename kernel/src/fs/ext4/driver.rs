@@ -689,7 +689,7 @@ impl Ext4Driver {
         // Resolve the journal inode's extent tree to a flat list of
         // physical block numbers.  The journal module needs this to
         // map journal-relative offsets to device blocks.
-        let journal_blocks = self.resolve_inode_block_list(&journal_inode)?;
+        let journal_blocks = self.resolve_inode_block_list(journal_ino, &journal_inode)?;
         if journal_blocks.is_empty() {
             serial_println!("[ext4] Warning: journal inode has no blocks, skipping recovery.");
             return Ok(());
@@ -738,7 +738,7 @@ impl Ext4Driver {
     /// Used to map the journal inode's logical blocks to physical device
     /// blocks.  Walks the extent tree and expands each extent into
     /// individual block numbers in logical order.
-    fn resolve_inode_block_list(&self, inode: &Ext4Inode) -> KernelResult<Vec<u64>> {
+    fn resolve_inode_block_list(&self, inode_nr: u32, inode: &Ext4Inode) -> KernelResult<Vec<u64>> {
         let file_size = self.inode_size(inode);
         let block_size = u64::from(self.sb.block_size);
         if file_size == 0 || block_size == 0 {
@@ -755,7 +755,7 @@ impl Ext4Driver {
         //
         // Build a sorted list of (logical_start, phys_start, len) from
         // the extent tree leaves.
-        let leaf_extents = self.collect_leaf_extents(inode)?;
+        let leaf_extents = self.collect_leaf_extents(inode_nr, inode)?;
 
         for logical_block in 0..total_blocks {
             // Binary search in the sorted leaf extents for the range
@@ -783,6 +783,7 @@ impl Ext4Driver {
     /// (not index node blocks) and preserves the logical block mapping.
     fn collect_leaf_extents(
         &self,
+        inode_nr: u32,
         inode: &Ext4Inode,
     ) -> KernelResult<Vec<(u64, u64, u64)>> {
         let mut result = Vec::new();
@@ -797,7 +798,8 @@ impl Ext4Driver {
             return Ok(result);
         }
 
-        self.collect_leaf_extents_recursive(block_bytes, &header, &mut result)?;
+        let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
+        self.collect_leaf_extents_recursive(ino_seed, block_bytes, &header, &mut result)?;
 
         // Sort by logical start block for binary search.
         result.sort_by_key(|&(logical, _, _)| logical);
@@ -808,6 +810,7 @@ impl Ext4Driver {
     /// with their logical block mappings.
     fn collect_leaf_extents_recursive(
         &self,
+        ino_seed: u32,
         node_data: &[u8],
         header: &Ext4ExtentHeader,
         result: &mut Vec<(u64, u64, u64)>,
@@ -856,7 +859,15 @@ impl Ext4Driver {
                     continue;
                 }
 
-                self.collect_leaf_extents_recursive(&child_data, &child_header, result)?;
+                // Validate extent block checksum.
+                validate_extent_block_checksum(
+                    self.sb.has_metadata_csum,
+                    ino_seed,
+                    &child_data,
+                    &child_header,
+                )?;
+
+                self.collect_leaf_extents_recursive(ino_seed, &child_data, &child_header, result)?;
             }
         }
 
@@ -957,7 +968,7 @@ impl Ext4Driver {
     ///
     /// Supports both extent-based (modern ext4) and indirect-block-based
     /// (ext2/ext3 compatibility) inodes.
-    pub fn read_file_data(&self, inode: &Ext4Inode) -> KernelResult<Vec<u8>> {
+    pub fn read_file_data(&self, inode_nr: u32, inode: &Ext4Inode) -> KernelResult<Vec<u8>> {
         let file_size = self.inode_size(inode);
 
         if file_size == 0 {
@@ -971,7 +982,7 @@ impl Ext4Driver {
 
         if (inode.i_flags & inode_flags::EXTENTS) != 0 {
             // Extent-based file.
-            self.read_extent_data(inode, file_size)
+            self.read_extent_data(inode_nr, inode, file_size)
         } else {
             // Indirect-block-based file (ext2/ext3 compat).
             self.read_indirect_data(inode, file_size)
@@ -1010,6 +1021,7 @@ impl Ext4Driver {
     /// avoiding reading the entire file for large-file partial reads.
     pub fn read_file_range(
         &self,
+        inode_nr: u32,
         inode: &Ext4Inode,
         offset: u64,
         len: usize,
@@ -1048,8 +1060,10 @@ impl Ext4Driver {
                 return Err(KernelError::IoError);
             }
 
+            let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
             let mut result = Vec::with_capacity(actual_len);
             self.read_range_from_tree(
+                ino_seed,
                 block_bytes,
                 &header,
                 first_logical,
@@ -1115,7 +1129,7 @@ impl Ext4Driver {
         dir_inode: &Ext4Inode,
     ) -> KernelResult<Vec<(u32, u8, String)>> {
         // Read directory data.
-        let data = self.read_file_data(dir_inode)?;
+        let data = self.read_file_data(dir_ino, dir_inode)?;
 
         // Validate per-block checksums if metadata_csum is enabled.
         if self.sb.has_metadata_csum {
@@ -1267,7 +1281,7 @@ impl Ext4Driver {
                 }
 
                 // Read the symlink target.
-                let target = self.read_symlink_target(&child_inode)?;
+                let target = self.read_symlink_target(child_ino, &child_inode)?;
                 let target_str = core::str::from_utf8(&target)
                     .map_err(|_| KernelError::IoError)?;
 
@@ -1300,7 +1314,7 @@ impl Ext4Driver {
     ///
     /// Fast symlinks (≤60 bytes) store the target in `i_block`.
     /// Slow symlinks store it in data blocks via the extent tree.
-    pub fn read_symlink_target(&self, inode: &Ext4Inode) -> KernelResult<Vec<u8>> {
+    pub fn read_symlink_target(&self, inode_nr: u32, inode: &Ext4Inode) -> KernelResult<Vec<u8>> {
         let size = self.inode_size(inode) as usize;
 
         if size <= 60 && (inode.i_flags & inode_flags::EXTENTS) == 0 {
@@ -1310,7 +1324,7 @@ impl Ext4Driver {
             Ok(target.to_vec())
         } else {
             // Slow symlink: target stored in data blocks.
-            self.read_file_data(inode)
+            self.read_file_data(inode_nr, inode)
         }
     }
 
@@ -1576,7 +1590,7 @@ impl Ext4Driver {
         }
 
         // Read existing directory data.
-        let mut dir_data = self.read_file_data(dir_inode)?;
+        let mut dir_data = self.read_file_data(dir_inode_nr, dir_inode)?;
         let block_size = self.sb.block_size as usize;
 
         // Calculate the new entry size (aligned to 4 bytes).
@@ -1669,6 +1683,7 @@ impl Ext4Driver {
     /// inodes with no data or non-extent inodes.
     pub fn collect_extent_blocks(
         &self,
+        inode_nr: u32,
         inode: &Ext4Inode,
     ) -> KernelResult<Vec<(u64, u32)>> {
         let mut result = Vec::new();
@@ -1687,13 +1702,15 @@ impl Ext4Driver {
             return Ok(result);
         }
 
-        self.collect_extents_recursive(block_bytes, &header, &mut result)?;
+        let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
+        self.collect_extents_recursive(ino_seed, block_bytes, &header, &mut result)?;
         Ok(result)
     }
 
     /// Recursively walk an extent tree node and collect all block ranges.
     fn collect_extents_recursive(
         &self,
+        ino_seed: u32,
         node_data: &[u8],
         header: &Ext4ExtentHeader,
         result: &mut Vec<(u64, u32)>,
@@ -1748,8 +1765,16 @@ impl Ext4Driver {
                     continue;
                 }
 
+                // Validate extent block checksum.
+                validate_extent_block_checksum(
+                    self.sb.has_metadata_csum,
+                    ino_seed,
+                    &child_data,
+                    &child_header,
+                )?;
+
                 // Recurse into the child.
-                self.collect_extents_recursive(&child_data, &child_header, result)?;
+                self.collect_extents_recursive(ino_seed, &child_data, &child_header, result)?;
 
                 // The index block itself is also allocated and needs freeing.
                 result.push((child_block, 1));
@@ -1764,8 +1789,8 @@ impl Ext4Driver {
     /// Walks the extent tree, collects all block ranges, and frees them
     /// via the block allocator.  Does NOT free the inode itself — call
     /// `free_inode_number` separately.
-    pub fn free_inode_data(&mut self, inode: &Ext4Inode) -> KernelResult<()> {
-        let ranges = self.collect_extent_blocks(inode)?;
+    pub fn free_inode_data(&mut self, inode_nr: u32, inode: &Ext4Inode) -> KernelResult<()> {
+        let ranges = self.collect_extent_blocks(inode_nr, inode)?;
 
         for (start, count) in ranges {
             // Free each range.  We tolerate individual errors (e.g., double-free
@@ -1859,7 +1884,8 @@ impl Ext4Driver {
                 return Ok(None);
             }
 
-            self.lookup_in_tree(inode_nr, block_bytes, &header, logical_block)
+            let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
+            self.lookup_in_tree(inode_nr, ino_seed, block_bytes, &header, logical_block)
         } else {
             // Indirect-block-based inode (ext2/ext3 compatibility).
             self.lookup_indirect_block(inode, logical_block)
@@ -1874,6 +1900,7 @@ impl Ext4Driver {
     fn lookup_in_tree(
         &self,
         inode_nr: u32,
+        ino_seed: u32,
         node_data: &[u8],
         header: &Ext4ExtentHeader,
         logical_block: u64,
@@ -1949,7 +1976,15 @@ impl Ext4Driver {
                     return Ok(None);
                 }
 
-                self.lookup_in_tree(inode_nr, &child_data, &child_header, logical_block)
+                // Validate extent block checksum (non-root blocks have a tail).
+                validate_extent_block_checksum(
+                    self.sb.has_metadata_csum,
+                    ino_seed,
+                    &child_data,
+                    &child_header,
+                )?;
+
+                self.lookup_in_tree(inode_nr, ino_seed, &child_data, &child_header, logical_block)
             } else {
                 Ok(None)
             }
@@ -2143,6 +2178,7 @@ impl Ext4Driver {
     /// the logical block range `[first_logical, last_logical]`.
     fn read_range_from_tree(
         &self,
+        ino_seed: u32,
         node_data: &[u8],
         header: &Ext4ExtentHeader,
         first_logical: u64,
@@ -2241,7 +2277,16 @@ impl Ext4Driver {
                     continue;
                 }
 
+                // Validate extent block checksum.
+                validate_extent_block_checksum(
+                    self.sb.has_metadata_csum,
+                    ino_seed,
+                    &child_data,
+                    &child_header,
+                )?;
+
                 self.read_range_from_tree(
+                    ino_seed,
                     &child_data,
                     &child_header,
                     first_logical,
@@ -2572,7 +2617,7 @@ impl Ext4Driver {
     }
 
     /// Read file data using the extent tree.
-    fn read_extent_data(&self, inode: &Ext4Inode, file_size: u64) -> KernelResult<Vec<u8>> {
+    fn read_extent_data(&self, inode_nr: u32, inode: &Ext4Inode, file_size: u64) -> KernelResult<Vec<u8>> {
         let block_size = u64::from(self.sb.block_size);
 
         // The extent tree root is in inode.i_block (60 bytes).
@@ -2626,8 +2671,9 @@ impl Ext4Driver {
             // Multi-level extent tree — follow index nodes.
             // For simplicity, handle depth=1 (one level of indirection).
             // Deeper trees are rare for files under ~340 MB.
+            let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
             self.read_extent_tree_recursive(
-                &block_bytes, &header, file_size, &mut result,
+                ino_seed, &block_bytes, &header, file_size, &mut result,
             )?;
         }
 
@@ -2639,6 +2685,7 @@ impl Ext4Driver {
     /// Recursively read data from an extent tree node.
     fn read_extent_tree_recursive(
         &self,
+        ino_seed: u32,
         node_data: &[u8],
         header: &Ext4ExtentHeader,
         file_size: u64,
@@ -2703,8 +2750,16 @@ impl Ext4Driver {
                     return Err(KernelError::IoError);
                 }
 
+                // Validate extent block checksum.
+                validate_extent_block_checksum(
+                    self.sb.has_metadata_csum,
+                    ino_seed,
+                    &child_data,
+                    &child_header,
+                )?;
+
                 self.read_extent_tree_recursive(
-                    &child_data, &child_header, file_size, result,
+                    ino_seed, &child_data, &child_header, file_size, result,
                 )?;
             }
         }
@@ -3042,6 +3097,114 @@ fn stamp_superblock_checksum(buf: &mut [u8]) {
     buf[CSUM_OFFSET.saturating_add(1)] = csum_bytes[1];
     buf[CSUM_OFFSET.saturating_add(2)] = csum_bytes[2];
     buf[CSUM_OFFSET.saturating_add(3)] = csum_bytes[3];
+}
+
+// ---------------------------------------------------------------------------
+// Per-inode checksum seed
+// ---------------------------------------------------------------------------
+
+/// Compute the per-inode checksum seed used for extent blocks and directory
+/// blocks.  This is `crc32c_raw(crc32c_raw(sb.csum_seed, &ino_le), &gen_le)`.
+///
+/// Returns 0 if metadata checksums are disabled.
+///
+/// Based on Linux `ext4_inode_csum_set()` / `ext4_inode_csum_init()`.
+fn inode_csum_seed(sb: &ParsedSuperblock, inode_nr: u32, inode_gen: u32) -> u32 {
+    if !sb.has_metadata_csum {
+        return 0;
+    }
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &inode_nr.to_le_bytes());
+    crate::crypto::crc32c_raw(crc, &inode_gen.to_le_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Extent block checksums
+// ---------------------------------------------------------------------------
+
+/// Validate a non-root extent tree block's CRC32C checksum.
+///
+/// ext4 with metadata_csum stores a 4-byte `ext4_extent_tail` after the
+/// maximum extent entries (at offset `header_size + eh_max * entry_size`).
+/// The root extent block (in the inode's i_block) does not have a tail —
+/// it is covered by the inode checksum.
+///
+/// The checksum is CRC32C(inode_csum_seed + block_data[..tail_offset]).
+///
+/// Returns Ok(()) if checksums are disabled or if the checksum matches.
+fn validate_extent_block_checksum(
+    has_metadata_csum: bool,
+    ino_seed: u32,
+    block_data: &[u8],
+    header: &Ext4ExtentHeader,
+) -> KernelResult<()> {
+    if !has_metadata_csum {
+        return Ok(());
+    }
+
+    // Tail offset: header_size + eh_max * entry_size.
+    // Both Ext4Extent and Ext4ExtentIdx are 12 bytes.
+    let entry_size = core::mem::size_of::<Ext4Extent>();
+    let tail_offset = core::mem::size_of::<Ext4ExtentHeader>()
+        .saturating_add((header.eh_max as usize).saturating_mul(entry_size));
+
+    let tail_end = tail_offset.saturating_add(4);
+    if block_data.len() < tail_end {
+        return Ok(()); // Block too small for a checksum tail.
+    }
+
+    // Read the stored checksum.
+    let tail_bytes = block_data.get(tail_offset..tail_end)
+        .ok_or(KernelError::IoError)?;
+    let stored = u32::from_le_bytes([
+        tail_bytes[0], tail_bytes[1], tail_bytes[2], tail_bytes[3],
+    ]);
+
+    // Compute: CRC32C(inode_csum_seed, block_data[..tail_offset]).
+    let data = block_data.get(..tail_offset).ok_or(KernelError::IoError)?;
+    let computed = crate::crypto::crc32c_seed(ino_seed, data);
+
+    if computed != stored {
+        serial_println!(
+            "[ext4] extent block checksum MISMATCH: stored={:#010x} computed={:#010x}",
+            stored, computed,
+        );
+        return Err(KernelError::CorruptedData);
+    }
+
+    Ok(())
+}
+
+/// Compute and stamp a non-root extent block's checksum tail.
+///
+/// Updates the 4-byte `et_checksum` field in-place at the tail offset.
+#[allow(dead_code)]
+fn stamp_extent_block_checksum(
+    has_metadata_csum: bool,
+    ino_seed: u32,
+    block_data: &mut [u8],
+    header: &Ext4ExtentHeader,
+) {
+    if !has_metadata_csum {
+        return;
+    }
+
+    let entry_size = core::mem::size_of::<Ext4Extent>();
+    let tail_offset = core::mem::size_of::<Ext4ExtentHeader>()
+        .saturating_add((header.eh_max as usize).saturating_mul(entry_size));
+
+    let tail_end = tail_offset.saturating_add(4);
+    if block_data.len() < tail_end {
+        return;
+    }
+
+    let computed = crate::crypto::crc32c_seed(
+        ino_seed,
+        block_data.get(..tail_offset).unwrap_or(&[]),
+    );
+    let csum_bytes = computed.to_le_bytes();
+    if let Some(dest) = block_data.get_mut(tail_offset..tail_end) {
+        dest.copy_from_slice(&csum_bytes);
+    }
 }
 
 // ---------------------------------------------------------------------------

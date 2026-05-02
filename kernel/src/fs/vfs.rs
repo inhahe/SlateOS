@@ -777,9 +777,21 @@ impl Vfs {
         );
 
         // Release any advisory locks on paths under this mount.
+        // Use path-boundary check to avoid accidentally clearing locks
+        // on paths like "/mnt_data" when unmounting "/mnt".
         drop(vfs);
         let mut table = LOCK_TABLE.lock();
-        table.retain(|entry| !entry.path.starts_with(mount_path));
+        table.retain(|entry| {
+            if entry.path == mount_path {
+                return false; // Exact match — remove.
+            }
+            if entry.path.starts_with(mount_path) {
+                // Only remove if mount_path is a path boundary prefix.
+                entry.path.as_bytes().get(mount_path.len()) != Some(&b'/')
+            } else {
+                true // Different prefix — keep.
+            }
+        });
 
         Ok(())
     }

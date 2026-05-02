@@ -160,6 +160,7 @@ fn execute(line: &str) {
         "chmod" => cmd_chmod(args),
         "chown" => cmd_chown(args),
         "touch" => cmd_touch(args),
+        "append" => cmd_append(args),
         "tree" => cmd_tree(args),
         "du" => cmd_du(args),
         "find" => cmd_find(args),
@@ -214,6 +215,7 @@ fn cmd_help() {
     crate::console_println!("  chmod M F Set permissions (octal, e.g., chmod 755 file)");
     crate::console_println!("  chown U F Set owner (uid:gid, e.g., chown 1000:1000 file)");
     crate::console_println!("  touch F   Create file or update timestamps");
+    crate::console_println!("  append F T Append text T to file F");
     crate::console_println!("  tree [D]  Show directory tree recursively");
     crate::console_println!("  du [D]    Show disk usage of directory");
     crate::console_println!("  find [D]P Search for files matching pattern");
@@ -1053,6 +1055,40 @@ fn cmd_touch(args: &str) {
                     crate::console_println!("touch: {}: {:?}", path, e);
                 }
             }
+        }
+    }
+}
+
+/// Append text to a file.
+fn cmd_append(args: &str) {
+    let mut parts = args.splitn(2, ' ');
+    let filename = match parts.next() {
+        Some(f) if !f.is_empty() => f,
+        _ => {
+            crate::console_println!("Usage: append <filename> <text>");
+            return;
+        }
+    };
+    let text = parts.next().unwrap_or("");
+
+    let path = if filename.starts_with('/') {
+        alloc::string::String::from(filename)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(filename);
+        s
+    };
+
+    let mut data = alloc::vec::Vec::from(text.as_bytes());
+    if !text.ends_with('\n') {
+        data.push(b'\n');
+    }
+    match crate::fs::Vfs::append(&path, &data) {
+        Ok(()) => {
+            crate::console_println!("Appended {} bytes to {}", data.len(), path);
+        }
+        Err(e) => {
+            crate::console_println!("append: {}: {:?}", path, e);
         }
     }
 }

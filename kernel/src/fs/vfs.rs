@@ -1075,6 +1075,22 @@ impl Vfs {
         Ok(())
     }
 
+    /// Append data to the end of a file.
+    ///
+    /// Creates the file if it doesn't exist.  Uses write_at at the
+    /// current file size for efficient append without rewriting.
+    pub fn append(path: &str, data: &[u8]) -> KernelResult<()> {
+        let offset = match Self::stat(path) {
+            Ok(entry) => entry.size,
+            Err(KernelError::NotFound) => {
+                // File doesn't exist — create it.
+                return Self::write_file(path, data);
+            }
+            Err(e) => return Err(e),
+        };
+        Self::write_at(path, offset, data)
+    }
+
     /// Truncate a file to the given size.
     pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;

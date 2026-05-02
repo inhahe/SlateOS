@@ -1908,7 +1908,10 @@ const COMMANDS: &[&str] = &[
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "tree", "true", "truncate", "type", "umount",
     "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
-    "wc", "wget", "while", "whoami", "write", "xattr", "xxd",
+    "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
+    // Scripting keywords and commands
+    "break", "case", "continue", "declare", "for", "function", "in",
+    "local", "read", "return", "shift", "typeof",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -2474,6 +2477,7 @@ fn dispatch(line: &str) {
         "printenv" | "env" => cmd_printenv(),
         "declare" => cmd_declare(args),
         "read" => cmd_read(args),
+        "which" | "typeof" => cmd_type(args),
         "return" => {
             // `return [N]` — set exit status and signal function return.
             if !args.is_empty() {
@@ -5430,6 +5434,70 @@ fn cmd_unset(args: &str) {
 ///   `declare -f`       — list all function names and bodies
 ///   `declare -f NAME`  — show a specific function's body
 ///   `declare`          — list all function names
+/// Show what kind of command a name is (builtin, function, alias).
+///
+/// Usage: `type name [name ...]`
+fn cmd_type(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: type <name> [<name> ...]");
+        return;
+    }
+
+    for name in args.split_whitespace() {
+        // Check aliases first.
+        if let Some(val) = alias_get(name) {
+            crate::console_println!("{} is aliased to '{}'", name, val);
+            continue;
+        }
+
+        // Check user-defined functions.
+        if FUNCTIONS.lock().contains_key(name) {
+            crate::console_println!("{} is a function", name);
+            continue;
+        }
+
+        // Check builtins (simplified — we check the dispatch table names).
+        if is_builtin(name) {
+            crate::console_println!("{} is a shell builtin", name);
+            continue;
+        }
+
+        // Check keywords.
+        if matches!(name, "if" | "then" | "elif" | "else" | "fi" | "while" | "for"
+            | "do" | "done" | "case" | "esac" | "function" | "in")
+        {
+            crate::console_println!("{} is a shell keyword", name);
+            continue;
+        }
+
+        crate::console_println!("{}: not found", name);
+        set_exit(1);
+    }
+}
+
+/// Check if a command name is a built-in shell command.
+fn is_builtin(name: &str) -> bool {
+    matches!(name,
+        "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
+        | "uptime" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
+        | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
+        | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
+        | "du" | "find" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
+        | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
+        | "sysctl" | "hostname" | "dd" | "free" | "lsblk" | "blkdev" | "glob"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "basename" | "dirname"
+        | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
+        | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
+        | "wget" | "http" | "version" | "ver" | "source" | "." | "seq" | "nl"
+        | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
+        | "env" | "declare" | "read" | "which" | "typeof" | "export" | "set"
+        | "unset" | "alias" | "unalias" | "return" | "break" | "continue"
+        | "shift" | "local"
+    )
+}
+
 fn cmd_declare(args: &str) {
     let funcs = FUNCTIONS.lock();
 

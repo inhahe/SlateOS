@@ -1623,6 +1623,11 @@ impl Ext4Driver {
                         block_size.saturating_sub(space % block_size),
                     );
 
+                    // Stamp directory block checksums before writing.
+                    stamp_dir_data_checksums(
+                        &self.sb, dir_inode_nr, dir_inode.i_generation, &mut dir_data,
+                    );
+
                     // Write the modified directory data back.
                     self.write_file_data(dir_inode, &dir_data)?;
                     self.write_inode(dir_inode_nr, dir_inode)?;
@@ -1640,16 +1645,36 @@ impl Ext4Driver {
             goal,
         )?;
 
-        // Initialize the new block with a single entry spanning the whole block.
+        // Initialize the new block with a single entry.
+        // If metadata checksums are enabled, reserve 12 bytes at the end
+        // for the dirent tail and reduce the entry's rec_len accordingly.
         let mut block_buf = vec![0u8; block_size];
+        let tail_size = core::mem::size_of::<super::ondisk::Ext4DirEntryTail>();
+        let entry_rec_len = if self.sb.has_metadata_csum {
+            block_size.saturating_sub(tail_size)
+        } else {
+            block_size
+        };
         write_dir_entry_raw(
             &mut block_buf,
             0,
             child_ino,
             name_bytes,
             file_type_byte,
-            block_size, // rec_len spans whole block
+            entry_rec_len,
         );
+
+        // Initialize and stamp the dirent tail if checksums are enabled.
+        if self.sb.has_metadata_csum {
+            init_dirent_tail(&mut block_buf);
+            stamp_dirent_checksum(
+                &self.sb,
+                dir_inode_nr,
+                dir_inode.i_generation,
+                &mut block_buf,
+            );
+        }
+
         self.reader.write_block(new_block, &block_buf)?;
 
         // Update the directory inode to include the new block.
@@ -3327,6 +3352,73 @@ fn stamp_dirent_checksum(
     let csum_bytes = computed.to_le_bytes();
     if let Some(dest) = block_data.get_mut(csum_offset..csum_offset.saturating_add(4)) {
         dest.copy_from_slice(&csum_bytes);
+    }
+}
+
+/// Stamp directory block checksums on all block-sized chunks in a buffer.
+///
+/// Used before writing modified directory data back to disk.
+/// Each block that has a valid dirent tail gets its checksum recomputed.
+pub(super) fn stamp_dir_data_checksums(
+    sb: &ParsedSuperblock,
+    dir_inode_nr: u32,
+    dir_inode_gen: u32,
+    dir_data: &mut [u8],
+) {
+    if !sb.has_metadata_csum {
+        return;
+    }
+    let bs = sb.block_size as usize;
+    if bs == 0 {
+        return;
+    }
+    let mut offset: usize = 0;
+    while offset.saturating_add(bs) <= dir_data.len() {
+        if let Some(block) = dir_data.get_mut(offset..offset.saturating_add(bs)) {
+            stamp_dirent_checksum(sb, dir_inode_nr, dir_inode_gen, block);
+        }
+        offset = offset.saturating_add(bs);
+    }
+}
+
+/// Initialize a 12-byte dirent tail at the end of a directory block.
+///
+/// When metadata_csum is enabled, new directory blocks must include a
+/// fake dirent entry at the end that holds the CRC32C checksum.  The
+/// previous real entry's `rec_len` must be reduced to leave room for
+/// the 12-byte tail.
+fn init_dirent_tail(block_data: &mut [u8]) {
+    let tail_size = core::mem::size_of::<super::ondisk::Ext4DirEntryTail>();
+    if block_data.len() < tail_size {
+        return;
+    }
+
+    let tail_offset = block_data.len().saturating_sub(tail_size);
+
+    // Write the dirent tail structure.
+    // det_reserved_zero1 (4 bytes) = 0
+    if let Some(dest) = block_data.get_mut(tail_offset..tail_offset.saturating_add(4)) {
+        dest.copy_from_slice(&0u32.to_le_bytes());
+    }
+    // det_rec_len (2 bytes) = 12
+    if let Some(dest) = block_data.get_mut(
+        tail_offset.saturating_add(4)..tail_offset.saturating_add(6)
+    ) {
+        dest.copy_from_slice(&12u16.to_le_bytes());
+    }
+    // det_reserved_zero2 (1 byte) = 0
+    if let Some(dest) = block_data.get_mut(tail_offset.saturating_add(6)..tail_offset.saturating_add(7)) {
+        dest[0] = 0;
+    }
+    // det_reserved_ft (1 byte) = 0xDE
+    if let Some(dest) = block_data.get_mut(tail_offset.saturating_add(7)..tail_offset.saturating_add(8)) {
+        dest[0] = super::ondisk::EXT4_DIRENT_TAIL_MARKER;
+    }
+    // det_checksum (4 bytes) = 0 (will be stamped separately)
+    if let Some(dest) = block_data.get_mut(
+        tail_offset.saturating_add(8)..tail_offset.saturating_add(12)
+    ) {
+        dest.copy_from_slice(&0u32.to_le_bytes());
     }
 }
 

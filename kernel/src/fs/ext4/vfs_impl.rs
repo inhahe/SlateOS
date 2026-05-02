@@ -411,6 +411,15 @@ impl FileSystem for Ext4Fs {
             if let Some(dest) = dir_data.get_mut(12..16) {
                 dest.copy_from_slice(&dst_parent_ino.to_le_bytes());
             }
+
+            // Stamp directory block checksums after modifying ".." entry.
+            super::driver::stamp_dir_data_checksums(
+                self.driver.superblock(),
+                src_ino,
+                src_inode.i_generation,
+                &mut dir_data,
+            );
+
             let mut dir_inode_copy = src_inode;
             self.driver.invalidate_extent_cache(src_ino);
             self.driver.write_file_data(&mut dir_inode_copy, &dir_data)?;
@@ -1075,6 +1084,14 @@ impl Ext4Fs {
                                 dest.copy_from_slice(&0u32.to_le_bytes());
                             }
                         }
+
+                        // Stamp directory block checksums before writing.
+                        super::driver::stamp_dir_data_checksums(
+                            self.driver.superblock(),
+                            dir_ino,
+                            dir_inode.i_generation,
+                            &mut dir_data,
+                        );
 
                         // Write modified directory data back.
                         let mut dir_inode_copy = *dir_inode;

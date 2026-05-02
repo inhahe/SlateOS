@@ -380,6 +380,14 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Procfs `/proc/config`: kernel build configuration (arch, page size, max CPUs, enabled subsystems, limits)
   - [x] Kshell `file` command: file type identification using lstat (directory, symlink with target, regular file with extension-based type hints, ~40 extensions)
   - [x] ext4 journal byte order fix: all jbd2 fields now correctly read/written as big-endian (network byte order) per spec, compatible with Linux-formatted ext4 images
+  - [x] Procfs `/proc/fsstats`: per-filesystem debug statistics, df -v verbose mode
+  - [x] Trash auto-prune: automatically delete oldest trash items when disk usage exceeds 90%, runs after each trash() operation
+  - [x] Kshell `trash` command: trash FILE, --list, --restore, --empty, --purge, --prune
+  - [x] Notify MetadataChanged events: VFS metadata operations (set_attributes, set_owner, set_permissions, set/remove_xattr) now emit MetadataChanged instead of Modified
+  - [x] Kshell help text: added 20+ missing commands (dmesg, file, printf, trash, cut, tr, tac, fold, paste, yes, xargs, etc.) and expanded control flow section
+  - [x] ext4 inline xattr support: reads xattrs from both inode body (inline) and external block, Linux compatibility for security.selinux and other inline attrs
+  - [x] ext4 creation time (i_crtime): metadata() now reads creation time from extra inode fields
+  - [x] Kshell timestamp formatting: stat and ls -l show YYYY-MM-DD HH:MM:SS via civil_from_days algorithm instead of raw epoch seconds
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

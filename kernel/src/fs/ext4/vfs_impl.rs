@@ -507,9 +507,57 @@ impl FileSystem for Ext4Fs {
                 }
                 Err(e) => Err(e),
             }
+        } else if offset < file_size {
+            // Write starts within the file but extends past EOF.
+            // Optimization: write the in-bounds portion in place, then
+            // append the remainder using extend_file_data.  This avoids
+            // reading the entire file for the common case of overwriting
+            // the tail + appending new data.
+            let in_bounds_len = file_size.saturating_sub(offset) as usize;
+            let in_bounds = data.get(..in_bounds_len).unwrap_or(data);
+            let past_eof = data.get(in_bounds_len..).unwrap_or(&[]);
+
+            // Step 1: write the in-bounds portion in place.
+            if !in_bounds.is_empty() {
+                self.driver.write_at_inplace(ino, &inode, offset, in_bounds)?;
+            }
+
+            // Step 2: append the past-EOF portion.
+            if !past_eof.is_empty() {
+                // Re-read inode (write_at_inplace doesn't change it, but
+                // extend_file_data needs the current state).
+                let mut new_inode = self.driver.read_inode(ino)?;
+                match self.driver.extend_file_data(&mut new_inode, past_eof) {
+                    Ok(()) => {
+                        self.driver.write_inode(ino, &new_inode)?;
+                        self.driver.invalidate_extent_cache(ino);
+                        self.driver.write_superblock()?;
+                        self.driver.write_group_descs()?;
+                    }
+                    Err(KernelError::NotSupported) => {
+                        // Fall back to full read-modify-write.
+                        let mut contents = self.driver.read_file_data(ino, &inode)?;
+                        let start = offset as usize;
+                        let end_usize = end as usize;
+                        if end_usize > contents.len() {
+                            contents.resize(end_usize, 0);
+                        }
+                        if let Some(dest) = contents.get_mut(
+                            start..start.saturating_add(data.len())
+                        ) {
+                            dest.copy_from_slice(data);
+                        }
+                        return self.write_file(path, &contents);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            self.driver.flush()?;
+            Ok(())
         } else {
-            // Write starts before EOF but extends past it — need to
-            // patch existing data AND extend.  Read-modify-write.
+            // Write starts past EOF — zero-fill gap then write.
+            // This is an unusual case; fall back to read-modify-write.
             let mut contents = self.driver.read_file_data(ino, &inode)?;
             let start = offset as usize;
             let end_usize = end as usize;

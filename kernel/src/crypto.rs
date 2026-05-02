@@ -1,15 +1,17 @@
 //! Cryptographic primitives for the kernel.
 //!
-//! Currently provides SHA-256 for file content hashing, ext4 metadata
-//! checksums, and integrity verification.  All implementations are
-//! pure Rust, no_std compatible, and constant-time where security-relevant.
+//! Provides:
+//! - **SHA-256** for file content hashing and integrity verification
+//! - **CRC32C** (Castagnoli) for ext4 metadata checksums
 //!
-//! ## SHA-256
+//! All implementations are pure Rust, no_std compatible, and correct.
+//! Not optimized for speed (no SIMD/SHA-NI/CRC32 instructions) but
+//! suitable for integrity checking at filesystem-operation frequency.
 //!
-//! Standard FIPS 180-4 SHA-256.  Not optimized for speed (no SIMD/SHA-NI)
-//! but correct and usable for integrity checking.
+//! ## References
 //!
-//! Reference: FIPS 180-4 (Secure Hash Standard)
+//! - SHA-256: FIPS 180-4 (Secure Hash Standard)
+//! - CRC32C: RFC 3720 appendix B (iSCSI), polynomial 0x1EDC6F41
 
 use alloc::vec::Vec;
 
@@ -344,5 +346,132 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[crypto]   Incremental update = correct");
 
     crate::serial_println!("[crypto] SHA-256 self-test passed.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CRC32C (Castagnoli) implementation
+// ---------------------------------------------------------------------------
+
+/// CRC32C lookup table, pre-computed from the Castagnoli polynomial
+/// 0x82F63B78 (bit-reversed form of 0x1EDC6F41).
+///
+/// Generated at compile time.  Each entry is the CRC of the byte index
+/// value processed through 8 rounds of the bit-at-a-time algorithm.
+const CRC32C_TABLE: [u32; 256] = {
+    // Castagnoli polynomial (bit-reversed).
+    const POLY: u32 = 0x82F6_3B78;
+    let mut table = [0u32; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        let mut crc = i;
+        let mut bit = 0;
+        while bit < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ POLY;
+            } else {
+                crc >>= 1;
+            }
+            bit += 1;
+        }
+        table[i as usize] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// Compute CRC32C (Castagnoli) over a byte slice.
+///
+/// Uses the standard bit-reflected table-driven algorithm.  The initial
+/// value is `!0` (all ones) and the final value is inverted.
+///
+/// This is the algorithm used by ext4 metadata checksums (`metadata_csum`
+/// feature).
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(crc32c(b"123456789"), 0xE3069283);
+/// ```
+pub fn crc32c(data: &[u8]) -> u32 {
+    crc32c_seed(!0u32, data)
+}
+
+/// Compute CRC32C with a custom initial seed value.
+///
+/// The caller provides the seed (typically `!0` or a previous CRC32C value).
+/// Result is XORed with `!0` on return.
+///
+/// ext4 uses this to chain checksums: e.g., the superblock checksum is
+/// `crc32c(crc32c(~0, superblock_uuid), superblock_bytes_excluding_checksum)`.
+pub fn crc32c_seed(seed: u32, data: &[u8]) -> u32 {
+    let mut crc = seed;
+    for &byte in data {
+        let idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
+        crc = CRC32C_TABLE[idx] ^ (crc >> 8);
+    }
+    crc ^ !0u32
+}
+
+/// Compute CRC32C without final inversion.
+///
+/// Returns the raw CRC accumulator (not XORed with `!0`).  This is
+/// useful when chaining multiple CRC32C computations, as ext4 does
+/// when computing metadata checksums with a UUID-derived seed.
+///
+/// Usage pattern for ext4:
+/// ```ignore
+/// let seed = crc32c_raw(!0, &uuid);          // raw accumulator
+/// let final_crc = crc32c_seed(seed, &data);  // final with inversion
+/// ```
+pub fn crc32c_raw(seed: u32, data: &[u8]) -> u32 {
+    let mut crc = seed;
+    for &byte in data {
+        let idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
+        crc = CRC32C_TABLE[idx] ^ (crc >> 8);
+    }
+    crc
+}
+
+/// Self-test for CRC32C.
+pub fn self_test_crc32c() -> Result<(), crate::error::KernelError> {
+    crate::serial_println!("[crypto] Running CRC32C self-test...");
+
+    // Test vector 1: standard check value for "123456789".
+    // The CRC32C of the ASCII string "123456789" is 0xE3069283.
+    let check = crc32c(b"123456789");
+    if check != 0xE306_9283 {
+        crate::serial_println!("[crypto]   FAIL: CRC32C(\"123456789\") = {:#010X}, expected 0xE3069283", check);
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!("[crypto]   CRC32C(\"123456789\") = {:#010X} (correct)", check);
+
+    // Test vector 2: empty input.
+    let empty = crc32c(b"");
+    if empty != 0x0000_0000 {
+        crate::serial_println!("[crypto]   FAIL: CRC32C(\"\") = {:#010X}, expected 0x00000000", empty);
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!("[crypto]   CRC32C(\"\") = {:#010X} (correct)", empty);
+
+    // Test vector 3: 32 zero bytes.
+    let zeros = [0u8; 32];
+    let z_crc = crc32c(&zeros);
+    if z_crc != 0xAA36_918A {
+        crate::serial_println!("[crypto]   FAIL: CRC32C(32 zeros) = {:#010X}, expected 0xAA36918A", z_crc);
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!("[crypto]   CRC32C(32 zeros) = {:#010X} (correct)", z_crc);
+
+    // Test vector 4: chaining (incremental computation).
+    let raw_seed = crc32c_raw(!0u32, b"1234");
+    let chained = crc32c_seed(raw_seed, b"56789");
+    if chained != 0xE306_9283 {
+        crate::serial_println!("[crypto]   FAIL: chained CRC32C = {:#010X}, expected 0xE3069283", chained);
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!("[crypto]   Chained CRC32C = {:#010X} (correct)", chained);
+
+    crate::serial_println!("[crypto] CRC32C self-test passed.");
     Ok(())
 }

@@ -1529,6 +1529,72 @@ impl Ext4Driver {
         Ok(())
     }
 
+    /// Write data back to blocks already mapped by the inode's extent tree.
+    ///
+    /// Unlike `write_file_data` which allocates entirely new blocks and
+    /// rebuilds the extent tree, this writes to the existing physical
+    /// blocks.  Use when only the block CONTENTS changed, not the file
+    /// size (e.g., inserting a directory entry in an existing block).
+    ///
+    /// Handles depth-0 extent trees (root-only, up to 4 extents).
+    /// Returns `Err(NotSupported)` for deeper extent trees, signalling
+    /// that the caller should fall back to `write_file_data`.
+    pub fn write_to_existing_blocks(
+        &self,
+        _inode_nr: u32,
+        inode: &Ext4Inode,
+        data: &[u8],
+    ) -> KernelResult<()> {
+        let block_size = self.sb.block_size as usize;
+
+        // Parse the extent header from the inode's i_block.
+        let block_bytes = inode_block_as_bytes(inode);
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+
+        if header.eh_magic != EXT4_EXTENT_MAGIC {
+            return Err(KernelError::IoError);
+        }
+        // Only handle depth-0 (leaf extents in inode root).
+        if header.eh_depth != 0 {
+            return Err(KernelError::NotSupported);
+        }
+
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+        let extent_size = core::mem::size_of::<Ext4Extent>();
+        let mut data_offset = 0usize;
+
+        for i in 0..header.eh_entries as usize {
+            let ext_offset = header_size.saturating_add(i.saturating_mul(extent_size));
+            let ext_bytes = block_bytes.get(ext_offset..ext_offset.saturating_add(extent_size))
+                .ok_or(KernelError::IoError)?;
+            let extent = read_struct::<Ext4Extent>(ext_bytes)?;
+
+            let phys_block = u64::from(extent.ee_start_lo)
+                | (u64::from(extent.ee_start_hi) << 32);
+            let len = u32::from(extent.ee_len & 0x7FFF) as usize;
+
+            for j in 0..len {
+                let block_nr = phys_block.saturating_add(j as u64);
+                let end = (data_offset.saturating_add(block_size)).min(data.len());
+
+                if data_offset >= data.len() {
+                    break;
+                }
+
+                let chunk = data.get(data_offset..end).unwrap_or(&[]);
+                let mut buf = vec![0u8; block_size];
+                if let Some(dest) = buf.get_mut(..chunk.len()) {
+                    dest.copy_from_slice(chunk);
+                }
+                self.reader.write_block(block_nr, &buf)?;
+
+                data_offset = end;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create a new empty inode with the given mode and flags.
     ///
     /// Allocates an inode number, initializes the on-disk inode, and
@@ -1628,22 +1694,30 @@ impl Ext4Driver {
                         &self.sb, dir_inode_nr, dir_inode.i_generation, &mut dir_data,
                     );
 
-                    // Write the modified directory data back.
-                    self.write_file_data(dir_inode, &dir_data)?;
+                    // Write modified data to existing blocks (no reallocation).
+                    // For depth-0 extent trees this avoids the leak that
+                    // write_file_data causes by always allocating new blocks.
+                    match self.write_to_existing_blocks(dir_inode_nr, dir_inode, &dir_data) {
+                        Ok(()) => {},
+                        Err(KernelError::NotSupported) => {
+                            // Deep extent tree — fall back to full rewrite.
+                            let old_inode = *dir_inode;
+                            self.invalidate_extent_cache(dir_inode_nr);
+                            self.write_file_data(dir_inode, &dir_data)?;
+                            self.free_inode_data(dir_inode_nr, &old_inode)?;
+                        },
+                        Err(e) => return Err(e),
+                    }
                     self.write_inode(dir_inode_nr, dir_inode)?;
                     return Ok(());
                 }
             }
         }
 
-        // No space in existing blocks — allocate a new block.
-        let goal = u64::from(self.sb.raw.s_first_data_block);
-        let new_block = super::balloc::alloc_block(
-            &self.reader,
-            &mut self.sb,
-            &mut self.group_descs,
-            goal,
-        )?;
+        // No space in existing blocks — need to grow the directory by one block.
+        // Build the new block data in memory, then use write_file_data to
+        // reallocate and rebuild the extent tree (crash-safe: old blocks
+        // are freed only after new ones are committed).
 
         // Initialize the new block with a single entry.
         // If metadata checksums are enabled, reserve 12 bytes at the end
@@ -1675,21 +1749,27 @@ impl Ext4Driver {
             );
         }
 
-        self.reader.write_block(new_block, &block_buf)?;
+        // Append the new block to existing directory data.
+        dir_data.extend_from_slice(&block_buf);
 
-        // Update the directory inode to include the new block.
-        // For simplicity, rebuild the extent tree to add one more block.
-        // This works for small directories; a production implementation
-        // would update the extent tree incrementally.
-        let new_size = dir_data.len().saturating_add(block_size) as u64;
-        dir_inode.i_size_lo = new_size as u32;
-        dir_inode.i_size_high = (new_size >> 32) as u32;
+        // Stamp checksums on all blocks (the existing ones may not need
+        // re-stamping, but it's safe and simple).
+        stamp_dir_data_checksums(
+            &self.sb, dir_inode_nr, dir_inode.i_generation, &mut dir_data,
+        );
 
-        // Update block count.
-        let total_blocks = new_size as u32 / self.sb.block_size;
-        dir_inode.i_blocks_lo = total_blocks.saturating_mul(self.sb.block_size / 512);
+        // Save old inode for crash-safe block freeing.
+        let old_inode = *dir_inode;
 
+        // Invalidate cached extent mappings — they'll be rebuilt.
+        self.invalidate_extent_cache(dir_inode_nr);
+
+        // Rebuild extent tree with the full directory data (old + new block).
+        self.write_file_data(dir_inode, &dir_data)?;
         self.write_inode(dir_inode_nr, dir_inode)?;
+
+        // Free old blocks now that on-disk inode points to new data.
+        self.free_inode_data(dir_inode_nr, &old_inode)?;
 
         // Invalidate dcache for the parent directory so stale entries
         // don't hide the new child.

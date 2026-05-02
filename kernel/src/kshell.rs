@@ -2947,7 +2947,7 @@ const COMMANDS: &[&str] = &[
     "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
-    "local", "read", "return", "shift", "trap", "typeof", "until", "yes",
+    "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -3976,6 +3976,7 @@ fn dispatch_with_input(line: &str, input: &str) {
         "tac" => cmd_tac_input(args, input),
         "fold" => cmd_fold_input(args, input),
         "paste" => cmd_paste_input(args, input),
+        "xargs" => cmd_xargs_input(args, input),
         _ => {
             // Command doesn't support piped input — just run normally.
             dispatch(line);
@@ -4078,6 +4079,7 @@ fn dispatch(line: &str) {
         "tac" => cmd_tac(args),
         "fold" => cmd_fold(args),
         "paste" => cmd_paste(args),
+        "xargs" => cmd_xargs(args),
         "sleep" => cmd_sleep(args),
         "true" => { set_exit(0); }
         "false" => { set_exit(1); }
@@ -4397,7 +4399,74 @@ fn cmd_uptime() {
 }
 
 fn cmd_echo(args: &str) {
-    shell_println!("{}", args);
+    let mut no_newline = false;
+    let mut interpret_escapes = false;
+    let mut rest = args;
+
+    // Parse flags: -n (no trailing newline), -e (interpret escapes).
+    loop {
+        if rest.starts_with("-n ") || rest.starts_with("-n\t") {
+            no_newline = true;
+            rest = rest.get(3..).unwrap_or("").trim_start();
+        } else if rest.starts_with("-e ") || rest.starts_with("-e\t") {
+            interpret_escapes = true;
+            rest = rest.get(3..).unwrap_or("").trim_start();
+        } else if rest.starts_with("-ne ") || rest.starts_with("-en ")
+            || rest.starts_with("-ne\t") || rest.starts_with("-en\t") {
+            no_newline = true;
+            interpret_escapes = true;
+            rest = rest.get(4..).unwrap_or("").trim_start();
+        } else if rest == "-n" {
+            no_newline = true;
+            rest = "";
+        } else if rest == "-e" {
+            interpret_escapes = true;
+            rest = "";
+        } else {
+            break;
+        }
+    }
+
+    if interpret_escapes {
+        let output = interpret_echo_escapes(rest);
+        if no_newline {
+            shell_print!("{}", output);
+        } else {
+            shell_println!("{}", output);
+        }
+    } else if no_newline {
+        shell_print!("{}", rest);
+    } else {
+        shell_println!("{}", rest);
+    }
+}
+
+/// Interpret C-style escape sequences for `echo -e`.
+fn interpret_echo_escapes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'\\' && i.saturating_add(1) < len {
+            let next = bytes[i.saturating_add(1)];
+            match next {
+                b'n' => { result.push('\n'); i = i.saturating_add(2); }
+                b't' => { result.push('\t'); i = i.saturating_add(2); }
+                b'r' => { result.push('\r'); i = i.saturating_add(2); }
+                b'\\' => { result.push('\\'); i = i.saturating_add(2); }
+                b'0' => { result.push('\0'); i = i.saturating_add(2); }
+                b'a' => { result.push('\x07'); i = i.saturating_add(2); } // bell
+                b'b' => { result.push('\x08'); i = i.saturating_add(2); } // backspace
+                _ => { result.push('\\'); i = i.saturating_add(1); }
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i = i.saturating_add(1);
+        }
+    }
+    result
 }
 
 /// `printf FORMAT [ARG ...]` — formatted output (subset of POSIX printf).
@@ -7187,6 +7256,53 @@ fn paste_output(columns: &[Vec<String>]) {
     }
 }
 
+/// `xargs COMMAND [INITIAL-ARGS]` — build and execute commands from input.
+///
+/// Reads words from stdin (piped input) and appends them as arguments to
+/// COMMAND.  By default, all input words are appended to a single invocation.
+/// With `-n N`, limits to N arguments per invocation.
+fn cmd_xargs(_args: &str) {
+    crate::console_println!("Usage: cmd | xargs COMMAND [args]");
+    crate::console_println!("xargs requires piped input.");
+    set_exit(1);
+}
+
+fn cmd_xargs_input(args: &str, input: &str) {
+    let mut max_args: Option<usize> = None;
+    let mut rest = args.trim();
+
+    // Parse -n N flag.
+    if rest.starts_with("-n") {
+        rest = rest.get(2..).unwrap_or("").trim_start();
+        let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+        max_args = rest.get(..end).and_then(|s| s.parse::<usize>().ok());
+        rest = rest.get(end..).unwrap_or("").trim_start();
+    }
+
+    let command = if rest.is_empty() { "echo" } else { rest };
+
+    // Collect input words.
+    let words: Vec<&str> = input.split_whitespace().collect();
+    if words.is_empty() {
+        return;
+    }
+
+    match max_args {
+        Some(n) if n > 0 => {
+            // Execute in batches of N words.
+            for chunk in words.chunks(n) {
+                let full_cmd = alloc::format!("{} {}", command, chunk.join(" "));
+                execute(&full_cmd);
+            }
+        }
+        _ => {
+            // All words in one invocation.
+            let full_cmd = alloc::format!("{} {}", command, words.join(" "));
+            execute(&full_cmd);
+        }
+    }
+}
+
 /// Pause for N milliseconds (busy-wait using APIC tick counter).
 fn cmd_sleep(args: &str) {
     let ms = match args.parse::<u64>() {
@@ -8337,7 +8453,7 @@ fn is_builtin(name: &str) -> bool {
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"
         | "export" | "set" | "unset" | "alias" | "unalias" | "return"
         | "break" | "continue" | "shift" | "local" | "printf"
-        | "cut" | "tr" | "yes" | "tac" | "fold" | "paste"
+        | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
     )
 }
 

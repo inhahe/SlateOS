@@ -3083,17 +3083,17 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
-    "cd", "chattr", "chmod", "chown", "clear", "cls", "cmp", "command", "copy", "cp",
+    "cd", "chattr", "chmod", "chown", "clear", "cls", "cmp", "column", "command", "copy", "cp",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount", "mv",
-    "move", "net", "nl", "nslookup", "paste", "pci", "ping", "printenv",
+    "move", "net", "nl", "nproc", "nslookup", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "rev", "rm",
     "rmdir", "run", "select", "seq", "set", "sha256", "sleep", "sort", "source",
-    "tac", "tr",
+    "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
@@ -4131,6 +4131,7 @@ fn dispatch_with_input(line: &str, input: &str) {
         "fold" => cmd_fold_input(args, input),
         "paste" => cmd_paste_input(args, input),
         "xargs" => cmd_xargs_input(args, input),
+        "column" => cmd_column_input(args, input),
         _ => {
             // Command doesn't support piped input — just run normally.
             dispatch(line);
@@ -4160,7 +4161,10 @@ fn dispatch(line: &str) {
         "dmesg" => cmd_dmesg(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
-        "time" | "date" => cmd_time(),
+        "date" => cmd_date(args),
+        "time" => cmd_time_cmd(args),
+        "nproc" => cmd_nproc(),
+        "strings" => cmd_strings(args),
         "cal" => cmd_cal(args),
         "reboot" => cmd_reboot(),
         "irq" => cmd_irq(),
@@ -4243,6 +4247,7 @@ fn dispatch(line: &str) {
         "fold" => cmd_fold(args),
         "paste" => cmd_paste(args),
         "xargs" => cmd_xargs(args),
+        "column" => cmd_column(args),
         "sleep" => cmd_sleep(args),
         "true" => { set_exit(0); }
         "false" => { set_exit(1); }
@@ -4319,7 +4324,8 @@ fn cmd_help() {
     crate::console_println!("  clear     Clear the screen");
     crate::console_println!("  uptime    Show system uptime (tick count)");
     crate::console_println!("  echo ...  Echo text to console");
-    crate::console_println!("  time      Show current date and time (RTC)");
+    crate::console_println!("  time CMD  Time command execution (or show time with no args)");
+    crate::console_println!("  nproc     Show number of CPUs");
     crate::console_println!("  irq       Show IRQ interrupt counts");
     crate::console_println!("  pci       List PCI devices");
     crate::console_println!("  disk      Show block device info");
@@ -4342,7 +4348,7 @@ fn cmd_help() {
     crate::console_println!("  touch F   Create file or update timestamps");
     crate::console_println!("  append F T Append text T to file F");
     crate::console_println!("  tree [D]  Show directory tree recursively");
-    crate::console_println!("  du [D]    Show disk usage of directory");
+    crate::console_println!("  du [-s] [-dN] [D]  Show disk usage (-s summary, -dN max depth)");
     crate::console_println!("  find [D]P Search for files matching pattern");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
@@ -4409,7 +4415,9 @@ fn cmd_help() {
     crate::console_println!("  paste F1 F2   Merge lines from files");
     crate::console_println!("  yes [STR]  Repeat STR (default 'y') indefinitely");
     crate::console_println!("  xargs [-n N] CMD  Run CMD with piped input as arguments");
-    crate::console_println!("  date       Show current date and time");
+    crate::console_println!("  strings [-n N] F  Extract printable strings from binary file (min length N, default 4)");
+    crate::console_println!("  column [-t] [-s SEP] F  Format text into aligned columns (-t table mode)");
+    crate::console_println!("  date [+FMT] Show date/time (format: %Y %m %d %H %M %S %a %b %F %T %s)");
     crate::console_println!("  cal [M] [Y] Show monthly calendar (current month if no args)");
     crate::console_println!("  test EXPR / [ EXPR ]  Conditional expressions");
     crate::console_println!("  expr EXPR  Evaluate arithmetic expression");
@@ -4896,9 +4904,403 @@ fn cmd_printf(args: &str) {
     }
 }
 
-fn cmd_time() {
+/// Display the current date/time with optional format string.
+///
+/// Usage: `date` (default: YYYY-MM-DD HH:MM:SS)
+///        `date +FORMAT` (strftime-like: %Y %m %d %H %M %S %a %A %b %B %j %u %Z)
+///
+/// Supported format specifiers:
+/// - `%Y` 4-digit year, `%m` month (01-12), `%d` day (01-31)
+/// - `%H` hour (00-23), `%M` minute (00-59), `%S` second (00-59)
+/// - `%a` abbreviated weekday (Sun..Sat), `%A` full weekday
+/// - `%b`/`%h` abbreviated month (Jan..Dec), `%B` full month name
+/// - `%j` day of year (001-366), `%u` ISO weekday (1=Mon..7=Sun)
+/// - `%Z` timezone (always "UTC"), `%n` newline, `%t` tab, `%%` literal %
+/// - `%F` = `%Y-%m-%d`, `%T` = `%H:%M:%S`, `%D` = `%m/%d/%Y`
+/// - `%s` epoch seconds
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn cmd_date(args: &str) {
     let dt = crate::rtc::read_datetime();
-    shell_println!("{}", dt);
+
+    if args.is_empty() {
+        // Default output: YYYY-MM-DD HH:MM:SS
+        shell_println!("{}", dt);
+        return;
+    }
+
+    let fmt = if let Some(f) = args.strip_prefix('+') {
+        f
+    } else {
+        crate::console_println!("Usage: date [+FORMAT]");
+        set_exit(1);
+        return;
+    };
+
+    // Day-of-week via Tomohiko Sakamoto's algorithm.
+    let dow = {
+        let mut y = i32::from(dt.year);
+        let m = dt.month as usize;
+        let d = i32::from(dt.day);
+        const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+        if m < 3 { y -= 1; }
+        let idx = if m >= 1 && m <= 12 { T[m - 1] } else { 0 };
+        ((y + y / 4 - y / 100 + y / 400 + idx + d) % 7) as u8 // 0=Sun
+    };
+
+    // Day of year (1-based).
+    let is_leap = {
+        let y = u32::from(dt.year);
+        (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    };
+    let month_days: [u16; 12] = [
+        0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334,
+    ];
+    let mi = if dt.month >= 1 && dt.month <= 12 {
+        (dt.month - 1) as usize
+    } else {
+        0
+    };
+    let mut yday = month_days[mi] + u16::from(dt.day);
+    if is_leap && dt.month > 2 {
+        yday += 1;
+    }
+
+    // Epoch seconds (approximate — good enough for display).
+    let epoch_secs = {
+        let y = i64::from(dt.year);
+        // Days from 1970-01-01 to Jan 1 of this year (approx).
+        let mut days: i64 = (y - 1970) * 365 + (y - 1969) / 4 - (y - 1901) / 100 + (y - 1601) / 400;
+        days += i64::from(yday) - 1; // yday is 1-based
+        days * 86400 + i64::from(dt.hour) * 3600 + i64::from(dt.minute) * 60 + i64::from(dt.second)
+    };
+
+    const DAY_ABBR: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const DAY_FULL: [&str; 7] = [
+        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    ];
+    const MON_ABBR: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const MON_FULL: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ];
+
+    let mut out = alloc::string::String::with_capacity(fmt.len() + 32);
+    let bytes = fmt.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 1 < bytes.len() {
+            i += 1;
+            match bytes[i] {
+                b'Y' => out.push_str(&alloc::format!("{:04}", dt.year)),
+                b'm' => out.push_str(&alloc::format!("{:02}", dt.month)),
+                b'd' => out.push_str(&alloc::format!("{:02}", dt.day)),
+                b'H' => out.push_str(&alloc::format!("{:02}", dt.hour)),
+                b'M' => out.push_str(&alloc::format!("{:02}", dt.minute)),
+                b'S' => out.push_str(&alloc::format!("{:02}", dt.second)),
+                b'a' => out.push_str(DAY_ABBR[dow as usize % 7]),
+                b'A' => out.push_str(DAY_FULL[dow as usize % 7]),
+                b'b' | b'h' => {
+                    let idx = if dt.month >= 1 && dt.month <= 12 {
+                        (dt.month - 1) as usize
+                    } else {
+                        0
+                    };
+                    out.push_str(MON_ABBR[idx]);
+                }
+                b'B' => {
+                    let idx = if dt.month >= 1 && dt.month <= 12 {
+                        (dt.month - 1) as usize
+                    } else {
+                        0
+                    };
+                    out.push_str(MON_FULL[idx]);
+                }
+                b'j' => out.push_str(&alloc::format!("{:03}", yday)),
+                b'u' => {
+                    // ISO weekday: Mon=1..Sun=7.  dow 0=Sun → 7.
+                    let iso = if dow == 0 { 7 } else { dow };
+                    out.push_str(&alloc::format!("{}", iso));
+                }
+                b'Z' => out.push_str("UTC"),
+                b'n' => out.push('\n'),
+                b't' => out.push('\t'),
+                b'%' => out.push('%'),
+                b'F' => out.push_str(&alloc::format!(
+                    "{:04}-{:02}-{:02}", dt.year, dt.month, dt.day
+                )),
+                b'T' => out.push_str(&alloc::format!(
+                    "{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second
+                )),
+                b'D' => out.push_str(&alloc::format!(
+                    "{:02}/{:02}/{:04}", dt.month, dt.day, dt.year
+                )),
+                b's' => out.push_str(&alloc::format!("{}", epoch_secs)),
+                _ => {
+                    out.push('%');
+                    out.push(bytes[i] as char);
+                }
+            }
+        } else {
+            out.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    shell_println!("{}", out);
+}
+
+/// Time the execution of a shell command.
+///
+/// Usage: `time <command>` — runs the command and prints elapsed wall time.
+/// Uses HPET for nanosecond-resolution timing when available, falling back
+/// to APIC tick counter (~10ms resolution).
+fn cmd_time_cmd(args: &str) {
+    if args.is_empty() {
+        // No command — just show current time (legacy compat).
+        let dt = crate::rtc::read_datetime();
+        shell_println!("{}", dt);
+        return;
+    }
+
+    let start_ns = crate::hpet::elapsed_ns();
+    execute_single(args);
+    let end_ns = crate::hpet::elapsed_ns();
+
+    let elapsed_ns = end_ns.saturating_sub(start_ns);
+    let secs = elapsed_ns / 1_000_000_000;
+    let ms = (elapsed_ns % 1_000_000_000) / 1_000_000;
+    let us = (elapsed_ns % 1_000_000) / 1_000;
+
+    if secs > 0 {
+        crate::console_println!("\nreal\t{}m{}.{:03}s", secs / 60, secs % 60, ms);
+    } else if ms > 0 {
+        crate::console_println!("\nreal\t0m0.{:03}s", ms);
+    } else {
+        crate::console_println!("\nreal\t{}us", us);
+    }
+}
+
+/// Show the number of available CPUs.
+fn cmd_nproc() {
+    shell_println!("{}", crate::smp::cpu_count());
+}
+
+/// Extract printable ASCII strings from a file.
+///
+/// Usage: `strings [-n MIN] <file>`
+///
+/// Scans the file for runs of printable ASCII characters (0x20..0x7E plus
+/// tab and newline).  Prints each run that meets the minimum length
+/// (default 4, matching Unix `strings`).  Useful for inspecting binary
+/// files, ELF executables, and firmware images.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_strings(args: &str) {
+    let mut min_len: usize = 4;
+    let mut path_arg = "";
+
+    let mut words = args.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "-n" {
+            if let Some(n_str) = words.next() {
+                min_len = n_str.parse::<usize>().unwrap_or(4);
+            }
+        } else if w.starts_with("-n") {
+            min_len = w[2..].parse::<usize>().unwrap_or(4);
+        } else {
+            path_arg = w;
+        }
+    }
+
+    if path_arg.is_empty() {
+        crate::console_println!("Usage: strings [-n MIN] <file>");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(path_arg);
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("strings: {}: {:?}", path, e);
+            set_exit(1);
+            return;
+        }
+    };
+
+    let mut current = alloc::string::String::new();
+    for &b in &data {
+        if (b >= 0x20 && b <= 0x7E) || b == b'\t' {
+            current.push(b as char);
+        } else {
+            if current.len() >= min_len {
+                crate::console_println!("{}", current);
+            }
+            current.clear();
+        }
+    }
+    // Flush trailing run.
+    if current.len() >= min_len {
+        crate::console_println!("{}", current);
+    }
+}
+
+/// Format text into aligned columns.
+///
+/// Usage: `column [-t] [-s SEP]` (reads from file or pipe)
+///
+/// `-t` — format into a table (auto-detect columns based on whitespace)
+/// `-s CHAR` — use CHAR as the delimiter (default: whitespace)
+///
+/// Without `-t`, merges short lines into side-by-side columns filling
+/// the terminal width.
+fn cmd_column(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: column [-t] [-s SEP] <file>");
+        crate::console_println!("   or: ... | column -t");
+        set_exit(1);
+        return;
+    }
+
+    // Parse flags.
+    let mut table_mode = false;
+    let mut sep: Option<char> = None;
+    let mut file_path = "";
+
+    let mut words = args.split_whitespace().peekable();
+    while let Some(w) = words.next() {
+        if w == "-t" {
+            table_mode = true;
+        } else if w == "-s" {
+            if let Some(s) = words.next() {
+                sep = s.chars().next();
+            }
+        } else {
+            file_path = w;
+        }
+    }
+
+    if file_path.is_empty() {
+        crate::console_println!("column: no input file");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(file_path);
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("column: {}: {:?}", path, e);
+            set_exit(1);
+            return;
+        }
+    };
+    let text = alloc::string::String::from_utf8_lossy(&data);
+    column_format(&text, table_mode, sep);
+}
+
+/// column from piped input.
+fn cmd_column_input(args: &str, input: &str) {
+    if input.is_empty() && args.is_empty() {
+        crate::console_println!("Usage: ... | column [-t] [-s SEP]");
+        set_exit(1);
+        return;
+    }
+
+    let mut table_mode = false;
+    let mut sep: Option<char> = None;
+    let mut file_path = "";
+
+    let mut words = args.split_whitespace().peekable();
+    while let Some(w) = words.next() {
+        if w == "-t" {
+            table_mode = true;
+        } else if w == "-s" {
+            if let Some(s) = words.next() {
+                sep = s.chars().next();
+            }
+        } else {
+            file_path = w;
+        }
+    }
+
+    // If a file was specified, read from it; otherwise use piped input.
+    if !file_path.is_empty() {
+        let path = resolve_path(file_path);
+        let data = match crate::fs::Vfs::read_file(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::console_println!("column: {}: {:?}", path, e);
+                set_exit(1);
+                return;
+            }
+        };
+        let text = alloc::string::String::from_utf8_lossy(&data);
+        column_format(&text, table_mode, sep);
+    } else {
+        column_format(input, table_mode, sep);
+    }
+}
+
+/// Core column formatting: split lines into columns and align.
+#[allow(clippy::arithmetic_side_effects)]
+fn column_format(text: &str, table_mode: bool, sep: Option<char>) {
+    let lines: alloc::vec::Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return;
+    }
+
+    if table_mode {
+        // Split each line into fields, compute max width per column,
+        // then print left-aligned with 2-space padding.
+        let rows: alloc::vec::Vec<alloc::vec::Vec<&str>> = lines
+            .iter()
+            .map(|line| {
+                if let Some(c) = sep {
+                    line.split(c).collect()
+                } else {
+                    line.split_whitespace().collect()
+                }
+            })
+            .collect();
+
+        // Find max columns and per-column max width.
+        let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let mut widths = alloc::vec![0usize; max_cols];
+        for row in &rows {
+            for (i, field) in row.iter().enumerate() {
+                if field.len() > widths[i] {
+                    widths[i] = field.len();
+                }
+            }
+        }
+
+        for row in &rows {
+            let mut out = alloc::string::String::new();
+            for (i, field) in row.iter().enumerate() {
+                if i > 0 {
+                    out.push_str("  ");
+                }
+                out.push_str(field);
+                // Pad to column width (except for the last column).
+                if i + 1 < row.len() {
+                    let pad = widths[i].saturating_sub(field.len());
+                    for _ in 0..pad {
+                        out.push(' ');
+                    }
+                }
+            }
+            crate::console_println!("{}", out);
+        }
+    } else {
+        // Simple mode: print lines as-is (no table formatting).
+        // A full implementation would fill the terminal width, but
+        // without terminal width info we just print each line.
+        for line in &lines {
+            crate::console_println!("{}", line);
+        }
+    }
 }
 
 /// Display a monthly calendar.

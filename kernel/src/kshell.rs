@@ -3085,7 +3085,7 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cat",
     "cd", "chmod", "chown", "clear", "cls", "cmp", "command", "copy", "cp",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dns", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "find", "fold", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount", "mv",
@@ -4183,6 +4183,7 @@ fn dispatch(line: &str) {
         "tree" => cmd_tree(args),
         "du" => cmd_du(args),
         "find" => cmd_find(args),
+        "file" => cmd_file(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -5724,6 +5725,123 @@ fn cmd_find(args: &str) {
     let mut count: u64 = 0;
     find_recurse(&root, pattern, is_glob, &mut count, 0);
     shell_println!("\n{} matches found", count);
+}
+
+/// `file PATH` — identify a file's type and basic info.
+///
+/// Similar to the Unix `file` command.  Uses `lstat` to avoid following
+/// symlinks, then reports the entry type with additional detail:
+/// - Directories: "directory"
+/// - Regular files: "regular file, SIZE bytes" with a mime-type hint
+///   based on the file extension
+/// - Symlinks: "symbolic link to TARGET"
+/// - Character specials: "character special"
+fn cmd_file(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: file <path>");
+        set_exit(1);
+        return;
+    }
+
+    let path = resolve_path(args.trim());
+
+    // Use lstat to get entry info without following symlinks.
+    let entry = match crate::fs::Vfs::lstat(&path) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("file: {}: {:?}", path, e);
+            set_exit(1);
+            return;
+        }
+    };
+
+    match entry.entry_type {
+        crate::fs::EntryType::Directory => {
+            shell_println!("{}: directory", path);
+        }
+        crate::fs::EntryType::Symlink => {
+            // Try to read the link target.
+            match crate::fs::Vfs::readlink(&path) {
+                Ok(target) => {
+                    shell_println!("{}: symbolic link to {}", path, target);
+                }
+                Err(_) => {
+                    shell_println!("{}: symbolic link", path);
+                }
+            }
+        }
+        crate::fs::EntryType::File => {
+            // Heuristic: /dev/* entries with size 0 are character specials
+            // (the VFS doesn't have a CharDevice entry type).
+            if path.starts_with("/dev/") && entry.size == 0 {
+                shell_println!("{}: character special", path);
+            } else {
+                let hint = extension_hint(&path);
+                shell_println!("{}: regular file, {} bytes ({})", path, entry.size, hint);
+            }
+        }
+        crate::fs::EntryType::VolumeLabel => {
+            shell_println!("{}: volume label", path);
+        }
+    }
+}
+
+/// Map a file extension to a human-readable type hint for the `file` command.
+fn extension_hint(path: &str) -> &'static str {
+    // Extract the extension (after the last '.'), lowercased comparison.
+    let ext = match path.rsplit_once('.') {
+        Some((_, e)) => e,
+        None => return "data",
+    };
+
+    // Compare case-insensitively by checking lowercase.
+    // Since ext is a slice of path, we need byte-level comparison.
+    match ext {
+        // Text and source files.
+        "txt" | "text" | "log" => "text",
+        "rs" => "Rust source",
+        "c" | "h" => "C source",
+        "cpp" | "cc" | "cxx" | "hpp" => "C++ source",
+        "py" => "Python source",
+        "js" => "JavaScript source",
+        "ts" => "TypeScript source",
+        "json" => "JSON data",
+        "toml" => "TOML data",
+        "yaml" | "yml" => "YAML data",
+        "xml" => "XML data",
+        "html" | "htm" => "HTML document",
+        "css" => "CSS stylesheet",
+        "md" => "Markdown text",
+        "sh" | "bash" => "shell script",
+
+        // Binary and executable formats.
+        "elf" => "ELF binary",
+        "o" => "object file",
+        "a" | "lib" => "archive/library",
+        "so" | "dll" => "shared library",
+        "wasm" => "WebAssembly binary",
+
+        // Image formats.
+        "png" => "PNG image",
+        "jpg" | "jpeg" => "JPEG image",
+        "gif" => "GIF image",
+        "bmp" => "BMP image",
+        "svg" => "SVG image",
+        "ico" => "icon image",
+
+        // Archive and compressed formats.
+        "tar" => "tar archive",
+        "gz" | "gzip" => "gzip compressed",
+        "zip" => "ZIP archive",
+        "xz" => "XZ compressed",
+
+        // Config and data.
+        "cfg" | "conf" | "ini" => "configuration file",
+        "csv" => "CSV data",
+        "sql" => "SQL script",
+
+        _ => "data",
+    }
 }
 
 /// Recursive helper for find — search directory tree for name matches.
@@ -8829,7 +8947,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "find" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "lsblk" | "blkdev" | "glob"

@@ -332,17 +332,21 @@ fn expand_vars(input: &str) -> String {
                     i = i.saturating_add(1);
                 }
             } else if next == b'{' {
-                // `${NAME}` form.
+                // `${...}` form — supports:
+                //   ${NAME}          simple expansion
+                //   ${#NAME}         string length
+                //   ${NAME:-default} use default if unset/empty
+                //   ${NAME:+alt}     use alt if set and non-empty
+                //   ${NAME:=default} assign default if unset/empty
+                //   ${NAME:?msg}     error if unset/empty
                 i = i.saturating_add(1); // skip `{`
                 let start = i;
                 while i < len && bytes[i] != b'}' {
                     i = i.saturating_add(1);
                 }
-                if let Some(name_bytes) = bytes.get(start..i) {
-                    if let Ok(name) = core::str::from_utf8(name_bytes) {
-                        if let Some(val) = env_get(name) {
-                            result.push_str(&val);
-                        }
+                if let Some(inner_bytes) = bytes.get(start..i) {
+                    if let Ok(inner) = core::str::from_utf8(inner_bytes) {
+                        expand_brace_expr(inner, &mut result);
                     }
                 }
                 if i < len && bytes[i] == b'}' {
@@ -387,6 +391,139 @@ fn expand_vars(input: &str) -> String {
     }
 
     result
+}
+
+/// Expand a `${...}` brace expression.
+///
+/// Handles:
+///   - `${NAME}` — simple variable lookup
+///   - `${#NAME}` — length of variable's value
+///   - `${NAME:-default}` — use default if NAME is unset or empty
+///   - `${NAME:+alternate}` — use alternate if NAME is set and non-empty
+///   - `${NAME:=default}` — assign and use default if NAME is unset or empty
+///   - `${NAME:?message}` — error if NAME is unset or empty
+///   - `${NAME%suffix}` — remove shortest suffix match
+///   - `${NAME%%suffix}` — remove longest suffix match
+///   - `${NAME#prefix}` — remove shortest prefix match
+///   - `${NAME##prefix}` — remove longest prefix match
+fn expand_brace_expr(inner: &str, result: &mut String) {
+    // ${#NAME} — string length.
+    if let Some(name) = inner.strip_prefix('#') {
+        let val = env_get(name).unwrap_or_default();
+        result.push_str(&alloc::format!("{}", val.len()));
+        return;
+    }
+
+    // Try to find an operator: :-, :+, :=, :?, %, %%, #, ##
+    // Scan for the operator position (skip the variable name).
+    let name_end = inner.find(|c: char| c == ':' || c == '%' || c == '#')
+        .unwrap_or(inner.len());
+    let name = inner.get(..name_end).unwrap_or(inner);
+    let rest = inner.get(name_end..).unwrap_or("");
+
+    if rest.is_empty() {
+        // Simple ${NAME}.
+        if let Some(val) = env_get(name) {
+            result.push_str(&val);
+        }
+        return;
+    }
+
+    let val = env_get(name);
+    let is_set_nonempty = val.as_ref().is_some_and(|v| !v.is_empty());
+
+    if let Some(default) = rest.strip_prefix(":-") {
+        // ${NAME:-default} — use default if unset or empty.
+        if is_set_nonempty {
+            result.push_str(val.as_deref().unwrap_or(""));
+        } else {
+            result.push_str(default);
+        }
+    } else if let Some(alt) = rest.strip_prefix(":+") {
+        // ${NAME:+alternate} — use alternate if set and non-empty.
+        if is_set_nonempty {
+            result.push_str(alt);
+        }
+    } else if let Some(default) = rest.strip_prefix(":=") {
+        // ${NAME:=default} — assign default if unset or empty.
+        if is_set_nonempty {
+            result.push_str(val.as_deref().unwrap_or(""));
+        } else {
+            env_set(name, default);
+            result.push_str(default);
+        }
+    } else if let Some(msg) = rest.strip_prefix(":?") {
+        // ${NAME:?message} — error if unset or empty.
+        if is_set_nonempty {
+            result.push_str(val.as_deref().unwrap_or(""));
+        } else {
+            let error_msg = if msg.is_empty() {
+                alloc::format!("{}: parameter null or not set", name)
+            } else {
+                alloc::format!("{}: {}", name, msg)
+            };
+            crate::console_println!("{}", error_msg);
+            set_exit(1);
+        }
+    } else if let Some(pattern) = rest.strip_prefix("%%") {
+        // ${NAME%%pattern} — remove longest suffix match.
+        let val = val.unwrap_or_default();
+        // Try from the start of the string (longest match).
+        let mut best = val.len();
+        for i in 0..=val.len() {
+            if let Some(suffix) = val.get(i..) {
+                if crate::fs::vfs::glob_match(pattern, suffix, false) {
+                    best = i;
+                    break;
+                }
+            }
+        }
+        result.push_str(val.get(..best).unwrap_or(&val));
+    } else if let Some(pattern) = rest.strip_prefix('%') {
+        // ${NAME%pattern} — remove shortest suffix match.
+        let val = val.unwrap_or_default();
+        let mut best = val.len();
+        for i in (0..=val.len()).rev() {
+            if let Some(suffix) = val.get(i..) {
+                if crate::fs::vfs::glob_match(pattern, suffix, false) {
+                    best = i;
+                    break;
+                }
+            }
+        }
+        result.push_str(val.get(..best).unwrap_or(&val));
+    } else if let Some(pattern) = rest.strip_prefix("##") {
+        // ${NAME##pattern} — remove longest prefix match.
+        let val = val.unwrap_or_default();
+        let mut best = 0;
+        for i in (0..=val.len()).rev() {
+            if let Some(prefix) = val.get(..i) {
+                if crate::fs::vfs::glob_match(pattern, prefix, false) {
+                    best = i;
+                    break;
+                }
+            }
+        }
+        result.push_str(val.get(best..).unwrap_or(""));
+    } else if let Some(pattern) = rest.strip_prefix('#') {
+        // ${NAME#pattern} — remove shortest prefix match.
+        let val = val.unwrap_or_default();
+        let mut best = 0;
+        for i in 0..=val.len() {
+            if let Some(prefix) = val.get(..i) {
+                if crate::fs::vfs::glob_match(pattern, prefix, false) {
+                    best = i;
+                    break;
+                }
+            }
+        }
+        result.push_str(val.get(best..).unwrap_or(""));
+    } else {
+        // Unknown operator — just expand the name.
+        if let Some(v) = val {
+            result.push_str(&v);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

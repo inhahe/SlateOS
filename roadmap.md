@@ -367,6 +367,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell until loops, trap handlers (EXIT/ERR/INT), command builtin (bypass aliases/functions)
   - [x] Kshell text processing: cut (-d/-f/-c), tr (translate/delete with ranges), tac (reverse cat), fold (-w), paste, yes, xargs (-n)
   - [x] Kshell echo -n/-e (no newline, escape sequences), select menus (interactive numbered choice)
+  - [x] VFS dcache expansion: 256→1024 entries, negative cache entries (DcacheLookup enum, insert_negative, NegativeHit short-circuits NotFound, invalidate_negative_prefix on creation ops)
+  - [x] ext4 journal revoke block support: two-pass recovery (scan revokes + replay with skip), JournalRevokeHeader, BTreeMap<u64,u32> revoke table, 64-bit block number support
+  - [x] ext4 add_dir_entry fix: new-block path now properly rebuilds extent tree (was orphaning allocated blocks), insert path uses write_to_existing_blocks (avoids block leak)
+  - [x] ext4 block leak fixes: rename ".." update and remove_dir_entry use write_to_existing_blocks instead of write_file_data (prevents O(dir_blocks) leak per operation)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -185,10 +185,13 @@ impl FileSystem for Ext4Fs {
         if inode.i_links_count == 0 {
             // Free all data blocks owned by this file.
             self.driver.free_inode_data(&inode)?;
+            // Free the external xattr block if present.
+            self.driver.free_xattr_block(&inode)?;
 
             inode.i_size_lo = 0;
             inode.i_size_high = 0;
             inode.i_blocks_lo = 0;
+            inode.i_file_acl_lo = 0;
 
             // Write the zeroed inode first, then free the inode number.
             self.driver.write_inode(ino, &inode)?;
@@ -284,8 +287,9 @@ impl FileSystem for Ext4Fs {
         parent_inode.i_links_count = parent_inode.i_links_count.saturating_sub(1);
         self.driver.write_inode(parent_ino, &parent_inode)?;
 
-        // Free the directory's data blocks.
+        // Free the directory's data blocks and external xattr block.
         self.driver.free_inode_data(&inode)?;
+        self.driver.free_xattr_block(&inode)?;
 
         // Mark directory inode as deleted.
         let mut inode = inode;
@@ -293,6 +297,7 @@ impl FileSystem for Ext4Fs {
         inode.i_size_lo = 0;
         inode.i_size_high = 0;
         inode.i_blocks_lo = 0;
+        inode.i_file_acl_lo = 0;
         self.driver.write_inode(ino, &inode)?;
 
         // Free the inode itself (is_directory=true to update used_dirs count).
@@ -546,7 +551,7 @@ impl FileSystem for Ext4Fs {
             gid: u32::from(inode.i_gid),
             permissions,
             attributes: attrs,
-            xattrs: Vec::new(), // xattrs not yet implemented
+            xattrs: self.driver.read_xattrs(&inode).unwrap_or_default(),
             hash: Vec::new(),
         })
     }
@@ -629,6 +634,75 @@ impl FileSystem for Ext4Fs {
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;
         Ok(())
+    }
+
+    fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+        self.driver.get_xattr(&inode, key)
+    }
+
+    fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Read existing xattrs, update or add the new one.
+        let mut attrs = self.driver.read_xattrs(&inode)?;
+
+        // Check key length (255 bytes max per design spec).
+        if key.len() > 255 {
+            return Err(KernelError::InvalidArgument);
+        }
+        // Check value size (64 KiB max per design spec).
+        if value.len() > 65536 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Update existing or insert new.
+        let mut found = false;
+        for (k, v) in &mut attrs {
+            if k == key {
+                *v = value.to_vec();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            attrs.push((String::from(key), value.to_vec()));
+        }
+
+        self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let mut inode = self.driver.read_inode(ino)?;
+
+        let mut attrs = self.driver.read_xattrs(&inode)?;
+        let original_len = attrs.len();
+        attrs.retain(|(k, _)| k != key);
+
+        if attrs.len() == original_len {
+            // Key wasn't present.
+            return Err(KernelError::NotFound);
+        }
+
+        self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+        let attrs = self.driver.read_xattrs(&inode)?;
+        Ok(attrs.into_iter().map(|(k, _)| k).collect())
     }
 
     fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {

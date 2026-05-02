@@ -731,6 +731,87 @@ pub mod dir_type {
 }
 
 // ---------------------------------------------------------------------------
+// Extended attributes
+// ---------------------------------------------------------------------------
+
+/// Extended attribute block header.
+///
+/// Located at the start of a standalone xattr block (pointed to by
+/// `i_file_acl_lo`).  Magic = 0xEA020000.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Ext4XattrHeader {
+    /// Magic number (EXT4_XATTR_MAGIC).
+    pub h_magic: u32,
+    /// Reference count (number of inodes sharing this block).
+    pub h_refcount: u32,
+    /// Number of disk blocks used (always 1 for ext4).
+    pub h_blocks: u32,
+    /// Hash of all attribute entries.
+    pub h_hash: u32,
+    /// Checksum (if metadata_csum is enabled).
+    pub h_checksum: u32,
+    /// Reserved for future use.
+    pub h_reserved: [u32; 3],
+}
+
+const _: () = assert!(core::mem::size_of::<Ext4XattrHeader>() == 32);
+
+/// Magic number for xattr blocks.
+pub const EXT4_XATTR_MAGIC: u32 = 0xEA02_0000;
+
+/// Extended attribute entry header.
+///
+/// Variable-length: this 16-byte header is followed by `e_name_len`
+/// bytes of attribute name (NOT null-terminated), then padding to
+/// 4-byte alignment.
+///
+/// The value data is stored at offset `e_value_offs` from the start
+/// of the xattr block.  Values grow backward from the end of the block.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Ext4XattrEntry {
+    /// Length of the attribute name in bytes.
+    pub e_name_len: u8,
+    /// Name index (namespace): 1=user, 2=posix_acl_access, etc.
+    pub e_name_index: u8,
+    /// Offset of the value from the start of the xattr block.
+    pub e_value_offs: u16,
+    /// Inode number holding the value (for EA_INODE feature; 0 normally).
+    pub e_value_inum: u32,
+    /// Size of the attribute value in bytes.
+    pub e_value_size: u32,
+    /// Hash of the name and value.
+    pub e_hash: u32,
+    // Followed by e_name_len bytes of name, then padding to 4 bytes.
+}
+
+const _: () = assert!(core::mem::size_of::<Ext4XattrEntry>() == 16);
+
+/// xattr name index for the "user" namespace.
+///
+/// This is the default namespace for general-purpose xattrs.
+/// The full key on disk is: index prefix + entry name.
+/// For index 1 (user), the prefix is "user.".
+#[allow(dead_code)]
+pub mod xattr_index {
+    /// No namespace prefix (raw name).
+    pub const NONE: u8 = 0;
+    /// "user." namespace — general purpose, any user can set.
+    pub const USER: u8 = 1;
+    /// "system.posix_acl_access" — POSIX ACLs.
+    pub const POSIX_ACL_ACCESS: u8 = 2;
+    /// "system.posix_acl_default" — POSIX default ACLs.
+    pub const POSIX_ACL_DEFAULT: u8 = 3;
+    /// "trusted." namespace — requires CAP_SYS_ADMIN.
+    pub const TRUSTED: u8 = 4;
+    /// "security." namespace — SELinux labels etc.
+    pub const SECURITY: u8 = 6;
+    /// "system." namespace — system-managed attributes.
+    pub const SYSTEM: u8 = 7;
+}
+
+// ---------------------------------------------------------------------------
 // Well-known inode numbers
 // ---------------------------------------------------------------------------
 

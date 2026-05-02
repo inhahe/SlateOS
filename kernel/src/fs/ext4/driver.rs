@@ -781,6 +781,22 @@ impl Ext4Driver {
         Ok(())
     }
 
+    /// Free the external xattr block if one exists.
+    ///
+    /// Called during inode deletion to reclaim the xattr block.
+    pub fn free_xattr_block(&mut self, inode: &Ext4Inode) -> KernelResult<()> {
+        let block_nr = self.xattr_block(inode);
+        if block_nr == 0 {
+            return Ok(());
+        }
+        super::balloc::free_block(
+            &self.reader,
+            &mut self.sb,
+            &mut self.group_descs,
+            block_nr,
+        )
+    }
+
     /// Free an inode number back to the inode bitmap.
     ///
     /// Also decrements the used_dirs count if the inode is a directory.
@@ -1074,6 +1090,243 @@ impl Ext4Driver {
         }
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Extended attribute operations
+    // -----------------------------------------------------------------------
+
+    /// Read the xattr block number from an inode.
+    ///
+    /// Returns 0 if the inode has no external xattr block.
+    fn xattr_block(&self, inode: &Ext4Inode) -> u64 {
+        let lo = u64::from(inode.i_file_acl_lo);
+        // High 16 bits are in i_osd2 bytes 2..4 on Linux.
+        let hi = u64::from(u16::from_le_bytes([
+            *inode.i_osd2.get(4).unwrap_or(&0),
+            *inode.i_osd2.get(5).unwrap_or(&0),
+        ]));
+        lo | (hi << 32)
+    }
+
+    /// Parse all xattr entries from an external xattr block.
+    ///
+    /// Returns a list of `(full_key, value)` pairs.  The key is
+    /// reconstructed by prepending the namespace prefix (e.g., "user.").
+    pub fn read_xattrs(&self, inode: &Ext4Inode) -> KernelResult<Vec<(String, Vec<u8>)>> {
+        let block_nr = self.xattr_block(inode);
+        if block_nr == 0 {
+            return Ok(Vec::new());
+        }
+
+        let block_size = self.sb.block_size as usize;
+        let mut block_data = vec![0u8; block_size];
+        self.reader.read_block(block_nr, &mut block_data)?;
+
+        // Validate the header.
+        let header = read_struct::<super::ondisk::Ext4XattrHeader>(&block_data)?;
+        if header.h_magic != super::ondisk::EXT4_XATTR_MAGIC {
+            return Err(KernelError::IoError);
+        }
+
+        let header_size = core::mem::size_of::<super::ondisk::Ext4XattrHeader>();
+        let entry_header_size = core::mem::size_of::<super::ondisk::Ext4XattrEntry>();
+
+        let mut result = Vec::new();
+        let mut offset = header_size;
+
+        loop {
+            // Check for end of entries (sentinel: 4 zero bytes).
+            if offset.saturating_add(4) > block_size {
+                break;
+            }
+            if block_data.get(offset..offset.saturating_add(4)) == Some(&[0, 0, 0, 0]) {
+                break;
+            }
+
+            // Read entry header.
+            if offset.saturating_add(entry_header_size) > block_size {
+                break;
+            }
+            let entry_bytes = block_data.get(offset..offset.saturating_add(entry_header_size))
+                .ok_or(KernelError::IoError)?;
+            let entry = read_struct::<super::ondisk::Ext4XattrEntry>(entry_bytes)?;
+
+            // Read the name.
+            let name_start = offset.saturating_add(entry_header_size);
+            let name_end = name_start.saturating_add(entry.e_name_len as usize);
+            let name_bytes = block_data.get(name_start..name_end)
+                .ok_or(KernelError::IoError)?;
+            let name = core::str::from_utf8(name_bytes)
+                .map_err(|_| KernelError::IoError)?;
+
+            // Build the full key with namespace prefix.
+            let full_key = xattr_full_key(entry.e_name_index, name);
+
+            // Read the value.
+            let val_start = entry.e_value_offs as usize;
+            let val_end = val_start.saturating_add(entry.e_value_size as usize);
+            let value = if entry.e_value_size > 0 && val_end <= block_size {
+                block_data.get(val_start..val_end)
+                    .unwrap_or(&[])
+                    .to_vec()
+            } else {
+                Vec::new()
+            };
+
+            result.push((full_key, value));
+
+            // Advance past entry header + name, aligned to 4 bytes.
+            let entry_total = entry_header_size.saturating_add(entry.e_name_len as usize);
+            let aligned = (entry_total.saturating_add(3)) & !3;
+            offset = offset.saturating_add(aligned);
+        }
+
+        Ok(result)
+    }
+
+    /// Get a single xattr value by full key (e.g., "user.myattr").
+    pub fn get_xattr(&self, inode: &Ext4Inode, key: &str) -> KernelResult<Vec<u8>> {
+        let attrs = self.read_xattrs(inode)?;
+        for (k, v) in &attrs {
+            if k == key {
+                return Ok(v.clone());
+            }
+        }
+        Err(KernelError::NotFound)
+    }
+
+    /// Write the xattr block for an inode with the given set of attributes.
+    ///
+    /// Allocates a new xattr block if needed, or updates the existing one.
+    /// The caller provides the full set of xattrs — this is a replace-all
+    /// operation.  Returns the block number used (0 if attrs is empty).
+    pub fn write_xattr_block(
+        &mut self,
+        inode: &mut Ext4Inode,
+        inode_nr: u32,
+        attrs: &[(String, Vec<u8>)],
+    ) -> KernelResult<u64> {
+        let old_block = self.xattr_block(inode);
+
+        if attrs.is_empty() {
+            // No xattrs — free the old block if it exists.
+            if old_block != 0 {
+                super::balloc::free_block(
+                    &self.reader,
+                    &mut self.sb,
+                    &mut self.group_descs,
+                    old_block,
+                )?;
+                inode.i_file_acl_lo = 0;
+                // Clear high bits in i_osd2.
+                if let Some(b) = inode.i_osd2.get_mut(4) { *b = 0; }
+                if let Some(b) = inode.i_osd2.get_mut(5) { *b = 0; }
+                self.write_inode(inode_nr, inode)?;
+            }
+            return Ok(0);
+        }
+
+        // Build the xattr block.
+        let block_size = self.sb.block_size as usize;
+        let mut block_data = vec![0u8; block_size];
+        let header_size = core::mem::size_of::<super::ondisk::Ext4XattrHeader>();
+        let entry_header_size = core::mem::size_of::<super::ondisk::Ext4XattrEntry>();
+
+        // Write header.
+        let header = super::ondisk::Ext4XattrHeader {
+            h_magic: super::ondisk::EXT4_XATTR_MAGIC,
+            h_refcount: 1,
+            h_blocks: 1,
+            h_hash: 0,
+            h_checksum: 0,
+            h_reserved: [0; 3],
+        };
+        let hdr_bytes = struct_as_bytes(&header);
+        if let Some(dest) = block_data.get_mut(..hdr_bytes.len()) {
+            dest.copy_from_slice(hdr_bytes);
+        }
+
+        // Write entries from the front, values from the back.
+        let mut entry_offset = header_size;
+        let mut value_end = block_size; // values grow backward from end
+
+        for (key, value) in attrs {
+            let (name_index, name) = xattr_split_key(key);
+            let name_bytes = name.as_bytes();
+
+            // Check that entry + value fit.
+            let entry_total = entry_header_size.saturating_add(name_bytes.len());
+            let entry_aligned = (entry_total.saturating_add(3)) & !3;
+            let value_aligned = (value.len().saturating_add(3)) & !3;
+
+            // Value goes at end of block.
+            let value_start = value_end.saturating_sub(value_aligned);
+            if entry_offset.saturating_add(entry_aligned) > value_start {
+                // No room — xattr block is full.
+                return Err(KernelError::DiskFull);
+            }
+
+            // Write the value.
+            if let Some(dest) = block_data.get_mut(value_start..value_start.saturating_add(value.len())) {
+                dest.copy_from_slice(value);
+            }
+            value_end = value_start;
+
+            // Write the entry header.
+            let entry = super::ondisk::Ext4XattrEntry {
+                e_name_len: name_bytes.len() as u8,
+                e_name_index: name_index,
+                e_value_offs: value_start as u16,
+                e_value_inum: 0,
+                e_value_size: value.len() as u32,
+                e_hash: 0,
+            };
+            let entry_bytes = struct_as_bytes(&entry);
+            if let Some(dest) = block_data.get_mut(entry_offset..entry_offset.saturating_add(entry_bytes.len())) {
+                dest.copy_from_slice(entry_bytes);
+            }
+
+            // Write the name.
+            let name_start = entry_offset.saturating_add(entry_header_size);
+            if let Some(dest) = block_data.get_mut(name_start..name_start.saturating_add(name_bytes.len())) {
+                dest.copy_from_slice(name_bytes);
+            }
+
+            entry_offset = entry_offset.saturating_add(entry_aligned);
+        }
+
+        // Write sentinel (4 zero bytes after last entry — already zero).
+
+        // Allocate or reuse a block.
+        let block_nr = if old_block != 0 {
+            // Reuse the existing block.
+            old_block
+        } else {
+            // Allocate a new block.
+            let goal = u64::from(self.sb.raw.s_first_data_block);
+            super::balloc::alloc_block(
+                &self.reader,
+                &mut self.sb,
+                &mut self.group_descs,
+                goal,
+            )?
+        };
+
+        // Write the xattr block to disk.
+        self.reader.write_block(block_nr, &block_data)?;
+
+        // Update the inode's i_file_acl field.
+        inode.i_file_acl_lo = block_nr as u32;
+        // High bits.
+        let hi = (block_nr >> 32) as u16;
+        let hi_bytes = hi.to_le_bytes();
+        if let Some(b) = inode.i_osd2.get_mut(4) { *b = hi_bytes[0]; }
+        if let Some(b) = inode.i_osd2.get_mut(5) { *b = hi_bytes[1]; }
+
+        self.write_inode(inode_nr, inode)?;
+
+        Ok(block_nr)
     }
 
     /// Flush all cached writes for this filesystem to disk.
@@ -1403,6 +1656,66 @@ fn read_struct<T: Copy>(data: &[u8]) -> KernelResult<T> {
         Ok(val.assume_init())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Extended attribute key helpers
+// ---------------------------------------------------------------------------
+
+/// Build a full xattr key from a namespace index and name.
+///
+/// For example, index=1 + name="myattr" → "user.myattr".
+fn xattr_full_key(name_index: u8, name: &str) -> String {
+    use super::ondisk::xattr_index;
+    match name_index {
+        xattr_index::USER => {
+            let mut key = String::from("user.");
+            key.push_str(name);
+            key
+        }
+        xattr_index::TRUSTED => {
+            let mut key = String::from("trusted.");
+            key.push_str(name);
+            key
+        }
+        xattr_index::SECURITY => {
+            let mut key = String::from("security.");
+            key.push_str(name);
+            key
+        }
+        xattr_index::SYSTEM => {
+            let mut key = String::from("system.");
+            key.push_str(name);
+            key
+        }
+        _ => {
+            // Unknown namespace — store with raw index prefix.
+            String::from(name)
+        }
+    }
+}
+
+/// Split a full xattr key into namespace index and bare name.
+///
+/// For example, "user.myattr" → (1, "myattr").
+/// Unknown prefixes get index 0 (raw).
+fn xattr_split_key(key: &str) -> (u8, &str) {
+    use super::ondisk::xattr_index;
+    if let Some(rest) = key.strip_prefix("user.") {
+        (xattr_index::USER, rest)
+    } else if let Some(rest) = key.strip_prefix("trusted.") {
+        (xattr_index::TRUSTED, rest)
+    } else if let Some(rest) = key.strip_prefix("security.") {
+        (xattr_index::SECURITY, rest)
+    } else if let Some(rest) = key.strip_prefix("system.") {
+        (xattr_index::SYSTEM, rest)
+    } else {
+        (xattr_index::NONE, key)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inode byte helpers
+// ---------------------------------------------------------------------------
 
 /// Reinterpret the inode's i_block field as a byte slice.
 ///

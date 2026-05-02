@@ -3761,6 +3761,68 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_FS_FLOCK` — acquire an advisory file lock.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+/// `arg2`: lock type (0 = shared, 1 = exclusive).
+/// `arg3`: owner ID.
+pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::METADATA,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    let lock_type = match args.arg2 {
+        0 => crate::fs::LockType::Shared,
+        1 => crate::fs::LockType::Exclusive,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let owner = args.arg3;
+
+    match crate::fs::Vfs::flock(path, owner, lock_type) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_FUNLOCK` — release an advisory file lock.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+/// `arg2`: owner ID.
+pub fn sys_fs_funlock(args: &SyscallArgs) -> SyscallResult {
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    let owner = args.arg2;
+
+    match crate::fs::Vfs::funlock(path, owner) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SYNC` — flush all filesystems to stable storage.
+pub fn sys_fs_sync(_args: &SyscallArgs) -> SyscallResult {
+    match crate::fs::Vfs::sync() {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FS_LINK` — create a hard link.
 ///
 /// `arg0`: pointer to existing path string.

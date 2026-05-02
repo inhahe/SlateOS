@@ -39,5 +39,6 @@ pub mod trash;
 pub mod vfs;
 
 pub use vfs::{
-    DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp, Vfs, validate_path,
+    DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, LockType, Timestamp, Vfs,
+    validate_path,
 };

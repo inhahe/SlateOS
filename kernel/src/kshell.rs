@@ -163,6 +163,7 @@ fn execute(line: &str) {
         "tree" => cmd_tree(args),
         "du" => cmd_du(args),
         "find" => cmd_find(args),
+        "sync" => cmd_sync(),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -211,6 +212,7 @@ fn cmd_help() {
     crate::console_println!("  du [D]    Show disk usage of directory");
     crate::console_println!("  find [D]P Search for files matching pattern");
     crate::console_println!("  df [path] Show filesystem space usage");
+    crate::console_println!("  sync      Flush all filesystems to disk");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -1225,6 +1227,18 @@ fn find_recurse(path: &str, pattern: &str, count: &mut u64, depth: u32) {
 
         if entry.entry_type == crate::fs::EntryType::Directory {
             find_recurse(&child_path, pattern, count, depth + 1);
+        }
+    }
+}
+
+/// Flush all filesystems to stable storage.
+fn cmd_sync() {
+    match crate::fs::Vfs::sync() {
+        Ok(()) => {
+            crate::console_println!("All filesystems synced.");
+        }
+        Err(e) => {
+            crate::console_println!("sync: {:?}", e);
         }
     }
 }

@@ -595,6 +595,17 @@ pub trait FileSystem: Send {
         let _ = (existing, new_path);
         Err(KernelError::NotSupported)
     }
+
+    /// Flush (sync) all dirty data and metadata to stable storage.
+    ///
+    /// Called by `Vfs::sync()` to ensure durability.  For filesystems
+    /// backed by block devices, this should flush the buffer cache and
+    /// any pending journal transactions.
+    ///
+    /// Default: no-op (suitable for in-memory or read-only filesystems).
+    fn sync(&mut self) -> KernelResult<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +628,61 @@ static VFS: Mutex<VfsInner> = Mutex::new(VfsInner {
 struct VfsInner {
     mounts: Vec<MountPoint>,
 }
+
+// ---------------------------------------------------------------------------
+// Advisory file locking
+// ---------------------------------------------------------------------------
+
+/// Type of advisory lock on a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockType {
+    /// Shared (read) lock — multiple holders allowed.
+    Shared,
+    /// Exclusive (write) lock — at most one holder.
+    Exclusive,
+}
+
+/// A single advisory lock held on a file.
+#[derive(Debug, Clone)]
+struct FileLock {
+    /// Owning process/task ID (0 = kernel).
+    owner: u64,
+    /// Lock type.
+    lock_type: LockType,
+}
+
+/// Per-path lock table entry.
+#[derive(Debug, Clone)]
+struct PathLockEntry {
+    /// Canonical path (after symlink resolution).
+    path: String,
+    /// Active locks on this path.
+    locks: Vec<FileLock>,
+}
+
+/// Global advisory lock table.
+///
+/// Tracks advisory locks per file path.  Locks are process-scoped:
+/// each lock is owned by a process ID, and a process can hold at most
+/// one lock per path (re-locking upgrades/downgrades atomically).
+///
+/// ## Semantics
+///
+/// - **Shared locks**: multiple processes can hold shared locks
+///   simultaneously.  A shared lock is incompatible with an exclusive lock.
+/// - **Exclusive locks**: only one process can hold an exclusive lock.
+///   Incompatible with both shared and exclusive locks from other owners.
+/// - **Upgrade**: a process holding a shared lock can upgrade to exclusive
+///   if no other locks exist.
+/// - **Downgrade**: a process holding an exclusive lock can downgrade to
+///   shared at any time.
+///
+/// Locks are advisory — they don't prevent actual I/O.  Cooperating
+/// processes must check locks before accessing files.
+static LOCK_TABLE: Mutex<Vec<PathLockEntry>> = Mutex::new(Vec::new());
+
+/// Maximum number of distinct file paths that can be locked.
+const MAX_LOCKED_PATHS: usize = 1024;
 
 /// Public VFS interface.
 ///
@@ -1292,6 +1358,165 @@ impl Vfs {
         }
         Ok(result)
     }
+
+    // ----- Sync / Flush -----
+
+    /// Flush all dirty data and metadata across all mounted filesystems.
+    ///
+    /// Ensures that all pending writes are committed to stable storage.
+    /// Analogous to POSIX `sync()`.
+    pub fn sync() -> KernelResult<()> {
+        let mut vfs = VFS.lock();
+        let mut last_err: Option<KernelError> = None;
+        for mp in vfs.mounts.iter_mut() {
+            if let Err(e) = mp.fs.sync() {
+                last_err = Some(e);
+            }
+        }
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Flush a specific filesystem (the one that `path` resolves to).
+    pub fn sync_path(path: &str) -> KernelResult<()> {
+        let path = Self::resolve_follow(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, _relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.sync()
+    }
+
+    // ----- Advisory file locking -----
+
+    /// Acquire an advisory lock on a file.
+    ///
+    /// `path` is resolved (symlinks followed) before locking.
+    /// `owner` identifies the lock holder (typically a process/task ID).
+    ///
+    /// ## Semantics
+    ///
+    /// - **Shared lock**: compatible with other shared locks, incompatible
+    ///   with exclusive locks from other owners.
+    /// - **Exclusive lock**: incompatible with any lock from another owner.
+    /// - If the owner already holds a lock on this path, the lock is
+    ///   upgraded or downgraded atomically.
+    ///
+    /// Returns `WouldBlock` if the lock cannot be acquired (non-blocking).
+    pub fn flock(path: &str, owner: u64, lock_type: LockType) -> KernelResult<()> {
+        let path = Self::resolve_follow(path)?;
+        let mut table = LOCK_TABLE.lock();
+
+        // Find or create the entry for this path.
+        let entry_idx = table.iter().position(|e| e.path == path);
+
+        if let Some(idx) = entry_idx {
+            let entry = &mut table[idx];
+
+            // Check if this owner already has a lock (upgrade/downgrade).
+            if let Some(pos) = entry.locks.iter().position(|l| l.owner == owner) {
+                // Re-lock: upgrade/downgrade.
+                match lock_type {
+                    LockType::Exclusive => {
+                        // Can only upgrade to exclusive if no other locks exist.
+                        if entry.locks.len() > 1 {
+                            return Err(KernelError::WouldBlock);
+                        }
+                        entry.locks[pos].lock_type = LockType::Exclusive;
+                    }
+                    LockType::Shared => {
+                        // Downgrade is always allowed.
+                        entry.locks[pos].lock_type = LockType::Shared;
+                    }
+                }
+                return Ok(());
+            }
+
+            // New lock on this path.
+            match lock_type {
+                LockType::Shared => {
+                    // Compatible only if no exclusive lock exists.
+                    if entry.locks.iter().any(|l| l.lock_type == LockType::Exclusive) {
+                        return Err(KernelError::WouldBlock);
+                    }
+                }
+                LockType::Exclusive => {
+                    // Incompatible with any existing lock.
+                    if !entry.locks.is_empty() {
+                        return Err(KernelError::WouldBlock);
+                    }
+                }
+            }
+
+            entry.locks.push(FileLock { owner, lock_type });
+        } else {
+            // No existing entry — create one.
+            if table.len() >= MAX_LOCKED_PATHS {
+                return Err(KernelError::OutOfMemory);
+            }
+            table.push(PathLockEntry {
+                path,
+                locks: alloc::vec![FileLock { owner, lock_type }],
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Release an advisory lock on a file.
+    ///
+    /// If the owner doesn't hold a lock on the path, this is a no-op.
+    pub fn funlock(path: &str, owner: u64) -> KernelResult<()> {
+        let path = Self::resolve_follow(path)?;
+        let mut table = LOCK_TABLE.lock();
+
+        if let Some(idx) = table.iter().position(|e| e.path == path) {
+            let entry = &mut table[idx];
+            entry.locks.retain(|l| l.owner != owner);
+
+            // Clean up empty entries to prevent unbounded growth.
+            if entry.locks.is_empty() {
+                table.swap_remove(idx);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Release all advisory locks held by a given owner (process cleanup).
+    ///
+    /// Called during process exit to avoid leaked locks.
+    pub fn funlock_all(owner: u64) {
+        let mut table = LOCK_TABLE.lock();
+        // Remove this owner from every entry, then clean up empties.
+        table.retain_mut(|entry| {
+            entry.locks.retain(|l| l.owner != owner);
+            !entry.locks.is_empty()
+        });
+    }
+
+    /// Query the lock state of a file.
+    ///
+    /// Returns `None` if no locks are held, or `Some((lock_type, count))`
+    /// describing the current lock state.
+    pub fn lock_query(path: &str) -> KernelResult<Option<(LockType, usize)>> {
+        let path = Self::resolve_follow(path)?;
+        let table = LOCK_TABLE.lock();
+
+        if let Some(entry) = table.iter().find(|e| e.path == path) {
+            if entry.locks.is_empty() {
+                return Ok(None);
+            }
+            // If any lock is exclusive, report exclusive.
+            if entry.locks.iter().any(|l| l.lock_type == LockType::Exclusive) {
+                return Ok(Some((LockType::Exclusive, 1)));
+            }
+            // Otherwise all are shared.
+            Ok(Some((LockType::Shared, entry.locks.len())))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1648,6 +1873,111 @@ pub fn self_test() -> KernelResult<()> {
         Err(e) => {
             serial_println!("[vfs]   mount_info failed: {:?}", e);
         }
+    }
+
+    // --- Advisory file locking tests ---
+    serial_println!("[vfs]   Testing advisory file locking...");
+    {
+        let test_path = "/tmp/_vfs_lock_test";
+        Vfs::write_file(test_path, b"lock test")?;
+
+        // Initially no lock.
+        let state = Vfs::lock_query(test_path)?;
+        if state.is_some() {
+            serial_println!("[vfs]   FAIL: expected no lock, got {:?}", state);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     initial: no lock OK");
+
+        // Acquire shared lock from owner 100.
+        Vfs::flock(test_path, 100, LockType::Shared)?;
+        let state = Vfs::lock_query(test_path)?;
+        if !matches!(state, Some((LockType::Shared, 1))) {
+            serial_println!("[vfs]   FAIL: expected Shared(1), got {:?}", state);
+            Vfs::funlock_all(100);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     shared lock acquired OK");
+
+        // Second shared lock from owner 200 — should succeed.
+        Vfs::flock(test_path, 200, LockType::Shared)?;
+        let state = Vfs::lock_query(test_path)?;
+        if !matches!(state, Some((LockType::Shared, 2))) {
+            serial_println!("[vfs]   FAIL: expected Shared(2), got {:?}", state);
+            Vfs::funlock_all(100);
+            Vfs::funlock_all(200);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     second shared lock OK (2 holders)");
+
+        // Exclusive lock from owner 300 should fail (shared locks exist).
+        match Vfs::flock(test_path, 300, LockType::Exclusive) {
+            Err(KernelError::WouldBlock) => {
+                serial_println!("[vfs]     exclusive blocked by shared OK");
+            }
+            other => {
+                serial_println!("[vfs]   FAIL: expected WouldBlock, got {:?}", other);
+                Vfs::funlock_all(100);
+                Vfs::funlock_all(200);
+                let _ = Vfs::remove(test_path);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Release both shared locks.
+        Vfs::funlock(test_path, 100)?;
+        Vfs::funlock(test_path, 200)?;
+        let state = Vfs::lock_query(test_path)?;
+        if state.is_some() {
+            serial_println!("[vfs]   FAIL: expected no lock after unlock, got {:?}", state);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     unlock both holders: clean OK");
+
+        // Exclusive lock should now succeed.
+        Vfs::flock(test_path, 300, LockType::Exclusive)?;
+        let state = Vfs::lock_query(test_path)?;
+        if !matches!(state, Some((LockType::Exclusive, 1))) {
+            serial_println!("[vfs]   FAIL: expected Exclusive(1), got {:?}", state);
+            Vfs::funlock_all(300);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     exclusive lock acquired OK");
+
+        // Shared lock from another owner should fail.
+        match Vfs::flock(test_path, 400, LockType::Shared) {
+            Err(KernelError::WouldBlock) => {
+                serial_println!("[vfs]     shared blocked by exclusive OK");
+            }
+            other => {
+                serial_println!("[vfs]   FAIL: expected WouldBlock, got {:?}", other);
+                Vfs::funlock_all(300);
+                let _ = Vfs::remove(test_path);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Downgrade exclusive to shared.
+        Vfs::flock(test_path, 300, LockType::Shared)?;
+        let state = Vfs::lock_query(test_path)?;
+        if !matches!(state, Some((LockType::Shared, 1))) {
+            serial_println!("[vfs]   FAIL: expected Shared after downgrade, got {:?}", state);
+            Vfs::funlock_all(300);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     downgrade exclusive→shared OK");
+
+        // funlock_all cleanup.
+        Vfs::funlock_all(300);
+
+        let _ = Vfs::remove(test_path);
+        serial_println!("[vfs]     lock test cleanup OK");
     }
 
     serial_println!("[vfs] Self-test PASSED");

@@ -879,6 +879,13 @@ impl FileSystem for Ext4Fs {
             read_only: !sb.can_write,
         })
     }
+
+    /// Flush all pending writes to the block device.
+    ///
+    /// Writes the superblock and flushes the block cache.
+    fn sync(&mut self) -> KernelResult<()> {
+        self.driver.flush()
+    }
 }
 
 impl Ext4Fs {

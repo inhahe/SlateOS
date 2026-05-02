@@ -2289,6 +2289,10 @@ impl FileSystem for FatFs {
     ///
     /// Scans the FAT to count free clusters and computes byte totals.
     #[allow(clippy::arithmetic_side_effects)]
+    fn sync(&mut self) -> KernelResult<()> {
+        super::cache::flush(&self.device_name)
+    }
+
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
         let cluster_bytes = u64::from(self.bpb.sectors_per_cluster)
             * u64::from(self.bpb.bytes_per_sector);

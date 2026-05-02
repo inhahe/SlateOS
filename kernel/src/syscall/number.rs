@@ -906,6 +906,42 @@ pub const SYS_FS_STATVFS: u64 = 608;
 /// Size of the output buffer for `SYS_FS_STATVFS`.
 pub const FS_STATVFS_SIZE: usize = 64;
 
+/// Acquire an advisory file lock (flock).
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: lock type (0 = shared/read, 1 = exclusive/write).
+/// `arg3`: owner ID (typically the process/task ID of the caller).
+///
+/// ## Semantics
+///
+/// - Shared locks are compatible with other shared locks but not
+///   exclusive locks.
+/// - Exclusive locks are incompatible with all other locks.
+/// - If the owner already holds a lock, it is upgraded or downgraded.
+///
+/// Returns: 0 on success, `WOULD_BLOCK` if the lock is held by
+/// another process, or negative error code.
+pub const SYS_FS_FLOCK: u64 = 609;
+
+/// Release an advisory file lock.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: owner ID.
+///
+/// If the owner doesn't hold a lock on this file, this is a no-op.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_FUNLOCK: u64 = 640;
+
+/// Flush all mounted filesystems to stable storage (sync).
+///
+/// No arguments.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_SYNC: u64 = 641;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

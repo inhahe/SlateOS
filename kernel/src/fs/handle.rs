@@ -350,6 +350,59 @@ pub fn fstat(handle: u64) -> KernelResult<(u64, u8)> {
     Ok((entry.size, 0))
 }
 
+/// Truncate a file to a given size by handle.
+///
+/// Requires the handle to be opened with WRITE permission.
+/// Updates the cached size and clamps the offset if it was
+/// beyond the new end-of-file.
+pub fn ftruncate(handle: u64, size: u64) -> KernelResult<()> {
+    let mut table = OPEN_FILES.lock();
+    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+
+    if !file.flags.is_writable() {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    crate::fs::Vfs::truncate(&file.path, size)?;
+
+    file.size = size;
+    // Clamp offset: if the cursor was beyond the new EOF, move it back.
+    if file.offset > size {
+        file.offset = size;
+    }
+
+    Ok(())
+}
+
+/// Duplicate a file handle, creating a new handle that refers to the
+/// same file with the same flags and an independent cursor position.
+///
+/// The new handle starts at the same offset as the original.
+pub fn dup(handle: u64) -> KernelResult<u64> {
+    let table = OPEN_FILES.lock();
+    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+
+    let path = file.path.clone();
+    let offset = file.offset;
+    let size = file.size;
+    let flags = file.flags;
+
+    // Need to drop the lock before calling allocate_handle (it
+    // acquires the same lock).
+    drop(table);
+
+    allocate_handle(path, offset, size, flags)
+}
+
+/// Get the VFS path associated with an open handle.
+///
+/// Useful for diagnostics and `/proc/<pid>/fd` equivalent.
+pub fn handle_path(handle: u64) -> KernelResult<String> {
+    let table = OPEN_FILES.lock();
+    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    Ok(file.path.clone())
+}
+
 /// Get the current number of open file handles (for diagnostics).
 #[allow(dead_code)]
 pub fn open_count() -> usize {
@@ -515,6 +568,60 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[fs::handle]   fstat: OK (size={}, type=file)", size);
 
+    // 11. ftruncate.
+    let trunc_size = 7u64;
+    ftruncate(hw, trunc_size)?;
+    let (new_size, _) = fstat(hw)?;
+    if new_size != trunc_size {
+        crate::serial_println!(
+            "[fs::handle]   FAIL: ftruncate to {} but fstat shows {}",
+            trunc_size, new_size
+        );
+        close(hw).ok();
+        return Err(KernelError::InternalError);
+    }
+    // Read back the truncated content.
+    seek(hw, SeekFrom::Start(0))?;
+    let nt = read(hw, &mut buf)?;
+    if nt != trunc_size as usize {
+        crate::serial_println!("[fs::handle]   FAIL: read after truncate returned {} bytes", nt);
+        close(hw).ok();
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[fs::handle]   ftruncate to {} bytes: OK", trunc_size);
+
+    // 12. dup — duplicate handle, verify independent cursor.
+    seek(hw, SeekFrom::Start(0))?;
+    let hdup = dup(hw)?;
+    // Read 3 bytes from original — advances original cursor.
+    let n_orig = read(hw, &mut buf[..3])?;
+    if n_orig != 3 {
+        crate::serial_println!("[fs::handle]   FAIL: read 3 from original got {}", n_orig);
+        close(hdup).ok();
+        close(hw).ok();
+        return Err(KernelError::InternalError);
+    }
+    // Dup'd handle was at offset 0 when dup'd — read should start there.
+    let n_dup = read(hdup, &mut buf[..3])?;
+    if n_dup != 3 {
+        crate::serial_println!("[fs::handle]   FAIL: read 3 from dup got {}", n_dup);
+        close(hdup).ok();
+        close(hw).ok();
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[fs::handle]   dup: independent cursor OK");
+
+    // 13. handle_path.
+    let path_check = handle_path(hw)?;
+    if path_check != "/handle_write_test.txt" {
+        crate::serial_println!("[fs::handle]   FAIL: handle_path = '{}'", path_check);
+        close(hdup).ok();
+        close(hw).ok();
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[fs::handle]   handle_path: '{}' OK", path_check);
+
+    close(hdup)?;
     close(hw)?;
 
     // Cleanup test files.

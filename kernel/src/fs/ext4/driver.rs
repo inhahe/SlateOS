@@ -984,6 +984,17 @@ pub fn inode_block_as_bytes(inode: &Ext4Inode) -> &[u8] {
     unsafe { core::slice::from_raw_parts(ptr, len) }
 }
 
+/// Reinterpret the inode's i_block field as a mutable byte slice.
+///
+/// Used for writing fast symlinks (target stored directly in i_block).
+pub fn inode_block_as_bytes_mut(inode: &mut Ext4Inode) -> &mut [u8] {
+    let ptr = inode.i_block.as_mut_ptr().cast::<u8>();
+    let len = core::mem::size_of_val(&inode.i_block);
+    // SAFETY: Same as inode_block_as_bytes, but mutable.
+    // The mutable borrow of `inode` ensures exclusive access.
+    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+}
+
 /// Reinterpret a `#[repr(C)]` struct as a byte slice.
 ///
 /// Used for writing structs to disk.

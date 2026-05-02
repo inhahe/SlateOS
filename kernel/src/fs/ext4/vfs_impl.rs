@@ -11,10 +11,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, FileSystem};
+use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem};
 
 use super::driver::Ext4Driver;
-use super::ondisk::file_type;
+use super::ondisk::{file_type, inode_flags};
 
 // ---------------------------------------------------------------------------
 // FileSystem implementation
@@ -374,6 +374,213 @@ impl FileSystem for Ext4Fs {
         self.driver.write_group_descs()?;
         self.driver.flush()?;
         Ok(())
+    }
+
+    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode = inode.i_mode & file_type::S_IFMT;
+        if mode == file_type::S_IFDIR {
+            return Err(KernelError::IsADirectory);
+        }
+
+        // For extent-based files, we can read only the blocks we need
+        // rather than reading the entire file.  For now, use the default
+        // read-full-then-slice approach — still correct but will be
+        // optimized when we add per-extent seek.
+        let data = self.driver.read_file_data(&inode)?;
+        let file_size = data.len() as u64;
+
+        if offset >= file_size {
+            return Ok(Vec::new());
+        }
+
+        let start = offset as usize;
+        let end = start.saturating_add(len).min(data.len());
+        let slice = data.get(start..end).unwrap_or(&[]);
+        Ok(slice.to_vec())
+    }
+
+    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode_type = inode.i_mode & file_type::S_IFMT;
+        let entry_type = mode_to_entry_type(mode_type);
+        let size = inode_file_size(&inode);
+        let permissions = inode.i_mode & 0o7777; // lower 12 bits
+
+        // Map inode flags to our FileAttr.
+        let mut attrs = FileAttr::NONE;
+        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
+            attrs = attrs.union(FileAttr::IMMUTABLE);
+        }
+        if inode.i_flags & inode_flags::APPEND != 0 {
+            attrs = attrs.union(FileAttr::APPEND_ONLY);
+        }
+
+        // ext4 stores Unix timestamps as seconds since epoch.
+        // Our FileMeta uses nanoseconds — convert.
+        let sec_to_ns = |s: u32| u64::from(s).saturating_mul(1_000_000_000);
+
+        Ok(FileMeta {
+            size,
+            entry_type,
+            created_ns: 0, // ext4 core inode doesn't have crtime (it's in extra)
+            modified_ns: sec_to_ns(inode.i_mtime),
+            accessed_ns: sec_to_ns(inode.i_atime),
+            changed_ns: sec_to_ns(inode.i_ctime),
+            uid: u32::from(inode.i_uid),
+            gid: u32::from(inode.i_gid),
+            permissions,
+            attributes: attrs,
+            xattrs: Vec::new(), // xattrs not yet implemented
+            hash: Vec::new(),
+        })
+    }
+
+    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Preserve the file type bits, update only the permission bits.
+        let type_bits = inode.i_mode & file_type::S_IFMT;
+        inode.i_mode = type_bits | (permissions & 0o7777);
+
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Note: ext4 supports 32-bit UIDs via i_uid + i_osd2 high bits.
+        // We only set the low 16 bits for now.
+        inode.i_uid = uid as u16;
+        inode.i_gid = gid as u16;
+
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+        let ino = self.driver.resolve_path(path)?;
+        let mut inode = self.driver.read_inode(ino)?;
+
+        // Map our FileAttr flags to ext4 inode flags.
+        // Preserve all other inode flags (like EXTENTS).
+        let mut flags = inode.i_flags;
+
+        // Clear the bits we manage, then set them if requested.
+        flags &= !(inode_flags::IMMUTABLE | inode_flags::APPEND);
+        if attrs.contains(FileAttr::IMMUTABLE) {
+            flags |= inode_flags::IMMUTABLE;
+        }
+        if attrs.contains(FileAttr::APPEND_ONLY) {
+            flags |= inode_flags::APPEND;
+        }
+        inode.i_flags = flags;
+
+        self.driver.write_inode(ino, &inode)?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {
+        let (parent_path, name) = split_parent_name(path)?;
+        let parent_ino = self.driver.resolve_path(parent_path)?;
+        let mut parent_inode = self.driver.read_inode(parent_ino)?;
+
+        if (parent_inode.i_mode & file_type::S_IFMT) != file_type::S_IFDIR {
+            return Err(KernelError::NotADirectory);
+        }
+
+        // Check name doesn't already exist.
+        if self.driver.dir_lookup(&parent_inode, name).is_ok() {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        let target_bytes = target.as_bytes();
+
+        // Allocate the symlink inode.
+        let preferred_group = self.driver.superblock().inode_group(parent_ino);
+        let (sym_ino, mut sym_inode) = self.driver.create_inode(
+            file_type::S_IFLNK | 0o777,
+            preferred_group,
+        )?;
+
+        if target_bytes.len() <= 60 {
+            // Fast symlink: store target in i_block directly (no data blocks).
+            let block_bytes = super::driver::inode_block_as_bytes_mut(&mut sym_inode);
+            if let Some(dest) = block_bytes.get_mut(..target_bytes.len()) {
+                dest.copy_from_slice(target_bytes);
+            }
+            // Clear the EXTENTS flag — fast symlinks don't use extents.
+            sym_inode.i_flags &= !inode_flags::EXTENTS;
+        } else {
+            // Slow symlink: store target in data blocks.
+            self.driver.write_file_data(&mut sym_inode, target_bytes)?;
+        }
+
+        // Set the size to the target length.
+        sym_inode.i_size_lo = target_bytes.len() as u32;
+        sym_inode.i_size_high = 0;
+
+        self.driver.write_inode(sym_ino, &sym_inode)?;
+
+        // Add directory entry in parent.
+        self.driver.add_dir_entry(
+            &mut parent_inode,
+            parent_ino,
+            sym_ino,
+            name,
+            super::ondisk::dir_type::SYMLINK,
+        )?;
+
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
+    fn readlink(&mut self, path: &str) -> KernelResult<String> {
+        let ino = self.driver.resolve_path(path)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        if (inode.i_mode & file_type::S_IFMT) != file_type::S_IFLNK {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let target_bytes = self.read_symlink_target(&inode)?;
+        // Convert to string — symlink targets should be valid paths.
+        String::from_utf8(target_bytes)
+            .map_err(|_| KernelError::IoError)
+    }
+
+    fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
+        // lstat is like stat but doesn't follow the final symlink.
+        // Since our resolve_path follows symlinks, we need to resolve
+        // the parent and then look up the final component directly.
+        let (parent_path, name) = split_parent_name(path)?;
+        let parent_ino = self.driver.resolve_path(parent_path)?;
+        let parent_inode = self.driver.read_inode(parent_ino)?;
+
+        let ino = self.driver.dir_lookup(&parent_inode, name)?;
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode = inode.i_mode & file_type::S_IFMT;
+        let entry_type = mode_to_entry_type(mode);
+        let size = inode_file_size(&inode);
+
+        Ok(DirEntry {
+            name: String::from(name),
+            entry_type,
+            size,
+        })
     }
 
     fn debug_stats(&self) -> String {

@@ -2132,16 +2132,28 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let mut result = Vec::new();
         for mp in vfs.mounts.iter_mut() {
-            let info = mp.fs.statvfs().unwrap_or(FsInfo {
-                fs_type: String::from(mp.fs.fs_type()),
-                block_size: 0,
-                total_blocks: 0,
-                free_blocks: 0,
-                total_inodes: 0,
-                free_inodes: 0,
-                max_name_len: 255,
-                read_only: false,
-            });
+            // statvfs may fail for virtual filesystems or misconfigured
+            // mounts.  Log the error but still include the mount in the
+            // list with zeroed stats so df/mount show it exists.
+            let info = match mp.fs.statvfs() {
+                Ok(i) => i,
+                Err(e) => {
+                    crate::serial_println!(
+                        "[vfs] mount_info: statvfs failed for '{}' ({}): {:?}",
+                        mp.path, mp.fs.fs_type(), e
+                    );
+                    FsInfo {
+                        fs_type: String::from(mp.fs.fs_type()),
+                        block_size: 0,
+                        total_blocks: 0,
+                        free_blocks: 0,
+                        total_inodes: 0,
+                        free_inodes: 0,
+                        max_name_len: 255,
+                        read_only: false,
+                    }
+                }
+            };
             result.push((mp.path.clone(), info));
         }
         Ok(result)

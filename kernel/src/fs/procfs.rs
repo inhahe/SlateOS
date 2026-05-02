@@ -24,6 +24,9 @@
 //! ├── interrupts     APIC timer and IRQ state
 //! ├── devices        PCI device listing
 //! ├── net            Network interface configuration
+//! ├── vmstat         Virtual memory statistics (frames, swap, zram, OOM)
+//! ├── buddyinfo      Buddy allocator free blocks per order
+//! ├── swaps          Active swap devices with usage and priority
 //! └── <pid>/         Per-process directories
 //!     ├── status     Process name, state, priority, credentials
 //!     ├── cmdline    Process command name (null-terminated)
@@ -84,6 +87,9 @@ const ROOT_FILES: &[&str] = &[
     "interrupts",
     "devices",
     "net",
+    "vmstat",
+    "buddyinfo",
+    "swaps",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -578,6 +584,121 @@ fn gen_net() -> Vec<u8> {
     text.into_bytes()
 }
 
+/// `/proc/vmstat` — virtual memory statistics.
+///
+/// Summarizes page fault handling, swap activity, and frame allocator
+/// state.  Useful for diagnosing memory pressure and swap storms.
+fn gen_vmstat() -> Vec<u8> {
+    let info = crate::mm::memory_info();
+
+    let mut s = String::with_capacity(512);
+
+    // Frame allocator.
+    s.push_str(&format!("nr_free_frames {}\n", info.free_frames));
+    s.push_str(&format!("nr_total_frames {}\n", info.total_frames));
+
+    // Zero page pool.
+    s.push_str(&format!("nr_zero_pool {}\n", info.zero_pool_count));
+    s.push_str(&format!("zero_pool_hits {}\n", info.zero_pool_hits));
+    s.push_str(&format!("zero_pool_misses {}\n", info.zero_pool_misses));
+
+    // Heap allocator.
+    s.push_str(&format!("heap_slab_allocs {}\n", info.heap_slab_allocs));
+    s.push_str(&format!("heap_slab_frees {}\n", info.heap_slab_frees));
+    s.push_str(&format!("heap_large_allocs {}\n", info.heap_large_allocs));
+    s.push_str(&format!("heap_alloc_failures {}\n", info.heap_alloc_failures));
+
+    // Swap.
+    let swap_free = crate::mm::swap::free_slots();
+    let swap_used = crate::mm::swap::used_slots();
+    s.push_str(&format!("swap_free_slots {swap_free}\n"));
+    s.push_str(&format!("swap_used_slots {swap_used}\n"));
+
+    // Compression.
+    let comp = crate::mm::swap::compression_stats();
+    s.push_str(&format!("zram_compressed_bytes {}\n", comp.compressed_bytes));
+    s.push_str(&format!("zram_uncompressed_bytes {}\n", comp.uncompressed_bytes));
+    s.push_str(&format!("zram_compressed_pages {}\n", comp.compressed_count));
+    s.push_str(&format!("zram_uncompressed_pages {}\n", comp.uncompressed_count));
+    if comp.uncompressed_bytes > 0 {
+        s.push_str(&format!("zram_ratio_pct {}\n", comp.ratio_percent()));
+        s.push_str(&format!("zram_bytes_saved {}\n", comp.bytes_saved()));
+    }
+
+    // kswapd.
+    s.push_str(&format!("kswapd_running {}\n", if info.kswapd_running { 1 } else { 0 }));
+    s.push_str(&format!("kswapd_reclaim_cycles {}\n", info.kswapd_reclaim_cycles));
+    s.push_str(&format!("kswapd_total_reclaimed {}\n", info.kswapd_total_reclaimed));
+
+    // OOM.
+    s.push_str(&format!("oom_events {}\n", info.oom_events));
+    s.push_str(&format!("oom_kills {}\n", info.oom_kills));
+
+    s.into_bytes()
+}
+
+/// `/proc/buddyinfo` — buddy allocator free block counts per order.
+///
+/// Each line shows how many free blocks exist at each order level.
+/// Order 0 = 1 frame (16 KiB), order 1 = 2 frames (32 KiB), etc.
+/// This is essential for diagnosing memory fragmentation.
+fn gen_buddyinfo() -> Vec<u8> {
+    match crate::mm::frame::stats() {
+        Some(stats) => {
+            let mut s = String::with_capacity(256);
+            s.push_str("Node 0, zone Normal ");
+            for (order, count) in stats.order_counts.iter().enumerate() {
+                if order > 0 {
+                    s.push(' ');
+                }
+                s.push_str(&format!("{count}"));
+            }
+            s.push('\n');
+
+            // Also show derived info.
+            s.push_str(&format!(
+                "\n# Order sizes: 0={} KiB, 1={} KiB, ..., 10={} KiB\n",
+                16, 32, 16 * 1024
+            ));
+            s.push_str(&format!(
+                "# Total free frames: {}\n",
+                stats.free_frames
+            ));
+
+            s.into_bytes()
+        }
+        None => b"(frame allocator not initialized)\n".to_vec(),
+    }
+}
+
+/// `/proc/swaps` — active swap devices, Linux-compatible format.
+///
+/// Shows each swap device's type, capacity, usage, and priority.
+fn gen_swaps() -> Vec<u8> {
+    let devices = crate::mm::swap::list_devices();
+
+    let mut s = String::with_capacity(256);
+    // Header matching Linux's /proc/swaps format.
+    s.push_str("Filename\t\t\tType\t\tSize\tUsed\tPriority\n");
+
+    if devices.is_empty() {
+        // No swap devices.
+        return s.into_bytes();
+    }
+
+    for dev in &devices {
+        // Size/used in KiB (1 slot = 1 frame = 16 KiB).
+        let size_kib = (dev.total_slots as u64).saturating_mul(16);
+        let used_kib = (dev.used_slots as u64).saturating_mul(16);
+        s.push_str(&format!(
+            "{}\t\t\t{}\t\t{}\t{}\t{}\n",
+            dev.name, dev.device_type, size_kib, used_kib, dev.priority
+        ));
+    }
+
+    s.into_bytes()
+}
+
 /// `/proc/<pid>/status` — per-task status information (human-readable).
 ///
 /// Includes both task-level (scheduler) and process-level (PCB) data
@@ -839,6 +960,9 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "interrupts" => Ok(gen_interrupts()),
         "devices" => Ok(gen_devices()),
         "net" => Ok(gen_net()),
+        "vmstat" => Ok(gen_vmstat()),
+        "buddyinfo" => Ok(gen_buddyinfo()),
+        "swaps" => Ok(gen_swaps()),
         _ => Err(KernelError::NotFound),
     }
 }

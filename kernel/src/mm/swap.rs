@@ -1152,6 +1152,43 @@ pub fn summary() -> (usize, usize, usize) {
     (total_bytes, used_bytes, devices)
 }
 
+/// Information about a single swap device (for /proc/swaps).
+#[derive(Debug, Clone)]
+pub struct SwapDeviceInfo {
+    /// Device display name (e.g., "zram", "disk:vdb").
+    pub name: alloc::string::String,
+    /// Device type ("memory" for zram, "disk" for block device).
+    pub device_type: &'static str,
+    /// Total capacity in slots (1 slot = 1 page = 16 KiB).
+    pub total_slots: u32,
+    /// Used slots.
+    pub used_slots: u32,
+    /// Priority (higher = preferred).
+    pub priority: i32,
+}
+
+/// List all active swap devices with their usage and type.
+///
+/// Used by `/proc/swaps` to show swap configuration.
+pub fn list_devices() -> alloc::vec::Vec<SwapDeviceInfo> {
+    let state = SWAP.lock();
+    let mut result = alloc::vec::Vec::with_capacity(state.devices.len());
+    for dev in &state.devices {
+        let device_type = match &dev.backend {
+            SwapBackend::Memory(_) => "memory",
+            SwapBackend::Disk(_) => "disk",
+        };
+        result.push(SwapDeviceInfo {
+            name: dev.name.clone(),
+            device_type,
+            total_slots: dev.slots.capacity,
+            used_slots: dev.slots.used,
+            priority: dev.priority,
+        });
+    }
+    result
+}
+
 /// Compression statistics for the zram backend.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Public API for memory statistics dashboard.

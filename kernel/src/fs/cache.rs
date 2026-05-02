@@ -58,13 +58,24 @@ use crate::error::{KernelError, KernelResult};
 
 /// Maximum number of cached sectors.
 ///
-/// 512 sectors × 512 bytes = 256 KiB of cached data.
-/// This is a reasonable default for a kernel with limited memory.
-/// Can be increased on systems with more RAM.
-const MAX_ENTRIES: usize = 512;
+/// 2048 sectors × 512 bytes = 1 MiB of cached data.
+/// Increased from 256 KiB to better support filesystem workloads
+/// with larger directories and multi-extent files.
+const MAX_ENTRIES: usize = 2048;
 
 /// Maximum number of distinct block devices the cache supports.
 const MAX_DEVICES: usize = 8;
+
+/// Number of sectors to prefetch when sequential access is detected.
+///
+/// When reads hit 2+ consecutive sectors, we speculatively read ahead
+/// this many sectors beyond the current read.  This dramatically
+/// improves sequential read throughput (directory scans, file reads)
+/// by overlapping I/O with computation.
+const READAHEAD_SECTORS: usize = 8;
+
+/// Minimum consecutive sequential accesses before triggering read-ahead.
+const READAHEAD_THRESHOLD: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Cache entry
@@ -117,6 +128,8 @@ pub struct CacheStats {
     pub writes: u64,
     /// Number of dirty entries written back on eviction.
     pub writebacks: u64,
+    /// Number of read-ahead operations triggered.
+    pub readaheads: u64,
     /// Number of currently valid entries in the cache.
     pub entries_used: usize,
     /// Number of currently dirty entries.
@@ -128,6 +141,30 @@ pub struct CacheStats {
 // ---------------------------------------------------------------------------
 // Inner state
 // ---------------------------------------------------------------------------
+
+/// Per-device sequential access tracker for read-ahead.
+///
+/// Detects sequential read patterns and triggers prefetch.
+/// Each device gets one tracker; the window moves on every read.
+struct ReadAheadTracker {
+    /// Last sector read on this device.
+    last_lba: u64,
+    /// Number of consecutive sequential reads.
+    seq_count: u32,
+    /// Highest sector we've already prefetched up to (exclusive).
+    /// Avoids re-prefetching the same range on consecutive reads.
+    prefetched_up_to: u64,
+}
+
+impl ReadAheadTracker {
+    const fn new() -> Self {
+        Self {
+            last_lba: u64::MAX,
+            seq_count: 0,
+            prefetched_up_to: 0,
+        }
+    }
+}
 
 struct BufferCacheInner {
     /// Fixed pool of cache entries.
@@ -144,6 +181,8 @@ struct BufferCacheInner {
     misses: u64,
     writes: u64,
     writebacks: u64,
+    /// Read-ahead operations triggered.
+    readaheads: u64,
     /// Whether the pool has been initialized.
     initialized: bool,
 
@@ -158,10 +197,15 @@ struct BufferCacheInner {
     /// Stack of free slot indices for O(1) free-slot allocation.
     /// Populated on init, maintained on alloc/free.
     free_slots: Vec<usize>,
+
+    /// Per-device sequential access tracker for read-ahead.
+    readahead: [ReadAheadTracker; MAX_DEVICES],
 }
 
 impl BufferCacheInner {
     const fn new() -> Self {
+        // const array init requires const elements.
+        const RA_INIT: ReadAheadTracker = ReadAheadTracker::new();
         Self {
             entries: Vec::new(),
             device_names: Vec::new(),
@@ -171,9 +215,11 @@ impl BufferCacheInner {
             misses: 0,
             writes: 0,
             writebacks: 0,
+            readaheads: 0,
             initialized: false,
             index: BTreeMap::new(),
             free_slots: Vec::new(),
+            readahead: [RA_INIT; MAX_DEVICES],
         }
     }
 
@@ -363,6 +409,7 @@ impl BufferCacheInner {
             misses: self.misses,
             writes: self.writes,
             writebacks: self.writebacks,
+            readaheads: self.readaheads,
             entries_used: used,
             entries_dirty: dirty,
             capacity: MAX_ENTRIES,
@@ -379,6 +426,30 @@ static CACHE: Mutex<BufferCacheInner> = Mutex::new(BufferCacheInner::new());
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Update the read-ahead tracker for a device after accessing `lba`.
+///
+/// Returns `true` if read-ahead should be triggered (sequential pattern
+/// detected above the threshold).
+fn update_readahead_tracker(
+    cache: &mut BufferCacheInner,
+    dev_id: u8,
+    lba: u64,
+) -> bool {
+    let tracker = &mut cache.readahead[dev_id as usize];
+
+    if lba == tracker.last_lba.wrapping_add(1) {
+        // Sequential: LBA is exactly one past the last read.
+        tracker.seq_count = tracker.seq_count.saturating_add(1);
+    } else {
+        // Non-sequential access — reset the window.
+        tracker.seq_count = 0;
+        tracker.prefetched_up_to = 0;
+    }
+    tracker.last_lba = lba;
+
+    tracker.seq_count >= READAHEAD_THRESHOLD
+}
 
 /// Read a sector through the buffer cache.
 ///
@@ -402,6 +473,8 @@ pub fn read_sector(
         buf.copy_from_slice(&cache.entries[idx].data);
         cache.touch(idx);
         cache.hits = cache.hits.wrapping_add(1);
+        // Update read-ahead tracker even on hits.
+        update_readahead_tracker(&mut cache, dev_id, lba);
         return Ok(());
     }
 
@@ -426,6 +499,46 @@ pub fn read_sector(
     cache.entries[idx].valid = true;
     cache.index.insert((dev_id, lba), idx);
     cache.touch(idx);
+
+    // OPT: Sequential read-ahead.  If we detect a pattern of
+    // consecutive sector reads, speculatively prefetch the next
+    // READAHEAD_SECTORS into the cache.  This dramatically reduces
+    // latency for sequential file reads and directory traversals
+    // by overlapping I/O with processing.
+    let should_readahead = update_readahead_tracker(&mut cache, dev_id, lba);
+    if should_readahead {
+        let ra_start = lba.wrapping_add(1);
+        let ra_end = ra_start.saturating_add(READAHEAD_SECTORS as u64);
+        let prefetch_from = cache.readahead[dev_id as usize].prefetched_up_to.max(ra_start);
+        if prefetch_from < ra_end {
+            cache.readaheads = cache.readaheads.wrapping_add(1);
+            // Prefetch sectors that aren't already cached.
+            for ahead_lba in prefetch_from..ra_end {
+                if cache.find_index(dev_id, ahead_lba).is_some() {
+                    continue; // Already cached.
+                }
+                // Read from device into a temporary buffer.
+                let mut ahead_buf = [0u8; SECTOR_SIZE];
+                let ahead_result = blkdev::with_device(device, |dev| {
+                    dev.read_sector(ahead_lba, &mut ahead_buf)
+                });
+                if let Some(Ok(())) = ahead_result {
+                    if let Ok(slot) = cache.make_room() {
+                        cache.entries[slot].device_id = dev_id;
+                        cache.entries[slot].lba = ahead_lba;
+                        cache.entries[slot].data.copy_from_slice(&ahead_buf);
+                        cache.entries[slot].dirty = false;
+                        cache.entries[slot].valid = true;
+                        cache.index.insert((dev_id, ahead_lba), slot);
+                        cache.touch(slot);
+                    }
+                } else {
+                    break; // Device error or end of device — stop prefetching.
+                }
+            }
+            cache.readahead[dev_id as usize].prefetched_up_to = ra_end;
+        }
+    }
 
     Ok(())
 }

@@ -942,6 +942,70 @@ pub const SYS_FS_FUNLOCK: u64 = 640;
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_SYNC: u64 = 641;
 
+/// Copy a file from one path to another (works cross-mount).
+///
+/// `arg0`: pointer to source path string.
+/// `arg1`: source path length (bytes).
+/// `arg2`: pointer to destination path string.
+/// `arg3`: destination path length (bytes).
+///
+/// Reads the entire source file and writes it to the destination.
+/// If the destination exists, it is overwritten.  Works across
+/// different mount points (unlike rename/link).
+///
+/// Returns: number of bytes copied on success, negative error code.
+pub const SYS_FS_COPY: u64 = 642;
+
+/// Append data to a file (create if it doesn't exist).
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: pointer to data buffer.
+/// `arg3`: data length.
+///
+/// Atomically writes data at the end of the file.  Creates the
+/// file if it doesn't exist.  More efficient than open+seek+write
+/// for log files and append-only workloads.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_APPEND: u64 = 643;
+
+/// Truncate an open file handle to a given size.
+///
+/// `arg0`: file handle.
+/// `arg1`: new size in bytes.
+///
+/// The handle must have been opened with WRITE permission.
+/// If the file is being shrunk, data past the new size is lost.
+/// If the offset was past the new end, it is clamped.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_FS_FTRUNCATE: u64 = 644;
+
+/// Duplicate an open file handle.
+///
+/// `arg0`: source file handle.
+///
+/// Creates a new handle referring to the same file with the same
+/// flags.  The new handle has an independent cursor position
+/// (initially set to the source's current offset).
+///
+/// Returns: new file handle on success, negative error code.
+pub const SYS_FS_DUP: u64 = 645;
+
+/// Get the VFS path of an open file handle.
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to output buffer.
+/// `arg2`: buffer capacity.
+///
+/// Writes the null-terminated path string into the buffer.
+/// Useful for diagnostics and `/proc/<pid>/fd` equivalent.
+///
+/// Returns: path length in bytes (excluding null terminator),
+/// or negative error code.
+pub const SYS_FS_HANDLE_PATH: u64 = 646;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

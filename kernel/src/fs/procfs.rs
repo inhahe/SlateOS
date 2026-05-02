@@ -322,7 +322,8 @@ fn gen_cacheinfo() -> Vec<u8> {
          hit_rate:     {:.1}%\n\
          writes:       {}\n\
          writebacks:   {}\n\
-         entries_used: {}\n\
+         readaheads:   {}\n\
+         entries_used: {}/{}\n\
          entries_dirty:{}\n",
         stats.reads,
         stats.hits,
@@ -330,7 +331,9 @@ fn gen_cacheinfo() -> Vec<u8> {
         hit_rate,
         stats.writes,
         stats.writebacks,
+        stats.readaheads,
         stats.entries_used,
+        stats.capacity,
         stats.entries_dirty,
     );
     text.into_bytes()

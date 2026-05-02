@@ -3929,6 +3929,175 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Filesystem — copy, append, ftruncate, dup, handle_path (642–646)
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_COPY` — copy a file from one path to another.
+///
+/// `arg0`: pointer to source path string.
+/// `arg1`: source path length.
+/// `arg2`: pointer to destination path string.
+/// `arg3`: destination path length.
+///
+/// Returns: number of bytes copied on success.
+pub fn sys_fs_copy(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::CREATE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // Read source path.
+    // SAFETY: Validated in read_user_path.
+    let src = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    // Read destination path (arg2=ptr, arg3=len).
+    let dst_ptr = args.arg2 as *const u8;
+    let dst_len = (args.arg3 as usize).min(4096);
+    if dst_ptr.is_null() || dst_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, dst_len) {
+        return SyscallResult::err(e);
+    }
+    // SAFETY: Validated above — dst_ptr is in user space and mapped.
+    let dst_bytes = unsafe { core::slice::from_raw_parts(dst_ptr, dst_len) };
+    let dst = match core::str::from_utf8(dst_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::fs::Vfs::copy(src, dst) {
+        Ok(bytes) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let n = bytes as i64;
+            SyscallResult::ok(n)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_APPEND` — append data to a file.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length.
+/// `arg2`: pointer to data buffer.
+/// `arg3`: data length.
+pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated in read_user_path.
+    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    let data_ptr = args.arg2 as *const u8;
+    let data_len = (args.arg3 as usize).min(64 * 1024);
+    if data_ptr.is_null() && data_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above — data_ptr is in user space and mapped.
+        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    };
+
+    match crate::fs::Vfs::append(path, data) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_FTRUNCATE` — truncate an open file handle.
+///
+/// `arg0`: file handle.
+/// `arg1`: new size in bytes.
+pub fn sys_fs_ftruncate(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let size = args.arg1;
+
+    match crate::fs::handle::ftruncate(handle, size) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_DUP` — duplicate an open file handle.
+///
+/// `arg0`: source file handle.
+///
+/// Returns: new file handle.
+pub fn sys_fs_dup(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+
+    match crate::fs::handle::dup(handle) {
+        Ok(new_handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let h = new_handle as i64;
+            SyscallResult::ok(h)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_HANDLE_PATH` — get the VFS path of an open file handle.
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to output buffer.
+/// `arg2`: buffer capacity.
+///
+/// Returns: path length in bytes (excluding null terminator).
+pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let out_ptr = args.arg1 as *mut u8;
+    let out_cap = args.arg2 as usize;
+
+    if out_ptr.is_null() || out_cap == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, out_cap) {
+        return SyscallResult::err(e);
+    }
+
+    let path = match crate::fs::handle::handle_path(handle) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let path_bytes = path.as_bytes();
+    // Copy as much as fits, plus null terminator.
+    let copy_len = path_bytes.len().min(out_cap.saturating_sub(1));
+
+    // SAFETY: Validated above — out_ptr is in user space, mapped, writable.
+    unsafe {
+        core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), out_ptr, copy_len);
+        // Null terminator.
+        core::ptr::write(out_ptr.add(copy_len), 0u8);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    let len = copy_len as i64;
+    SyscallResult::ok(len)
+}
+
+// ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------
 

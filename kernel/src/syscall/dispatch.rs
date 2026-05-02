@@ -31,7 +31,9 @@ use super::number::{
     SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
     SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS, SYS_FS_FLOCK,
-    SYS_FS_FUNLOCK, SYS_FS_SYNC, SYS_FS_WRITE_FILE,
+    SYS_FS_FUNLOCK, SYS_FS_SYNC,
+    SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE, SYS_FS_DUP, SYS_FS_HANDLE_PATH,
+    SYS_FS_WRITE_FILE,
     SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
     SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
     SYS_FS_TRASH, SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRASH_EMPTY,
@@ -287,6 +289,11 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_FLOCK as usize] = Some(handlers::sys_fs_flock);
     handlers[SYS_FS_FUNLOCK as usize] = Some(handlers::sys_fs_funlock);
     handlers[SYS_FS_SYNC as usize] = Some(handlers::sys_fs_sync);
+    handlers[SYS_FS_COPY as usize] = Some(handlers::sys_fs_copy);
+    handlers[SYS_FS_APPEND as usize] = Some(handlers::sys_fs_append);
+    handlers[SYS_FS_FTRUNCATE as usize] = Some(handlers::sys_fs_ftruncate);
+    handlers[SYS_FS_DUP as usize] = Some(handlers::sys_fs_dup);
+    handlers[SYS_FS_HANDLE_PATH as usize] = Some(handlers::sys_fs_handle_path);
 
     // Filesystem — handle-based (610–699).
     handlers[SYS_FS_OPEN as usize] = Some(handlers::sys_fs_open);

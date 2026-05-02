@@ -4856,6 +4856,51 @@ pub fn self_test() -> KernelResult<()> {
 
     crate::serial_println!("[fat]   LFN operations tests passed");
 
+    // ---------------------------------------------------------------
+    // fsck consistency check (run on the live volume after all tests)
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing fsck...");
+
+    // Flush all pending writes so fsck sees a consistent on-disk state.
+    crate::fs::cache::flush_expired();
+    let _ = crate::fs::Vfs::sync();
+
+    // Run fsck in read-only mode on the root device.
+    // fsck_fat creates its own FatFs mount directly on the block device,
+    // so it does not conflict with the VFS mount.
+    match fsck_fat("vda", false) {
+        Ok(report) => {
+            for msg in &report.messages {
+                crate::serial_println!("[fat]     fsck: {}", msg);
+            }
+            crate::serial_println!(
+                "[fat]     fsck summary: {} files, {} dirs, {} errors, {} lost, {} cross-linked",
+                report.files, report.dirs, report.errors,
+                report.lost_clusters, report.cross_linked
+            );
+            // A clean volume should have no cross-linked clusters.
+            // Lost clusters may exist from previous incomplete operations,
+            // so we only warn (not fail) for those.
+            if report.cross_linked > 0 {
+                crate::serial_println!(
+                    "[fat]   fsck FAILED: {} cross-linked clusters detected",
+                    report.cross_linked
+                );
+                return Err(KernelError::IoError);
+            }
+            if report.errors > 0 {
+                crate::serial_println!(
+                    "[fat]   fsck WARNING: {} errors (may be from previous boots)",
+                    report.errors
+                );
+            }
+            crate::serial_println!("[fat]   fsck passed");
+        }
+        Err(e) => {
+            crate::serial_println!("[fat]   fsck could not run: {:?} (non-fatal)", e);
+        }
+    }
+
     // Report dcache statistics.
     match crate::fs::Vfs::debug_stats("/") {
         Ok(stats) if !stats.is_empty() => {

@@ -4354,7 +4354,7 @@ fn cmd_help() {
     crate::console_println!("  append F T Append text T to file F");
     crate::console_println!("  tree [D]  Show directory tree recursively");
     crate::console_println!("  du [-s] [-dN] [D]  Show disk usage (-s summary, -dN max depth)");
-    crate::console_println!("  find [D]P Search for files matching pattern");
+    crate::console_println!("  find [D] [-name PAT] [-type f|d|l] [-size +N|-N] [-maxdepth N] [-empty]");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
     crate::console_println!("  mount     List all mounted filesystems");
@@ -4362,7 +4362,7 @@ fn cmd_help() {
     crate::console_println!("  wc FILE   Count lines, words, and bytes");
     crate::console_println!("  head N F  Show first N lines of file");
     crate::console_println!("  tail N F  Show last N lines of file");
-    crate::console_println!("  hexdump F Hex dump of file contents");
+    crate::console_println!("  hexdump [-n N] F  Hex dump of file contents (default 512 bytes, -n 0 for all)");
     crate::console_println!("  lsof      List open file handles");
     crate::console_println!("  lsp [N] D Paginated ls: show N entries at a time");
     crate::console_println!("  grep [-ivclnwrI] PATTERN FILE  Search for pattern in files (-r recursive, -v invert, -c count, -w whole-word, -l files-only, -I case-sensitive)");
@@ -6748,29 +6748,130 @@ fn du_recurse(path: &str, depth: usize, max_depth: usize, summary_only: bool) ->
 }
 
 /// Search for files matching a pattern (basic find).
+/// Search for files matching predicates (like Unix `find`).
+///
+/// Usage: `find [PATH] [PREDICATES...]`
+///
+/// Predicates:
+///   `-name PATTERN`   Match filename against glob pattern
+///   `-type f|d|l`     Match by type (f=file, d=directory, l=symlink)
+///   `-size +N|-N|N`   Match by size (+ = larger, - = smaller, no prefix = exact)
+///                     Suffixes: k (KiB), M (MiB), G (GiB), c (bytes, default)
+///   `-maxdepth N`     Limit recursion depth
+///   `-empty`          Match empty files (size 0) or empty directories
+///
+/// Without predicates, acts as a recursive glob (legacy behavior).
+///
+/// Examples:
+///   `find /tmp -name *.txt`
+///   `find / -type d -name src`
+///   `find . -size +1M`
+///   `find /tmp -empty`
+#[allow(clippy::arithmetic_side_effects)]
 fn cmd_find(args: &str) {
-    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
-    let (search_path, pattern) = if parts.len() >= 2 {
-        (parts[0], parts[1])
-    } else if !args.is_empty() {
-        ("/", args)
-    } else {
-        crate::console_println!("Usage: find [path] <pattern>");
-        crate::console_println!("  Searches for files/dirs matching the glob pattern.");
-        crate::console_println!("  Patterns: * (any), ? (one char), [abc] (set), [a-z] (range)");
-        crate::console_println!("  Example: find /tmp *.txt");
-        crate::console_println!("  Example: find / *.rs");
+    if args.is_empty() {
+        crate::console_println!("Usage: find [PATH] [PREDICATES...]");
+        crate::console_println!("  Predicates:");
+        crate::console_println!("    -name PATTERN   Glob match on filename");
+        crate::console_println!("    -type f|d|l     File type (f=file, d=dir, l=symlink)");
+        crate::console_println!("    -size +N|-N|N   Size filter (suffixes: c, k, M, G)");
+        crate::console_println!("    -maxdepth N     Limit recursion depth");
+        crate::console_println!("    -empty          Empty files or directories");
+        crate::console_println!("  Example: find /tmp -name *.txt -type f");
         return;
-    };
+    }
+
+    // Parse arguments.
+    let mut search_path = "";
+    let mut name_pattern: Option<&str> = None;
+    let mut type_filter: Option<char> = None; // 'f', 'd', or 'l'
+    let mut size_filter: Option<(i64, char)> = None; // (threshold, '+'/'-'/'=')
+    let mut max_depth: u32 = 16;
+    let mut empty_filter = false;
+
+    let mut words = args.split_whitespace().peekable();
+    while let Some(w) = words.next() {
+        if w == "-name" {
+            name_pattern = words.next();
+        } else if w == "-type" {
+            if let Some(t) = words.next() {
+                type_filter = t.chars().next();
+            }
+        } else if w == "-size" {
+            if let Some(s) = words.next() {
+                size_filter = Some(parse_size_predicate(s));
+            }
+        } else if w == "-maxdepth" {
+            if let Some(d) = words.next() {
+                max_depth = d.parse::<u32>().unwrap_or(16);
+            }
+        } else if w == "-empty" {
+            empty_filter = true;
+        } else if !w.starts_with('-') && search_path.is_empty() {
+            search_path = w;
+        } else if !w.starts_with('-') && name_pattern.is_none() {
+            // Legacy: bare pattern without -name.
+            name_pattern = Some(w);
+        }
+    }
+
+    if search_path.is_empty() {
+        search_path = ".";
+    }
 
     let root = resolve_path(search_path);
 
-    // Detect whether the pattern contains glob metacharacters.
-    let is_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
+    let filter = FindFilter {
+        name_pattern,
+        is_glob: name_pattern.map_or(false, |p| {
+            p.contains('*') || p.contains('?') || p.contains('[')
+        }),
+        type_filter,
+        size_filter,
+        empty_filter,
+        max_depth,
+    };
 
     let mut count: u64 = 0;
-    find_recurse(&root, pattern, is_glob, &mut count, 0);
+    find_recurse_filtered(&root, &filter, &mut count, 0);
     shell_println!("\n{} matches found", count);
+}
+
+/// Parsed find predicates.
+struct FindFilter<'a> {
+    name_pattern: Option<&'a str>,
+    is_glob: bool,
+    type_filter: Option<char>,
+    size_filter: Option<(i64, char)>,
+    empty_filter: bool,
+    max_depth: u32,
+}
+
+/// Parse a `-size` argument like `+1M`, `-512k`, `100c`.
+fn parse_size_predicate(s: &str) -> (i64, char) {
+    let (sign, rest) = if s.starts_with('+') {
+        ('+', &s[1..])
+    } else if s.starts_with('-') {
+        ('-', &s[1..])
+    } else {
+        ('=', s)
+    };
+
+    // Parse suffix.
+    let (num_str, multiplier) = if rest.ends_with('G') || rest.ends_with('g') {
+        (&rest[..rest.len() - 1], 1024i64 * 1024 * 1024)
+    } else if rest.ends_with('M') || rest.ends_with('m') {
+        (&rest[..rest.len() - 1], 1024i64 * 1024)
+    } else if rest.ends_with('k') || rest.ends_with('K') {
+        (&rest[..rest.len() - 1], 1024i64)
+    } else if rest.ends_with('c') {
+        (&rest[..rest.len() - 1], 1i64)
+    } else {
+        (rest, 1i64) // default: bytes
+    };
+
+    let value = num_str.parse::<i64>().unwrap_or(0) * multiplier;
+    (value, sign)
 }
 
 /// `file PATH` — identify a file's type and basic info.
@@ -6895,8 +6996,10 @@ fn extension_hint(path: &str) -> &'static str {
 /// Uses glob matching if the pattern contains metacharacters (`*`, `?`,
 /// `[`), otherwise falls back to case-insensitive substring matching.
 /// Limits depth to 16.
-fn find_recurse(path: &str, pattern: &str, is_glob: bool, count: &mut u64, depth: u32) {
-    if depth > 16 {
+/// Recursive find with predicate filtering.
+#[allow(clippy::arithmetic_side_effects)]
+fn find_recurse_filtered(path: &str, filter: &FindFilter<'_>, count: &mut u64, depth: u32) {
+    if depth > filter.max_depth {
         return;
     }
 
@@ -6912,16 +7015,66 @@ fn find_recurse(path: &str, pattern: &str, is_glob: bool, count: &mut u64, depth
             alloc::format!("{}/{}", path, entry.name)
         };
 
-        // Match the entry name against the pattern.
-        let matched = if is_glob {
-            // Glob pattern matching (case-insensitive).
-            crate::fs::vfs::glob_match(&entry.name, pattern, true)
-        } else {
-            // Legacy: case-insensitive substring match.
-            let name_lower = entry.name.to_ascii_lowercase();
-            let pattern_lower = pattern.to_ascii_lowercase();
-            name_lower.contains(&pattern_lower)
-        };
+        // Apply all predicates (AND logic).
+        let mut matched = true;
+
+        // Name predicate.
+        if let Some(pattern) = filter.name_pattern {
+            if filter.is_glob {
+                if !crate::fs::vfs::glob_match(&entry.name, pattern, true) {
+                    matched = false;
+                }
+            } else {
+                let name_lower = entry.name.to_ascii_lowercase();
+                let pattern_lower = pattern.to_ascii_lowercase();
+                if !name_lower.contains(&pattern_lower) {
+                    matched = false;
+                }
+            }
+        }
+
+        // Type predicate.
+        if let Some(t) = filter.type_filter {
+            let type_ok = match t {
+                'f' => entry.entry_type == crate::fs::EntryType::File,
+                'd' => entry.entry_type == crate::fs::EntryType::Directory,
+                'l' => entry.entry_type == crate::fs::EntryType::Symlink,
+                _ => true,
+            };
+            if !type_ok {
+                matched = false;
+            }
+        }
+
+        // Size predicate (only for files).
+        if let Some((threshold, sign)) = filter.size_filter {
+            let sz = entry.size as i64;
+            let size_ok = match sign {
+                '+' => sz > threshold,
+                '-' => sz < threshold,
+                _ => sz == threshold, // '='
+            };
+            if !size_ok {
+                matched = false;
+            }
+        }
+
+        // Empty predicate.
+        if filter.empty_filter {
+            let empty_ok = match entry.entry_type {
+                crate::fs::EntryType::File => entry.size == 0,
+                crate::fs::EntryType::Directory => {
+                    // Check if directory is empty (no entries besides . and ..).
+                    crate::fs::Vfs::readdir(&child_path)
+                        .map(|e| e.is_empty())
+                        .unwrap_or(false)
+                }
+                _ => false,
+            };
+            if !empty_ok {
+                matched = false;
+            }
+        }
 
         if matched {
             let type_str = match entry.entry_type {
@@ -6935,7 +7088,7 @@ fn find_recurse(path: &str, pattern: &str, is_glob: bool, count: &mut u64, depth
         }
 
         if entry.entry_type == crate::fs::EntryType::Directory {
-            find_recurse(&child_path, pattern, is_glob, count, depth + 1);
+            find_recurse_filtered(&child_path, filter, count, depth + 1);
         }
     }
 }
@@ -7046,13 +7199,46 @@ fn cmd_tail(args: &str) {
 
 /// Hex dump of a file (like `hexdump -C` or `xxd`).
 #[allow(clippy::arithmetic_side_effects)]
+/// Hex dump of file contents.
+///
+/// Usage: `hexdump [-n COUNT] <file>`
+///
+/// `-n COUNT` limits output to COUNT bytes (default: 512).
+/// Use `-n 0` for no limit (shows entire file).
 fn cmd_hexdump(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: hexdump <file>");
+        crate::console_println!("Usage: hexdump [-n count] <file>");
         return;
     }
 
-    let path = resolve_path(args);
+    let mut max_bytes: usize = 512;
+    let mut file_path = "";
+
+    let mut words = args.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "-n" {
+            if let Some(n) = words.next() {
+                max_bytes = n.parse::<usize>().unwrap_or(512);
+                if max_bytes == 0 {
+                    max_bytes = usize::MAX;
+                }
+            }
+        } else if w.starts_with("-n") {
+            max_bytes = w[2..].parse::<usize>().unwrap_or(512);
+            if max_bytes == 0 {
+                max_bytes = usize::MAX;
+            }
+        } else {
+            file_path = w;
+        }
+    }
+
+    if file_path.is_empty() {
+        crate::console_println!("Usage: hexdump [-n count] <file>");
+        return;
+    }
+
+    let path = resolve_path(file_path);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -7062,8 +7248,8 @@ fn cmd_hexdump(args: &str) {
         }
     };
 
-    // Limit output to first 512 bytes to avoid flooding the console.
-    let limit = data.len().min(512);
+    let total_size = data.len();
+    let limit = total_size.min(max_bytes);
     let data = &data[..limit];
 
     for offset in (0..data.len()).step_by(16) {
@@ -7100,10 +7286,10 @@ fn cmd_hexdump(args: &str) {
         shell_println!("{}", line);
     }
 
-    if data.len() < limit {
-        shell_println!("{:08x}", data.len());
+    if limit >= total_size {
+        shell_println!("{:08x}", total_size);
     } else {
-        shell_println!("... ({} bytes total, showing first {})", data.len(), limit);
+        shell_println!("... ({} bytes total, showing first {})", total_size, limit);
     }
 }
 

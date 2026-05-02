@@ -3084,7 +3084,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cat",
     "cd", "chmod", "chown", "clear", "cls", "cmp", "command", "copy", "cp",
-    "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dns", "du",
+    "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "let", "ln", "link", "ls", "lsblk", "lsof", "lsp",
@@ -4157,6 +4157,7 @@ fn dispatch(line: &str) {
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
+        "dmesg" => cmd_dmesg(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "time" | "date" => cmd_time(),
@@ -4553,6 +4554,79 @@ fn cmd_uptime() {
         minutes % 60,
         seconds % 60
     );
+}
+
+/// `dmesg [-n COUNT]` — display kernel log messages.
+///
+/// Reads the structured log ring buffer and displays entries in a
+/// human-readable format: `[timestamp] level/module: message`.
+/// Use `-n COUNT` to limit output to the last COUNT entries.
+fn cmd_dmesg(args: &str) {
+    let mut limit: usize = usize::MAX;
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let mut i = 0;
+    while i < words.len() {
+        if words[i] == "-n" {
+            i = i.saturating_add(1);
+            if let Some(n) = words.get(i).and_then(|s| s.parse::<usize>().ok()) {
+                limit = n;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+
+    // Read all log entries from the ring buffer.
+    // The buffer is JSON-lines format; we'll read raw bytes and parse
+    // the timestamp, level, module, and message from each line.
+    let mut buf = alloc::vec![0u8; 64 * 1024];
+    let (written, _last_seq) = crate::klog::read_logs(u64::MAX, &mut buf);
+    let text = core::str::from_utf8(buf.get(..written).unwrap_or(&[]))
+        .unwrap_or("");
+
+    // Collect lines, then take the last `limit` entries.
+    let lines: alloc::vec::Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(limit);
+
+    for line in lines.get(start..).unwrap_or(&[]) {
+        // JSON-lines format: {"t":MS,"l":"level","m":"module","msg":"text"}
+        // Simple key extraction (no full JSON parser in kernel).
+        let ts = extract_json_u64(line, "\"t\":");
+        let level = extract_json_str(line, "\"l\":\"");
+        let module = extract_json_str(line, "\"m\":\"");
+        let msg = extract_json_str(line, "\"msg\":\"");
+
+        let secs = ts / 1000;
+        let ms = ts % 1000;
+        shell_println!(
+            "[{:5}.{:03}] {}/{}: {}",
+            secs, ms, level, module, msg
+        );
+    }
+}
+
+/// Extract a u64 value from a JSON-lines string at the given key prefix.
+fn extract_json_u64(line: &str, key: &str) -> u64 {
+    if let Some(pos) = line.find(key) {
+        let start = pos.saturating_add(key.len());
+        let rest = line.get(start..).unwrap_or("");
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        rest.get(..end).and_then(|s| s.parse().ok()).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// Extract a string value from a JSON-lines string at the given key prefix.
+/// Expects the key prefix to end with `:"`, and reads until the next `"`.
+fn extract_json_str<'a>(line: &'a str, key: &str) -> &'a str {
+    if let Some(pos) = line.find(key) {
+        let start = pos.saturating_add(key.len());
+        let rest = line.get(start..).unwrap_or("");
+        let end = rest.find('"').unwrap_or(rest.len());
+        rest.get(..end).unwrap_or("")
+    } else {
+        ""
+    }
 }
 
 fn cmd_echo(args: &str) {
@@ -6369,9 +6443,68 @@ fn cmd_mount(args: &str) {
                 crate::console_println!("{:<12} {}", fs_type, path);
             }
         }
+        return;
+    }
+
+    // Parse: mount [-t type] <device|none> <mount-path>
+    let words: Vec<&str> = args.split_whitespace().collect();
+
+    let (fs_type, device, mount_path) = if words.len() >= 4
+        && words.first() == Some(&"-t")
+    {
+        // mount -t <type> <device> <path>
+        (Some(words[1]), words[2], words[3])
+    } else if words.len() >= 2 {
+        // mount <device> <path> — auto-detect type
+        (None, words[0], words[1])
     } else {
-        crate::console_println!("mount: mounting from kshell not yet supported.");
-        crate::console_println!("Use 'mount' with no args to list mounts.");
+        crate::console_println!("Usage: mount [-t type] <device|none> <mount-path>");
+        crate::console_println!("Types: ext4, memfs, procfs, devfs, sysfs, iso9660");
+        crate::console_println!("Use 'none' as device for virtual filesystems.");
+        set_exit(1);
+        return;
+    };
+
+    let mount_path_resolved = resolve_path(mount_path);
+
+    let result = match fs_type.unwrap_or("auto") {
+        "memfs" | "tmpfs" | "ramfs" => crate::fs::memfs::mount(&mount_path_resolved),
+        "procfs" | "proc" => crate::fs::procfs::mount(&mount_path_resolved),
+        "devfs" | "dev" => crate::fs::devfs::mount(&mount_path_resolved),
+        "sysfs" | "sys" => crate::fs::sysfs::mount(&mount_path_resolved),
+        "ext4" => crate::fs::ext4::mount(device, &mount_path_resolved),
+        "iso9660" | "iso" => crate::fs::iso9660::mount(device, &mount_path_resolved),
+        "auto" => {
+            // Try to probe the device for known filesystem types.
+            if crate::fs::ext4::probe(device) {
+                crate::fs::ext4::mount(device, &mount_path_resolved)
+            } else if crate::fs::iso9660::probe(device) {
+                crate::fs::iso9660::mount(device, &mount_path_resolved)
+            } else {
+                crate::console_println!(
+                    "mount: could not detect filesystem on '{}' (try -t to specify type)",
+                    device
+                );
+                set_exit(1);
+                return;
+            }
+        }
+        other => {
+            crate::console_println!("mount: unknown filesystem type '{}'", other);
+            set_exit(1);
+            return;
+        }
+    };
+
+    match result {
+        Ok(()) => crate::console_println!("Mounted {} at {}", device, mount_path_resolved),
+        Err(e) => {
+            crate::console_println!(
+                "mount: failed to mount {} at {}: {:?}",
+                device, mount_path_resolved, e
+            );
+            set_exit(1);
+        }
     }
 }
 
@@ -8943,7 +9076,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

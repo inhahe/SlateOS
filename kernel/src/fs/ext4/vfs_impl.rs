@@ -122,7 +122,7 @@ impl FileSystem for Ext4Fs {
         match self.driver.resolve_path(path) {
             Ok(ino) => {
                 // File exists — overwrite its contents.
-                let mut inode = self.driver.read_inode(ino)?;
+                let inode = self.driver.read_inode(ino)?;
 
                 // Only regular files can be written.
                 let mode = inode.i_mode & file_type::S_IFMT;
@@ -130,12 +130,25 @@ impl FileSystem for Ext4Fs {
                     return Err(KernelError::NotSupported);
                 }
 
-                // Free the old blocks before writing new ones.
-                // This prevents block leaks on overwrite.
-                self.driver.free_inode_data(&inode)?;
+                // Crash-safe overwrite ordering:
+                // 1. Save old inode (holds extent tree pointing to old blocks)
+                // 2. Write new data (allocates new blocks, updates inode)
+                // 3. Free old blocks (safe: on-disk inode now points to new data)
+                //
+                // If we crash after step 2 but before step 3, old blocks
+                // are leaked (not ideal) but no data is lost or corrupted.
+                // The reverse order (free-then-write) risks pointing the
+                // inode at freed blocks if the write fails.
+                let old_inode = inode;
 
-                self.driver.write_file_data(&mut inode, data)?;
-                self.driver.write_inode(ino, &inode)?;
+                let mut new_inode = old_inode;
+                self.driver.write_file_data(&mut new_inode, data)?;
+                self.driver.write_inode(ino, &new_inode)?;
+
+                // Now safe to free old blocks — on-disk inode points to new data.
+                // Use old_inode which still has the old extent tree.
+                self.driver.free_inode_data(&old_inode)?;
+
                 self.driver.write_superblock()?;
                 self.driver.write_group_descs()?;
                 self.driver.flush()?;
@@ -291,6 +304,78 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
+    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+        // Resolve the source inode.
+        let src_ino = self.driver.resolve_path(from)?;
+        let src_inode = self.driver.read_inode(src_ino)?;
+        let src_mode = src_inode.i_mode & file_type::S_IFMT;
+
+        // Determine the directory entry file type for re-insertion.
+        let ft_byte = match src_mode {
+            file_type::S_IFDIR => super::ondisk::dir_type::DIR,
+            file_type::S_IFREG => super::ondisk::dir_type::REG_FILE,
+            file_type::S_IFLNK => super::ondisk::dir_type::SYMLINK,
+            _ => super::ondisk::dir_type::UNKNOWN,
+        };
+
+        // Check that the destination doesn't already exist.
+        if self.driver.resolve_path(to).is_ok() {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        // Split source and destination into parent + name.
+        let (src_parent_path, src_name) = split_parent_name(from)?;
+        let (dst_parent_path, dst_name) = split_parent_name(to)?;
+
+        let src_parent_ino = self.driver.resolve_path(src_parent_path)?;
+        let dst_parent_ino = self.driver.resolve_path(dst_parent_path)?;
+
+        // Add the entry in the destination directory first (safer: if this
+        // fails, the source is still intact).
+        let mut dst_parent_inode = self.driver.read_inode(dst_parent_ino)?;
+        self.driver.add_dir_entry(
+            &mut dst_parent_inode,
+            dst_parent_ino,
+            src_ino,
+            dst_name,
+            ft_byte,
+        )?;
+
+        // Remove the entry from the source directory.
+        let mut src_parent_inode = self.driver.read_inode(src_parent_ino)?;
+        self.remove_dir_entry(&mut src_parent_inode, src_parent_ino, src_name)?;
+
+        // If moving a directory to a different parent, update ".." entry
+        // and adjust link counts.
+        if src_mode == file_type::S_IFDIR && src_parent_ino != dst_parent_ino {
+            // Update the ".." entry in the moved directory to point to
+            // the new parent.
+            let mut dir_data = self.driver.read_file_data(&src_inode)?;
+            // ".." is the second entry (at offset 12 after the "." entry).
+            // Its inode field is at bytes 12..16.
+            if let Some(dest) = dir_data.get_mut(12..16) {
+                dest.copy_from_slice(&dst_parent_ino.to_le_bytes());
+            }
+            let mut dir_inode_copy = src_inode;
+            self.driver.write_file_data(&mut dir_inode_copy, &dir_data)?;
+
+            // Old parent loses a link (the moved dir's ".." no longer
+            // points here), new parent gains one.
+            src_parent_inode.i_links_count =
+                src_parent_inode.i_links_count.saturating_sub(1);
+            self.driver.write_inode(src_parent_ino, &src_parent_inode)?;
+
+            dst_parent_inode.i_links_count =
+                dst_parent_inode.i_links_count.saturating_add(1);
+            self.driver.write_inode(dst_parent_ino, &dst_parent_inode)?;
+        }
+
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()?;
+        Ok(())
+    }
+
     fn debug_stats(&self) -> String {
         self.driver.superblock().summary()
     }
@@ -389,10 +474,11 @@ impl Ext4Fs {
                         }
 
                         // Write modified directory data back.
+                        let mut dir_inode_copy = *dir_inode;
                         self.driver.write_file_data(
-                            &mut dir_inode.clone(),
+                            &mut dir_inode_copy,
                             &dir_data,
-                        ).ok(); // Best-effort for now.
+                        )?;
                         return Ok(());
                     }
                 }

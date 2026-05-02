@@ -1617,20 +1617,8 @@ fn cmd_ln(args: &str) {
     let src = parts[0];
     let dst = parts[1];
 
-    let src_path = if src.starts_with('/') {
-        alloc::string::String::from(src)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(src);
-        s
-    };
-    let dst_path = if dst.starts_with('/') {
-        alloc::string::String::from(dst)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(dst);
-        s
-    };
+    let src_path = resolve_path(src);
+    let dst_path = resolve_path(dst);
 
     match crate::fs::Vfs::link(&src_path, &dst_path) {
         Ok(()) => {
@@ -1675,13 +1663,7 @@ fn cmd_df(args: &str) {
         }
     } else {
         // Show info for specific path.
-        let path = if args.starts_with('/') {
-            alloc::string::String::from(args)
-        } else {
-            let mut s = alloc::string::String::from("/");
-            s.push_str(args);
-            s
-        };
+        let path = resolve_path(args);
         match crate::fs::Vfs::statvfs(&path) {
             Ok(info) => {
                 crate::console_println!(
@@ -1741,20 +1723,8 @@ fn cmd_cp(args: &str) {
     let src = parts[0];
     let dst = parts[1];
 
-    let src_path = if src.starts_with('/') {
-        alloc::string::String::from(src)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(src);
-        s
-    };
-    let dst_path = if dst.starts_with('/') {
-        alloc::string::String::from(dst)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(dst);
-        s
-    };
+    let src_path = resolve_path(src);
+    let dst_path = resolve_path(dst);
 
     if recursive {
         match crate::fs::Vfs::copy_recursive(&src_path, &dst_path) {
@@ -1788,20 +1758,8 @@ fn cmd_mv(args: &str) {
     let src = parts[0];
     let dst = parts[1];
 
-    let src_path = if src.starts_with('/') {
-        alloc::string::String::from(src)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(src);
-        s
-    };
-    let dst_path = if dst.starts_with('/') {
-        alloc::string::String::from(dst)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(dst);
-        s
-    };
+    let src_path = resolve_path(src);
+    let dst_path = resolve_path(dst);
 
     match crate::fs::Vfs::rename(&src_path, &dst_path) {
         Ok(()) => {
@@ -1833,13 +1791,7 @@ fn cmd_chmod(args: &str) {
         }
     };
 
-    let path = if file.starts_with('/') {
-        alloc::string::String::from(file)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(file);
-        s
-    };
+    let path = resolve_path(file);
 
     match crate::fs::Vfs::set_permissions(&path, mode) {
         Ok(()) => {
@@ -1893,13 +1845,7 @@ fn cmd_chown(args: &str) {
         }
     };
 
-    let path = if file.starts_with('/') {
-        alloc::string::String::from(file)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(file);
-        s
-    };
+    let path = resolve_path(file);
 
     match crate::fs::Vfs::set_owner(&path, uid, gid) {
         Ok(()) => {
@@ -1959,14 +1905,7 @@ fn cmd_append(args: &str) {
         }
     };
     let text = parts.next().unwrap_or("");
-
-    let path = if filename.starts_with('/') {
-        alloc::string::String::from(filename)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(filename);
-        s
-    };
+    let path = resolve_path(filename);
 
     let mut data = alloc::vec::Vec::from(text.as_bytes());
     if !text.ends_with('\n') {
@@ -2045,13 +1984,9 @@ fn tree_recurse(path: &str, prefix: &str, dirs: &mut u64, files: &mut u64, depth
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_du(args: &str) {
     let path = if args.is_empty() {
-        alloc::string::String::from("/")
-    } else if args.starts_with('/') {
-        alloc::string::String::from(args)
+        get_cwd()
     } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
+        resolve_path(args)
     };
 
     let total = du_recurse(&path);
@@ -2103,13 +2038,7 @@ fn cmd_find(args: &str) {
         return;
     };
 
-    let root = if search_path.starts_with('/') {
-        alloc::string::String::from(search_path)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(search_path);
-        s
-    };
+    let root = resolve_path(search_path);
 
     // Detect whether the pattern contains glob metacharacters.
     let is_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
@@ -2177,13 +2106,7 @@ fn cmd_wc(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -2227,13 +2150,7 @@ fn cmd_head(args: &str) {
         return;
     };
 
-    let path = if file.starts_with('/') {
-        alloc::string::String::from(file)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(file);
-        s
-    };
+    let path = resolve_path(file);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -2267,13 +2184,7 @@ fn cmd_tail(args: &str) {
         return;
     };
 
-    let path = if file.starts_with('/') {
-        alloc::string::String::from(file)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(file);
-        s
-    };
+    let path = resolve_path(file);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -2299,13 +2210,7 @@ fn cmd_hexdump(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -2371,13 +2276,7 @@ fn cmd_grep(args: &str) {
     let pattern = parts[0];
     let file_arg = parts[1];
 
-    let path = if file_arg.starts_with('/') {
-        alloc::string::String::from(file_arg)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(file_arg);
-        s
-    };
+    let path = resolve_path(file_arg);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -2454,16 +2353,8 @@ fn cmd_cmp(args: &str) {
         return;
     }
 
-    let path1 = if parts[0].starts_with('/') {
-        alloc::string::String::from(parts[0])
-    } else {
-        alloc::format!("/{}", parts[0])
-    };
-    let path2 = if parts[1].starts_with('/') {
-        alloc::string::String::from(parts[1])
-    } else {
-        alloc::format!("/{}", parts[1])
-    };
+    let path1 = resolve_path(parts[0]);
+    let path2 = resolve_path(parts[1]);
 
     let data1 = match crate::fs::Vfs::read_file(&path1) {
         Ok(d) => d,
@@ -2515,11 +2406,7 @@ fn cmd_fallocate(args: &str) {
     }
 
     let size_str = parts[0];
-    let path = if parts[1].starts_with('/') {
-        alloc::string::String::from(parts[1])
-    } else {
-        alloc::format!("/{}", parts[1])
-    };
+    let path = resolve_path(parts[1]);
 
     // Parse size with optional K/M/G suffix.
     let size = {
@@ -2699,13 +2586,7 @@ fn cmd_umount(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     match crate::fs::Vfs::unmount(&path) {
         Ok(()) => {
@@ -2735,13 +2616,7 @@ fn cmd_run(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        alloc::string::String::from(args)
-    } else {
-        let mut s = alloc::string::String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     // Read the ELF binary from the filesystem.
     let elf_data = match crate::fs::Vfs::read_file(&path) {
@@ -3403,13 +3278,7 @@ fn cmd_source(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        String::from(args)
-    } else {
-        let mut s = String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -3505,13 +3374,7 @@ fn cmd_nl(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        String::from(args)
-    } else {
-        let mut s = String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
@@ -3545,13 +3408,7 @@ fn cmd_rev(args: &str) {
         return;
     }
 
-    let path = if args.starts_with('/') {
-        String::from(args)
-    } else {
-        let mut s = String::from("/");
-        s.push_str(args);
-        s
-    };
+    let path = resolve_path(args);
 
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,

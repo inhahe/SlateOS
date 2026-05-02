@@ -551,6 +551,7 @@ impl FileSystem for Ext4Fs {
             gid: u32::from(inode.i_gid),
             permissions,
             attributes: attrs,
+            nlinks: u32::from(inode.i_links_count),
             xattrs: self.driver.read_xattrs(&inode).unwrap_or_default(),
             hash: Vec::new(),
         })
@@ -799,6 +800,67 @@ impl FileSystem for Ext4Fs {
 
     fn debug_stats(&self) -> String {
         self.driver.superblock().summary()
+    }
+
+    /// Create a hard link to an existing file.
+    ///
+    /// Creates a new directory entry in `new_path`'s parent directory
+    /// pointing to the same inode as `existing`.  Increments the inode's
+    /// link count.
+    ///
+    /// Restrictions:
+    /// - Cannot hard-link directories (prevents cycles in the directory tree).
+    /// - The target must exist.
+    /// - The new name must not already exist.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn link(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+        // Resolve the existing file to get its inode number.
+        let existing_ino = self.driver.resolve_path(existing)?;
+        let mut inode = self.driver.read_inode(existing_ino)?;
+
+        // Only regular files can be hard-linked.
+        let mode_type = inode.i_mode & file_type::S_IFMT;
+        if mode_type == file_type::S_IFDIR {
+            return Err(KernelError::IsADirectory);
+        }
+        if mode_type != file_type::S_IFREG {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Resolve the parent of the new path.
+        let (parent_path, name) = split_parent_name(new_path)?;
+        let parent_ino = self.driver.resolve_path(parent_path)?;
+        let mut parent_inode = self.driver.read_inode(parent_ino)?;
+
+        // Verify parent is a directory.
+        if (parent_inode.i_mode & file_type::S_IFMT) != file_type::S_IFDIR {
+            return Err(KernelError::NotADirectory);
+        }
+
+        // Check that the new name doesn't already exist.
+        if self.driver.dir_lookup(&parent_inode, name).is_ok() {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        // Determine the directory entry file type byte.
+        let ftype_byte = match mode_type {
+            file_type::S_IFREG => super::ondisk::dir_type::REG_FILE,
+            file_type::S_IFLNK => super::ondisk::dir_type::SYMLINK,
+            _ => super::ondisk::dir_type::UNKNOWN,
+        };
+
+        // Add the directory entry.
+        self.driver.add_dir_entry(
+            &mut parent_inode, parent_ino,
+            existing_ino, name, ftype_byte,
+        )?;
+        self.driver.write_inode(parent_ino, &parent_inode)?;
+
+        // Increment the link count.
+        inode.i_links_count = inode.i_links_count.saturating_add(1);
+        self.driver.write_inode(existing_ino, &inode)?;
+
+        Ok(())
     }
 
     /// Report ext4 filesystem capacity and free space.

@@ -2438,6 +2438,8 @@ impl FileSystem for FatFs {
                     // FAT has no Unix permissions; 0 signals "not applicable".
                     permissions: 0,
                     attributes: attrs,
+                    // FAT has no hard link support; always 1.
+                    nlinks: 1,
                     xattrs: Vec::new(),
                     hash: Vec::new(),
                 })

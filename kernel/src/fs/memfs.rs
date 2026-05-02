@@ -217,6 +217,8 @@ impl MemFsNode {
             gid: self.gid,
             permissions: self.permissions,
             attributes: self.attributes,
+            // memfs has no hard link support; always 1.
+            nlinks: 1,
             xattrs: self.xattrs.clone(),
             hash: Vec::new(),
         }

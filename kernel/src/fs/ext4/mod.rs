@@ -317,6 +317,124 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     timestamp test file cleaned up OK");
     }
 
+    // --- Hard link tests ---
+    serial_println!("[ext4]   Testing hard links...");
+    {
+        let file_path = if root == "/" {
+            alloc::string::String::from("/_ext4_hardlink_src")
+        } else {
+            format!("{}/_ext4_hardlink_src", root)
+        };
+        let link_path = if root == "/" {
+            alloc::string::String::from("/_ext4_hardlink_dst")
+        } else {
+            format!("{}/_ext4_hardlink_dst", root)
+        };
+
+        // Create a source file.
+        crate::fs::Vfs::write_file(&file_path, b"hard link test data")?;
+
+        // Verify initial nlinks = 1.
+        let meta = crate::fs::Vfs::metadata(&file_path)?;
+        if meta.nlinks != 1 {
+            serial_println!("[ext4]   FAIL: initial nlinks = {}, expected 1", meta.nlinks);
+            let _ = crate::fs::Vfs::remove(&file_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     initial nlinks=1 OK");
+
+        // Create a hard link.
+        crate::fs::Vfs::link(&file_path, &link_path)?;
+        serial_println!("[ext4]     link() OK");
+
+        // Both paths should now show nlinks = 2.
+        let meta_src = crate::fs::Vfs::metadata(&file_path)?;
+        let meta_dst = crate::fs::Vfs::metadata(&link_path)?;
+        if meta_src.nlinks != 2 || meta_dst.nlinks != 2 {
+            serial_println!(
+                "[ext4]   FAIL: after link, src.nlinks={}, dst.nlinks={}, expected 2",
+                meta_src.nlinks, meta_dst.nlinks
+            );
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&file_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     both paths show nlinks=2 OK");
+
+        // Reading through the link should return the same content.
+        let content = crate::fs::Vfs::read_file(&link_path)?;
+        if content != b"hard link test data" {
+            serial_println!("[ext4]   FAIL: read through hard link returned wrong data");
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&file_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     read through hard link OK ({} bytes)", content.len());
+
+        // Both should have the same file size.
+        if meta_src.size != meta_dst.size {
+            serial_println!(
+                "[ext4]   FAIL: size mismatch: src={}, dst={}",
+                meta_src.size, meta_dst.size
+            );
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&file_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     sizes match ({} bytes) OK", meta_src.size);
+
+        // Linking to a directory should fail.
+        let dir_path = if root == "/" {
+            alloc::string::String::from("/_ext4_hardlink_dir_test")
+        } else {
+            format!("{}/_ext4_hardlink_dir_test", root)
+        };
+        crate::fs::Vfs::mkdir(&dir_path)?;
+        let link_dir_result = crate::fs::Vfs::link(&dir_path, &format!("{}_link", dir_path));
+        if !matches!(link_dir_result, Err(crate::error::KernelError::IsADirectory)) {
+            serial_println!("[ext4]   FAIL: linking directory should return IsADirectory, got {:?}", link_dir_result);
+            let _ = crate::fs::Vfs::rmdir(&dir_path);
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&file_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        crate::fs::Vfs::rmdir(&dir_path)?;
+        serial_println!("[ext4]     link-to-directory rejected OK");
+
+        // Linking to an existing name should fail.
+        let dup_result = crate::fs::Vfs::link(&file_path, &link_path);
+        if !matches!(dup_result, Err(crate::error::KernelError::AlreadyExists)) {
+            serial_println!("[ext4]   FAIL: duplicate link should return AlreadyExists, got {:?}", dup_result);
+            let _ = crate::fs::Vfs::remove(&link_path);
+            let _ = crate::fs::Vfs::remove(&file_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     duplicate link rejected OK");
+
+        // Remove one link — the other should still work with nlinks = 1.
+        crate::fs::Vfs::remove(&file_path)?;
+        let meta_after = crate::fs::Vfs::metadata(&link_path)?;
+        if meta_after.nlinks != 1 {
+            serial_println!("[ext4]   FAIL: after removing one link, nlinks={}, expected 1", meta_after.nlinks);
+            let _ = crate::fs::Vfs::remove(&link_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     after remove: nlinks=1 OK");
+
+        // Data should still be accessible through the remaining link.
+        let remaining = crate::fs::Vfs::read_file(&link_path)?;
+        if remaining != b"hard link test data" {
+            serial_println!("[ext4]   FAIL: data through remaining link is wrong");
+            let _ = crate::fs::Vfs::remove(&link_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     data through remaining link OK");
+
+        // Clean up.
+        crate::fs::Vfs::remove(&link_path)?;
+        serial_println!("[ext4]     hard link test files cleaned up OK");
+    }
+
     serial_println!("[ext4] Self-test passed.");
     Ok(())
 }

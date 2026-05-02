@@ -175,6 +175,11 @@ pub struct FileMeta {
     /// Keys are UTF-8 strings, values are byte vectors.
     pub xattrs: Vec<(String, Vec<u8>)>,
 
+    // --- Link count ---
+    /// Number of hard links pointing to the underlying data.
+    /// Always 1 for filesystems that don't support hard links (FAT, memfs).
+    pub nlinks: u32,
+
     // --- Content hash ---
     /// Optional content hash (e.g., SHA-256).
     /// Empty if not computed or not supported.
@@ -198,6 +203,7 @@ impl FileMeta {
             gid: 0,
             permissions: 0,
             attributes: FileAttr::NONE,
+            nlinks: 1,
             xattrs: Vec::new(),
             hash: Vec::new(),
         }
@@ -221,6 +227,7 @@ impl FileMeta {
                 0o644
             },
             attributes: FileAttr::NONE,
+            nlinks: 1,
             xattrs: Vec::new(),
             hash: Vec::new(),
         }
@@ -572,6 +579,21 @@ pub trait FileSystem: Send {
             max_name_len: 255,
             read_only: false,
         })
+    }
+
+    /// Create a hard link.
+    ///
+    /// `existing` is the path to the existing file.
+    /// `new_path` is where the new directory entry should appear.
+    ///
+    /// Hard links create an additional directory entry pointing to the
+    /// same underlying file data (same inode on ext4).  Both paths must
+    /// be on the same filesystem.
+    ///
+    /// Default: not supported (FAT, memfs, procfs, devfs, ISO9660).
+    fn link(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+        let _ = (existing, new_path);
+        Err(KernelError::NotSupported)
     }
 }
 
@@ -1123,6 +1145,89 @@ impl Vfs {
         }
         super::notify::emit_created(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
+        Ok(())
+    }
+
+    /// Create a hard link.
+    ///
+    /// `existing` is the path to an existing file.
+    /// `new_path` is where the new directory entry will be created.
+    ///
+    /// Both paths must resolve to the same mount point.  The existing
+    /// path is followed through symlinks (the link points to the
+    /// underlying file, not the symlink).
+    pub fn link(existing: &str, new_path: &str) -> KernelResult<()> {
+        let existing = Self::resolve_follow(existing)?;
+        let new_path = Self::resolve_no_follow(new_path)?;
+
+        {
+            let mut vfs = VFS.lock();
+            // Both paths must be on the same mount.
+            let mount_idx_existing = {
+                let mut best = None;
+                let mut best_len = 0;
+                for (i, mp) in vfs.mounts.iter().enumerate() {
+                    let prefix = &mp.path;
+                    if existing.starts_with(prefix.as_str())
+                        && (existing.len() == prefix.len()
+                            || existing.as_bytes().get(prefix.len()) == Some(&b'/')
+                            || prefix == "/")
+                    {
+                        if prefix.len() > best_len {
+                            best = Some(i);
+                            best_len = prefix.len();
+                        }
+                    }
+                }
+                best.ok_or(KernelError::NotFound)?
+            };
+            let mount_idx_new = {
+                let mut best = None;
+                let mut best_len = 0;
+                for (i, mp) in vfs.mounts.iter().enumerate() {
+                    let prefix = &mp.path;
+                    if new_path.starts_with(prefix.as_str())
+                        && (new_path.len() == prefix.len()
+                            || new_path.as_bytes().get(prefix.len()) == Some(&b'/')
+                            || prefix == "/")
+                    {
+                        if prefix.len() > best_len {
+                            best = Some(i);
+                            best_len = prefix.len();
+                        }
+                    }
+                }
+                best.ok_or(KernelError::NotFound)?
+            };
+
+            if mount_idx_existing != mount_idx_new {
+                return Err(KernelError::InvalidArgument); // Cross-mount hard link.
+            }
+
+            let mp = &mut vfs.mounts[mount_idx_existing];
+            let mount_prefix = &mp.path;
+
+            // Strip mount prefix to get filesystem-relative paths.
+            let rel_existing = if mount_prefix == "/" {
+                &existing[..]
+            } else if existing.len() > mount_prefix.len() {
+                &existing[mount_prefix.len()..]
+            } else {
+                "/"
+            };
+            let rel_new = if mount_prefix == "/" {
+                &new_path[..]
+            } else if new_path.len() > mount_prefix.len() {
+                &new_path[mount_prefix.len()..]
+            } else {
+                "/"
+            };
+
+            mp.fs.link(rel_existing, rel_new)?;
+        }
+
+        super::notify::emit_created(&new_path);
+        super::journal::record(super::journal::JournalEventType::Created, &new_path);
         Ok(())
     }
 

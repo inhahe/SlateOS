@@ -341,6 +341,8 @@ fn dispatch_with_input(line: &str, input: &str) {
         "head" => cmd_head_input(args, input),
         "tail" => cmd_tail_input(args, input),
         "wc" => cmd_wc_input(args, input),
+        "nl" => cmd_nl_input(args, input),
+        "rev" => cmd_rev_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_print!("{}", input);
@@ -429,6 +431,14 @@ fn dispatch(line: &str) {
         "dns" | "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
         "version" | "ver" => cmd_version(),
+        "source" | "." => cmd_source(args),
+        "seq" => cmd_seq(args),
+        "nl" => cmd_nl(args),
+        "rev" => cmd_rev(args),
+        "sleep" => cmd_sleep(args),
+        "true" => {} // no-op, always succeeds
+        "false" => crate::console_println!("false"),
+        "printenv" | "env" => cmd_printenv(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
         }
@@ -510,6 +520,17 @@ fn cmd_help() {
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
     crate::console_println!("  wget URL  Fetch a URL via HTTP GET");
     crate::console_println!("  version   Show kernel version");
+    crate::console_println!("  source F  Execute kshell commands from file F");
+    crate::console_println!("  seq N [M] Print numbers from 1..N or N..M");
+    crate::console_println!("  nl [F]    Number lines of file (or piped input)");
+    crate::console_println!("  rev [F]   Reverse order of lines in file (or piped)");
+    crate::console_println!("  sleep N   Pause for N milliseconds");
+    crate::console_println!("  printenv  Show sysctl kernel parameters");
+    crate::console_println!("");
+    crate::console_println!("I/O redirection:");
+    crate::console_println!("  cmd > file   Write output to file (overwrite)");
+    crate::console_println!("  cmd >> file  Append output to file");
+    crate::console_println!("  cmd1 | cmd2  Pipe output of cmd1 into cmd2");
     crate::console_println!("  reboot    Reboot the system");
 }
 
@@ -2809,6 +2830,241 @@ fn cmd_wc_input(args: &str, input: &str) {
     }
 
     shell_println!("  {} lines  {} words  {} bytes", lines, words, bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Script execution, text utilities, and misc commands
+// ---------------------------------------------------------------------------
+
+/// Execute kshell commands from a file (like bash `source` or `.`).
+///
+/// Each non-empty, non-comment line in the file is executed as a
+/// separate command.  Lines starting with `#` are comments.
+/// Maximum nesting depth is 8 to prevent infinite recursion.
+fn cmd_source(args: &str) {
+    /// Track recursion depth to prevent infinite `source` loops.
+    static SOURCE_DEPTH: Mutex<u8> = Mutex::new(0);
+
+    const MAX_DEPTH: u8 = 8;
+
+    if args.is_empty() {
+        crate::console_println!("Usage: source <script-file>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        String::from(args)
+    } else {
+        let mut s = String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("source: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    let text = match core::str::from_utf8(&data) {
+        Ok(s) => s,
+        Err(_) => {
+            crate::console_println!("source: {}: not a text file", path);
+            return;
+        }
+    };
+
+    // Check recursion depth.
+    {
+        let mut depth = SOURCE_DEPTH.lock();
+        if *depth >= MAX_DEPTH {
+            crate::console_println!("source: maximum nesting depth ({}) exceeded", MAX_DEPTH);
+            return;
+        }
+        *depth = depth.saturating_add(1);
+    }
+
+    // Execute each line.
+    for (line_num, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        // Skip empty lines and comments.
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        crate::serial_println!("[source] {}:{}: {}", path, line_num.saturating_add(1), trimmed);
+        execute(trimmed);
+    }
+
+    // Decrement depth.
+    {
+        let mut depth = SOURCE_DEPTH.lock();
+        *depth = depth.saturating_sub(1);
+    }
+}
+
+/// Print a sequence of numbers (like Unix `seq`).
+///
+/// `seq N` prints 1..N.  `seq N M` prints N..M.
+fn cmd_seq(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    let (start, end) = match parts.len() {
+        1 => {
+            let n = match parts[0].parse::<i64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    crate::console_println!("Usage: seq N [M]");
+                    return;
+                }
+            };
+            (1i64, n)
+        }
+        2 => {
+            let a = parts[0].parse::<i64>().unwrap_or(1);
+            let b = parts[1].parse::<i64>().unwrap_or(1);
+            (a, b)
+        }
+        _ => {
+            crate::console_println!("Usage: seq N [M]");
+            return;
+        }
+    };
+
+    if start <= end {
+        let mut i = start;
+        while i <= end {
+            shell_println!("{}", i);
+            i = i.saturating_add(1);
+        }
+    } else {
+        let mut i = start;
+        while i >= end {
+            shell_println!("{}", i);
+            i = i.saturating_sub(1);
+        }
+    }
+}
+
+/// Number lines of a file (like Unix `nl`).
+fn cmd_nl(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: nl <file>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        String::from(args)
+    } else {
+        let mut s = String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("nl: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
+    for (i, line) in text.lines().enumerate() {
+        shell_println!("{:>6}\t{}", i.saturating_add(1), line);
+    }
+}
+
+/// Number lines of piped input.
+fn cmd_nl_input(args: &str, input: &str) {
+    if !args.is_empty() {
+        cmd_nl(args);
+        return;
+    }
+    for (i, line) in input.lines().enumerate() {
+        shell_println!("{:>6}\t{}", i.saturating_add(1), line);
+    }
+}
+
+/// Reverse the order of lines in a file (like Unix `tac`).
+fn cmd_rev(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: rev <file>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        String::from(args)
+    } else {
+        let mut s = String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("rev: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    let text = core::str::from_utf8(&data).unwrap_or("<binary>");
+    let lines: Vec<&str> = text.lines().collect();
+    for line in lines.iter().rev() {
+        shell_println!("{}", line);
+    }
+}
+
+/// Reverse lines of piped input.
+fn cmd_rev_input(args: &str, input: &str) {
+    if !args.is_empty() {
+        cmd_rev(args);
+        return;
+    }
+    let lines: Vec<&str> = input.lines().collect();
+    for line in lines.iter().rev() {
+        shell_println!("{}", line);
+    }
+}
+
+/// Pause for N milliseconds (busy-wait using APIC tick counter).
+fn cmd_sleep(args: &str) {
+    let ms = match args.parse::<u64>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            crate::console_println!("Usage: sleep <milliseconds>");
+            return;
+        }
+    };
+
+    // Cap at 10 seconds to prevent accidental infinite waits.
+    let capped = ms.min(10_000);
+    if capped != ms {
+        crate::console_println!("(capped to {} ms)", capped);
+    }
+
+    // Busy-wait using the APIC tick counter.
+    // Each tick is ~1 ms (PIT-driven APIC timer at ~1000 Hz).
+    let start = crate::apic::tick_count();
+    let target = start.saturating_add(capped);
+    while crate::apic::tick_count() < target {
+        // HLT until next interrupt to save power.
+        crate::cpu::hlt();
+    }
+}
+
+/// Show kernel tunable parameters (sysctl values).
+fn cmd_printenv() {
+    let params = crate::sysctl::list_all();
+    if params.is_empty() {
+        shell_println!("(no parameters)");
+        return;
+    }
+    for p in &params {
+        shell_println!("{}={} (default={}, range={}..{})", p.name, p.value, p.default, p.min, p.max);
+    }
 }
 
 /// `tee FILE TEXT` — write TEXT to FILE and also display it.

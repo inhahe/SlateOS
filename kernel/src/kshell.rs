@@ -155,6 +155,14 @@ fn execute(line: &str) {
         "stat" => cmd_stat(args),
         "ln" | "link" => cmd_ln(args),
         "df" => cmd_df(args),
+        "cp" | "copy" => cmd_cp(args),
+        "mv" | "move" | "ren" => cmd_mv(args),
+        "chmod" => cmd_chmod(args),
+        "chown" => cmd_chown(args),
+        "touch" => cmd_touch(args),
+        "tree" => cmd_tree(args),
+        "du" => cmd_du(args),
+        "find" => cmd_find(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -194,6 +202,14 @@ fn cmd_help() {
     crate::console_println!("  rmdir DIR Remove an empty directory");
     crate::console_println!("  stat FILE Show detailed file metadata");
     crate::console_println!("  ln S D    Create hard link D pointing to S");
+    crate::console_println!("  cp S D    Copy file S to D");
+    crate::console_println!("  mv S D    Move/rename file or directory");
+    crate::console_println!("  chmod M F Set permissions (octal, e.g., chmod 755 file)");
+    crate::console_println!("  chown U F Set owner (uid:gid, e.g., chown 1000:1000 file)");
+    crate::console_println!("  touch F   Create file or update timestamps");
+    crate::console_println!("  tree [D]  Show directory tree recursively");
+    crate::console_println!("  du [D]    Show disk usage of directory");
+    crate::console_println!("  find [D]P Search for files matching pattern");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
@@ -811,6 +827,405 @@ fn format_bytes(bytes: u64) -> alloc::string::String {
         alloc::format!("{}M", bytes / (1024 * 1024))
     } else {
         alloc::format!("{}G", bytes / (1024 * 1024 * 1024))
+    }
+}
+
+/// Copy a file.
+fn cmd_cp(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: cp <source> <dest>");
+        return;
+    }
+
+    let src = parts[0];
+    let dst = parts[1];
+
+    let src_path = if src.starts_with('/') {
+        alloc::string::String::from(src)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(src);
+        s
+    };
+    let dst_path = if dst.starts_with('/') {
+        alloc::string::String::from(dst)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(dst);
+        s
+    };
+
+    // Read source file.
+    let data = match crate::fs::Vfs::read_file(&src_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("cp: cannot read '{}': {:?}", src_path, e);
+            return;
+        }
+    };
+
+    // Write to destination.
+    match crate::fs::Vfs::write_file(&dst_path, &data) {
+        Ok(()) => {
+            crate::console_println!("'{}' -> '{}' ({} bytes)", src_path, dst_path, data.len());
+        }
+        Err(e) => {
+            crate::console_println!("cp: cannot write '{}': {:?}", dst_path, e);
+        }
+    }
+}
+
+/// Rename/move a file or directory.
+fn cmd_mv(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: mv <source> <dest>");
+        return;
+    }
+
+    let src = parts[0];
+    let dst = parts[1];
+
+    let src_path = if src.starts_with('/') {
+        alloc::string::String::from(src)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(src);
+        s
+    };
+    let dst_path = if dst.starts_with('/') {
+        alloc::string::String::from(dst)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(dst);
+        s
+    };
+
+    match crate::fs::Vfs::rename(&src_path, &dst_path) {
+        Ok(()) => {
+            crate::console_println!("'{}' -> '{}'", src_path, dst_path);
+        }
+        Err(e) => {
+            crate::console_println!("mv: {:?}", e);
+        }
+    }
+}
+
+/// Change file permissions.
+fn cmd_chmod(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: chmod <mode> <path>");
+        crate::console_println!("  mode: octal (e.g., 755, 644)");
+        return;
+    }
+
+    let mode_str = parts[0];
+    let file = parts[1];
+
+    let mode = match u16::from_str_radix(mode_str, 8) {
+        Ok(m) => m,
+        Err(_) => {
+            crate::console_println!("chmod: invalid mode '{}' (use octal, e.g., 755)", mode_str);
+            return;
+        }
+    };
+
+    let path = if file.starts_with('/') {
+        alloc::string::String::from(file)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(file);
+        s
+    };
+
+    match crate::fs::Vfs::set_permissions(&path, mode) {
+        Ok(()) => {
+            crate::console_println!("{}: mode set to {:04o}", path, mode);
+        }
+        Err(e) => {
+            crate::console_println!("chmod: {:?}", e);
+        }
+    }
+}
+
+/// Change file ownership.
+fn cmd_chown(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: chown <uid:gid> <path>");
+        crate::console_println!("  e.g., chown 1000:1000 /home/user");
+        return;
+    }
+
+    let owner_str = parts[0];
+    let file = parts[1];
+
+    // Parse uid:gid.
+    let (uid, gid) = if let Some(colon) = owner_str.find(':') {
+        let uid_s = &owner_str[..colon];
+        let gid_s = &owner_str[colon + 1..];
+        let uid = match uid_s.parse::<u32>() {
+            Ok(u) => u,
+            Err(_) => {
+                crate::console_println!("chown: invalid uid '{}'", uid_s);
+                return;
+            }
+        };
+        let gid = match gid_s.parse::<u32>() {
+            Ok(g) => g,
+            Err(_) => {
+                crate::console_println!("chown: invalid gid '{}'", gid_s);
+                return;
+            }
+        };
+        (uid, gid)
+    } else {
+        // Just uid, set gid to same.
+        match owner_str.parse::<u32>() {
+            Ok(u) => (u, u),
+            Err(_) => {
+                crate::console_println!("chown: invalid owner '{}'", owner_str);
+                return;
+            }
+        }
+    };
+
+    let path = if file.starts_with('/') {
+        alloc::string::String::from(file)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(file);
+        s
+    };
+
+    match crate::fs::Vfs::set_owner(&path, uid, gid) {
+        Ok(()) => {
+            crate::console_println!("{}: owner set to {}:{}", path, uid, gid);
+        }
+        Err(e) => {
+            crate::console_println!("chown: {:?}", e);
+        }
+    }
+}
+
+/// Create a file or update timestamps.
+fn cmd_touch(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: touch <path>");
+        return;
+    }
+
+    let path = if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    // Check if file exists.
+    match crate::fs::Vfs::stat(&path) {
+        Ok(_) => {
+            // File exists — update timestamps to "now".
+            let now = crate::hpet::elapsed_ns();
+            match crate::fs::Vfs::set_times(&path, now, now) {
+                Ok(()) => {
+                    crate::console_println!("{}: timestamps updated", path);
+                }
+                Err(e) => {
+                    crate::console_println!("touch: {}: {:?}", path, e);
+                }
+            }
+        }
+        Err(_) => {
+            // File doesn't exist — create empty file.
+            match crate::fs::Vfs::write_file(&path, &[]) {
+                Ok(()) => {
+                    crate::console_println!("{}: created", path);
+                }
+                Err(e) => {
+                    crate::console_println!("touch: {}: {:?}", path, e);
+                }
+            }
+        }
+    }
+}
+
+/// Recursive directory tree listing.
+fn cmd_tree(args: &str) {
+    let path = if args.is_empty() {
+        alloc::string::String::from("/")
+    } else if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    crate::console_println!("{}", path);
+    let mut dirs: u64 = 0;
+    let mut files: u64 = 0;
+    tree_recurse(&path, "", &mut dirs, &mut files, 0);
+    crate::console_println!("\n{} directories, {} files", dirs, files);
+}
+
+/// Internal recursive helper for tree display.
+///
+/// Limits depth to 8 levels to avoid excessive output.
+fn tree_recurse(path: &str, prefix: &str, dirs: &mut u64, files: &mut u64, depth: u32) {
+    if depth > 8 {
+        return;
+    }
+
+    let entries = match crate::fs::Vfs::readdir(path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let count = entries.len();
+    for (i, entry) in entries.iter().enumerate() {
+        let is_last = i + 1 == count;
+        let connector = if is_last { "└── " } else { "├── " };
+        let type_marker = match entry.entry_type {
+            crate::fs::EntryType::Directory => "/",
+            crate::fs::EntryType::Symlink => "@",
+            _ => "",
+        };
+
+        crate::console_println!("{}{}{}{}", prefix, connector, entry.name, type_marker);
+
+        if entry.entry_type == crate::fs::EntryType::Directory {
+            *dirs = dirs.saturating_add(1);
+            let child_path = if path == "/" {
+                alloc::format!("/{}", entry.name)
+            } else {
+                alloc::format!("{}/{}", path, entry.name)
+            };
+            let child_prefix = if is_last {
+                alloc::format!("{}    ", prefix)
+            } else {
+                alloc::format!("{}│   ", prefix)
+            };
+            tree_recurse(&child_path, &child_prefix, dirs, files, depth + 1);
+        } else {
+            *files = files.saturating_add(1);
+        }
+    }
+}
+
+/// Show disk usage for a path (like Unix `du`).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_du(args: &str) {
+    let path = if args.is_empty() {
+        alloc::string::String::from("/")
+    } else if args.starts_with('/') {
+        alloc::string::String::from(args)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(args);
+        s
+    };
+
+    let total = du_recurse(&path);
+    crate::console_println!("{}\t{}", format_bytes(total), path);
+}
+
+/// Recursively calculate total size of a directory tree.
+#[allow(clippy::arithmetic_side_effects)]
+fn du_recurse(path: &str) -> u64 {
+    let mut total: u64 = 0;
+
+    let entries = match crate::fs::Vfs::readdir(path) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+
+    for entry in &entries {
+        let child_path = if path == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", path, entry.name)
+        };
+
+        total = total.saturating_add(entry.size);
+
+        if entry.entry_type == crate::fs::EntryType::Directory {
+            let subdir_total = du_recurse(&child_path);
+            crate::console_println!("{}\t{}", format_bytes(subdir_total), child_path);
+            total = total.saturating_add(subdir_total);
+        }
+    }
+
+    total
+}
+
+/// Search for files matching a pattern (basic find).
+fn cmd_find(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    let (search_path, pattern) = if parts.len() >= 2 {
+        (parts[0], parts[1])
+    } else if !args.is_empty() {
+        ("/", args)
+    } else {
+        crate::console_println!("Usage: find [path] <name-pattern>");
+        crate::console_println!("  Searches for files/dirs containing the pattern.");
+        crate::console_println!("  Example: find /tmp log");
+        return;
+    };
+
+    let root = if search_path.starts_with('/') {
+        alloc::string::String::from(search_path)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(search_path);
+        s
+    };
+
+    let mut count: u64 = 0;
+    find_recurse(&root, pattern, &mut count, 0);
+    crate::console_println!("\n{} matches found", count);
+}
+
+/// Recursive helper for find — search directory tree for name matches.
+///
+/// Uses case-insensitive substring matching.  Limits depth to 16.
+fn find_recurse(path: &str, pattern: &str, count: &mut u64, depth: u32) {
+    if depth > 16 {
+        return;
+    }
+
+    let entries = match crate::fs::Vfs::readdir(path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in &entries {
+        let child_path = if path == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", path, entry.name)
+        };
+
+        // Case-insensitive substring match.
+        let name_lower = entry.name.to_ascii_lowercase();
+        let pattern_lower = pattern.to_ascii_lowercase();
+        if name_lower.contains(&pattern_lower) {
+            let type_str = match entry.entry_type {
+                crate::fs::EntryType::File => "",
+                crate::fs::EntryType::Directory => "/",
+                crate::fs::EntryType::Symlink => "@",
+                crate::fs::EntryType::VolumeLabel => "*",
+            };
+            crate::console_println!("{}{}", child_path, type_str);
+            *count = count.saturating_add(1);
+        }
+
+        if entry.entry_type == crate::fs::EntryType::Directory {
+            find_recurse(&child_path, pattern, count, depth + 1);
+        }
     }
 }
 

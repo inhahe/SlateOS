@@ -14,8 +14,8 @@ use crate::serial_println;
 use super::io::BlockReader;
 use super::ondisk::{
     Ext4DirEntry2, Ext4ExtentHeader, Ext4Extent, Ext4GroupDesc, Ext4Inode,
-    Ext4InodeExtra, EXT4_EXTENT_MAGIC, EXT4_ROOT_INO,
-    dir_type, file_type, inode_flags,
+    EXT4_EXTENT_MAGIC, EXT4_ROOT_INO,
+    file_type, inode_flags,
 };
 use super::superblock::{self, ParsedSuperblock};
 
@@ -466,7 +466,7 @@ fn read_struct<T: Copy>(data: &[u8]) -> KernelResult<T> {
 ///
 /// The i_block field is 15 * u32 = 60 bytes, which holds either
 /// block pointers (ext2) or an extent tree (ext4).
-fn inode_block_as_bytes(inode: &Ext4Inode) -> &[u8] {
+pub fn inode_block_as_bytes(inode: &Ext4Inode) -> &[u8] {
     // SAFETY: i_block is [u32; 15] inside a repr(C) struct.
     // Reinterpreting as bytes is safe on any platform.
     let ptr = inode.i_block.as_ptr().cast::<u8>();

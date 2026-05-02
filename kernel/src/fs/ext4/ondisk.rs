@@ -738,10 +738,13 @@ pub mod dir_type {
 pub const EXT4_ROOT_INO: u32 = 2;
 
 /// Journal inode (inode 8).
+#[allow(dead_code)]
 pub const EXT4_JOURNAL_INO: u32 = 8;
 
 /// First non-reserved inode in standard ext4 (usually 11).
+#[allow(dead_code)]
 pub const EXT4_FIRST_INO: u32 = 11;
 
 /// Lost+found directory inode (inode 11, typically).
+#[allow(dead_code)]
 pub const EXT4_LOST_FOUND_INO: u32 = 11;

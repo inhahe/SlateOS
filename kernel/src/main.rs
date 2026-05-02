@@ -542,6 +542,23 @@ extern "C" fn kmain() -> ! {
                 serial_println!("[boot] WARNING: failed to mount devfs at /dev: {:?}", e);
             }
 
+            // Probe secondary block devices for ext4 filesystems.
+            // Try common virtio-blk device names.  The first ext4 partition
+            // found is mounted at /mnt.  Non-fatal if none found.
+            for ext4_dev in &["vdb", "vdc"] {
+                if fs::ext4::probe(ext4_dev) {
+                    match fs::ext4::mount(ext4_dev, "/mnt") {
+                        Ok(()) => break,
+                        Err(e) => {
+                            serial_println!(
+                                "[boot] WARNING: ext4 detected on {} but mount failed: {:?}",
+                                ext4_dev, e
+                            );
+                        }
+                    }
+                }
+            }
+
             // Initialize the change journal (persistent change tracking).
             // Must happen before self-tests so all VFS operations are captured.
             fs::journal::init();
@@ -581,6 +598,10 @@ extern "C" fn kmain() -> ! {
             // Run devfs self-test (validates device file operations).
             if let Err(e) = fs::devfs::self_test() {
                 serial_println!("WARNING: DevFs self-test failed: {:?}", e);
+            }
+            // Run ext4 self-test (reads directory listing and files if mounted).
+            if let Err(e) = fs::ext4::self_test() {
+                serial_println!("WARNING: ext4 self-test failed: {:?}", e);
             }
             // Flush buffer cache to disk so data survives power loss / QEMU kill.
             if let Err(e) = fs::cache::flush_all() {

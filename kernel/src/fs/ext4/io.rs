@@ -109,12 +109,14 @@ impl BlockReader {
 
     /// The ext4 block size in bytes.
     #[must_use]
+    #[allow(dead_code)]
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
 
     /// The device name.
     #[must_use]
+    #[allow(dead_code)]
     pub fn device(&self) -> &str {
         &self.device
     }

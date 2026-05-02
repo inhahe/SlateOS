@@ -45,6 +45,7 @@ pub struct ParsedSuperblock {
     /// Whether the filesystem has a journal.
     pub has_journal: bool,
     /// Whether we can mount read-write (false if unsupported ro_compat).
+    #[allow(dead_code)]
     pub can_write: bool,
     /// Volume label (trimmed, UTF-8 best-effort).
     pub volume_name: String,
@@ -208,6 +209,7 @@ fn extract_name(buf: &[u8]) -> String {
 impl ParsedSuperblock {
     /// Byte offset of a given block number on the device.
     #[must_use]
+    #[allow(dead_code)]
     pub fn block_offset(&self, block_nr: u64) -> u64 {
         block_nr.saturating_mul(u64::from(self.block_size))
     }

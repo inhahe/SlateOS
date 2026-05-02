@@ -786,6 +786,15 @@ impl Vfs {
         mp.fs.metadata(relative)
     }
 
+    /// Compute the SHA-256 content hash of a file.
+    ///
+    /// Reads the file and returns the 32-byte SHA-256 digest.
+    /// Returns `IsADirectory` if the path is a directory.
+    pub fn content_hash(path: &str) -> KernelResult<Vec<u8>> {
+        let data = Self::read_file(path)?;
+        Ok(crate::crypto::sha256_vec(&data))
+    }
+
     /// Set file attributes (immutable, append-only, hidden, system).
     pub fn set_attributes(path: &str, attrs: FileAttr) -> KernelResult<()> {
         validate_path(path)?;

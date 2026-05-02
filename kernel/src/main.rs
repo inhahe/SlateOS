@@ -56,6 +56,7 @@ mod boot;
 mod cap;
 mod console;
 mod cpu;
+mod crypto;
 mod error;
 mod font;
 mod fs;
@@ -627,6 +628,11 @@ extern "C" fn kmain() -> ! {
         Err(e) => {
             serial_println!("[fs] No FAT filesystem on vda: {:?} (non-fatal)", e);
         }
+    }
+
+    // Run SHA-256 self-test (verifies against FIPS 180-4 test vectors).
+    if let Err(e) = crypto::self_test() {
+        serial_println!("WARNING: SHA-256 self-test failed: {:?}", e);
     }
 
     console::boot_step_update(console::BootStatus::Ok, "Storage & filesystems");

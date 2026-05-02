@@ -3,6 +3,23 @@
 //! Defines the [`FileSystem`] trait that all filesystem implementations
 //! must provide, and the [`Vfs`] singleton that manages mounted
 //! filesystems and dispatches operations.
+//!
+//! ## Path resolution
+//!
+//! The VFS resolves paths component-by-component, following symlinks at
+//! each step via `lstat()`.  This enables **cross-mount symlink resolution**:
+//! a symlink on ext4 can point to `/tmp/file` (on memfs) and the VFS
+//! correctly re-routes through the mount table.  Depth limit is 40.
+//!
+//! Operations that follow all symlinks (stat, read, write, etc.) use
+//! `resolve_follow()`.  Operations that act on the entry itself (remove,
+//! rmdir, lstat, readlink, rename) use `resolve_no_follow()`.
+//!
+//! ## Mount table
+//!
+//! The VFS uses longest-prefix matching with path-boundary checks.  A
+//! mount at `/tmp` captures `/tmp/foo` but not `/tmpfile`.  Multiple
+//! mounts are supported; submount directories are synthesized in readdir.
 
 use alloc::boxed::Box;
 use alloc::format;

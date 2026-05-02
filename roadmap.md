@@ -371,6 +371,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ext4 journal revoke block support: two-pass recovery (scan revokes + replay with skip), JournalRevokeHeader, BTreeMap<u64,u32> revoke table, 64-bit block number support
   - [x] ext4 add_dir_entry fix: new-block path now properly rebuilds extent tree (was orphaning allocated blocks), insert path uses write_to_existing_blocks (avoids block leak)
   - [x] ext4 block leak fixes: rename ".." update and remove_dir_entry use write_to_existing_blocks instead of write_file_data (prevents O(dir_blocks) leak per operation)
+  - [x] ext4 fallocate: real block pre-allocation with UNWRITTEN extents (empty files only; reads return zeros, blocks reserved on disk)
+  - [x] VFS access() check: POSIX-style access(path, mode) with F_OK/R_OK/W_OK/X_OK, is_readable(), is_writable() convenience helpers, immutable-file check, self-test
+  - [x] Kshell `uname` command: POSIX-compatible flags (-s/-n/-r/-v/-m/-o/-a), combined flags, RTC-based version date
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

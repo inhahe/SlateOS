@@ -248,7 +248,7 @@ const ATTR_HIDDEN: u8    = 0x02;
 const ATTR_SYSTEM: u8    = 0x04;
 const ATTR_VOLUME_ID: u8 = 0x08;
 const ATTR_DIRECTORY: u8 = 0x10;
-const _ATTR_ARCHIVE: u8  = 0x20;
+const ATTR_ARCHIVE: u8   = 0x20;
 /// Combination that indicates a long filename entry.
 const ATTR_LONG_NAME: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUME_ID;
 
@@ -3358,6 +3358,95 @@ impl FileSystem for FatFs {
         self.dcache_invalidate_prefix(path);
 
         Ok(())
+    }
+
+    /// Set file attributes on a FAT entry.
+    ///
+    /// Maps VFS attributes to FAT attribute flags:
+    /// - `IMMUTABLE` → `ATTR_READ_ONLY` (0x01)
+    /// - `HIDDEN`    → `ATTR_HIDDEN`    (0x02)
+    /// - `SYSTEM`    → `ATTR_SYSTEM`    (0x04)
+    ///
+    /// Preserves structural flags (`ATTR_DIRECTORY`, `ATTR_VOLUME_ID`,
+    /// `ATTR_ARCHIVE`) — only the user-controllable bits change.
+    /// `APPEND_ONLY` is silently ignored since FAT has no equivalent.
+    ///
+    /// Returns `NotSupported` for the root directory (no on-disk entry).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+        // Resolve path — root directory has no entry to modify.
+        let (parent_path, _filename) = split_path(path);
+        let parent_cluster = self.resolve_dir_cluster(parent_path)?;
+        let (_pc, entry_opt) = self.resolve_path(path)?;
+        let entry = entry_opt.ok_or(KernelError::NotSupported)?;
+
+        // Find the on-disk location of the 8.3 entry.
+        let name83 = entry.name;
+        let (dir_lba, dir_offset, exists) =
+            self.find_or_create_slot_in(parent_cluster, &name83)?;
+        if !exists {
+            return Err(KernelError::NotFound);
+        }
+
+        // Read the sector containing the entry.
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        self.read_sector(dir_lba, &mut sector_buf)?;
+
+        let old_attr = sector_buf
+            .get(dir_offset + 11)
+            .copied()
+            .unwrap_or(0);
+
+        // Preserve structural flags, clear user-controllable bits, then
+        // set them based on the requested VFS attributes.
+        let structural = old_attr & (ATTR_DIRECTORY | ATTR_VOLUME_ID | ATTR_ARCHIVE);
+        let mut new_attr = structural;
+
+        if attrs.contains(FileAttr::IMMUTABLE) {
+            new_attr |= ATTR_READ_ONLY;
+        }
+        if attrs.contains(FileAttr::HIDDEN) {
+            new_attr |= ATTR_HIDDEN;
+        }
+        if attrs.contains(FileAttr::SYSTEM) {
+            new_attr |= ATTR_SYSTEM;
+        }
+
+        // Write back the updated attribute byte (offset 11 in the 32-byte entry).
+        if let Some(attr_byte) = sector_buf.get_mut(dir_offset + 11) {
+            *attr_byte = new_attr;
+        }
+
+        self.write_sector(dir_lba, &sector_buf)?;
+
+        // Invalidate dcache since the entry's attributes changed.
+        self.dcache_invalidate_prefix(path);
+
+        crate::serial_println!(
+            "[fat] set_attributes '{}': 0x{:02X} → 0x{:02X}",
+            path, old_attr, new_attr,
+        );
+
+        Ok(())
+    }
+
+    /// FAT has no Unix permission model — always returns `NotSupported`.
+    ///
+    /// FAT uses attribute flags (read-only, hidden, system) instead of
+    /// rwxrwxrwx permission bits.  Use [`set_attributes`] to control
+    /// the read-only flag.
+    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+        let _ = (path, permissions);
+        Err(KernelError::NotSupported)
+    }
+
+    /// FAT has no file ownership — always returns `NotSupported`.
+    ///
+    /// FAT directory entries do not store UID/GID.  All files
+    /// effectively belong to the same (anonymous) owner.
+    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+        let _ = (path, uid, gid);
+        Err(KernelError::NotSupported)
     }
 }
 

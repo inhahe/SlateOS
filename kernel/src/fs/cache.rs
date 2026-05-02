@@ -44,6 +44,7 @@
 //! Inspired by the Unix buffer cache (bio.c) and Linux's buffer_head
 //! layer, simplified for a single-lock microkernel.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -145,6 +146,18 @@ struct BufferCacheInner {
     writebacks: u64,
     /// Whether the pool has been initialized.
     initialized: bool,
+
+    // --- O(log n) sector lookup index ---
+    // OPT: Replaces O(n) linear scan in find_index() with BTreeMap
+    // lookup.  Sector lookup is the hottest path (every read/write).
+    // Benchmark: find_index dropped from O(512) to O(log 512) ≈ 9.
+
+    /// Maps (device_id, lba) → entry index for O(log n) sector lookup.
+    index: BTreeMap<(u8, u64), usize>,
+
+    /// Stack of free slot indices for O(1) free-slot allocation.
+    /// Populated on init, maintained on alloc/free.
+    free_slots: Vec<usize>,
 }
 
 impl BufferCacheInner {
@@ -159,6 +172,8 @@ impl BufferCacheInner {
             writes: 0,
             writebacks: 0,
             initialized: false,
+            index: BTreeMap::new(),
+            free_slots: Vec::new(),
         }
     }
 
@@ -170,6 +185,11 @@ impl BufferCacheInner {
         self.entries.reserve_exact(MAX_ENTRIES);
         for _ in 0..MAX_ENTRIES {
             self.entries.push(CacheEntry::empty());
+        }
+        // All slots start free — push in reverse so index 0 is popped first.
+        self.free_slots.reserve_exact(MAX_ENTRIES);
+        for i in (0..MAX_ENTRIES).rev() {
+            self.free_slots.push(i);
         }
         self.initialized = true;
     }
@@ -199,10 +219,10 @@ impl BufferCacheInner {
     }
 
     /// Find the cache entry index for `(dev_id, lba)`, or `None`.
+    ///
+    /// Uses BTreeMap index for O(log n) lookup instead of linear scan.
     fn find_index(&self, dev_id: u8, lba: u64) -> Option<usize> {
-        self.entries.iter().position(|e| {
-            e.valid && e.device_id == dev_id && e.lba == lba
-        })
+        self.index.get(&(dev_id, lba)).copied()
     }
 
     /// Bump the access counter and record it on the entry.
@@ -213,8 +233,10 @@ impl BufferCacheInner {
     }
 
     /// Find an invalid (free) slot, or `None`.
-    fn find_free(&self) -> Option<usize> {
-        self.entries.iter().position(|e| !e.valid)
+    ///
+    /// Uses pre-built free-slot stack for O(1) allocation.
+    fn find_free(&mut self) -> Option<usize> {
+        self.free_slots.pop()
     }
 
     /// Find the LRU clean entry index, or `None` if all valid entries
@@ -285,6 +307,18 @@ impl BufferCacheInner {
         }
     }
 
+    /// Evict an entry: remove from index and mark the slot invalid.
+    fn evict_entry(&mut self, idx: usize) {
+        if self.entries[idx].valid {
+            let dev_id = self.entries[idx].device_id;
+            let lba = self.entries[idx].lba;
+            self.index.remove(&(dev_id, lba));
+        }
+        self.entries[idx].valid = false;
+        // Note: the slot is NOT pushed to free_slots here because
+        // the caller will immediately reuse it.
+    }
+
     /// Make room for one new entry.  Returns the index of the slot
     /// that is now available (either free, or just evicted).
     ///
@@ -298,7 +332,7 @@ impl BufferCacheInner {
 
         // 2. Evict LRU clean entry (no I/O needed).
         if let Some(idx) = self.find_lru_clean() {
-            self.entries[idx].valid = false;
+            self.evict_entry(idx);
             return Ok(idx);
         }
 
@@ -306,7 +340,7 @@ impl BufferCacheInner {
         let idx = self.find_lru()
             .ok_or(KernelError::InternalError)?;
         self.writeback_entry(idx)?;
-        self.entries[idx].valid = false;
+        self.evict_entry(idx);
         Ok(idx)
     }
 
@@ -390,6 +424,7 @@ pub fn read_sector(
     cache.entries[idx].data.copy_from_slice(buf);
     cache.entries[idx].dirty = false;
     cache.entries[idx].valid = true;
+    cache.index.insert((dev_id, lba), idx);
     cache.touch(idx);
 
     Ok(())
@@ -430,6 +465,7 @@ pub fn write_sector(
     cache.entries[idx].data.copy_from_slice(buf);
     cache.entries[idx].dirty = true;
     cache.entries[idx].valid = true;
+    cache.index.insert((dev_id, lba), idx);
     cache.touch(idx);
 
     Ok(())
@@ -499,9 +535,12 @@ pub fn invalidate(device: &str) -> KernelResult<()> {
         None => return Ok(()),
     };
 
-    for entry in &mut cache.entries {
-        if entry.valid && entry.device_id == dev_id {
-            entry.valid = false;
+    for i in 0..cache.entries.len() {
+        if cache.entries[i].valid && cache.entries[i].device_id == dev_id {
+            let lba = cache.entries[i].lba;
+            cache.index.remove(&(dev_id, lba));
+            cache.entries[i].valid = false;
+            cache.free_slots.push(i);
         }
     }
 
@@ -514,9 +553,16 @@ pub fn invalidate(device: &str) -> KernelResult<()> {
 /// after a device error where writeback is known to be impossible.
 pub fn invalidate_all_no_flush() {
     let mut cache = CACHE.lock();
+    cache.index.clear();
+    cache.free_slots.clear();
+    let len = cache.entries.len();
     for entry in &mut cache.entries {
         entry.valid = false;
         entry.dirty = false;
+    }
+    // Rebuild free list (reverse order so index 0 is allocated first).
+    for i in (0..len).rev() {
+        cache.free_slots.push(i);
     }
 }
 

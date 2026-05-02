@@ -238,7 +238,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Superblock parser with feature flag validation and derived value computation
   - [x] Block group descriptor table reading
   - [x] Inode lookup (inode number → on-disk inode)
-  - [x] Directory traversal (linear entries; htree not yet)
+  - [x] Directory traversal (linear entries + htree hash-tree index for O(1) lookups on large directories)
   - [x] Extent tree walking (logical → physical block mapping, multi-level)
   - [x] Read-only FileSystem trait implementation (VFS integration, mount, probe, self-test)
   - [x] Block allocation (bitmap-based, goal-directed, contiguous-run)
@@ -306,8 +306,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Space pre-allocation: FileSystem::fallocate() trait method, Vfs::fallocate(), SYS_FS_FALLOCATE (649) syscall
   - [x] Sparse file support: SeekFrom::Data and SeekFrom::Hole variants, SYS_FS_SEEK_DATA (650) and SYS_FS_SEEK_HOLE (651) syscalls (non-sparse default: data=offset, hole=EOF)
   - [x] ext4 directory entry cache: 512-entry LRU keyed by (dir_inode, name) → child_inode, avoids linear O(n) directory scans on repeated lookups, invalidation on add/remove
+  - [x] ext4 htree (hash-tree) directory index: half_md4/TEA/legacy hash functions, dx_root/dx_node parsing, binary search, O(1) amortized lookups for INDEX directories (read-only; write-side node splitting deferred)
+  - [x] Procfs expansion: /proc/interrupts (APIC timer, ISR latency, IRQ state), /proc/devices (PCI bus scan), /proc/net (interface config snapshot)
   - [x] Kshell commands: lsp (paginated ls), cmp/diff (byte-by-byte file compare), fallocate (space reservation with K/M/G suffixes)
-  - [x] Self-tests: recursive copy/remove (3-level directory tree), cross-mount rename (memfs↔ext4), paginated readdir_at (page boundary, overlap, tail, past-end), VFS dcache (hit verification, invalidation, prefix matching)
+  - [x] Self-tests: recursive copy/remove (3-level directory tree), cross-mount rename (memfs↔ext4), paginated readdir_at (page boundary, overlap, tail, past-end), VFS dcache (hit verification, invalidation, prefix matching), htree hash functions (determinism, divergence, scan_leaf_block)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

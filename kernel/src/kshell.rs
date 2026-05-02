@@ -833,6 +833,16 @@ static LOOP_CONTINUE: core::sync::atomic::AtomicBool =
 /// kernel debug shell, which has a limited stack).
 const MAX_FUNC_DEPTH: usize = 32;
 
+/// Stack of local variable scopes.
+///
+/// Each function call can push local variable names.  When the function
+/// returns, all variables in the top frame are restored to their previous
+/// values (or removed if they didn't exist before).
+///
+/// Each frame is a list of `(name, previous_value)` pairs.
+/// `previous_value = None` means the variable didn't exist before `local`.
+static LOCAL_VARS: Mutex<Vec<Vec<(String, Option<String>)>>> = Mutex::new(Vec::new());
+
 /// Get a positional parameter from the current function scope.
 ///
 /// $0 is always "kshell".  $1..$N are function arguments.
@@ -1856,8 +1866,9 @@ fn execute_function(body: &[String], args: &[String]) {
         }
     }
 
-    // Push parameter frame.
+    // Push parameter frame and local variable frame.
     POSITIONAL_PARAMS.lock().push(args.to_vec());
+    LOCAL_VARS.lock().push(Vec::new());
 
     // Clear the return flag.
     FUNC_RETURN.store(false, core::sync::atomic::Ordering::Relaxed);
@@ -1873,6 +1884,16 @@ fn execute_function(body: &[String], args: &[String]) {
     // Clear return flag and pop parameter frame.
     FUNC_RETURN.store(false, core::sync::atomic::Ordering::Relaxed);
     POSITIONAL_PARAMS.lock().pop();
+
+    // Pop the local variable frame, restoring previous values.
+    if let Some(frame) = LOCAL_VARS.lock().pop() {
+        for (name, prev) in frame {
+            match prev {
+                Some(val) => env_set(&name, &val),
+                None => { env_remove(&name); }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3241,10 +3262,7 @@ fn dispatch(line: &str) {
             }
         }
         "local" => {
-            // `local VAR=VALUE` — set a variable (currently just a
-            // synonym for export; true local scoping would need a
-            // separate per-frame variable map).
-            cmd_export(args);
+            cmd_local(args);
         }
         _ => {
             // Check user-defined functions before reporting unknown.
@@ -3370,6 +3388,7 @@ fn cmd_help() {
     crate::console_println!("  declare -f       List all defined functions");
     crate::console_println!("  unset -f NAME    Remove a function definition");
     crate::console_println!("  return [N]       Return from function with status N");
+    crate::console_println!("  local VAR=VALUE  Function-scoped variable (restored on return)");
     crate::console_println!("Arrays:");
     crate::console_println!("  arr=(a b c)      Declare array");
     crate::console_println!("  ${{arr[0]}}        Access element (0-based)");
@@ -6297,6 +6316,55 @@ fn cmd_export(args: &str) {
 
     // Keep PWD in sync.
     sync_env_pwd();
+}
+
+/// Declare a local variable inside a function.
+///
+/// Usage: `local VAR=VALUE` or `local VAR VALUE` or `local VAR`
+///
+/// Saves the variable's current value (or notes it was unset) so it
+/// can be restored when the function returns.  Outside a function,
+/// behaves identically to `export`.
+fn cmd_local(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: local VAR[=VALUE]");
+        return;
+    }
+
+    // Parse NAME=VALUE or NAME VALUE.
+    let (name, value) = if let Some(eq_pos) = args.find('=') {
+        let n = args.get(..eq_pos).unwrap_or("").trim();
+        let v = args.get(eq_pos.saturating_add(1)..).unwrap_or("").trim();
+        (n, v)
+    } else {
+        let mut parts = args.splitn(2, ' ');
+        let n = parts.next().unwrap_or("").trim();
+        let v = parts.next().unwrap_or("").trim();
+        (n, v)
+    };
+
+    if name.is_empty() {
+        crate::console_println!("local: invalid variable name");
+        return;
+    }
+
+    // Save the current value on the local variable stack (if inside a function).
+    {
+        let mut stack = LOCAL_VARS.lock();
+        if let Some(frame) = stack.last_mut() {
+            // Only save if we haven't already saved this name in this frame.
+            let already_saved = frame.iter().any(|(n, _)| n == name);
+            if !already_saved {
+                let prev = env_get(name);
+                frame.push((String::from(name), prev));
+            }
+        }
+        // If not inside a function (stack is empty), `local` still works
+        // like `export` — sets the variable without scope protection.
+    }
+
+    // Set the variable.
+    env_set(name, value);
 }
 
 /// Remove an environment variable.

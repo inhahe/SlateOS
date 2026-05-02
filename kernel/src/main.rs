@@ -645,9 +645,12 @@ extern "C" fn kmain() -> ! {
         }
     }
 
-    // Run SHA-256 self-test (verifies against FIPS 180-4 test vectors).
+    // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {
         serial_println!("WARNING: SHA-256 self-test failed: {:?}", e);
+    }
+    if let Err(e) = crypto::self_test_crc32c() {
+        serial_println!("WARNING: CRC32C self-test failed: {:?}", e);
     }
 
     console::boot_step_update(console::BootStatus::Ok, "Storage & filesystems");

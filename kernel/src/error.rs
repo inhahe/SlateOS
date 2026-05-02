@@ -80,6 +80,8 @@ pub enum KernelError {
     InvalidHandle = -505,
     /// Too many symbolic links encountered during path resolution.
     TooManyLinks = -506,
+    /// The directory is not empty (e.g., rmdir on non-empty directory).
+    NotEmpty = -507,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -123,6 +125,7 @@ impl KernelError {
             Self::DiskFull => "disk full",
             Self::InvalidHandle => "invalid handle",
             Self::TooManyLinks => "too many symbolic links",
+            Self::NotEmpty => "directory not empty",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

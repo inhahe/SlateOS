@@ -2167,6 +2167,7 @@ fn dispatch(line: &str) {
         "test" | "[" => cmd_test(args),
         "expr" => cmd_expr(args),
         "printenv" | "env" => cmd_printenv(),
+        "declare" => cmd_declare(args),
         "return" => {
             // `return [N]` — set exit status and signal function return.
             if !args.is_empty() {
@@ -2295,7 +2296,14 @@ fn cmd_help() {
     crate::console_println!("Control flow:");
     crate::console_println!("  if COND; then ... elif COND; then ... else ... fi");
     crate::console_println!("  while COND; do ... done  (max 1000 iterations)");
+    crate::console_println!("  for VAR in WORDS; do ... done");
     crate::console_println!("  test EXPR / [ EXPR ]  Conditional expressions");
+    crate::console_println!("Functions:");
+    crate::console_println!("  name() {{ body; }}  Define a function");
+    crate::console_println!("  name arg1 arg2   Call function ($1, $2, $#, $@)");
+    crate::console_println!("  declare -f       List all defined functions");
+    crate::console_println!("  unset -f NAME    Remove a function definition");
+    crate::console_println!("  return [N]       Return from function with status N");
     crate::console_println!("  reboot    Reboot the system");
 }
 
@@ -4982,14 +4990,81 @@ fn cmd_export(args: &str) {
 /// Usage: `unset NAME [NAME ...]`
 fn cmd_unset(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: unset NAME [NAME ...]");
+        crate::console_println!("Usage: unset [-f] NAME [NAME ...]");
         return;
     }
+
+    // `unset -f NAME` removes a function definition.
+    if args.starts_with("-f ") || args.starts_with("-f\t") {
+        let names = args.get(3..).unwrap_or("").trim();
+        for name in names.split_whitespace() {
+            if FUNCTIONS.lock().remove(name).is_none() {
+                crate::console_println!("unset: function '{}': not defined", name);
+            }
+        }
+        return;
+    }
+
     for name in args.split_whitespace() {
         if !env_remove(name) {
             crate::console_println!("unset: '{}': not set", name);
         }
     }
+}
+
+/// List or inspect shell functions.
+///
+/// Usage:
+///   `declare -f`       — list all function names and bodies
+///   `declare -f NAME`  — show a specific function's body
+///   `declare`          — list all function names
+fn cmd_declare(args: &str) {
+    let funcs = FUNCTIONS.lock();
+
+    if args.is_empty() {
+        // List function names only.
+        if funcs.is_empty() {
+            crate::console_println!("No functions defined.");
+        } else {
+            for name in funcs.keys() {
+                crate::console_println!("{}", name);
+            }
+        }
+        return;
+    }
+
+    if args == "-f" {
+        // List all functions with bodies.
+        if funcs.is_empty() {
+            crate::console_println!("No functions defined.");
+        } else {
+            for (name, body) in funcs.iter() {
+                crate::console_println!("{}() {{", name);
+                for line in body {
+                    crate::console_println!("    {}", line);
+                }
+                crate::console_println!("}}");
+            }
+        }
+        return;
+    }
+
+    if let Some(name) = args.strip_prefix("-f ") {
+        let name = name.trim();
+        if let Some(body) = funcs.get(name) {
+            crate::console_println!("{}() {{", name);
+            for line in body {
+                crate::console_println!("    {}", line);
+            }
+            crate::console_println!("}}");
+        } else {
+            crate::console_println!("declare: function '{}' not found", name);
+            set_exit(1);
+        }
+        return;
+    }
+
+    crate::console_println!("Usage: declare [-f [NAME]]");
 }
 
 /// Define or list shell aliases.

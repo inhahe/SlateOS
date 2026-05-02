@@ -540,9 +540,9 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
         }
     }
 
-    // Try to find an operator: :-, :+, :=, :?, %, %%, #, ##
+    // Try to find an operator: :-, :+, :=, :?, :N:N, %, %%, #, ##, /, //, ^, ^^, ,, ,,
     // Scan for the operator position (skip the variable name).
-    let name_end = inner.find(|c: char| c == ':' || c == '%' || c == '#')
+    let name_end = inner.find(|c: char| c == ':' || c == '%' || c == '#' || c == '/' || c == '^' || c == ',')
         .unwrap_or(inner.len());
     let name = inner.get(..name_end).unwrap_or(inner);
     let rest = inner.get(name_end..).unwrap_or("");
@@ -595,6 +595,51 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
             crate::console_println!("{}", error_msg);
             set_exit(1);
         }
+    } else if rest.starts_with(':')
+        && rest.len() > 1
+        && !rest.starts_with(":-")
+        && !rest.starts_with(":+")
+        && !rest.starts_with(":=")
+        && !rest.starts_with(":?")
+    {
+        // ${NAME:offset} or ${NAME:offset:length} — substring extraction.
+        let spec = rest.get(1..).unwrap_or("");
+        let val = val.unwrap_or_default();
+
+        // Split on the second `:` to get offset and optional length.
+        let (offset_str, length_str) = if let Some(colon2) = spec.find(':') {
+            (
+                spec.get(..colon2).unwrap_or(""),
+                Some(spec.get(colon2.saturating_add(1)..).unwrap_or("")),
+            )
+        } else {
+            (spec, None)
+        };
+
+        let offset_str = offset_str.trim();
+        // Parse offset (supports negative values counting from end).
+        if let Ok(raw_offset) = offset_str.parse::<i64>() {
+            let str_len = val.len() as i64;
+            let start = if raw_offset < 0 {
+                // Negative offset: count from end.
+                (str_len.saturating_add(raw_offset)).max(0) as usize
+            } else {
+                (raw_offset as usize).min(val.len())
+            };
+
+            let end = if let Some(len_s) = length_str {
+                if let Ok(len) = len_s.trim().parse::<usize>() {
+                    start.saturating_add(len).min(val.len())
+                } else {
+                    val.len()
+                }
+            } else {
+                val.len()
+            };
+
+            result.push_str(val.get(start..end).unwrap_or(""));
+        }
+        // Non-numeric offset: silently expand to empty (like bash).
     } else if let Some(pattern) = rest.strip_prefix("%%") {
         // ${NAME%%pattern} — remove longest suffix match.
         let val = val.unwrap_or_default();
@@ -648,12 +693,117 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
             }
         }
         result.push_str(val.get(best..).unwrap_or(""));
+    } else if let Some(subst) = rest.strip_prefix("//") {
+        // ${NAME//pattern/replacement} — replace all occurrences.
+        let val = val.unwrap_or_default();
+        if let Some(slash) = subst.find('/') {
+            let pattern = subst.get(..slash).unwrap_or("");
+            let replacement = subst.get(slash.saturating_add(1)..).unwrap_or("");
+            result.push_str(&str_replace_all(&val, pattern, replacement));
+        } else {
+            // ${NAME//pattern} — remove all occurrences of pattern.
+            result.push_str(&str_replace_all(&val, subst, ""));
+        }
+    } else if let Some(subst) = rest.strip_prefix('/') {
+        // ${NAME/pattern/replacement} — replace first occurrence.
+        let val = val.unwrap_or_default();
+        if let Some(slash) = subst.find('/') {
+            let pattern = subst.get(..slash).unwrap_or("");
+            let replacement = subst.get(slash.saturating_add(1)..).unwrap_or("");
+            result.push_str(&str_replace_first(&val, pattern, replacement));
+        } else {
+            // ${NAME/pattern} — remove first occurrence of pattern.
+            result.push_str(&str_replace_first(&val, subst, ""));
+        }
+    } else if let Some(subst) = rest.strip_prefix('^') {
+        // ${NAME^} — uppercase first character.
+        // ${NAME^^} — uppercase all characters.
+        let val = val.unwrap_or_default();
+        if subst.starts_with('^') {
+            // ^^ — all uppercase.
+            let mut upper = String::with_capacity(val.len());
+            for ch in val.chars() {
+                for uc in ch.to_uppercase() {
+                    upper.push(uc);
+                }
+            }
+            result.push_str(&upper);
+        } else {
+            // ^ — first character only.
+            let mut chars = val.chars();
+            if let Some(first) = chars.next() {
+                for uc in first.to_uppercase() {
+                    result.push(uc);
+                }
+                result.extend(chars);
+            }
+        }
+    } else if let Some(subst) = rest.strip_prefix(',') {
+        // ${NAME,} — lowercase first character.
+        // ${NAME,,} — lowercase all characters.
+        let val = val.unwrap_or_default();
+        if subst.starts_with(',') {
+            // ,, — all lowercase.
+            let mut lower = String::with_capacity(val.len());
+            for ch in val.chars() {
+                for lc in ch.to_lowercase() {
+                    lower.push(lc);
+                }
+            }
+            result.push_str(&lower);
+        } else {
+            // , — first character only.
+            let mut chars = val.chars();
+            if let Some(first) = chars.next() {
+                for lc in first.to_lowercase() {
+                    result.push(lc);
+                }
+                result.extend(chars);
+            }
+        }
     } else {
         // Unknown operator — just expand the name.
         if let Some(v) = val {
             result.push_str(&v);
         }
     }
+}
+
+/// Replace the first occurrence of `pattern` in `s` with `replacement`.
+///
+/// Simple literal string matching (not glob).
+fn str_replace_first(s: &str, pattern: &str, replacement: &str) -> String {
+    if pattern.is_empty() {
+        return String::from(s);
+    }
+    if let Some(pos) = s.find(pattern) {
+        let mut result = String::with_capacity(s.len());
+        result.push_str(s.get(..pos).unwrap_or(""));
+        result.push_str(replacement);
+        result.push_str(s.get(pos.saturating_add(pattern.len())..).unwrap_or(""));
+        result
+    } else {
+        String::from(s)
+    }
+}
+
+/// Replace all occurrences of `pattern` in `s` with `replacement`.
+///
+/// Simple literal string matching (not glob).
+fn str_replace_all(s: &str, pattern: &str, replacement: &str) -> String {
+    if pattern.is_empty() {
+        return String::from(s);
+    }
+    let mut result = String::with_capacity(s.len());
+    let mut start = 0;
+    while let Some(pos) = s.get(start..).and_then(|rest| rest.find(pattern)) {
+        let abs_pos = start.saturating_add(pos);
+        result.push_str(s.get(start..abs_pos).unwrap_or(""));
+        result.push_str(replacement);
+        start = abs_pos.saturating_add(pattern.len());
+    }
+    result.push_str(s.get(start..).unwrap_or(""));
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -3377,6 +3527,12 @@ fn cmd_help() {
     crate::console_println!("  $((expr))        Arithmetic expansion");
     crate::console_println!("  $1..$9 $# $@     Positional params (in functions)");
     crate::console_println!("  $$               Literal dollar sign");
+    crate::console_println!("String operations:");
+    crate::console_println!("  ${{VAR:N}}  ${{VAR:N:L}}  Substring (offset, offset+length)");
+    crate::console_println!("  ${{VAR/pat/rep}}       Replace first match");
+    crate::console_println!("  ${{VAR//pat/rep}}      Replace all matches");
+    crate::console_println!("  ${{VAR^}} ${{VAR^^}}     Uppercase first / all chars");
+    crate::console_println!("  ${{VAR,}} ${{VAR,,}}     Lowercase first / all chars");
     crate::console_println!("Control flow:");
     crate::console_println!("  if COND; then ... elif COND; then ... else ... fi");
     crate::console_println!("  while COND; do ... done  (max 1000 iterations)");

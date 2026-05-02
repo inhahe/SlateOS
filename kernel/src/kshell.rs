@@ -249,6 +249,41 @@ fn expand_vars(input: &str) -> String {
                 let code = last_exit();
                 result.push_str(&alloc::format!("{}", code));
                 i = i.saturating_add(1);
+            } else if next == b'(' && bytes.get(i.saturating_add(1)) == Some(&b'(') {
+                // `$((...))` — arithmetic expansion.
+                i = i.saturating_add(2); // skip `((`
+                let start = i;
+                // Find matching `))`.
+                let mut depth: u32 = 1;
+                while i < len && depth > 0 {
+                    if bytes[i] == b'(' && bytes.get(i.saturating_add(1)) == Some(&b'(') {
+                        depth = depth.saturating_add(1);
+                        i = i.saturating_add(2);
+                    } else if bytes[i] == b')' && bytes.get(i.saturating_add(1)) == Some(&b')') {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            break;
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                if let Some(expr_bytes) = bytes.get(start..i) {
+                    if let Ok(expr) = core::str::from_utf8(expr_bytes) {
+                        // Expand variables within the expression first.
+                        let expanded_expr = expand_vars(expr);
+                        let val = eval_arithmetic(&expanded_expr);
+                        result.push_str(&alloc::format!("{}", val));
+                    }
+                }
+                // Skip past `))`.
+                if i < len && bytes[i] == b')' {
+                    i = i.saturating_add(1);
+                }
+                if i < len && bytes[i] == b')' {
+                    i = i.saturating_add(1);
+                }
             } else if next == b'{' {
                 // `${NAME}` form.
                 i = i.saturating_add(1); // skip `{`
@@ -1141,7 +1176,7 @@ const COMMANDS: &[&str] = &[
     "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
     "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
     "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
-    "do", "done", "elif", "else", "fi", "if",
+    "do", "done", "elif", "else", "expr", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "tree", "true", "truncate", "type", "umount",
     "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
@@ -1707,6 +1742,7 @@ fn dispatch(line: &str) {
         "true" => { set_exit(0); }
         "false" => { set_exit(1); }
         "test" | "[" => cmd_test(args),
+        "expr" => cmd_expr(args),
         "printenv" | "env" => cmd_printenv(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -4281,6 +4317,169 @@ fn eval_test(args: &str) -> bool {
 
     // Unrecognized expression — treat as false.
     false
+}
+
+/// Evaluate and print an arithmetic expression.
+///
+/// Usage: `expr 1 + 2 * 3` → `7`
+fn cmd_expr(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: expr <expression>");
+        crate::console_println!("  Operators: + - * / % ()");
+        crate::console_println!("  Example: expr 2 + 3 * 4");
+        set_exit(1);
+        return;
+    }
+    let result = eval_arithmetic(args);
+    shell_println!("{}", result);
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic evaluation for $((...))
+// ---------------------------------------------------------------------------
+
+/// Evaluate a simple arithmetic expression.
+///
+/// Supports: integer literals, `+`, `-`, `*`, `/`, `%`, unary `-`,
+/// parentheses `(...)`, and whitespace.
+///
+/// All arithmetic is done in i64.  Division by zero returns 0.
+fn eval_arithmetic(expr: &str) -> i64 {
+    let tokens = tokenize_arith(expr);
+    let mut pos = 0;
+    parse_expr(&tokens, &mut pos)
+}
+
+/// Arithmetic token.
+#[derive(Clone, Copy)]
+enum ArithToken {
+    Num(i64),
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    LParen,
+    RParen,
+}
+
+/// Tokenize an arithmetic expression string.
+fn tokenize_arith(s: &str) -> Vec<ArithToken> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+
+    while i < len {
+        let b = bytes[i];
+        match b {
+            b' ' | b'\t' => { i = i.saturating_add(1); }
+            b'+' => { tokens.push(ArithToken::Plus); i = i.saturating_add(1); }
+            b'-' => { tokens.push(ArithToken::Minus); i = i.saturating_add(1); }
+            b'*' => { tokens.push(ArithToken::Star); i = i.saturating_add(1); }
+            b'/' => { tokens.push(ArithToken::Slash); i = i.saturating_add(1); }
+            b'%' => { tokens.push(ArithToken::Percent); i = i.saturating_add(1); }
+            b'(' => { tokens.push(ArithToken::LParen); i = i.saturating_add(1); }
+            b')' => { tokens.push(ArithToken::RParen); i = i.saturating_add(1); }
+            b'0'..=b'9' => {
+                let start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i = i.saturating_add(1);
+                }
+                if let Some(num_bytes) = bytes.get(start..i) {
+                    if let Ok(num_str) = core::str::from_utf8(num_bytes) {
+                        let val = num_str.parse::<i64>().unwrap_or(0);
+                        tokens.push(ArithToken::Num(val));
+                    }
+                }
+            }
+            _ => {
+                // Unknown character — skip.
+                i = i.saturating_add(1);
+            }
+        }
+    }
+
+    tokens
+}
+
+/// Parse an additive expression: term (('+' | '-') term)*
+fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+    let mut val = parse_term(tokens, pos);
+    loop {
+        match tokens.get(*pos) {
+            Some(ArithToken::Plus) => {
+                *pos = pos.saturating_add(1);
+                val = val.wrapping_add(parse_term(tokens, pos));
+            }
+            Some(ArithToken::Minus) => {
+                *pos = pos.saturating_add(1);
+                val = val.wrapping_sub(parse_term(tokens, pos));
+            }
+            _ => break,
+        }
+    }
+    val
+}
+
+/// Parse a multiplicative expression: unary (('*' | '/' | '%') unary)*
+fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+    let mut val = parse_unary(tokens, pos);
+    loop {
+        match tokens.get(*pos) {
+            Some(ArithToken::Star) => {
+                *pos = pos.saturating_add(1);
+                val = val.wrapping_mul(parse_unary(tokens, pos));
+            }
+            Some(ArithToken::Slash) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_unary(tokens, pos);
+                val = if rhs == 0 { 0 } else { val.wrapping_div(rhs) };
+            }
+            Some(ArithToken::Percent) => {
+                *pos = pos.saturating_add(1);
+                let rhs = parse_unary(tokens, pos);
+                val = if rhs == 0 { 0 } else { val.wrapping_rem(rhs) };
+            }
+            _ => break,
+        }
+    }
+    val
+}
+
+/// Parse a unary expression: '-' unary | atom
+fn parse_unary(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+    if let Some(ArithToken::Minus) = tokens.get(*pos) {
+        // Check if this is unary minus (not binary minus).
+        // Unary if at start or after an operator/lparen.
+        *pos = pos.saturating_add(1);
+        return parse_unary(tokens, pos).wrapping_neg();
+    }
+    parse_atom(tokens, pos)
+}
+
+/// Parse an atom: number | '(' expr ')'
+fn parse_atom(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+    match tokens.get(*pos) {
+        Some(ArithToken::Num(n)) => {
+            let val = *n;
+            *pos = pos.saturating_add(1);
+            val
+        }
+        Some(ArithToken::LParen) => {
+            *pos = pos.saturating_add(1);
+            let val = parse_expr(tokens, pos);
+            // Consume matching ')'.
+            if let Some(ArithToken::RParen) = tokens.get(*pos) {
+                *pos = pos.saturating_add(1);
+            }
+            val
+        }
+        _ => {
+            // Unexpected token — return 0.
+            0
+        }
+    }
 }
 
 /// Show environment variables.

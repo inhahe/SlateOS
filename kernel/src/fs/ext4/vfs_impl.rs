@@ -880,6 +880,19 @@ impl FileSystem for Ext4Fs {
             evalid, super::driver::EXTENT_CACHE_SIZE, ehits, emisses, erate,
         ));
 
+        // Inode cache stats.
+        let (ihits, imisses, ivalid) = self.driver.inode_cache_stats();
+        let itotal = ihits.saturating_add(imisses);
+        let irate = if itotal > 0 {
+            ihits.saturating_mul(100) / itotal
+        } else {
+            0
+        };
+        s.push_str(&alloc::format!(
+            "\ninode_cache: {}/{} slots, {} hits, {} misses ({}% hit rate)",
+            ivalid, super::driver::INODE_CACHE_SIZE, ihits, imisses, irate,
+        ));
+
         s
     }
 

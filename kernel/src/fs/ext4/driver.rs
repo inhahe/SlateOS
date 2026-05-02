@@ -380,13 +380,179 @@ impl ExtentCache {
 }
 
 // ---------------------------------------------------------------------------
+// Inode cache — avoids re-reading inodes from disk on repeated access
+// ---------------------------------------------------------------------------
+
+/// Number of entries in the inode cache.
+///
+/// Path resolution, directory lookups, and file metadata calls read the
+/// same inodes repeatedly (especially directory inodes along a path).
+/// 128 entries covers typical working sets with room for multiple open
+/// files and their parent directories.
+pub(super) const INODE_CACHE_SIZE: usize = 128;
+
+/// A cached inode entry.
+struct InodeCacheEntry {
+    /// Inode number (cache key).
+    inode_nr: u32,
+    /// The cached inode data (128 bytes).
+    inode: Ext4Inode,
+    /// LRU access counter.
+    last_access: u64,
+    /// Whether this entry is valid.
+    valid: bool,
+}
+
+/// Interior-mutable state for the inode cache.
+struct InodeCacheInner {
+    entries: Vec<InodeCacheEntry>,
+    counter: u64,
+    hits: u64,
+    misses: u64,
+}
+
+/// Inode cache for ext4.
+///
+/// Caches recently read `Ext4Inode` structures keyed by inode number.
+/// This eliminates redundant disk reads during path resolution (which
+/// reads each parent directory's inode) and repeated metadata queries.
+///
+/// Interior-mutable via `spin::Mutex` for use through `&self` references.
+///
+/// Cache coherency: `write_inode()` invalidates the cached entry so
+/// subsequent reads pick up the on-disk changes.
+pub(super) struct InodeCache {
+    inner: Mutex<InodeCacheInner>,
+}
+
+impl InodeCache {
+    fn new() -> Self {
+        let mut entries = Vec::with_capacity(INODE_CACHE_SIZE);
+        for _ in 0..INODE_CACHE_SIZE {
+            let entry = InodeCacheEntry {
+                inode_nr: 0,
+                // SAFETY: Ext4Inode is 128 bytes of integers, all-zero is a valid
+                // (if meaningless) inode.  We only use entries where valid == true.
+                inode: unsafe { core::mem::zeroed() },
+                last_access: 0,
+                valid: false,
+            };
+            entries.push(entry);
+        }
+        Self {
+            inner: Mutex::new(InodeCacheInner {
+                entries,
+                counter: 0,
+                hits: 0,
+                misses: 0,
+            }),
+        }
+    }
+
+    /// Look up a cached inode by number.
+    ///
+    /// Returns a copy of the inode if cached, or `None` on miss.
+    fn lookup(&self, inode_nr: u32) -> Option<Ext4Inode> {
+        let mut inner = self.inner.lock();
+        let found = inner.entries.iter()
+            .enumerate()
+            .find(|(_, e)| e.valid && e.inode_nr == inode_nr)
+            .map(|(i, e)| (i, e.inode));
+
+        match found {
+            Some((idx, inode)) => {
+                inner.counter = inner.counter.wrapping_add(1);
+                let c = inner.counter;
+                inner.hits = inner.hits.wrapping_add(1);
+                if let Some(e) = inner.entries.get_mut(idx) {
+                    e.last_access = c;
+                }
+                Some(inode)
+            }
+            None => {
+                inner.misses = inner.misses.wrapping_add(1);
+                None
+            }
+        }
+    }
+
+    /// Insert or update a cached inode.
+    fn insert(&self, inode_nr: u32, inode: &Ext4Inode) {
+        let mut inner = self.inner.lock();
+        inner.counter = inner.counter.wrapping_add(1);
+        let c = inner.counter;
+
+        // Check for existing entry (update in place).
+        let existing = inner.entries.iter()
+            .position(|e| e.valid && e.inode_nr == inode_nr);
+        if let Some(idx) = existing {
+            if let Some(e) = inner.entries.get_mut(idx) {
+                e.inode = *inode;
+                e.last_access = c;
+            }
+            return;
+        }
+
+        // Find empty slot.
+        let empty = inner.entries.iter().position(|e| !e.valid);
+        if let Some(idx) = empty {
+            if let Some(e) = inner.entries.get_mut(idx) {
+                e.inode_nr = inode_nr;
+                e.inode = *inode;
+                e.last_access = c;
+                e.valid = true;
+            }
+            return;
+        }
+
+        // Evict LRU.
+        let lru_idx = inner.entries.iter()
+            .enumerate()
+            .min_by_key(|(_, e)| e.last_access)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        if let Some(e) = inner.entries.get_mut(lru_idx) {
+            e.inode_nr = inode_nr;
+            e.inode = *inode;
+            e.last_access = c;
+            e.valid = true;
+        }
+    }
+
+    /// Invalidate a cached inode.
+    ///
+    /// Used when an inode is freed/deleted and should no longer be served
+    /// from cache.  For normal writes, `insert` is preferred (updates the
+    /// cache with the new data rather than forcing a re-read).
+    #[allow(dead_code)]
+    fn invalidate(&self, inode_nr: u32) {
+        let mut inner = self.inner.lock();
+        for entry in inner.entries.iter_mut() {
+            if entry.valid && entry.inode_nr == inode_nr {
+                entry.valid = false;
+                return;
+            }
+        }
+    }
+
+    /// Return (hits, misses, valid_count).
+    fn stats(&self) -> (u64, u64, usize) {
+        let inner = self.inner.lock();
+        let valid = inner.entries.iter().filter(|e| e.valid).count();
+        (inner.hits, inner.misses, valid)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ext4 driver
 // ---------------------------------------------------------------------------
 
 /// An ext4 filesystem instance.
 ///
 /// Holds the parsed superblock, block reader, cached block group
-/// descriptor table, directory entry cache, and extent range cache.
+/// descriptor table, directory entry cache, extent range cache, and
+/// inode cache.
 pub struct Ext4Driver {
     /// Parsed superblock with derived values.
     sb: ParsedSuperblock,
@@ -398,6 +564,8 @@ pub struct Ext4Driver {
     pub(super) dcache: Ext4Dcache,
     /// Extent range cache for fast logical→physical block mapping.
     extent_cache: ExtentCache,
+    /// Inode cache for fast repeated inode reads.
+    inode_cache: InodeCache,
 }
 
 impl Ext4Driver {
@@ -439,6 +607,7 @@ impl Ext4Driver {
             group_descs,
             dcache: Ext4Dcache::new(),
             extent_cache: ExtentCache::new(),
+            inode_cache: InodeCache::new(),
         })
     }
 
@@ -460,6 +629,11 @@ impl Ext4Driver {
     /// Return extent cache statistics: (hits, misses, valid_entries).
     pub(super) fn extent_cache_stats(&self) -> (u64, u64, usize) {
         self.extent_cache.stats()
+    }
+
+    /// Return inode cache statistics: (hits, misses, valid_entries).
+    pub(super) fn inode_cache_stats(&self) -> (u64, u64, usize) {
+        self.inode_cache.stats()
     }
 
     /// Read a single ext4 block by physical block number.
@@ -488,10 +662,18 @@ impl Ext4Driver {
 
     /// Read an inode by number.
     ///
+    /// Checks the inode cache first.  On miss, reads from disk and
+    /// inserts the result into the cache for future lookups.
+    ///
     /// Inode numbers are 1-based (inode 0 is invalid, inode 2 is root).
     pub fn read_inode(&self, inode_nr: u32) -> KernelResult<Ext4Inode> {
         if inode_nr == 0 {
             return Err(KernelError::InvalidArgument);
+        }
+
+        // Fast path: check the inode cache.
+        if let Some(inode) = self.inode_cache.lookup(inode_nr) {
+            return Ok(inode);
         }
 
         let group = self.sb.inode_group(inode_nr);
@@ -527,6 +709,10 @@ impl Ext4Driver {
         }
 
         let inode = read_struct::<Ext4Inode>(&inode_bytes)?;
+
+        // Cache for future lookups.
+        self.inode_cache.insert(inode_nr, &inode);
+
         Ok(inode)
     }
 
@@ -828,7 +1014,15 @@ impl Ext4Driver {
 
         // Serialize the inode to bytes.
         let inode_bytes = struct_as_bytes(inode);
-        self.reader.write_bytes(inode_byte_offset, inode_bytes)
+        self.reader.write_bytes(inode_byte_offset, inode_bytes)?;
+
+        // Update the inode cache with the new data (or invalidate if
+        // the write changes the inode in a way that should force a re-read).
+        // We update rather than invalidate because the caller already has
+        // the final inode state — caching it avoids a pointless re-read.
+        self.inode_cache.insert(inode_nr, inode);
+
+        Ok(())
     }
 
     /// Write the superblock back to disk.

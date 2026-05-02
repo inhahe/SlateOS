@@ -1285,14 +1285,36 @@ impl Ext4Driver {
                 u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
             );
 
-        // Serialize the inode to bytes.
-        let inode_bytes = struct_as_bytes(inode);
-        self.reader.write_bytes(inode_byte_offset, inode_bytes)?;
+        // Build the full on-disk inode image.
+        let inode_sz = self.sb.inode_size as usize;
+        let core_bytes = struct_as_bytes(inode);
 
-        // Update the inode cache with the new data (or invalidate if
-        // the write changes the inode in a way that should force a re-read).
-        // We update rather than invalidate because the caller already has
-        // the final inode state — caching it avoids a pointless re-read.
+        if self.sb.has_metadata_csum && inode_sz > core_bytes.len() {
+            // Read the existing full on-disk inode so we preserve the
+            // extra area (creation time, checksum_hi, etc.).
+            let mut buf = self.reader.read_bytes(inode_byte_offset, inode_sz)?;
+
+            // Overwrite the core 128-byte portion with the new data.
+            let copy_len = core_bytes.len().min(buf.len());
+            if let (Some(dst), Some(src)) = (buf.get_mut(..copy_len), core_bytes.get(..copy_len)) {
+                dst.copy_from_slice(src);
+            }
+
+            // Compute and embed the checksum.
+            stamp_inode_checksum(&self.sb, inode_nr, inode, &mut buf);
+
+            self.reader.write_bytes(inode_byte_offset, &buf)?;
+        } else if self.sb.has_metadata_csum {
+            // 128-byte inodes with metadata_csum: only lo checksum.
+            let mut buf = Vec::from(core_bytes);
+            stamp_inode_checksum(&self.sb, inode_nr, inode, &mut buf);
+            self.reader.write_bytes(inode_byte_offset, &buf)?;
+        } else {
+            // No checksumming — write the core inode directly.
+            self.reader.write_bytes(inode_byte_offset, core_bytes)?;
+        }
+
+        // Update the inode cache with the new data.
         self.inode_cache.insert(inode_nr, inode);
 
         Ok(())
@@ -1300,16 +1322,30 @@ impl Ext4Driver {
 
     /// Write the superblock back to disk.
     ///
-    /// The superblock is at byte offset 1024 from partition start.
+    /// If metadata checksumming is enabled, computes and embeds the CRC32C
+    /// checksum before writing.  The superblock is at byte offset 1024
+    /// from partition start.
     pub fn write_superblock(&self) -> KernelResult<()> {
-        let sb_bytes = struct_as_bytes(&self.sb.raw);
-        self.reader.write_bytes(
-            super::superblock::superblock_device_offset(),
-            sb_bytes,
-        )
+        if self.sb.has_metadata_csum {
+            let mut buf = Vec::from(struct_as_bytes(&self.sb.raw));
+            stamp_superblock_checksum(&mut buf);
+            self.reader.write_bytes(
+                super::superblock::superblock_device_offset(),
+                &buf,
+            )
+        } else {
+            let sb_bytes = struct_as_bytes(&self.sb.raw);
+            self.reader.write_bytes(
+                super::superblock::superblock_device_offset(),
+                sb_bytes,
+            )
+        }
     }
 
     /// Write all block group descriptors back to disk.
+    ///
+    /// If metadata checksumming is enabled, computes and embeds the CRC32C
+    /// checksum for each descriptor before writing.
     pub fn write_group_descs(&self) -> KernelResult<()> {
         let gd_size = self.sb.desc_size as usize;
         let gdt_start = self.sb.group_desc_offset(0);
@@ -1319,9 +1355,16 @@ impl Ext4Driver {
                 (i as u64).saturating_mul(gd_size as u64)
             );
             let gd_bytes = struct_as_bytes(gd);
-            // Write only desc_size bytes (may be 32 or 64).
             let write_len = gd_bytes.len().min(gd_size);
-            if let Some(data) = gd_bytes.get(..write_len) {
+
+            if self.sb.has_metadata_csum {
+                // Copy descriptor bytes and stamp checksum.
+                let source = gd_bytes.get(..write_len).unwrap_or(&[]);
+                let mut buf = Vec::from(source);
+                #[allow(clippy::cast_possible_truncation)]
+                stamp_gd_checksum(&self.sb, i as u32, &mut buf);
+                self.reader.write_bytes(offset, &buf)?;
+            } else if let Some(data) = gd_bytes.get(..write_len) {
                 self.reader.write_bytes(offset, data)?;
             }
         }
@@ -2827,6 +2870,104 @@ fn validate_inode_checksum(
     }
 
     Ok(())
+}
+
+/// Compute and embed an inode checksum into a mutable raw inode buffer.
+///
+/// The inode buffer must be at least 128 bytes.  If the inode is 256+
+/// bytes, both `i_checksum_lo` (offset 0x7C) and `i_checksum_hi`
+/// (offset 0x82) are written.  Otherwise only `i_checksum_lo`.
+fn stamp_inode_checksum(
+    sb: &ParsedSuperblock,
+    inode_nr: u32,
+    inode: &Ext4Inode,
+    buf: &mut [u8],
+) {
+    const CKSUM_LO_OFFSET: usize = 0x7C;
+    const CKSUM_HI_OFFSET: usize = 0x82;
+    let inode_sz = buf.len();
+
+    // Zero the checksum fields before computing.
+    if inode_sz > CKSUM_LO_OFFSET.saturating_add(1) {
+        buf[CKSUM_LO_OFFSET] = 0;
+        buf[CKSUM_LO_OFFSET.saturating_add(1)] = 0;
+    }
+    if inode_sz > CKSUM_HI_OFFSET.saturating_add(1) {
+        buf[CKSUM_HI_OFFSET] = 0;
+        buf[CKSUM_HI_OFFSET.saturating_add(1)] = 0;
+    }
+
+    // Compute CRC32C(seed + inode_nr + generation + inode_bytes).
+    let ino_le = inode_nr.to_le_bytes();
+    let gen_le = inode.i_generation.to_le_bytes();
+
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &ino_le);
+    let crc = crate::crypto::crc32c_raw(crc, &gen_le);
+    let computed = crate::crypto::crc32c_seed(crc, buf);
+
+    // Write checksum back into the buffer.
+    #[allow(clippy::cast_possible_truncation)]
+    let lo = computed as u16;
+    let lo_bytes = lo.to_le_bytes();
+    if inode_sz > CKSUM_LO_OFFSET.saturating_add(1) {
+        buf[CKSUM_LO_OFFSET] = lo_bytes[0];
+        buf[CKSUM_LO_OFFSET.saturating_add(1)] = lo_bytes[1];
+    }
+
+    if inode_sz > CKSUM_HI_OFFSET.saturating_add(1) {
+        #[allow(clippy::cast_possible_truncation)]
+        let hi = (computed >> 16) as u16;
+        let hi_bytes = hi.to_le_bytes();
+        buf[CKSUM_HI_OFFSET] = hi_bytes[0];
+        buf[CKSUM_HI_OFFSET.saturating_add(1)] = hi_bytes[1];
+    }
+}
+
+/// Compute and embed a group descriptor checksum into a mutable raw descriptor buffer.
+fn stamp_gd_checksum(sb: &ParsedSuperblock, group: u32, buf: &mut [u8]) {
+    const CSUM_OFFSET: usize = 0x1E;
+
+    // Zero the checksum field.
+    if buf.len() > CSUM_OFFSET.saturating_add(1) {
+        buf[CSUM_OFFSET] = 0;
+        buf[CSUM_OFFSET.saturating_add(1)] = 0;
+    }
+
+    let group_le = group.to_le_bytes();
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &group_le);
+    let computed = crate::crypto::crc32c_seed(crc, buf);
+
+    #[allow(clippy::cast_possible_truncation)]
+    let csum = computed as u16;
+    let csum_bytes = csum.to_le_bytes();
+    if buf.len() > CSUM_OFFSET.saturating_add(1) {
+        buf[CSUM_OFFSET] = csum_bytes[0];
+        buf[CSUM_OFFSET.saturating_add(1)] = csum_bytes[1];
+    }
+}
+
+/// Compute and embed the superblock checksum into a mutable raw superblock buffer.
+fn stamp_superblock_checksum(buf: &mut [u8]) {
+    const CSUM_OFFSET: usize = 0x3FC;
+    const SB_SIZE: usize = 1024;
+
+    if buf.len() < SB_SIZE {
+        return;
+    }
+
+    // Zero the checksum field.
+    buf[CSUM_OFFSET] = 0;
+    buf[CSUM_OFFSET.saturating_add(1)] = 0;
+    buf[CSUM_OFFSET.saturating_add(2)] = 0;
+    buf[CSUM_OFFSET.saturating_add(3)] = 0;
+
+    let computed = crate::crypto::crc32c(buf.get(..SB_SIZE).unwrap_or(&[]));
+
+    let csum_bytes = computed.to_le_bytes();
+    buf[CSUM_OFFSET] = csum_bytes[0];
+    buf[CSUM_OFFSET.saturating_add(1)] = csum_bytes[1];
+    buf[CSUM_OFFSET.saturating_add(2)] = csum_bytes[2];
+    buf[CSUM_OFFSET.saturating_add(3)] = csum_bytes[3];
 }
 
 // ---------------------------------------------------------------------------

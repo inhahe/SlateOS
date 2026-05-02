@@ -326,6 +326,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell command history: 64-entry ring buffer, Up/Down arrow browsing, duplicate suppression, saved live-line restoration
   - [x] Kshell cursor-aware line editing: Left/Right arrow, Home/End, insert/delete at cursor, readline shortcuts (Ctrl+A/E/C/K/U/W/L), keyboard echo control
   - [x] Kshell tab completion: command names (80+ built-in commands) and file paths (VFS directory listing), longest-common-prefix for multi-candidate, inline insertion
+  - [x] Kshell relative path support: working directory (cd), resolve_path() for all commands, all old-style path resolution patterns migrated
+  - [x] Kshell environment variables: BTreeMap storage, $VAR/${VAR} expansion, export/unset commands, default variables (PWD, HOME, SHELL, USER, PATH), PWD auto-sync
+  - [x] Kshell aliases: alias/unalias commands, first-word expansion with loop detection, strip_quotes for alias values
+  - [x] Kshell command chaining: ; (sequential), && (on success), || (on failure), exit status tracking ($?), test command (POSIX-compatible file/string/integer tests)
+  - [x] CRC32C (Castagnoli) implementation: 256-entry lookup table (compile-time), crc32c/crc32c_seed/crc32c_raw API, self-test with 4 vectors
+  - [x] ext4 metadata checksum validation: superblock CRC32C on mount, group descriptor checksums (all groups validated), inode checksums (validated on every read), CorruptedData error on mismatch
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

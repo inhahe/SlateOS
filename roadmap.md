@@ -249,7 +249,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images
-- [ ] ISO 9660 (optical media)
+- [x] ISO 9660 (optical media, read-only, Joliet detection)
 - [x] Filesystem infrastructure:
   - [x] Buffer cache (512-sector LRU, write-back, 90% hit rate on FAT workloads)
   - [x] File handle system (open/close/read/write/seek/fstat, global handle table)

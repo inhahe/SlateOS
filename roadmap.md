@@ -233,7 +233,19 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 ### 2.3 Filesystem
 _Port ext4 first. Don't write a custom filesystem._
 - [x] VFS (virtual filesystem) layer — FileSystem trait, mount table, path resolution
-- [ ] Port ext4 (primary filesystem, read-write)
+- [-] Port ext4 (primary filesystem, read-write)
+  - [x] On-disk structure definitions (superblock, group descriptors, inodes, extents, directory entries)
+  - [x] Superblock parser with feature flag validation and derived value computation
+  - [ ] Block group descriptor table reading
+  - [ ] Inode lookup (inode number → on-disk inode)
+  - [ ] Directory traversal (linear and htree)
+  - [ ] Extent tree walking (logical → physical block mapping)
+  - [ ] Read-only FileSystem trait implementation
+  - [ ] Block allocation (bitmap-based)
+  - [ ] Inode allocation
+  - [ ] File creation/deletion
+  - [ ] Directory entry insertion/removal
+  - [ ] Journal (write-ahead log for crash recovery)
 - [x] FAT (USB drives, EFI System Partition — essential)
   - [x] Unified FAT16/FAT32 driver (auto-detect, BPB parsing, FAT chain, readdir, file read/write/delete, subdirectories, mkdir, rmdir)
   - [x] Tested with both FAT16 (4 MiB) and FAT32 (64 MiB) disk images

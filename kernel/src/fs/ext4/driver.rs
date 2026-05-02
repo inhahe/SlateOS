@@ -937,6 +937,16 @@ impl Ext4Driver {
 
         let inode = read_struct::<Ext4Inode>(&inode_bytes)?;
 
+        // Validate inode checksum (if metadata checksumming enabled).
+        if self.sb.has_metadata_csum {
+            validate_inode_checksum(
+                &self.sb,
+                inode_nr,
+                &inode,
+                &inode_bytes,
+            )?;
+        }
+
         // Cache for future lookups.
         self.inode_cache.insert(inode_nr, &inode);
 
@@ -2666,10 +2676,157 @@ fn read_group_descs(
         }
 
         let gd = read_struct::<Ext4GroupDesc>(&buf)?;
+
+        // Validate group descriptor checksum (if metadata checksumming enabled).
+        if sb.has_metadata_csum {
+            let stored = gd.bg_checksum;
+            let computed = compute_gd_checksum(sb, i as u32, &buf, gd_size);
+            if stored != computed {
+                crate::serial_println!(
+                    "[ext4] group {} descriptor checksum mismatch: stored={:#06X}, computed={:#06X}",
+                    i, stored, computed,
+                );
+                return Err(KernelError::CorruptedData);
+            }
+        }
+
         descs.push(gd);
     }
 
+    if sb.has_metadata_csum {
+        crate::serial_println!("[ext4] all {} group descriptor checksums valid", count);
+    }
+
     Ok(descs)
+}
+
+/// Compute the CRC32C checksum for a block group descriptor.
+///
+/// Algorithm (from Linux `ext4_group_desc_csum()`):
+/// 1. Start with `sb.csum_seed` (raw CRC accumulator, no inversion).
+/// 2. Feed in the group number as little-endian u32.
+/// 3. Feed in the descriptor bytes with `bg_checksum` (offset 0x1E, 2 bytes) zeroed.
+/// 4. Return the lower 16 bits of the final CRC32C.
+fn compute_gd_checksum(sb: &ParsedSuperblock, group: u32, raw: &[u8], desc_size: usize) -> u16 {
+    let group_le = group.to_le_bytes();
+
+    // Start with the UUID-derived seed and fold in the group number.
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &group_le);
+
+    // Feed descriptor bytes, but zero out the bg_checksum field (2 bytes at offset 0x1E).
+    const CSUM_OFFSET: usize = 0x1E;
+    const CSUM_SIZE: usize = 2;
+
+    let before = raw.get(..CSUM_OFFSET).unwrap_or(&[]);
+    let after_start = CSUM_OFFSET.saturating_add(CSUM_SIZE);
+    let after = raw.get(after_start..desc_size.min(raw.len())).unwrap_or(&[]);
+
+    let crc = crate::crypto::crc32c_raw(crc, before);
+    let crc = crate::crypto::crc32c_raw(crc, &[0u8; CSUM_SIZE]);
+    // Final segment with inversion.
+    let final_crc = crate::crypto::crc32c_seed(crc, after);
+
+    // Only the lower 16 bits are stored.
+    #[allow(clippy::cast_possible_truncation)]
+    { final_crc as u16 }
+}
+
+/// Validate an inode's CRC32C checksum.
+///
+/// Algorithm (from Linux `ext4_inode_csum()`):
+/// 1. Start with `sb.csum_seed` (raw CRC accumulator).
+/// 2. Feed in the inode number as little-endian u32.
+/// 3. Feed in the inode generation as little-endian u32.
+/// 4. Feed in the inode bytes with `i_checksum_lo` and `i_checksum_hi` zeroed.
+/// 5. Compare: lower 16 bits → `i_checksum_lo`, upper 16 bits → `i_checksum_hi`.
+///
+/// The `i_checksum_lo` field is at offset 0x7C within the inode (within i_osd2),
+/// and `i_checksum_hi` is at offset 0x82 (in the extra area, if inode_size >= 256).
+fn validate_inode_checksum(
+    sb: &ParsedSuperblock,
+    inode_nr: u32,
+    _inode: &Ext4Inode,
+    raw_bytes: &[u8],
+) -> KernelResult<()> {
+    // i_checksum_lo is at offset 0x7C within the inode (i_osd2 + 8).
+    const CKSUM_LO_OFFSET: usize = 0x7C;
+    // i_checksum_hi is at offset 0x82 within the inode (extra area + 2).
+    const CKSUM_HI_OFFSET: usize = 0x82;
+
+    let inode_size = sb.inode_size as usize;
+
+    // Read the stored checksum low 16 bits.
+    let stored_lo = if raw_bytes.len() > CKSUM_LO_OFFSET.saturating_add(1) {
+        u16::from_le_bytes([
+            raw_bytes[CKSUM_LO_OFFSET],
+            raw_bytes[CKSUM_LO_OFFSET.saturating_add(1)],
+        ])
+    } else {
+        return Ok(()); // Can't validate — inode too small.
+    };
+
+    // Read the stored checksum high 16 bits (only if inode_size >= 256).
+    let stored_hi = if inode_size >= 256 && raw_bytes.len() > CKSUM_HI_OFFSET.saturating_add(1) {
+        u16::from_le_bytes([
+            raw_bytes[CKSUM_HI_OFFSET],
+            raw_bytes[CKSUM_HI_OFFSET.saturating_add(1)],
+        ])
+    } else {
+        0u16
+    };
+
+    let stored = u32::from(stored_lo) | (u32::from(stored_hi) << 16);
+
+    // Compute the checksum.
+    let ino_le = inode_nr.to_le_bytes();
+    let gen_le = _inode.i_generation.to_le_bytes();
+
+    let crc = crate::crypto::crc32c_raw(sb.csum_seed, &ino_le);
+    let crc = crate::crypto::crc32c_raw(crc, &gen_le);
+
+    // Feed inode bytes, zeroing checksum fields.
+    // We need to handle up to 3 segments:
+    //   [0..CKSUM_LO_OFFSET] + [0,0] + [CKSUM_LO_OFFSET+2..CKSUM_HI_OFFSET] + [0,0] + [CKSUM_HI_OFFSET+2..inode_size]
+    let end = inode_size.min(raw_bytes.len());
+
+    let seg1 = raw_bytes.get(..CKSUM_LO_OFFSET).unwrap_or(&[]);
+    let crc = crate::crypto::crc32c_raw(crc, seg1);
+    let crc = crate::crypto::crc32c_raw(crc, &[0u8; 2]); // zero i_checksum_lo
+
+    let seg2_start = CKSUM_LO_OFFSET.saturating_add(2);
+    if inode_size >= 256 && end > CKSUM_HI_OFFSET.saturating_add(1) {
+        // Large inode: also zero i_checksum_hi.
+        let seg2 = raw_bytes.get(seg2_start..CKSUM_HI_OFFSET).unwrap_or(&[]);
+        let crc = crate::crypto::crc32c_raw(crc, seg2);
+        let crc = crate::crypto::crc32c_raw(crc, &[0u8; 2]); // zero i_checksum_hi
+        let seg3_start = CKSUM_HI_OFFSET.saturating_add(2);
+        let seg3 = raw_bytes.get(seg3_start..end).unwrap_or(&[]);
+        let computed = crate::crypto::crc32c_seed(crc, seg3);
+
+        if stored != computed {
+            crate::serial_println!(
+                "[ext4] inode {} checksum mismatch: stored={:#010X}, computed={:#010X}",
+                inode_nr, stored, computed,
+            );
+            return Err(KernelError::CorruptedData);
+        }
+    } else {
+        // Small inode (128 bytes): only i_checksum_lo.
+        let seg2 = raw_bytes.get(seg2_start..end).unwrap_or(&[]);
+        let computed = crate::crypto::crc32c_seed(crc, seg2);
+
+        let stored_lo_only = u32::from(stored_lo);
+        let computed_lo_only = computed & 0xFFFF;
+        if stored_lo_only != computed_lo_only {
+            crate::serial_println!(
+                "[ext4] inode {} checksum mismatch: stored={:#06X}, computed={:#06X}",
+                inode_nr, stored_lo_only, computed_lo_only,
+            );
+            return Err(KernelError::CorruptedData);
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

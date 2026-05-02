@@ -49,6 +49,15 @@ pub struct ParsedSuperblock {
     pub can_write: bool,
     /// Volume label (trimmed, UTF-8 best-effort).
     pub volume_name: String,
+    /// Whether the filesystem has metadata checksums (RO_COMPAT_METADATA_CSUM).
+    pub has_metadata_csum: bool,
+    /// CRC32C seed for metadata checksum computation.
+    ///
+    /// If INCOMPAT_CSUM_SEED is set, this is `s_checksum_seed` from the
+    /// superblock.  Otherwise, it is `crc32c(~0, s_uuid)`.  This seed is
+    /// used as the initial value when computing checksums for group
+    /// descriptors, inodes, and other metadata.
+    pub csum_seed: u32,
 }
 
 /// Read and parse an ext4 superblock from raw bytes.
@@ -154,6 +163,31 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
     // Volume name.
     let volume_name = extract_name(&raw.s_volume_name);
 
+    // Metadata checksums.
+    let has_metadata_csum =
+        (raw.s_feature_ro_compat & ondisk::ro_compat::METADATA_CSUM) != 0;
+
+    // Compute the checksum seed.  ext4 uses this as the initial CRC
+    // accumulator for all per-object checksums (group descriptors, inodes,
+    // extents, etc.).
+    let csum_seed = if has_metadata_csum {
+        if (raw.s_feature_incompat & ondisk::incompat::CSUM_SEED) != 0 {
+            // The filesystem stores a pre-computed seed.
+            raw.s_checksum_seed
+        } else {
+            // Compute seed from the filesystem UUID:
+            //   crc32c(~0, s_uuid)  (raw, without final inversion)
+            crate::crypto::crc32c_raw(!0u32, &raw.s_uuid)
+        }
+    } else {
+        0
+    };
+
+    // Validate superblock checksum if metadata checksumming is enabled.
+    if has_metadata_csum {
+        validate_superblock_checksum(data)?;
+    }
+
     Ok(ParsedSuperblock {
         raw,
         block_size,
@@ -167,7 +201,57 @@ pub fn parse(data: &[u8]) -> KernelResult<ParsedSuperblock> {
         has_journal,
         can_write,
         volume_name,
+        has_metadata_csum,
+        csum_seed,
     })
+}
+
+/// Validate the superblock's CRC32C checksum.
+///
+/// The checksum covers bytes 0..0x3FC of the superblock (everything
+/// except the checksum field itself, which occupies the last 4 bytes).
+///
+/// Reference: Linux `ext4_superblock_csum()` in `fs/ext4/super.c`.
+fn validate_superblock_checksum(data: &[u8]) -> KernelResult<()> {
+    // The checksum field is at offset 0x3FC within the 1024-byte superblock.
+    const CSUM_OFFSET: usize = 0x3FC;
+    const SB_SIZE: usize = core::mem::size_of::<Ext4Superblock>();
+
+    if data.len() < SB_SIZE {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Read the stored checksum (little-endian u32 at offset 0x3FC).
+    let stored = u32::from_le_bytes([
+        data[CSUM_OFFSET],
+        data[CSUM_OFFSET.saturating_add(1)],
+        data[CSUM_OFFSET.saturating_add(2)],
+        data[CSUM_OFFSET.saturating_add(3)],
+    ]);
+
+    // Compute CRC32C over everything before the checksum field,
+    // then over everything after it (there's nothing after in a standard
+    // 1024-byte superblock, but be correct anyway).
+    let before = data.get(..CSUM_OFFSET).unwrap_or(&[]);
+    let after = data.get(CSUM_OFFSET.saturating_add(4)..SB_SIZE).unwrap_or(&[]);
+
+    let mut crc = crate::crypto::crc32c_raw(!0u32, before);
+    // Zero-fill the checksum field position (4 bytes of 0x00).
+    crc = crate::crypto::crc32c_raw(crc, &[0u8; 4]);
+    // Continue with any bytes after the checksum field.
+    let computed = crate::crypto::crc32c_seed(crc, after);
+
+    if stored != computed {
+        crate::serial_println!(
+            "[ext4] superblock checksum mismatch: stored={:#010X}, computed={:#010X}",
+            stored,
+            computed,
+        );
+        return Err(KernelError::CorruptedData);
+    }
+
+    crate::serial_println!("[ext4] superblock checksum valid ({:#010X})", stored);
+    Ok(())
 }
 
 /// Read an `Ext4Superblock` from raw bytes, handling alignment.

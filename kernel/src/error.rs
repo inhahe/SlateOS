@@ -82,6 +82,8 @@ pub enum KernelError {
     TooManyLinks = -506,
     /// The directory is not empty (e.g., rmdir on non-empty directory).
     NotEmpty = -507,
+    /// Data integrity check failed (e.g., checksum mismatch).
+    CorruptedData = -508,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -126,6 +128,7 @@ impl KernelError {
             Self::InvalidHandle => "invalid handle",
             Self::TooManyLinks => "too many symbolic links",
             Self::NotEmpty => "directory not empty",
+            Self::CorruptedData => "data integrity check failed",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

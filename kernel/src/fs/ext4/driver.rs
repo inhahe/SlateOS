@@ -1709,14 +1709,17 @@ impl Ext4Driver {
     /// on existing files: only allocates and writes the new blocks instead
     /// of reading and rewriting the entire file.
     ///
-    /// Handles depth-0 extent trees only (up to 4 extents in the inode root).
-    /// Returns `Err(NotSupported)` for deeper trees, signalling the caller
-    /// should fall back to read-modify-write.
+    /// Handles depth-0 extent trees natively (adding extents to the root)
+    /// and depth>0 trees by finding the last leaf block and modifying it.
+    /// Returns `Err(NotSupported)` only when the last leaf block is full
+    /// and the new blocks are not adjacent (would require extent tree
+    /// splitting, which is not yet implemented).
     ///
     /// `append_data` is the bytes to append starting at the current EOF.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     pub fn extend_file_data(
         &mut self,
+        inode_nr: u32,
         inode: &mut Ext4Inode,
         append_data: &[u8],
     ) -> KernelResult<()> {
@@ -1736,37 +1739,23 @@ impl Ext4Driver {
             lo | (hi << 32)
         };
 
-        // Parse the existing extent tree.
+        // Parse the existing extent tree root in the inode.
         let block_bytes = inode_block_as_bytes(inode);
         let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
 
         if header.eh_magic != EXT4_EXTENT_MAGIC {
             return Err(KernelError::IoError);
         }
-        // Only handle depth-0 trees.
-        if header.eh_depth != 0 {
-            return Err(KernelError::NotSupported);
-        }
 
-        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
-        let extent_size = core::mem::size_of::<Ext4Extent>();
-        let entries = header.eh_entries as usize;
-        let max_entries = header.eh_max as usize;
+        // Collect all leaf extents from the tree (any depth).
+        let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
+        let mut all_extents: Vec<(u64, u64, u64)> = Vec::new();
+        self.collect_leaf_extents_recursive(ino_seed, block_bytes, &header, &mut all_extents)?;
 
-        // Read the last extent to determine where the file's physical blocks end.
-        let (last_logical_start, last_phys_start, last_block_count) = if entries > 0 {
-            let idx = entries.saturating_sub(1);
-            let offset = header_size.saturating_add(idx.saturating_mul(extent_size));
-            let ext_bytes = block_bytes.get(offset..)
-                .ok_or(KernelError::IoError)?;
-            let extent = read_struct::<Ext4Extent>(ext_bytes)?;
-            let phys = u64::from(extent.ee_start_lo)
-                | (u64::from(extent.ee_start_hi) << 32);
-            let len = u64::from(extent.ee_len & 0x7FFF); // strip unwritten flag
-            (u64::from(extent.ee_block), phys, len)
-        } else {
-            (0, 0, 0)
-        };
+        // Sort by logical block number and find the last extent.
+        all_extents.sort_by_key(|&(logical, _, _)| logical);
+        let (last_logical_start, last_phys_start, last_block_count) =
+            all_extents.last().copied().unwrap_or((0, 0, 0));
 
         // Calculate the partial block at EOF (if the file doesn't end on
         // a block boundary, we need to read-modify-write the last block).
@@ -1852,9 +1841,8 @@ impl Ext4Driver {
             data_offset = end;
         }
 
-        // Update the extent tree in the inode.
+        // Update the extent tree — strategy depends on tree depth.
         let new_logical_start = if current_size > 0 {
-            // Next logical block after the current last allocated block.
             let current_blocks = current_size
                 .saturating_add(block_size_u64.saturating_sub(1))
                 / block_size_u64;
@@ -1863,55 +1851,59 @@ impl Ext4Driver {
             0
         };
 
-        // Check if the new allocation is adjacent to the last extent.
-        let is_adjacent = entries > 0
+        let is_adjacent = !all_extents.is_empty()
             && first_new_block == last_extent_end
             && last_block_count.saturating_add(new_blocks_needed as u64) <= 0x7FFF;
 
-        if is_adjacent {
-            // Extend the last extent's block count.
-            let new_len = (last_block_count as u16)
-                .saturating_add(new_blocks_needed as u16);
-            let idx = entries.saturating_sub(1);
-            let base = 3 + idx * 3; // each extent is 3 u32s, header is 3 u32s
-            // ee_len is in the low 16 bits of the second u32.
-            if let Some(word) = inode.i_block.get(base + 1).copied() {
-                // Preserve ee_start_hi in high 16 bits.
-                let hi_bits = word & 0xFFFF_0000;
-                inode.i_block[base + 1] = hi_bits | u32::from(new_len);
-            }
-        } else if entries < max_entries {
-            // Add a new extent entry.
-            let new_entries = (entries as u16).saturating_add(1);
-            // Update eh_entries in the header.
-            inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
-                | (u32::from(new_entries) << 16);
+        if header.eh_depth == 0 {
+            // Depth-0: modify extents directly in the inode's i_block.
+            let entries = header.eh_entries as usize;
+            let max_entries = header.eh_max as usize;
 
-            // Write the new extent at index `entries`.
-            let base = 3 + entries * 3;
-            if base + 2 < inode.i_block.len() {
-                inode.i_block[base] = new_logical_start as u32;
-                inode.i_block[base + 1] = (new_blocks_needed as u32 & 0x7FFF)
-                    | (((first_new_block >> 32) as u32) << 16);
-                inode.i_block[base + 2] = first_new_block as u32;
+            if is_adjacent {
+                // Extend the last extent's block count in-place.
+                let new_len = (last_block_count as u16)
+                    .saturating_add(new_blocks_needed as u16);
+                let idx = entries.saturating_sub(1);
+                let base = 3 + idx * 3; // each extent is 3 u32s, header is 3 u32s
+                if let Some(word) = inode.i_block.get(base + 1).copied() {
+                    let hi_bits = word & 0xFFFF_0000;
+                    inode.i_block[base + 1] = hi_bits | u32::from(new_len);
+                }
+            } else if entries < max_entries {
+                // Add a new extent entry.
+                let new_entries = (entries as u16).saturating_add(1);
+                inode.i_block[0] = u32::from(EXT4_EXTENT_MAGIC)
+                    | (u32::from(new_entries) << 16);
+
+                let base = 3 + entries * 3;
+                if base + 2 < inode.i_block.len() {
+                    inode.i_block[base] = new_logical_start as u32;
+                    inode.i_block[base + 1] = (new_blocks_needed as u32 & 0x7FFF)
+                        | (((first_new_block >> 32) as u32) << 16);
+                    inode.i_block[base + 2] = first_new_block as u32;
+                } else {
+                    self.free_contiguous_blocks(first_new_block, new_blocks_needed);
+                    return Err(KernelError::NotSupported);
+                }
             } else {
-                // Should not happen for depth-0 trees with max 4 extents,
-                // but guard against overflow.
+                self.free_contiguous_blocks(first_new_block, new_blocks_needed);
                 return Err(KernelError::NotSupported);
             }
         } else {
-            // Extent entries full and not adjacent — cannot extend in place.
-            // Free the blocks we just allocated and signal fallback.
-            for i in 0..new_blocks_needed {
-                let block_nr = first_new_block.saturating_add(i as u64);
-                let _ = super::balloc::free_block(
-                    &self.reader,
-                    &mut self.sb,
-                    &mut self.group_descs,
-                    block_nr,
-                );
+            // Depth>0: find the last leaf block and modify it.
+            let result = self.extend_in_last_leaf(
+                inode_nr,
+                inode,
+                is_adjacent,
+                new_blocks_needed,
+                new_logical_start,
+                first_new_block,
+            );
+            if result.is_err() {
+                self.free_contiguous_blocks(first_new_block, new_blocks_needed);
+                return result;
             }
-            return Err(KernelError::NotSupported);
         }
 
         // Update inode size and block count.
@@ -1930,6 +1922,170 @@ impl Ext4Driver {
         Ok(())
     }
 
+    /// Free `count` contiguous blocks starting at `start`.
+    /// Shared error-cleanup helper for [`extend_file_data`].
+    fn free_contiguous_blocks(&mut self, start: u64, count: usize) {
+        for i in 0..count {
+            let block_nr = start.saturating_add(i as u64);
+            let _ = super::balloc::free_block(
+                &self.reader, &mut self.sb, &mut self.group_descs, block_nr,
+            );
+        }
+    }
+
+    /// Extend or append an extent in the last leaf block of a depth>0 tree.
+    ///
+    /// Reads the last leaf block from disk, modifies the last extent
+    /// (adjacent case) or adds a new entry (room in leaf), writes back,
+    /// and stamps the extent block checksum if enabled.
+    ///
+    /// Returns `Err(NotSupported)` if the last leaf is full and the new
+    /// blocks are not adjacent — tree splitting is not yet implemented.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn extend_in_last_leaf(
+        &self,
+        inode_nr: u32,
+        inode: &Ext4Inode,
+        is_adjacent: bool,
+        new_blocks_needed: usize,
+        new_logical_start: u64,
+        first_new_block: u64,
+    ) -> KernelResult<()> {
+        let block_size = self.sb.block_size as usize;
+
+        // Walk index nodes to find the last leaf block address.
+        // "Last" = the rightmost index entry at each level.
+        let block_bytes = inode_block_as_bytes(inode);
+        let root_header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
+        let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
+
+        let leaf_block_nr = self.find_last_leaf_block(
+            block_bytes, &root_header,
+        )?;
+
+        // Read the leaf block.
+        let mut leaf_data = vec![0u8; block_size];
+        self.reader.read_block(leaf_block_nr, &mut leaf_data)?;
+
+        let leaf_header = read_struct::<Ext4ExtentHeader>(&leaf_data)?;
+        if leaf_header.eh_magic != EXT4_EXTENT_MAGIC || leaf_header.eh_depth != 0 {
+            return Err(KernelError::IoError);
+        }
+
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+        let extent_size = core::mem::size_of::<Ext4Extent>();
+        let entries = leaf_header.eh_entries as usize;
+        let max_entries = leaf_header.eh_max as usize;
+
+        if is_adjacent && entries > 0 {
+            // Extend the last extent in this leaf block.
+            let idx = entries.saturating_sub(1);
+            let off = header_size.saturating_add(idx.saturating_mul(extent_size));
+            let ee_len_off = off + 4; // ee_len starts after ee_block(4 bytes)
+            if ee_len_off + 2 > leaf_data.len() {
+                return Err(KernelError::IoError);
+            }
+            let old_len = u16::from_le_bytes([
+                *leaf_data.get(ee_len_off).ok_or(KernelError::IoError)?,
+                *leaf_data.get(ee_len_off + 1).ok_or(KernelError::IoError)?,
+            ]);
+            let new_len = (old_len & 0x8000) // preserve unwritten flag
+                | ((old_len & 0x7FFF).saturating_add(new_blocks_needed as u16));
+            let new_len_bytes = new_len.to_le_bytes();
+            if let Some(b) = leaf_data.get_mut(ee_len_off) { *b = new_len_bytes[0]; }
+            if let Some(b) = leaf_data.get_mut(ee_len_off + 1) { *b = new_len_bytes[1]; }
+        } else if entries < max_entries {
+            // Add a new extent entry in this leaf block.
+            let new_entries = (entries as u16).saturating_add(1);
+            // Update eh_entries in the leaf header.
+            let eh_entries_bytes = new_entries.to_le_bytes();
+            if let Some(b) = leaf_data.get_mut(2) { *b = eh_entries_bytes[0]; }
+            if let Some(b) = leaf_data.get_mut(3) { *b = eh_entries_bytes[1]; }
+
+            // Write the new extent at index `entries`.
+            let off = header_size.saturating_add(entries.saturating_mul(extent_size));
+            if off + extent_size > leaf_data.len() {
+                return Err(KernelError::IoError);
+            }
+            // ee_block (4 bytes)
+            let logical_bytes = (new_logical_start as u32).to_le_bytes();
+            for (i, &b) in logical_bytes.iter().enumerate() {
+                if let Some(slot) = leaf_data.get_mut(off + i) { *slot = b; }
+            }
+            // ee_len (2 bytes)
+            let len_bytes = (new_blocks_needed as u16).to_le_bytes();
+            if let Some(slot) = leaf_data.get_mut(off + 4) { *slot = len_bytes[0]; }
+            if let Some(slot) = leaf_data.get_mut(off + 5) { *slot = len_bytes[1]; }
+            // ee_start_hi (2 bytes)
+            let start_hi = ((first_new_block >> 32) as u16).to_le_bytes();
+            if let Some(slot) = leaf_data.get_mut(off + 6) { *slot = start_hi[0]; }
+            if let Some(slot) = leaf_data.get_mut(off + 7) { *slot = start_hi[1]; }
+            // ee_start_lo (4 bytes)
+            let start_lo = (first_new_block as u32).to_le_bytes();
+            for (i, &b) in start_lo.iter().enumerate() {
+                if let Some(slot) = leaf_data.get_mut(off + 8 + i) { *slot = b; }
+            }
+        } else {
+            // Leaf is full and blocks not adjacent — would need tree split.
+            return Err(KernelError::NotSupported);
+        }
+
+        // Stamp extent block checksum.
+        // Re-read header after modifications.
+        let updated_header = read_struct::<Ext4ExtentHeader>(&leaf_data)?;
+        stamp_extent_block_checksum(
+            self.sb.has_metadata_csum, ino_seed, &mut leaf_data, &updated_header,
+        );
+
+        // Write the modified leaf block back.
+        self.reader.write_block(leaf_block_nr, &leaf_data)?;
+
+        Ok(())
+    }
+
+    /// Find the physical block number of the last (rightmost) leaf block
+    /// in a depth>0 extent tree.  Follows the rightmost index entry at
+    /// each level until reaching a leaf.
+    fn find_last_leaf_block(
+        &self,
+        node_data: &[u8],
+        header: &Ext4ExtentHeader,
+    ) -> KernelResult<u64> {
+        if header.eh_depth == 0 {
+            // Should not be called for depth-0 trees.
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+        let idx_size = core::mem::size_of::<super::ondisk::Ext4ExtentIdx>();
+        let block_size = self.sb.block_size as usize;
+
+        // Find the last (rightmost) index entry.
+        let last_idx = header.eh_entries.saturating_sub(1) as usize;
+        let off = header_size.saturating_add(last_idx.saturating_mul(idx_size));
+        let idx_bytes = node_data
+            .get(off..off.saturating_add(idx_size))
+            .ok_or(KernelError::IoError)?;
+        let idx = read_struct::<super::ondisk::Ext4ExtentIdx>(idx_bytes)?;
+
+        let child_block = u64::from(idx.ei_leaf_lo)
+            | (u64::from(idx.ei_leaf_hi) << 16);
+
+        if header.eh_depth == 1 {
+            // Child is a leaf block — return its address.
+            Ok(child_block)
+        } else {
+            // Child is another internal node — recurse.
+            let mut child_data = vec![0u8; block_size];
+            self.reader.read_block(child_block, &mut child_data)?;
+            let child_header = read_struct::<Ext4ExtentHeader>(&child_data)?;
+            if child_header.eh_magic != EXT4_EXTENT_MAGIC {
+                return Err(KernelError::IoError);
+            }
+            self.find_last_leaf_block(&child_data, &child_header)
+        }
+    }
+
     /// Write data back to blocks already mapped by the inode's extent tree.
     ///
     /// Unlike `write_file_data` which allocates entirely new blocks and
@@ -1937,12 +2093,12 @@ impl Ext4Driver {
     /// blocks.  Use when only the block CONTENTS changed, not the file
     /// size (e.g., inserting a directory entry in an existing block).
     ///
-    /// Handles depth-0 extent trees (root-only, up to 4 extents).
-    /// Returns `Err(NotSupported)` for deeper extent trees, signalling
-    /// that the caller should fall back to `write_file_data`.
+    /// Handles any extent tree depth (walks the tree to find leaf extents).
+    /// Sorts leaf extents by logical block number and writes data blocks
+    /// sequentially using the physical mapping.
     pub fn write_to_existing_blocks(
         &self,
-        _inode_nr: u32,
+        inode_nr: u32,
         inode: &Ext4Inode,
         data: &[u8],
     ) -> KernelResult<()> {
@@ -1955,34 +2111,27 @@ impl Ext4Driver {
         if header.eh_magic != EXT4_EXTENT_MAGIC {
             return Err(KernelError::IoError);
         }
-        // Only handle depth-0 (leaf extents in inode root).
-        if header.eh_depth != 0 {
-            return Err(KernelError::NotSupported);
-        }
 
-        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
-        let extent_size = core::mem::size_of::<Ext4Extent>();
+        // Collect all leaf extents regardless of tree depth.
+        let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
+        let mut extents: Vec<(u64, u64, u64)> = Vec::new();
+        self.collect_leaf_extents_recursive(ino_seed, block_bytes, &header, &mut extents)?;
+
+        // Sort by logical block number (should already be sorted, but
+        // enforce for correctness).
+        extents.sort_by_key(|&(logical, _, _)| logical);
+
         let mut data_offset = 0usize;
-
-        for i in 0..header.eh_entries as usize {
-            let ext_offset = header_size.saturating_add(i.saturating_mul(extent_size));
-            let ext_bytes = block_bytes.get(ext_offset..ext_offset.saturating_add(extent_size))
-                .ok_or(KernelError::IoError)?;
-            let extent = read_struct::<Ext4Extent>(ext_bytes)?;
-
-            let phys_block = u64::from(extent.ee_start_lo)
-                | (u64::from(extent.ee_start_hi) << 32);
-            let len = u32::from(extent.ee_len & 0x7FFF) as usize;
-
-            for j in 0..len {
-                let block_nr = phys_block.saturating_add(j as u64);
-                let end = (data_offset.saturating_add(block_size)).min(data.len());
-
+        for &(_, phys_block, len) in &extents {
+            for j in 0..len as usize {
                 if data_offset >= data.len() {
-                    break;
+                    return Ok(());
                 }
 
+                let block_nr = phys_block.saturating_add(j as u64);
+                let end = (data_offset.saturating_add(block_size)).min(data.len());
                 let chunk = data.get(data_offset..end).unwrap_or(&[]);
+
                 let mut buf = vec![0u8; block_size];
                 if let Some(dest) = buf.get_mut(..chunk.len()) {
                     dest.copy_from_slice(chunk);
@@ -3053,32 +3202,30 @@ impl Ext4Driver {
     }
 
     /// Return the physical block number one past the last extent in the
-    /// inode.  Used as allocation goal for adjacency.  Returns an error
-    /// if the extent tree can't be parsed.
+    /// inode.  Used as allocation goal for adjacency.  Handles any extent
+    /// tree depth.
     pub fn last_extent_end(&self, inode: &Ext4Inode) -> KernelResult<u64> {
         let block_bytes = inode_block_as_bytes(inode);
         let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
 
-        if header.eh_magic != EXT4_EXTENT_MAGIC || header.eh_depth != 0 {
+        if header.eh_magic != EXT4_EXTENT_MAGIC {
             return Err(KernelError::NotSupported);
         }
 
-        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
-        let extent_size = core::mem::size_of::<Ext4Extent>();
-        let entries = header.eh_entries as usize;
+        // Collect all leaf extents and find the rightmost one.
+        let ino_seed = inode_csum_seed(&self.sb, 0, inode.i_generation);
+        let mut extents: Vec<(u64, u64, u64)> = Vec::new();
+        self.collect_leaf_extents_recursive(ino_seed, block_bytes, &header, &mut extents)?;
 
-        if entries == 0 {
+        if extents.is_empty() {
             return Err(KernelError::NotFound);
         }
 
-        let idx = entries.saturating_sub(1);
-        let offset = header_size.saturating_add(idx.saturating_mul(extent_size));
-        let ext_bytes = block_bytes.get(offset..)
-            .ok_or(KernelError::IoError)?;
-        let extent = read_struct::<Ext4Extent>(ext_bytes)?;
-        let phys = u64::from(extent.ee_start_lo)
-            | (u64::from(extent.ee_start_hi) << 32);
-        let len = u64::from(extent.ee_len & 0x7FFF);
+        // Find the extent with the highest logical start.
+        let (_, phys, len) = extents.iter()
+            .max_by_key(|&&(logical, _, _)| logical)
+            .copied()
+            .ok_or(KernelError::NotFound)?;
         Ok(phys.saturating_add(len))
     }
 

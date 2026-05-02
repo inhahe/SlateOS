@@ -489,7 +489,7 @@ impl FileSystem for Ext4Fs {
             // This avoids reading/rewriting the entire file for the
             // common case of growing a log file, database, etc.
             let mut new_inode = inode;
-            match self.driver.extend_file_data(&mut new_inode, data) {
+            match self.driver.extend_file_data(ino, &mut new_inode, data) {
                 Ok(()) => {
                     self.driver.write_inode(ino, &new_inode)?;
                     self.driver.invalidate_extent_cache(ino);
@@ -527,7 +527,7 @@ impl FileSystem for Ext4Fs {
                 // Re-read inode (write_at_inplace doesn't change it, but
                 // extend_file_data needs the current state).
                 let mut new_inode = self.driver.read_inode(ino)?;
-                match self.driver.extend_file_data(&mut new_inode, past_eof) {
+                match self.driver.extend_file_data(ino, &mut new_inode, past_eof) {
                     Ok(()) => {
                         self.driver.write_inode(ino, &new_inode)?;
                         self.driver.invalidate_extent_cache(ino);

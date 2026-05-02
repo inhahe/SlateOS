@@ -3342,12 +3342,23 @@ impl FileSystem for FatFs {
 
     fn rmdir(&mut self, path: &str) -> KernelResult<()> {
         self.modified = true;
-        let (parent_path, dirname) = split_path(path);
-        let name83 = Self::to_83_name(dirname).ok_or(KernelError::InvalidArgument)?;
+        let (parent_path, _dirname) = split_path(path);
+
+        // Resolve the entry via path resolution (handles both LFN and 8.3).
+        let (_pc, entry_opt) = self.resolve_path(path)?;
+        let entry = entry_opt.ok_or(KernelError::NotFound)?;
+
+        if !entry.is_directory() {
+            return Err(KernelError::NotADirectory);
+        }
+
+        let name83 = entry.name;
+        let first_cluster = entry.first_cluster;
 
         // Resolve the parent directory.
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
+        // Find the short entry's on-disk location.
         let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
             parent_cluster, &name83,
         )?;
@@ -3355,18 +3366,6 @@ impl FileSystem for FatFs {
         if !exists {
             return Err(KernelError::NotFound);
         }
-
-        // Read the directory entry to verify it's a directory.
-        let mut sector_buf = [0u8; SECTOR_SIZE];
-        self.read_sector(dir_lba, &mut sector_buf)?;
-        let attr = sector_buf.get(dir_offset + 11).copied().unwrap_or(0);
-        if attr & ATTR_DIRECTORY == 0 {
-            return Err(KernelError::NotADirectory);
-        }
-
-        let cluster_lo = u32::from(read_u16(&sector_buf, dir_offset + 26));
-        let cluster_hi = u32::from(read_u16(&sector_buf, dir_offset + 20));
-        let first_cluster = (cluster_hi << 16) | cluster_lo;
 
         // Check the directory is empty (only . and .. allowed).
         if first_cluster >= 2 {
@@ -3377,7 +3376,8 @@ impl FileSystem for FatFs {
             self.free_chain(first_cluster)?;
         }
 
-        // Delete the directory entry in the parent.
+        // Delete the LFN entries and then the short entry.
+        self.delete_lfn_entries(dir_lba, dir_offset, &name83)?;
         self.delete_dir_entry(dir_lba, dir_offset)?;
 
         // Invalidate dcache: directory and all descendant paths.
@@ -3391,17 +3391,20 @@ impl FileSystem for FatFs {
     fn mkdir(&mut self, path: &str) -> KernelResult<()> {
         self.modified = true;
         let (parent_path, dirname) = split_path(path);
-        let name83 = Self::to_83_name(dirname).ok_or(KernelError::InvalidArgument)?;
 
         // Resolve the parent directory.
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
 
-        // Check if the name already exists.
-        let (dir_lba, dir_offset, exists) = self.find_or_create_slot_in(
-            parent_cluster, &name83,
-        )?;
-
-        if exists {
+        // Check if the name already exists (handles both LFN and 8.3).
+        let dir_entries = if parent_cluster == 0 {
+            self.read_root_dir()?
+        } else {
+            self.read_dir_cluster(parent_cluster)?
+        };
+        let already_exists = dir_entries.iter().any(|e| {
+            !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(dirname)
+        });
+        if already_exists {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -3448,13 +3451,12 @@ impl FileSystem for FatFs {
             self.write_sector(u64::from(lba) + u64::from(s), &zero_sector)?;
         }
 
-        // Create the directory entry in the parent.
-        self.write_dir_entry(
-            dir_lba,
-            dir_offset,
-            &name83,
+        // Create the directory entry in the parent (with LFN if needed).
+        self.create_entry_with_lfn(
+            parent_cluster,
+            dirname,
             new_cluster,
-            0, // Directories have size 0 in FAT16.
+            0, // Directories have size 0 in FAT.
             ATTR_DIRECTORY,
         )?;
 
@@ -3478,54 +3480,60 @@ impl FileSystem for FatFs {
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
         self.modified = true;
-        // 1. Resolve the source entry.
-        let (from_parent_path, from_filename) = split_path(from);
-        let from_name83 = Self::to_83_name(from_filename)
-            .ok_or(KernelError::InvalidArgument)?;
+
+        // 1. Resolve the source entry via the path resolver, which handles
+        //    both 8.3 and LFN names transparently.
+        let (_parent_cluster, source_entry) = self.resolve_path(from)?;
+        let source_entry = source_entry.ok_or(KernelError::NotFound)?;
+
+        let old_attr = source_entry.attr;
+        let old_cluster = source_entry.first_cluster;
+        let old_size = source_entry.file_size;
+        let source_name83 = source_entry.name;
+
+        // We need the source's on-disk location to delete it.  Walk the
+        // parent directory to find the matching 8.3 short entry by name.
+        let (from_parent_path, _from_filename) = split_path(from);
         let from_parent_cluster = self.resolve_dir_cluster(from_parent_path)?;
 
         let (from_lba, from_offset, from_exists) =
-            self.find_or_create_slot_in(from_parent_cluster, &from_name83)?;
+            self.find_or_create_slot_in(from_parent_cluster, &source_name83)?;
         if !from_exists {
             return Err(KernelError::NotFound);
         }
 
-        // Read the old entry's metadata.
-        let mut from_sector = [0u8; SECTOR_SIZE];
-        self.read_sector(from_lba, &mut from_sector)?;
-
-        let old_attr = from_sector.get(from_offset + 11).copied().unwrap_or(0);
-        let cluster_lo = u32::from(read_u16(&from_sector, from_offset + 26));
-        let cluster_hi = u32::from(read_u16(&from_sector, from_offset + 20));
-        let old_cluster = (cluster_hi << 16) | cluster_lo;
-        let old_size = read_u32(&from_sector, from_offset + 28);
-
-        // 2. Resolve the destination.
+        // 2. Check that the destination doesn't already exist.
         let (to_parent_path, to_filename) = split_path(to);
-        let to_name83 = Self::to_83_name(to_filename)
-            .ok_or(KernelError::InvalidArgument)?;
         let to_parent_cluster = self.resolve_dir_cluster(to_parent_path)?;
 
-        let (to_lba, to_offset, to_exists) =
-            self.find_or_create_slot_in(to_parent_cluster, &to_name83)?;
-
-        // If destination exists, fail (no silent overwrite on rename).
-        if to_exists {
+        // Check for existing destination by walking the directory.
+        let dest_entries = if to_parent_cluster == 0 {
+            self.read_root_dir()?
+        } else {
+            self.read_dir_cluster(to_parent_cluster)?
+        };
+        let dest_exists = dest_entries.iter().any(|e| {
+            !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(to_filename)
+        });
+        if dest_exists {
             return Err(KernelError::AlreadyExists);
         }
 
-        // 3. Create the new directory entry pointing to the same clusters.
-        self.write_dir_entry(
-            to_lba, to_offset, &to_name83,
-            old_cluster, old_size, old_attr,
+        // 3. Create the new directory entry (with LFN if needed) pointing
+        //    to the same clusters as the source.
+        self.create_entry_with_lfn(
+            to_parent_cluster,
+            to_filename,
+            old_cluster,
+            old_size,
+            old_attr,
         )?;
 
-        // 4. Delete the old entry (mark as 0xE5). Data is untouched.
+        // 4. Delete the old entry and its LFN entries.
+        self.delete_lfn_entries(from_lba, from_offset, &source_name83)?;
         self.delete_dir_entry(from_lba, from_offset)?;
 
         // Invalidate dcache: old path no longer valid, new path created.
-        // Use prefix invalidation on `from` to handle directory renames
-        // (all descendant paths become stale).
         self.dcache_invalidate_prefix(from);
         self.dcache_invalidate_prefix(to);
 

@@ -172,6 +172,7 @@ fn execute(line: &str) {
         "tail" => cmd_tail(args),
         "hexdump" | "xxd" => cmd_hexdump(args),
         "lsof" => cmd_lsof(),
+        "grep" => cmd_grep(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -229,6 +230,7 @@ fn cmd_help() {
     crate::console_println!("  tail N F  Show last N lines of file");
     crate::console_println!("  hexdump F Hex dump of file contents");
     crate::console_println!("  lsof      List open file handles");
+    crate::console_println!("  grep P F  Search for pattern P in file F");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -1498,6 +1500,90 @@ fn cmd_hexdump(args: &str) {
         crate::console_println!("{:08x}", data.len());
     } else {
         crate::console_println!("... ({} bytes total, showing first {})", data.len(), limit);
+    }
+}
+
+/// Search for a pattern in a file (simple substring grep).
+fn cmd_grep(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: grep <pattern> <file>");
+        return;
+    }
+
+    let pattern = parts[0];
+    let file_arg = parts[1];
+
+    let path = if file_arg.starts_with('/') {
+        alloc::string::String::from(file_arg)
+    } else {
+        let mut s = alloc::string::String::from("/");
+        s.push_str(file_arg);
+        s
+    };
+
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("grep: {}: {:?}", path, e);
+            return;
+        }
+    };
+
+    // Try to interpret as UTF-8 text.
+    let text = match core::str::from_utf8(&data) {
+        Ok(s) => s,
+        Err(_) => {
+            crate::console_println!("grep: {}: binary file (not UTF-8)", path);
+            return;
+        }
+    };
+
+    // Case-insensitive substring search across lines.
+    let pattern_lower = {
+        let mut p = alloc::string::String::with_capacity(pattern.len());
+        for c in pattern.chars() {
+            for lc in c.to_lowercase() {
+                p.push(lc);
+            }
+        }
+        p
+    };
+
+    let mut match_count = 0usize;
+    for (line_num, line) in text.lines().enumerate() {
+        // Build lowercase version of line for comparison.
+        let line_lower = {
+            let mut l = alloc::string::String::with_capacity(line.len());
+            for c in line.chars() {
+                for lc in c.to_lowercase() {
+                    l.push(lc);
+                }
+            }
+            l
+        };
+
+        if line_lower.contains(pattern_lower.as_str()) {
+            crate::console_println!(
+                "{}:{}: {}",
+                line_num.saturating_add(1),
+                path,
+                line,
+            );
+            match_count = match_count.saturating_add(1);
+
+            // Limit output to prevent flooding.
+            if match_count >= 50 {
+                crate::console_println!("... (showing first 50 matches)");
+                break;
+            }
+        }
+    }
+
+    if match_count == 0 {
+        crate::console_println!("grep: no matches for '{}' in {}", pattern, path);
+    } else {
+        crate::console_println!("{} matches", match_count);
     }
 }
 

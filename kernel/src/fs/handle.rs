@@ -690,7 +690,41 @@ pub fn self_test() -> KernelResult<()> {
     close(hdup)?;
     close(hw)?;
 
+    // 14. Lock-on-close: verify advisory locks are released when handle closes.
+    let lock_path = "/handle_lock_test.txt";
+    crate::fs::Vfs::write_file(lock_path, b"lock test data")?;
+
+    let hlock = open(lock_path, OpenFlags::READ.union(OpenFlags::WRITE))?;
+
+    // Acquire an exclusive lock using the handle ID as owner.
+    crate::fs::Vfs::flock(lock_path, hlock, crate::fs::LockType::Exclusive)?;
+
+    // Verify lock is held.
+    match crate::fs::Vfs::lock_query(lock_path) {
+        Ok(Some(_)) => {} // Lock is held — expected.
+        other => {
+            crate::serial_println!("[fs::handle]   FAIL: lock not held after flock: {:?}", other);
+            close(hlock).ok();
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[fs::handle]   flock(exclusive) on handle {}: OK", hlock);
+
+    // Close the handle — this should auto-release the lock.
+    close(hlock)?;
+
+    // Verify lock was released.
+    match crate::fs::Vfs::lock_query(lock_path) {
+        Ok(None) => {} // Lock released — expected.
+        other => {
+            crate::serial_println!("[fs::handle]   FAIL: lock still held after close: {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[fs::handle]   lock-on-close: auto-released OK");
+
     // Cleanup test files.
+    crate::fs::Vfs::remove(lock_path).ok();
     crate::fs::Vfs::remove(test_path).ok();
     crate::fs::Vfs::remove("/handle_write_test.txt").ok();
 

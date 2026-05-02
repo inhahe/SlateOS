@@ -174,6 +174,8 @@ fn execute(line: &str) {
         "lsof" => cmd_lsof(),
         "lsp" => cmd_lsp(args),
         "grep" => cmd_grep(args),
+        "cmp" | "diff" => cmd_cmp(args),
+        "fallocate" => cmd_fallocate(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -233,6 +235,8 @@ fn cmd_help() {
     crate::console_println!("  lsof      List open file handles");
     crate::console_println!("  lsp [N] D Paginated ls: show N entries at a time");
     crate::console_println!("  grep P F  Search for pattern P in file F");
+    crate::console_println!("  cmp F1 F2 Compare two files byte-by-byte");
+    crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -1586,6 +1590,115 @@ fn cmd_grep(args: &str) {
         crate::console_println!("grep: no matches for '{}' in {}", pattern, path);
     } else {
         crate::console_println!("{} matches", match_count);
+    }
+}
+
+/// Compare two files byte-by-byte.
+///
+/// Usage: `cmp <file1> <file2>`
+fn cmd_cmp(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: cmp <file1> <file2>");
+        return;
+    }
+
+    let path1 = if parts[0].starts_with('/') {
+        alloc::string::String::from(parts[0])
+    } else {
+        alloc::format!("/{}", parts[0])
+    };
+    let path2 = if parts[1].starts_with('/') {
+        alloc::string::String::from(parts[1])
+    } else {
+        alloc::format!("/{}", parts[1])
+    };
+
+    let data1 = match crate::fs::Vfs::read_file(&path1) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("cmp: {}: {:?}", path1, e);
+            return;
+        }
+    };
+    let data2 = match crate::fs::Vfs::read_file(&path2) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("cmp: {}: {:?}", path2, e);
+            return;
+        }
+    };
+
+    if data1 == data2 {
+        crate::console_println!("{} and {} are identical ({} bytes)", path1, path2, data1.len());
+        return;
+    }
+
+    // Find first difference.
+    let min_len = data1.len().min(data2.len());
+    let mut diff_offset = None;
+    for i in 0..min_len {
+        if data1.get(i) != data2.get(i) {
+            diff_offset = Some(i);
+            break;
+        }
+    }
+
+    // If no difference in common prefix, the difference is the length.
+    let diff_at = diff_offset.unwrap_or(min_len);
+    crate::console_println!(
+        "{} {} differ: byte {}, {} size={}, {} size={}",
+        path1, path2, diff_at, path1, data1.len(), path2, data2.len(),
+    );
+}
+
+/// Pre-allocate disk space for a file.
+///
+/// Usage: `fallocate <size> <file>`
+fn cmd_fallocate(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.len() < 2 || parts[1].is_empty() {
+        crate::console_println!("Usage: fallocate <size> <file>");
+        crate::console_println!("  Size can be suffixed with K, M, G (e.g., 4K, 1M)");
+        return;
+    }
+
+    let size_str = parts[0];
+    let path = if parts[1].starts_with('/') {
+        alloc::string::String::from(parts[1])
+    } else {
+        alloc::format!("/{}", parts[1])
+    };
+
+    // Parse size with optional K/M/G suffix.
+    let size = {
+        let s = size_str.trim();
+        let (num_part, multiplier) = if s.ends_with('K') || s.ends_with('k') {
+            (&s[..s.len().saturating_sub(1)], 1024u64)
+        } else if s.ends_with('M') || s.ends_with('m') {
+            (&s[..s.len().saturating_sub(1)], 1024u64 * 1024)
+        } else if s.ends_with('G') || s.ends_with('g') {
+            (&s[..s.len().saturating_sub(1)], 1024u64 * 1024 * 1024)
+        } else {
+            (s, 1u64)
+        };
+
+        match num_part.parse::<u64>() {
+            Ok(n) => n.saturating_mul(multiplier),
+            Err(_) => {
+                crate::console_println!("fallocate: invalid size '{}'", size_str);
+                return;
+            }
+        }
+    };
+
+    match crate::fs::Vfs::fallocate(&path, size) {
+        Ok(()) => {
+            crate::console_println!("fallocate: reserved {} bytes for {}", size, path);
+        }
+        Err(e) => {
+            crate::console_println!("fallocate: {}: {:?}", path, e);
+        }
     }
 }
 

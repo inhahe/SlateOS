@@ -4248,6 +4248,63 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
     // (ext4 O_TMPFILE).  For now, callers should delete after use.
 }
 
+/// `SYS_FS_FALLOCATE` — pre-allocate disk space.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: size in bytes to pre-allocate.
+pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
+    let path_len = args.arg1 as usize;
+    if path_len == 0 || path_len > 4096 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, path_len) {
+        return SyscallResult::err(e);
+    }
+
+    let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
+    let path = match core::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let size = args.arg2;
+    match crate::fs::Vfs::fallocate(path, size) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SEEK_DATA` — seek to next data region.
+///
+/// `arg0`: file handle.
+/// `arg1`: offset to search from.
+#[allow(clippy::cast_possible_wrap)]
+pub fn sys_fs_seek_data(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let offset = args.arg1;
+
+    match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Data(offset)) {
+        Ok(pos) => SyscallResult::ok(pos as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_SEEK_HOLE` — seek to next hole in file.
+///
+/// `arg0`: file handle.
+/// `arg1`: offset to search from.
+#[allow(clippy::cast_possible_wrap)]
+pub fn sys_fs_seek_hole(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let offset = args.arg1;
+
+    match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Hole(offset)) {
+        Ok(pos) => SyscallResult::ok(pos as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Networking handlers (800–999)
 // ---------------------------------------------------------------------------

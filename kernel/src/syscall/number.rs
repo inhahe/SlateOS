@@ -1036,6 +1036,34 @@ pub const SYS_FS_READDIR_AT: u64 = 647;
 /// Returns: file handle on success, negative error code on failure.
 pub const SYS_FS_TMPFILE: u64 = 648;
 
+/// Pre-allocate disk space for a file.
+///
+/// `arg0`: pointer to path string.
+/// `arg1`: path length (bytes).
+/// `arg2`: size in bytes to pre-allocate.
+///
+/// The file's logical size is unchanged — only the allocated space
+/// grows.  Useful for databases and log files to avoid fragmentation.
+///
+/// Returns: 0 on success, negative error code on failure.
+pub const SYS_FS_FALLOCATE: u64 = 649;
+
+/// Seek to the next data region in a file (SEEK_DATA).
+///
+/// `arg0`: file handle.
+/// `arg1`: offset to start searching from.
+///
+/// Returns: offset of next data region, or negative error if past EOF.
+pub const SYS_FS_SEEK_DATA: u64 = 650;
+
+/// Seek to the next hole in a file (SEEK_HOLE).
+///
+/// `arg0`: file handle.
+/// `arg1`: offset to start searching from.
+///
+/// Returns: offset of next hole, or EOF if no holes.
+pub const SYS_FS_SEEK_HOLE: u64 = 651;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

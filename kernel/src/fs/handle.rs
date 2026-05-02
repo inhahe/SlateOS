@@ -100,6 +100,16 @@ pub enum SeekFrom {
     Current(i64),
     /// Seek relative to the end of the file (can be negative).
     End(i64),
+    /// Seek to the next data region at or after the given offset.
+    /// Returns the offset of the next data byte.  If the file has
+    /// no holes (common case), this returns the given offset if it's
+    /// within the file, or an error if past EOF.
+    Data(u64),
+    /// Seek to the next hole at or after the given offset.
+    /// A "hole" is an unallocated region (reads as zeros).
+    /// If the filesystem doesn't track holes, returns EOF as the
+    /// first hole (the conceptual hole after all data).
+    Hole(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +352,23 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
                 let d = delta.unsigned_abs();
                 file.size.checked_sub(d).ok_or(KernelError::InvalidArgument)?
             }
+        }
+        SeekFrom::Data(pos) => {
+            // For non-sparse filesystems, any offset within the file is "data".
+            // Return the requested offset if it's within the file.
+            if pos >= file.size {
+                return Err(KernelError::InvalidArgument);
+            }
+            pos
+        }
+        SeekFrom::Hole(pos) => {
+            // For non-sparse filesystems, the first "hole" is at EOF.
+            // If pos is already past EOF, that's an error.
+            if pos > file.size {
+                return Err(KernelError::InvalidArgument);
+            }
+            // Return EOF as the first hole.
+            file.size
         }
     };
 

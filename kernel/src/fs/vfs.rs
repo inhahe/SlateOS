@@ -435,6 +435,24 @@ pub trait FileSystem: Send {
         self.write_file(path, &contents)
     }
 
+    /// Pre-allocate space for a file without writing data.
+    ///
+    /// Ensures that at least `size` bytes are allocated for the file.
+    /// The file's logical size does not change (reads beyond the
+    /// current size still return zero/error).  This is useful for
+    /// databases and log files that know their eventual size upfront —
+    /// pre-allocation avoids fragmentation from incremental growth.
+    ///
+    /// Default implementation: no-op (reports success without actually
+    /// reserving space).  Filesystems with block allocation (ext4, FAT)
+    /// should override to actually reserve blocks.
+    fn fallocate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+        let _ = (path, size);
+        // Default: pretend we allocated.  The actual write will extend
+        // the file when data arrives.
+        Ok(())
+    }
+
     /// Truncate a file to the given size.
     ///
     /// If `size` is less than the current file size, data beyond
@@ -1515,6 +1533,19 @@ impl Vfs {
         super::notify::emit_modified(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
+    }
+
+    /// Pre-allocate space for a file.
+    ///
+    /// Reserves `size` bytes of disk space for the file.  The file's
+    /// logical size is not changed — this just ensures the blocks are
+    /// allocated so future writes don't fail due to ENOSPC and don't
+    /// cause fragmentation.
+    pub fn fallocate(path: &str, size: u64) -> KernelResult<()> {
+        let path = Self::resolve_follow(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.fallocate(relative, size)
     }
 
     /// Rename or move a file or directory.

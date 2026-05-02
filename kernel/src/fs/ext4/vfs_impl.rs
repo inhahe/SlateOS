@@ -216,7 +216,7 @@ impl FileSystem for Ext4Fs {
         }
 
         // Check that the name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, name).is_ok() {
+        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -716,7 +716,7 @@ impl FileSystem for Ext4Fs {
         }
 
         // Check name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, name).is_ok() {
+        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -799,7 +799,19 @@ impl FileSystem for Ext4Fs {
     }
 
     fn debug_stats(&self) -> String {
-        self.driver.superblock().summary()
+        let mut s = self.driver.superblock().summary();
+        let (hits, misses, valid) = self.driver.dcache.stats();
+        let total = hits.saturating_add(misses);
+        let rate = if total > 0 {
+            hits.saturating_mul(100) / total
+        } else {
+            0
+        };
+        s.push_str(&alloc::format!(
+            "\ndcache: {}/{} slots, {} hits, {} misses ({}% hit rate)",
+            valid, super::driver::EXT4_DCACHE_SIZE, hits, misses, rate,
+        ));
+        s
     }
 
     /// Create a hard link to an existing file.
@@ -838,7 +850,7 @@ impl FileSystem for Ext4Fs {
         }
 
         // Check that the new name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, name).is_ok() {
+        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -900,7 +912,7 @@ impl Ext4Fs {
         }
 
         // Check that name doesn't already exist.
-        if self.driver.dir_lookup(&parent_inode, name).is_ok() {
+        if self.driver.dir_lookup(&parent_inode, parent_ino, name).is_ok() {
             return Err(KernelError::AlreadyExists);
         }
 
@@ -934,9 +946,11 @@ impl Ext4Fs {
     fn remove_dir_entry(
         &mut self,
         dir_inode: &mut super::ondisk::Ext4Inode,
-        _dir_ino: u32,
+        dir_ino: u32,
         name: &str,
     ) -> KernelResult<()> {
+        // Invalidate the dcache entry for this name.
+        self.driver.dcache.invalidate_entry(dir_ino, name);
         let mut dir_data = self.driver.read_file_data(dir_inode)?;
         let entry_header_size = core::mem::size_of::<super::ondisk::Ext4DirEntry2>();
         let mut offset = 0usize;

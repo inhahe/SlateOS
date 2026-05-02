@@ -20,13 +20,169 @@ use super::ondisk::{
 use super::superblock::{self, ParsedSuperblock};
 
 // ---------------------------------------------------------------------------
+// Directory entry cache (ext4-level dcache)
+// ---------------------------------------------------------------------------
+
+/// Number of entries in the ext4 directory entry cache.
+///
+/// Caches `(dir_inode, name) → child_inode` to avoid linear directory
+/// scans on repeated lookups.  512 entries covers typical desktop
+/// working sets (open project with dozens of files, navigating dirs).
+pub(super) const EXT4_DCACHE_SIZE: usize = 512;
+
+/// A single directory entry cache entry.
+struct Ext4DcacheEntry {
+    /// Directory inode number (key part 1).
+    dir_ino: u32,
+    /// Child name within the directory (key part 2).
+    name: String,
+    /// Resolved child inode number (cached result).
+    child_ino: u32,
+    /// File type byte from the directory entry.
+    file_type: u8,
+    /// LRU access counter.
+    last_access: u64,
+    /// Whether this entry is valid.
+    valid: bool,
+}
+
+impl Ext4DcacheEntry {
+    const fn empty() -> Self {
+        Self {
+            dir_ino: 0,
+            name: String::new(),
+            child_ino: 0,
+            file_type: 0,
+            last_access: 0,
+            valid: false,
+        }
+    }
+}
+
+/// Directory entry cache for ext4.
+///
+/// Avoids linear O(n) directory scans in `dir_lookup()` by caching
+/// recent name→inode mappings per directory.
+pub(super) struct Ext4Dcache {
+    entries: Vec<Ext4DcacheEntry>,
+    counter: u64,
+    hits: u64,
+    misses: u64,
+}
+
+impl Ext4Dcache {
+    fn new() -> Self {
+        let mut entries = Vec::with_capacity(EXT4_DCACHE_SIZE);
+        for _ in 0..EXT4_DCACHE_SIZE {
+            entries.push(Ext4DcacheEntry::empty());
+        }
+        Self {
+            entries,
+            counter: 0,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Look up a child inode by directory inode + name.
+    fn lookup(&mut self, dir_ino: u32, name: &str) -> Option<(u32, u8)> {
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.dir_ino == dir_ino && entry.name == name {
+                self.counter = self.counter.wrapping_add(1);
+                entry.last_access = self.counter;
+                self.hits = self.hits.wrapping_add(1);
+                return Some((entry.child_ino, entry.file_type));
+            }
+        }
+        self.misses = self.misses.wrapping_add(1);
+        None
+    }
+
+    /// Insert a name→inode mapping.
+    fn insert(&mut self, dir_ino: u32, name: &str, child_ino: u32, file_type: u8) {
+        self.counter = self.counter.wrapping_add(1);
+
+        // Check for existing entry (update in place).
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.dir_ino == dir_ino && entry.name == name {
+                entry.child_ino = child_ino;
+                entry.file_type = file_type;
+                entry.last_access = self.counter;
+                return;
+            }
+        }
+
+        // Find empty slot.
+        for entry in self.entries.iter_mut() {
+            if !entry.valid {
+                entry.dir_ino = dir_ino;
+                entry.name = String::from(name);
+                entry.child_ino = child_ino;
+                entry.file_type = file_type;
+                entry.last_access = self.counter;
+                entry.valid = true;
+                return;
+            }
+        }
+
+        // Evict LRU.
+        let mut lru_idx = 0;
+        let mut lru_access = u64::MAX;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.last_access < lru_access {
+                lru_access = entry.last_access;
+                lru_idx = i;
+            }
+        }
+
+        let e = &mut self.entries[lru_idx];
+        e.dir_ino = dir_ino;
+        e.name.clear();
+        e.name.push_str(name);
+        e.child_ino = child_ino;
+        e.file_type = file_type;
+        e.last_access = self.counter;
+        e.valid = true;
+    }
+
+    /// Invalidate all entries for a specific directory.
+    ///
+    /// Used when a directory's on-disk data changes in a way that could
+    /// affect multiple entries (e.g., directory compaction, crash recovery).
+    #[allow(dead_code)]
+    fn invalidate_dir(&mut self, dir_ino: u32) {
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.dir_ino == dir_ino {
+                entry.valid = false;
+            }
+        }
+    }
+
+    /// Invalidate a specific entry.
+    pub(super) fn invalidate_entry(&mut self, dir_ino: u32, name: &str) {
+        for entry in self.entries.iter_mut() {
+            if entry.valid && entry.dir_ino == dir_ino && entry.name == name {
+                entry.valid = false;
+                return;
+            }
+        }
+    }
+
+    /// Return (hits, misses, valid_count).
+    pub(super) fn stats(&self) -> (u64, u64, usize) {
+        let valid = self.entries.iter().filter(|e| e.valid).count();
+        (self.hits, self.misses, valid)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ext4 driver
 // ---------------------------------------------------------------------------
 
 /// An ext4 filesystem instance.
 ///
-/// Holds the parsed superblock, block reader, and cached block group
-/// descriptor table.
+/// Holds the parsed superblock, block reader, cached block group
+/// descriptor table, and directory entry cache.
 pub struct Ext4Driver {
     /// Parsed superblock with derived values.
     sb: ParsedSuperblock,
@@ -34,6 +190,8 @@ pub struct Ext4Driver {
     reader: BlockReader,
     /// Cached block group descriptor table.
     group_descs: Vec<Ext4GroupDesc>,
+    /// Directory entry cache for fast name→inode lookups.
+    pub(super) dcache: Ext4Dcache,
 }
 
 impl Ext4Driver {
@@ -73,6 +231,7 @@ impl Ext4Driver {
             sb,
             reader,
             group_descs,
+            dcache: Ext4Dcache::new(),
         })
     }
 
@@ -215,14 +374,26 @@ impl Ext4Driver {
     }
 
     /// Look up a name in a directory and return the inode number.
+    ///
+    /// Checks the ext4 dcache first for an O(1) hit.  On miss, does a
+    /// linear scan of the directory entries and caches the result.
     pub fn dir_lookup(
-        &self,
+        &mut self,
         dir_inode: &Ext4Inode,
+        dir_ino: u32,
         name: &str,
     ) -> KernelResult<u32> {
+        // Check dcache first.
+        if let Some((child_ino, _ftype)) = self.dcache.lookup(dir_ino, name) {
+            return Ok(child_ino);
+        }
+
+        // Cache miss — linear scan.
         let entries = self.read_dir_entries(dir_inode)?;
-        for (ino, _ftype, entry_name) in &entries {
+        for (ino, ftype, entry_name) in &entries {
             if entry_name == name {
+                // Cache this lookup for next time.
+                self.dcache.insert(dir_ino, name, *ino, *ftype);
                 return Ok(*ino);
             }
         }
@@ -238,7 +409,7 @@ impl Ext4Driver {
     /// Resolve a path to an inode number, following all symlinks.
     ///
     /// `path` must be absolute (starting with `/`).
-    pub fn resolve_path(&self, path: &str) -> KernelResult<u32> {
+    pub fn resolve_path(&mut self, path: &str) -> KernelResult<u32> {
         self.resolve_path_from(EXT4_ROOT_INO, path, true, 0)
     }
 
@@ -246,7 +417,7 @@ impl Ext4Driver {
     ///
     /// Intermediate symlinks ARE followed; only the last component is
     /// left unresolved if it happens to be a symlink.  Used for `lstat`.
-    pub fn resolve_path_no_follow(&self, path: &str) -> KernelResult<u32> {
+    pub fn resolve_path_no_follow(&mut self, path: &str) -> KernelResult<u32> {
         self.resolve_path_from(EXT4_ROOT_INO, path, false, 0)
     }
 
@@ -261,7 +432,7 @@ impl Ext4Driver {
     ///
     /// `depth` tracks symlink recursion to prevent infinite loops.
     fn resolve_path_from(
-        &self,
+        &mut self,
         start_ino: u32,
         path: &str,
         follow_last: bool,
@@ -303,7 +474,7 @@ impl Ext4Driver {
                 return Err(KernelError::NotADirectory);
             }
 
-            let child_ino = self.dir_lookup(&dir_inode, component)?;
+            let child_ino = self.dir_lookup(&dir_inode, current_ino, component)?;
             let child_inode = self.read_inode(child_ino)?;
 
             // Check if the child is a symlink.
@@ -648,6 +819,11 @@ impl Ext4Driver {
         dir_inode.i_blocks_lo = total_blocks.saturating_mul(self.sb.block_size / 512);
 
         self.write_inode(dir_inode_nr, dir_inode)?;
+
+        // Invalidate dcache for the parent directory so stale entries
+        // don't hide the new child.
+        self.dcache.invalidate_entry(dir_inode_nr, name);
+
         Ok(())
     }
 

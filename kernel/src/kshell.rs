@@ -551,6 +551,95 @@ fn expand_vars(input: &str) -> String {
 ///   - `${NAME%%suffix}` — remove longest suffix match
 ///   - `${NAME#prefix}` — remove shortest prefix match
 ///   - `${NAME##prefix}` — remove longest prefix match
+/// Expand shell brace patterns: `{a,b,c}` and `{N..M}` ranges.
+///
+/// Brace expansion is applied to each whitespace-delimited token in the input.
+/// A token like `prefix{a,b,c}suffix` expands to `prefixa suffix prefixbsuffix
+/// prefixcsuffix`.  Numeric ranges `{1..5}` expand to `1 2 3 4 5`.
+/// Ranges with step: `{1..10..2}` → `1 3 5 7 9`.
+///
+/// Tokens without `{` or `}` pass through unchanged.
+fn expand_braces(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let tokens = split_words(input);
+
+    for (ti, token) in tokens.iter().enumerate() {
+        if ti > 0 {
+            result.push(' ');
+        }
+
+        // Find the first `{` and its matching `}`.
+        let brace_start = match token.find('{') {
+            Some(pos) => pos,
+            None => { result.push_str(token); continue; }
+        };
+        let brace_end = match token.get(brace_start..).and_then(|s| s.rfind('}')) {
+            Some(pos) => brace_start.saturating_add(pos),
+            None => { result.push_str(token); continue; }
+        };
+
+        let prefix = token.get(..brace_start).unwrap_or("");
+        let inner = token.get(brace_start.saturating_add(1)..brace_end).unwrap_or("");
+        let suffix = token.get(brace_end.saturating_add(1)..).unwrap_or("");
+
+        // Check for range pattern: `{N..M}` or `{N..M..S}`.
+        if inner.contains("..") {
+            let parts: Vec<&str> = inner.splitn(3, "..").collect();
+            if let (Some(&start_s), Some(&end_s)) = (parts.first(), parts.get(1)) {
+                if let (Ok(start), Ok(end)) = (start_s.parse::<i64>(), end_s.parse::<i64>()) {
+                    let step: i64 = if let Some(&step_s) = parts.get(2) {
+                        step_s.parse::<i64>().unwrap_or(1)
+                    } else if start <= end { 1 } else { -1 };
+
+                    if step == 0 {
+                        result.push_str(token);
+                        continue;
+                    }
+
+                    let mut first = true;
+                    let mut val = start;
+                    let mut count: u32 = 0;
+                    loop {
+                        if step > 0 && val > end { break; }
+                        if step < 0 && val < end { break; }
+                        if count > 10_000 { break; } // Safety limit.
+
+                        if !first { result.push(' '); }
+                        first = false;
+                        result.push_str(prefix);
+                        result.push_str(&alloc::format!("{}", val));
+                        result.push_str(suffix);
+
+                        val = val.wrapping_add(step);
+                        count = count.saturating_add(1);
+                    }
+                    continue;
+                }
+            }
+            // Not a valid range — fall through to comma check.
+        }
+
+        // Check for comma-separated alternatives: `{a,b,c}`.
+        if inner.contains(',') {
+            let alternatives: Vec<&str> = inner.split(',').collect();
+            for (ai, alt) in alternatives.iter().enumerate() {
+                if ai > 0 {
+                    result.push(' ');
+                }
+                result.push_str(prefix);
+                result.push_str(alt);
+                result.push_str(suffix);
+            }
+            continue;
+        }
+
+        // No comma, no valid range — emit the token literally.
+        result.push_str(token);
+    }
+
+    result
+}
+
 fn expand_brace_expr(inner: &str, result: &mut String) {
     // ${#NAME[@]} — array length.
     if let Some(name) = inner.strip_prefix('#') {
@@ -954,6 +1043,8 @@ enum LoopKind {
     While { condition: String },
     /// `for VAR in WORDS...; do ... done` — iterates over a word list.
     For { variable: String, words_raw: String },
+    /// `for ((INIT; COND; STEP)); do ... done` — C-style arithmetic loop.
+    CFor { init: String, cond: String, step: String },
 }
 
 /// Loop body collector: buffers lines between `do` and `done`.
@@ -1426,6 +1517,9 @@ fn handle_control_flow(line: &str) -> bool {
                         LoopKind::For { variable, words_raw } => {
                             execute_for_loop(&variable, &words_raw, &body);
                         }
+                        LoopKind::CFor { init, cond, step } => {
+                            execute_cfor_loop(&init, &cond, &step, &body);
+                        }
                     }
                     return true;
                 }
@@ -1466,10 +1560,57 @@ fn handle_control_flow(line: &str) -> bool {
             return true;
         }
         "for" => {
+            // Check for C-style: `for ((INIT; COND; STEP)); do`
+            // or:                 `for ((INIT; COND; STEP))`
+            //                     do
+            let rest = trimmed.get(3..).unwrap_or("").trim();
+            if rest.starts_with("((") {
+                // Extract the content between (( and )).
+                let inner_start = 2; // skip "(("
+                // Find closing "))".
+                if let Some(end) = rest.find("))") {
+                    let inner = rest.get(inner_start..end).unwrap_or("").trim();
+                    // Split on `;` into init, cond, step.
+                    let parts: Vec<&str> = inner.splitn(3, ';').collect();
+                    if parts.len() != 3 {
+                        crate::console_println!("Syntax error: for ((...)) requires 3 semicolon-separated expressions");
+                        return true;
+                    }
+                    let init_expr = parts[0].trim();
+                    let cond_expr = parts[1].trim();
+                    let step_expr = parts[2].trim();
+
+                    // Check if `do` follows on the same line.
+                    let after_parens = rest.get(end.saturating_add(2)..).unwrap_or("").trim();
+                    let has_do = after_parens.starts_with(';') && after_parens.contains("do")
+                        || after_parens == "do"
+                        || after_parens.starts_with("do ")
+                        || after_parens.starts_with("do\t")
+                        || after_parens == ";do"
+                        || after_parens == "; do";
+
+                    if !has_do {
+                        // Body collection will wait for `do` on the next line.
+                    }
+
+                    *LOOP_COLLECTOR.lock() = Some(LoopCollector {
+                        kind: LoopKind::CFor {
+                            init: String::from(init_expr),
+                            cond: String::from(cond_expr),
+                            step: String::from(step_expr),
+                        },
+                        body: Vec::new(),
+                        nesting: 0,
+                    });
+                    return true;
+                }
+                crate::console_println!("Syntax error: unterminated for ((...))");
+                return true;
+            }
+
             // Parse: for VAR in WORD1 WORD2 ...; do
             // or:    for VAR in WORD1 WORD2 ...
             //        do
-            let rest = trimmed.get(3..).unwrap_or("").trim();
 
             // Split "VAR in WORDS..." — variable is the first token.
             let mut parts = rest.splitn(2, char::is_whitespace);
@@ -1787,6 +1928,111 @@ fn execute_for_loop(variable: &str, words_raw: &str, body: &[String]) {
 
     LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
     LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Execute a C-style arithmetic for loop: `for ((INIT; COND; STEP)); do BODY done`
+///
+/// The init expression runs once.  Before each iteration, the condition is
+/// evaluated as an arithmetic expression: if non-zero, the body runs and the
+/// step expression is evaluated afterward.  If zero, the loop ends.
+///
+/// Expressions use the same arithmetic evaluator as `$((...))` and support
+/// variable assignment (e.g., `for ((i=0; i<10; i=i+1)); do ...`).
+fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
+    const MAX_ITERATIONS: u32 = 10_000;
+
+    // Execute init expression.
+    if !init.is_empty() {
+        eval_cfor_expr(init);
+    }
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+
+    let mut iteration: u32 = 0;
+    loop {
+        // Safety limit.
+        if iteration >= MAX_ITERATIONS {
+            crate::console_println!(
+                "Error: C-style for loop exceeded {} iterations — infinite loop?",
+                MAX_ITERATIONS,
+            );
+            break;
+        }
+        iteration = iteration.saturating_add(1);
+
+        // Evaluate condition — if empty, treat as infinite (true).
+        if !cond.is_empty() {
+            let cond_expanded = expand_vars(cond);
+            let val = eval_arithmetic(&cond_expanded);
+            if val == 0 {
+                break;
+            }
+        }
+
+        // Clear continue flag.
+        LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+
+        // Execute body.
+        for line in body {
+            execute(line);
+            if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+                || LOOP_CONTINUE.load(core::sync::atomic::Ordering::Relaxed)
+                || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+        }
+
+        if LOOP_BREAK.load(core::sync::atomic::Ordering::Relaxed)
+            || FUNC_RETURN.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            break;
+        }
+
+        // Execute step expression.
+        if !step.is_empty() {
+            eval_cfor_expr(step);
+        }
+    }
+
+    LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
+    LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Evaluate a C-style for loop expression.
+///
+/// Supports simple assignment (`VAR=EXPR`) and bare arithmetic.
+/// The arithmetic evaluator handles variable references.
+fn eval_cfor_expr(expr: &str) {
+    let expanded = expand_vars(expr);
+    let trimmed = expanded.trim();
+
+    // Check for assignment: `VAR=EXPR` (not `VAR==EXPR`).
+    if let Some(eq_pos) = trimmed.find('=') {
+        // Make sure it's not `==`, `<=`, `>=`, `!=`.
+        let before_eq = trimmed.as_bytes().get(eq_pos.wrapping_sub(1));
+        let after_eq = trimmed.as_bytes().get(eq_pos.saturating_add(1));
+        let is_comparison = before_eq == Some(&b'<')
+            || before_eq == Some(&b'>')
+            || before_eq == Some(&b'!')
+            || after_eq == Some(&b'=');
+
+        if !is_comparison {
+            let name = trimmed.get(..eq_pos).unwrap_or("").trim();
+            let rhs = trimmed.get(eq_pos.saturating_add(1)..).unwrap_or("").trim();
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+            {
+                let val = eval_arithmetic(rhs);
+                env_set(name, &alloc::format!("{}", val));
+                return;
+            }
+        }
+    }
+
+    // Bare expression — just evaluate for side effects (none in our model,
+    // but future ++ operator support could use this).
+    eval_arithmetic(trimmed);
 }
 
 /// Split a string into words, respecting single and double quotes.
@@ -2785,8 +3031,9 @@ fn execute(line: &str) {
         }
     }
 
-    // Phase 1: Expand environment variables ($VAR, ${VAR}).
+    // Phase 1: Expand environment variables ($VAR, ${VAR}), then braces.
     let expanded = expand_vars(line);
+    let expanded = expand_braces(&expanded);
     let line = expanded.trim();
 
     if line.is_empty() {
@@ -3121,6 +3368,13 @@ fn execute_single(line: &str) {
         return;
     }
 
+    // Check for here-string (cmd <<< word).
+    if let Some((command, word)) = parse_here_string(line) {
+        let input = alloc::format!("{}\n", word);
+        dispatch_with_input(&command, &input);
+        return;
+    }
+
     // Check for input redirection (cmd < file).
     if let Some((command, path)) = parse_input_redirect(line) {
         execute_input_redirect(&command, &path);
@@ -3172,6 +3426,42 @@ fn parse_redirect(line: &str) -> Option<Redirect<'_>> {
 ///
 /// Returns `Some((command, file_path))` if found.
 /// Only detects bare `<` (not `<<` heredoc or `<(` process subst).
+/// Parse a here-string: `command <<< word`.
+///
+/// Returns `(command, word)` if the pattern is found.
+/// The word is stripped of surrounding quotes if present.
+fn parse_here_string(line: &str) -> Option<(&str, String)> {
+    let bytes = line.as_bytes();
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\'' && !in_dq { in_sq = !in_sq; i = i.saturating_add(1); continue; }
+        if b == b'"' && !in_sq { in_dq = !in_dq; i = i.saturating_add(1); continue; }
+        if in_sq || in_dq { i = i.saturating_add(1); continue; }
+
+        if b == b'<'
+            && bytes.get(i.saturating_add(1)) == Some(&b'<')
+            && bytes.get(i.saturating_add(2)) == Some(&b'<')
+        {
+            // Ensure it's not `<<<<`.
+            if bytes.get(i.saturating_add(3)) == Some(&b'<') {
+                i = i.saturating_add(4);
+                continue;
+            }
+            let command = line.get(..i)?.trim();
+            let word = line.get(i.saturating_add(3)..)?.trim();
+            if command.is_empty() || word.is_empty() {
+                return None;
+            }
+            return Some((command, String::from(strip_quotes(word))));
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
 fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
     let bytes = line.as_bytes();
     let mut in_quote = false;
@@ -3181,9 +3471,17 @@ fn parse_input_redirect(line: &str) -> Option<(&str, &str)> {
         if b == b'"' || b == b'\'' {
             in_quote = !in_quote;
         } else if !in_quote && b == b'<' {
-            // Make sure this isn't `<<` (heredoc) or `<(` (process subst).
+            // Make sure this isn't `<<` / `<<<` (heredoc/here-string) or `<(`.
             let next = bytes.get(i.saturating_add(1));
-            if next == Some(&b'<') || next == Some(&b'(') {
+            if next == Some(&b'<') {
+                // Skip all consecutive `<` chars (<<, <<<).
+                i = i.saturating_add(2);
+                while i < bytes.len() && bytes[i] == b'<' {
+                    i = i.saturating_add(1);
+                }
+                continue;
+            }
+            if next == Some(&b'(') {
                 i = i.saturating_add(2);
                 continue;
             }

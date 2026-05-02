@@ -382,6 +382,23 @@ impl ControlState {
 /// based on the condition result.
 static CONTROL_STACK: Mutex<Vec<ControlState>> = Mutex::new(Vec::new());
 
+/// While-loop state: when collecting, lines are buffered until `done`.
+/// Then the body is replayed while the condition remains true.
+struct WhileLoop {
+    /// The condition command string.
+    condition: String,
+    /// Buffered body lines.
+    body: Vec<String>,
+    /// Nesting depth of while/done during collection (0 = our own while).
+    nesting: u32,
+}
+
+/// Active while-loop collection buffer (only one at a time).
+///
+/// When `Some`, we are collecting lines for a while loop body.
+/// When `done` is seen at nesting depth 0, the loop executes.
+static WHILE_LOOP: Mutex<Option<WhileLoop>> = Mutex::new(None);
+
 /// Check whether execution is currently active (not skipped by an
 /// outer control-flow block).
 fn control_should_execute() -> bool {
@@ -397,6 +414,81 @@ fn control_should_execute() -> bool {
 fn handle_control_flow(line: &str) -> bool {
     let trimmed = line.trim();
     let first_word = trimmed.split_whitespace().next().unwrap_or("");
+
+    // If we're collecting while-loop body lines, buffer them.
+    {
+        let mut wl = WHILE_LOOP.lock();
+        if let Some(ref mut state) = *wl {
+            match first_word {
+                "while" => {
+                    // Nested while — increase depth.
+                    state.nesting = state.nesting.saturating_add(1);
+                    state.body.push(String::from(trimmed));
+                    return true;
+                }
+                "done" => {
+                    if state.nesting > 0 {
+                        // Nested done — decrease depth.
+                        state.nesting = state.nesting.saturating_sub(1);
+                        state.body.push(String::from(trimmed));
+                        return true;
+                    }
+                    // Our matching done — execute the loop.
+                    let condition = state.condition.clone();
+                    let body = state.body.clone();
+                    *wl = None; // Clear the collection state.
+                    drop(wl);
+
+                    // Execute the while loop body.
+                    execute_while_loop(&condition, &body);
+                    return true;
+                }
+                "do" => {
+                    // `do` on its own line — skip (just a marker).
+                    return true;
+                }
+                _ => {
+                    // Buffer every other line.
+                    state.body.push(String::from(trimmed));
+                    return true;
+                }
+            }
+        }
+    }
+
+    match first_word {
+        "while" => {
+            let condition = trimmed.get(5..).unwrap_or("").trim();
+            // Remove trailing "do" if present (allow `while test -f /x; do`).
+            let condition = condition.strip_suffix("do")
+                .unwrap_or(condition)
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+
+            if condition.is_empty() {
+                crate::console_println!("Syntax error: while requires a condition");
+                return true;
+            }
+
+            // Start collecting body lines.
+            *WHILE_LOOP.lock() = Some(WhileLoop {
+                condition: String::from(condition),
+                body: Vec::new(),
+                nesting: 0,
+            });
+            return true;
+        }
+        "do" => {
+            // `do` on its own line without while — syntax error or no-op.
+            return true;
+        }
+        "done" => {
+            crate::console_println!("Syntax error: done without while");
+            return true;
+        }
+        _ => {}
+    }
 
     match first_word {
         "if" => {
@@ -515,6 +607,28 @@ fn handle_control_flow(line: &str) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Execute a while loop: repeatedly evaluate the condition and replay the body.
+///
+/// Maximum 1000 iterations to prevent accidental infinite loops in the
+/// kernel debug shell (which cannot be interrupted except by reboot).
+fn execute_while_loop(condition: &str, body: &[String]) {
+    const MAX_ITERATIONS: u32 = 1000;
+
+    for _ in 0..MAX_ITERATIONS {
+        // Evaluate the condition.
+        execute(condition);
+        if last_exit() != 0 {
+            // Condition failed — exit the loop.
+            break;
+        }
+
+        // Execute the body lines.
+        for line in body {
+            execute(line);
+        }
     }
 }
 
@@ -1027,11 +1141,11 @@ const COMMANDS: &[&str] = &[
     "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
     "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
     "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
-    "elif", "else", "fi", "if",
+    "do", "done", "elif", "else", "fi", "if",
     "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
     "then", "time", "touch", "tree", "true", "truncate", "type", "umount",
     "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
-    "wc", "wget", "whoami", "write", "xattr", "xxd",
+    "wc", "wget", "while", "whoami", "write", "xattr", "xxd",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -1697,6 +1811,7 @@ fn cmd_help() {
     crate::console_println!("  $$               Literal dollar sign");
     crate::console_println!("Control flow:");
     crate::console_println!("  if COND; then ... elif COND; then ... else ... fi");
+    crate::console_println!("  while COND; do ... done  (max 1000 iterations)");
     crate::console_println!("  test EXPR / [ EXPR ]  Conditional expressions");
     crate::console_println!("  reboot    Reboot the system");
 }

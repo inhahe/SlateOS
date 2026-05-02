@@ -1611,6 +1611,53 @@ impl Vfs {
         Ok(())
     }
 
+    /// Create a directory and all missing parent directories.
+    ///
+    /// Like `mkdir -p` — creates each component in the path that doesn't
+    /// exist yet.  Succeeds if the full path already exists as a directory.
+    /// Fails if any component exists but is not a directory.
+    ///
+    /// ## Depth limit
+    ///
+    /// Limited to 64 path components to prevent abuse.
+    pub fn mkdir_all(path: &str) -> KernelResult<()> {
+        validate_path(path)?;
+        let norm = normalize_path(path);
+
+        let components: Vec<&str> = norm.split('/')
+            .filter(|c| !c.is_empty())
+            .collect();
+
+        if components.len() > 64 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let mut built = String::with_capacity(norm.len());
+
+        for comp in &components {
+            built.push('/');
+            built.push_str(comp);
+
+            // Check if this component exists.
+            match Self::stat(&built) {
+                Ok(entry) => {
+                    if entry.entry_type != EntryType::Directory {
+                        // Exists but is not a directory — can't create children.
+                        return Err(KernelError::NotADirectory);
+                    }
+                    // Already a directory — continue to next component.
+                }
+                Err(KernelError::NotFound) => {
+                    // Doesn't exist — create it.
+                    Self::mkdir(&built)?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
+    }
+
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
@@ -2999,6 +3046,36 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         serial_println!("[vfs]     dcache test completed OK");
+    }
+
+    // --- mkdir_all tests ---
+    if has_tmp {
+        serial_println!("[vfs]   Testing mkdir_all (recursive mkdir)...");
+
+        // Create a deep directory tree in one call.
+        let deep_path = "/tmp/_vfs_mkdirall/a/b/c";
+        Vfs::mkdir_all(deep_path)?;
+
+        // Verify all intermediate directories exist.
+        let stat_a = Vfs::stat("/tmp/_vfs_mkdirall")?;
+        assert!(stat_a.entry_type == EntryType::Directory, "mkdirall: root should be dir");
+        let stat_b = Vfs::stat("/tmp/_vfs_mkdirall/a")?;
+        assert!(stat_b.entry_type == EntryType::Directory, "mkdirall: a should be dir");
+        let stat_c = Vfs::stat("/tmp/_vfs_mkdirall/a/b")?;
+        assert!(stat_c.entry_type == EntryType::Directory, "mkdirall: a/b should be dir");
+        let stat_d = Vfs::stat(deep_path)?;
+        assert!(stat_d.entry_type == EntryType::Directory, "mkdirall: a/b/c should be dir");
+
+        // Calling again on existing path should succeed (idempotent).
+        Vfs::mkdir_all(deep_path)?;
+
+        // Cleanup.
+        let _ = Vfs::rmdir("/tmp/_vfs_mkdirall/a/b/c");
+        let _ = Vfs::rmdir("/tmp/_vfs_mkdirall/a/b");
+        let _ = Vfs::rmdir("/tmp/_vfs_mkdirall/a");
+        let _ = Vfs::rmdir("/tmp/_vfs_mkdirall");
+
+        serial_println!("[vfs]     mkdir_all: deep creation + idempotency OK");
     }
 
     // --- Recursive copy/remove tests ---

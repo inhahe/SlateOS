@@ -5050,13 +5050,29 @@ fn cmd_rm(args: &str) {
 
 fn cmd_mkdir(args: &str) {
     if args.is_empty() {
-        crate::console_println!("Usage: mkdir <dirname>");
+        crate::console_println!("Usage: mkdir [-p] <dirname>");
         return;
     }
 
-    let path = resolve_path(args);
+    // Parse -p flag for recursive creation.
+    let (recursive, dir_arg) = if args.starts_with("-p ") {
+        (true, args.get(3..).unwrap_or("").trim())
+    } else if args == "-p" {
+        crate::console_println!("Usage: mkdir [-p] <dirname>");
+        return;
+    } else {
+        (false, args)
+    };
 
-    match crate::fs::Vfs::mkdir(&path) {
+    let path = resolve_path(dir_arg);
+
+    let result = if recursive {
+        crate::fs::Vfs::mkdir_all(&path)
+    } else {
+        crate::fs::Vfs::mkdir(&path)
+    };
+
+    match result {
         Ok(()) => {
             crate::console_println!("Created directory {}", path);
         }

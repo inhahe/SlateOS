@@ -350,6 +350,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ext4 directory block checksums: per-block CRC32C validation in read_dir_entries and htree leaf scan, Ext4DirEntryTail struct, stamp_dirent_checksum for write paths
   - [x] ext4 extent block checksums: CRC32C validation of non-root extent tree blocks via Ext4ExtentTail, inode_csum_seed(), threaded inode_nr through all read/free paths, validation on all 5 recursive extent tree walkers
   - [x] ext4 write-path directory checksums: stamp_dir_data_checksums on add/remove/rename, init_dirent_tail for new blocks, find_dir_insert_point skips dirent tail to prevent checksum corruption
+  - [x] Kshell here-documents: <<DELIM (collect+expand), <<-DELIM (tab-strip), <<'DELIM' (literal), suffix pipes/redirects, continuation prompt, source-aware, history-excluded
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

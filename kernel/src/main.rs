@@ -559,6 +559,22 @@ extern "C" fn kmain() -> ! {
                 }
             }
 
+            // Probe for ISO 9660 filesystems (CD-ROM images).
+            // In QEMU, an ISO image can be attached as a virtio-blk device.
+            for iso_dev in &["vdb", "vdc", "vdd"] {
+                if fs::iso9660::probe(iso_dev) {
+                    match fs::iso9660::mount(iso_dev, "/cdrom") {
+                        Ok(()) => break,
+                        Err(e) => {
+                            serial_println!(
+                                "[boot] WARNING: ISO 9660 detected on {} but mount failed: {:?}",
+                                iso_dev, e
+                            );
+                        }
+                    }
+                }
+            }
+
             // Initialize the change journal (persistent change tracking).
             // Must happen before self-tests so all VFS operations are captured.
             fs::journal::init();

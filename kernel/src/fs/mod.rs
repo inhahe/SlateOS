@@ -30,6 +30,7 @@ pub mod devfs;
 pub mod ext4;
 pub mod fat;
 pub mod handle;
+pub mod iso9660;
 pub mod journal;
 pub mod memfs;
 pub mod notify;

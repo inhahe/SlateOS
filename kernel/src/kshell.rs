@@ -855,10 +855,10 @@ const COMMANDS: &[&str] = &[
     "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
     "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
     "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
-    "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "time",
-    "touch", "tree", "true", "truncate", "type", "umount", "unalias",
-    "uniq", "unmount", "unset", "uptime", "ver", "version", "wc", "wget",
-    "whoami", "write", "xattr", "xxd",
+    "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "test",
+    "time", "touch", "tree", "true", "truncate", "type", "umount",
+    "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
+    "wc", "wget", "whoami", "write", "xattr", "xxd",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -1402,6 +1402,7 @@ fn dispatch(line: &str) {
         "sleep" => cmd_sleep(args),
         "true" => { set_exit(0); }
         "false" => { set_exit(1); }
+        "test" | "[" => cmd_test(args),
         "printenv" | "env" => cmd_printenv(),
         _ => {
             crate::console_println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
@@ -1793,6 +1794,7 @@ fn cmd_ls(args: &str) {
         }
         Err(e) => {
             crate::console_println!("ls: {}: {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -1826,6 +1828,7 @@ fn cmd_cat(args: &str) {
         }
         Err(e) => {
             crate::console_println!("cat: {}: {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -1855,6 +1858,7 @@ fn cmd_write(args: &str) {
         }
         Err(e) => {
             crate::console_println!("write: {}: {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -1884,6 +1888,7 @@ fn cmd_rm(args: &str) {
             }
             Err(e) => {
                 crate::console_println!("rm: {}: {:?}", path, e);
+                set_exit(1);
             }
         }
     } else {
@@ -1893,6 +1898,7 @@ fn cmd_rm(args: &str) {
             }
             Err(e) => {
                 crate::console_println!("rm: {}: {:?}", path, e);
+                set_exit(1);
             }
         }
     }
@@ -1912,6 +1918,7 @@ fn cmd_mkdir(args: &str) {
         }
         Err(e) => {
             crate::console_println!("mkdir: {}: {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -1930,6 +1937,7 @@ fn cmd_rmdir(args: &str) {
         }
         Err(e) => {
             crate::console_println!("rmdir: {}: {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -1981,6 +1989,7 @@ fn cmd_stat(args: &str) {
         }
         Err(e) => {
             crate::console_println!("stat: {}: {:?}", path, e);
+            set_exit(1);
         }
     }
 }
@@ -2005,6 +2014,7 @@ fn cmd_ln(args: &str) {
         }
         Err(e) => {
             crate::console_println!("ln: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -2112,6 +2122,7 @@ fn cmd_cp(args: &str) {
             }
             Err(e) => {
                 crate::console_println!("cp: {:?}", e);
+                set_exit(1);
             }
         }
     } else {
@@ -2121,6 +2132,7 @@ fn cmd_cp(args: &str) {
             }
             Err(e) => {
                 crate::console_println!("cp: {:?}", e);
+                set_exit(1);
             }
         }
     }
@@ -2146,6 +2158,7 @@ fn cmd_mv(args: &str) {
         }
         Err(e) => {
             crate::console_println!("mv: {:?}", e);
+            set_exit(1);
         }
     }
 }
@@ -3842,7 +3855,127 @@ fn cmd_sleep(args: &str) {
     }
 }
 
-/// Show kernel tunable parameters (sysctl values).
+/// Conditional expression evaluation (like POSIX `test` / `[`).
+///
+/// Supports:
+///   File tests:    -e FILE, -f FILE, -d FILE, -s FILE (exists, file, dir, non-empty)
+///   String tests:  -z STR (empty), -n STR (non-empty), STR = STR, STR != STR
+///   Integer tests: N -eq N, N -ne N, N -lt N, N -le N, N -gt N, N -ge N
+///   Logical:       ! EXPR (negation)
+///
+/// Sets exit status: 0 (true) or 1 (false).
+fn cmd_test(args: &str) {
+    // Strip trailing `]` if invoked as `[`.
+    let args = if args.ends_with(']') {
+        args.get(..args.len().saturating_sub(1)).unwrap_or("").trim()
+    } else {
+        args
+    };
+
+    if args.is_empty() {
+        // Empty test is false (POSIX behavior).
+        set_exit(1);
+        return;
+    }
+
+    let result = eval_test(args);
+    set_exit(if result { 0 } else { 1 });
+}
+
+/// Evaluate a test expression, returning true or false.
+fn eval_test(args: &str) -> bool {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    if parts.is_empty() {
+        return false;
+    }
+
+    // Negation: `! EXPR`
+    if parts[0] == "!" {
+        let rest = parts.get(1..).unwrap_or(&[]).join(" ");
+        return !eval_test(&rest);
+    }
+
+    // Unary file/string tests.
+    if parts.len() == 2 {
+        let op = parts[0];
+        let operand = parts[1];
+
+        match op {
+            "-e" => {
+                // File exists.
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::stat(&path).is_ok();
+            }
+            "-f" => {
+                // Is regular file.
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::stat(&path)
+                    .map(|m| m.entry_type == crate::fs::EntryType::File)
+                    .unwrap_or(false);
+            }
+            "-d" => {
+                // Is directory.
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::stat(&path)
+                    .map(|m| m.entry_type == crate::fs::EntryType::Directory)
+                    .unwrap_or(false);
+            }
+            "-s" => {
+                // File exists and is non-empty.
+                let path = resolve_path(operand);
+                return crate::fs::Vfs::stat(&path)
+                    .map(|m| m.size > 0)
+                    .unwrap_or(false);
+            }
+            "-z" => {
+                // String is empty.
+                return operand.is_empty();
+            }
+            "-n" => {
+                // String is non-empty.
+                return !operand.is_empty();
+            }
+            _ => {}
+        }
+    }
+
+    // Binary operators: STR = STR, STR != STR, N -eq N, etc.
+    if parts.len() == 3 {
+        let left = parts[0];
+        let op = parts[1];
+        let right = parts[2];
+
+        match op {
+            "=" | "==" => return left == right,
+            "!=" => return left != right,
+            "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+                let l = left.parse::<i64>().unwrap_or(0);
+                let r = right.parse::<i64>().unwrap_or(0);
+                return match op {
+                    "-eq" => l == r,
+                    "-ne" => l != r,
+                    "-lt" => l < r,
+                    "-le" => l <= r,
+                    "-gt" => l > r,
+                    "-ge" => l >= r,
+                    _ => false,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    // Single argument: true if non-empty string.
+    if parts.len() == 1 {
+        return !parts[0].is_empty();
+    }
+
+    // Unrecognized expression — treat as false.
+    false
+}
+
+/// Show environment variables.
 fn cmd_printenv() {
     let vars = ENV_VARS.lock();
     if vars.is_empty() {
@@ -4328,11 +4461,13 @@ fn cmd_cd(args: &str) {
         Ok(meta) => {
             if meta.entry_type != crate::fs::EntryType::Directory {
                 crate::console_println!("cd: not a directory: {}", target);
+                set_exit(1);
                 return;
             }
         }
         Err(e) => {
             crate::console_println!("cd: {}: {:?}", target, e);
+            set_exit(1);
             return;
         }
     }

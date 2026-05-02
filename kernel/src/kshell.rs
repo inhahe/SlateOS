@@ -22,6 +22,7 @@
 //! between interrupts).  This keeps the idle loop power-efficient while
 //! still processing input promptly when keys arrive.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -142,6 +143,186 @@ fn resolve_path(path: &str) -> String {
         }
         result
     }
+}
+
+// ---------------------------------------------------------------------------
+// Environment variables
+// ---------------------------------------------------------------------------
+
+/// Shell environment variables, accessible via `$VAR` or `${VAR}` syntax.
+///
+/// Set with `export NAME=VALUE`, removed with `unset NAME`, listed with
+/// `printenv` or `env`.  Some built-in variables are populated at init
+/// (`PWD`, `SHELL`, `HOME`).
+static ENV_VARS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// Get an environment variable's value, or `None` if not set.
+fn env_get(name: &str) -> Option<String> {
+    ENV_VARS.lock().get(name).cloned()
+}
+
+/// Set an environment variable.
+fn env_set(name: &str, value: &str) {
+    ENV_VARS.lock().insert(String::from(name), String::from(value));
+}
+
+/// Remove an environment variable.  Returns true if it existed.
+fn env_remove(name: &str) -> bool {
+    ENV_VARS.lock().remove(name).is_some()
+}
+
+/// Expand `$VAR` and `${VAR}` references in a string.
+///
+/// - `$NAME` expands the longest run of alphanumeric/underscore chars.
+/// - `${NAME}` expands the text between braces.
+/// - `$$` produces a literal `$`.
+/// - `$?` expands to the last exit status (always "0" for now).
+/// - Unknown variables expand to empty string.
+/// - Single-quoted strings (`'...'`) are not expanded.
+fn expand_vars(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0;
+    let mut in_single_quote = false;
+
+    while i < len {
+        let b = bytes[i];
+
+        if b == b'\'' && !in_single_quote {
+            // Enter single-quoted section (no expansion).
+            in_single_quote = true;
+            result.push('\'');
+            i = i.saturating_add(1);
+            continue;
+        }
+        if b == b'\'' && in_single_quote {
+            in_single_quote = false;
+            result.push('\'');
+            i = i.saturating_add(1);
+            continue;
+        }
+        if in_single_quote {
+            result.push(b as char);
+            i = i.saturating_add(1);
+            continue;
+        }
+
+        if b == b'$' {
+            i = i.saturating_add(1);
+            if i >= len {
+                // Trailing `$` — emit literally.
+                result.push('$');
+                break;
+            }
+            let next = bytes[i];
+
+            if next == b'$' {
+                // `$$` → literal `$`.
+                result.push('$');
+                i = i.saturating_add(1);
+            } else if next == b'?' {
+                // `$?` → last exit status (stub: always 0).
+                result.push('0');
+                i = i.saturating_add(1);
+            } else if next == b'{' {
+                // `${NAME}` form.
+                i = i.saturating_add(1); // skip `{`
+                let start = i;
+                while i < len && bytes[i] != b'}' {
+                    i = i.saturating_add(1);
+                }
+                if let Some(name_bytes) = bytes.get(start..i) {
+                    if let Ok(name) = core::str::from_utf8(name_bytes) {
+                        if let Some(val) = env_get(name) {
+                            result.push_str(&val);
+                        }
+                    }
+                }
+                if i < len && bytes[i] == b'}' {
+                    i = i.saturating_add(1); // skip `}`
+                }
+            } else if next.is_ascii_alphabetic() || next == b'_' {
+                // `$NAME` form — longest alphanumeric/underscore run.
+                let start = i;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i = i.saturating_add(1);
+                }
+                if let Some(name_bytes) = bytes.get(start..i) {
+                    if let Ok(name) = core::str::from_utf8(name_bytes) {
+                        if let Some(val) = env_get(name) {
+                            result.push_str(&val);
+                        }
+                    }
+                }
+            } else {
+                // `$` followed by something else — emit literally.
+                result.push('$');
+                result.push(next as char);
+                i = i.saturating_add(1);
+            }
+        } else {
+            result.push(b as char);
+            i = i.saturating_add(1);
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Aliases
+// ---------------------------------------------------------------------------
+
+/// Shell command aliases.  When the first word of a command matches an alias
+/// name, it is replaced with the alias value before dispatch.
+///
+/// Set with `alias name=value`, removed with `unalias name`, listed with
+/// `alias` (no arguments).
+static ALIASES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// Look up an alias.  Returns the expansion or `None`.
+fn alias_get(name: &str) -> Option<String> {
+    ALIASES.lock().get(name).cloned()
+}
+
+/// Set an alias.
+fn alias_set(name: &str, value: &str) {
+    ALIASES.lock().insert(String::from(name), String::from(value));
+}
+
+/// Remove an alias.  Returns true if it existed.
+fn alias_remove(name: &str) -> bool {
+    ALIASES.lock().remove(name).is_some()
+}
+
+/// Expand aliases in a command line.
+///
+/// Only the first word is checked.  To prevent infinite recursion, a
+/// maximum of 16 expansions is performed per line.
+fn expand_aliases(line: &str) -> String {
+    let mut current = String::from(line);
+    let mut seen = Vec::new();
+
+    for _ in 0..16u8 {
+        let first_word_end = current.find(' ').unwrap_or(current.len());
+        let first_word = &current[..first_word_end];
+
+        // Stop if we've already expanded this alias (prevent loops).
+        if seen.iter().any(|s: &String| s == first_word) {
+            break;
+        }
+
+        if let Some(expansion) = alias_get(first_word) {
+            seen.push(String::from(first_word));
+            let rest = current.get(first_word_end..).unwrap_or("");
+            current = alloc::format!("{}{}", expansion, rest);
+        } else {
+            break;
+        }
+    }
+
+    current
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +456,13 @@ pub fn run() -> ! {
             cwd.push('/');
         }
     }
+
+    // Initialize default environment variables.
+    env_set("PWD", &get_cwd());
+    env_set("HOME", "/");
+    env_set("SHELL", "kshell");
+    env_set("USER", "root");
+    env_set("PATH", "/bin:/usr/bin");
 
     let mut line_buf = String::with_capacity(MAX_LINE);
     let mut history = History::new();
@@ -636,19 +824,20 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "append", "basename", "blkdev", "blkinfo", "blkread", "cat", "cd", "chmod",
-    "chown", "clear", "cls", "cmp", "copy", "cp", "date", "dd", "del",
-    "df", "dhcp", "diff", "dir", "dirname", "dns", "du", "echo", "env",
-    "exec", "fallocate", "false", "find", "free", "glob", "grep", "hash",
-    "head", "help", "hexdump", "hostname", "http", "id", "ifconfig",
-    "irq", "ln", "link", "ls", "lsblk", "lsof", "lsp", "mem", "meminfo",
-    "mkdir", "mkelf", "mklink", "mktemp", "mount", "move", "mv", "net",
-    "nl", "nslookup", "pci", "ping", "printenv", "ps", "pwd", "readlink",
-    "realpath", "reboot", "ren", "rev", "rm", "rmdir", "run", "seq",
-    "sha256", "sleep", "sort", "source", "stat", "symlink", "sync",
-    "sysctl", "tail", "tasks", "tee", "time", "touch", "tree", "true",
-    "truncate", "type", "umount", "uniq", "unmount", "uptime", "ver",
-    "version", "wc", "wget", "whoami", "write", "xattr", "xxd",
+    "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cat",
+    "cd", "chmod", "chown", "clear", "cls", "cmp", "copy", "cp", "date",
+    "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dns", "du",
+    "echo", "env", "exec", "export", "fallocate", "false", "find", "free",
+    "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
+    "id", "ifconfig", "irq", "ln", "link", "ls", "lsblk", "lsof", "lsp",
+    "mem", "meminfo", "mkdir", "mkelf", "mklink", "mktemp", "mount",
+    "move", "mv", "net", "nl", "nslookup", "pci", "ping", "printenv",
+    "ps", "pwd", "readlink", "realpath", "reboot", "ren", "rev", "rm",
+    "rmdir", "run", "seq", "set", "sha256", "sleep", "sort", "source",
+    "stat", "symlink", "sync", "sysctl", "tail", "tasks", "tee", "time",
+    "touch", "tree", "true", "truncate", "type", "umount", "unalias",
+    "uniq", "unmount", "unset", "uptime", "ver", "version", "wc", "wget",
+    "whoami", "write", "xattr", "xxd",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -778,6 +967,30 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
 /// feeds it as virtual input to the right side (for commands that
 /// accept piped input: sort, grep, uniq, head, tail, wc, cat).
 fn execute(line: &str) {
+    // Phase 1: Expand environment variables ($VAR, ${VAR}).
+    let expanded = expand_vars(line);
+    let line = expanded.trim();
+
+    // Phase 2: Expand aliases (first word only).
+    let aliased = expand_aliases(line);
+    let line = aliased.trim();
+
+    // Phase 3: Check for `export`/`unset`/`alias`/`unalias` before
+    // pipe/redirect parsing — these are variable-setting commands that
+    // should not be piped.
+    {
+        let mut parts = line.splitn(2, ' ');
+        let cmd = parts.next().unwrap_or("");
+        let args = parts.next().unwrap_or("").trim();
+        match cmd {
+            "export" | "set" => { cmd_export(args); return; }
+            "unset" => { cmd_unset(args); return; }
+            "alias" => { cmd_alias(args); return; }
+            "unalias" => { cmd_unalias(args); return; }
+            _ => {}
+        }
+    }
+
     // Check for pipe first (highest-level operator).
     if let Some(pipe_pos) = find_pipe(line) {
         let left = line.get(..pipe_pos).unwrap_or("").trim();
@@ -1119,12 +1332,19 @@ fn cmd_help() {
     crate::console_println!("  nl [F]    Number lines of file (or piped input)");
     crate::console_println!("  rev [F]   Reverse order of lines in file (or piped)");
     crate::console_println!("  sleep N   Pause for N milliseconds");
-    crate::console_println!("  printenv  Show sysctl kernel parameters");
+    crate::console_println!("  printenv  Show environment variables");
+    crate::console_println!("  export N=V Set environment variable");
+    crate::console_println!("  unset N   Remove environment variable");
+    crate::console_println!("  alias N=V Define command alias");
+    crate::console_println!("  unalias N Remove command alias");
     crate::console_println!("");
     crate::console_println!("I/O redirection:");
     crate::console_println!("  cmd > file   Write output to file (overwrite)");
     crate::console_println!("  cmd >> file  Append output to file");
     crate::console_println!("  cmd1 | cmd2  Pipe output of cmd1 into cmd2");
+    crate::console_println!("Variable expansion:");
+    crate::console_println!("  $NAME / ${{NAME}}  Expand environment variable");
+    crate::console_println!("  $$               Literal dollar sign");
     crate::console_println!("  reboot    Reboot the system");
 }
 
@@ -3465,14 +3685,156 @@ fn cmd_sleep(args: &str) {
 
 /// Show kernel tunable parameters (sysctl values).
 fn cmd_printenv() {
-    let params = crate::sysctl::list_all();
-    if params.is_empty() {
-        shell_println!("(no parameters)");
+    let vars = ENV_VARS.lock();
+    if vars.is_empty() {
+        shell_println!("(no environment variables set)");
+    } else {
+        for (k, v) in vars.iter() {
+            shell_println!("{}={}", k, v);
+        }
+    }
+}
+
+/// Set an environment variable.
+///
+/// Usage: `export NAME=VALUE` or `export NAME VALUE`.
+/// With no arguments, lists all variables (same as `printenv`).
+fn cmd_export(args: &str) {
+    if args.is_empty() {
+        // List all variables.
+        cmd_printenv();
         return;
     }
-    for p in &params {
-        shell_println!("{}={} (default={}, range={}..{})", p.name, p.value, p.default, p.min, p.max);
+
+    // Try `NAME=VALUE` form first.
+    if let Some(eq_pos) = args.find('=') {
+        let name = args.get(..eq_pos).unwrap_or("").trim();
+        let value = args.get(eq_pos.saturating_add(1)..).unwrap_or("").trim();
+        if name.is_empty() {
+            crate::console_println!("export: invalid variable name");
+            return;
+        }
+        env_set(name, value);
+    } else {
+        // Try `NAME VALUE` form.
+        let mut parts = args.splitn(2, ' ');
+        let name = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if name.is_empty() {
+            crate::console_println!("export: invalid variable name");
+            return;
+        }
+        env_set(name, value);
     }
+
+    // Keep PWD in sync.
+    sync_env_pwd();
+}
+
+/// Remove an environment variable.
+///
+/// Usage: `unset NAME [NAME ...]`
+fn cmd_unset(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: unset NAME [NAME ...]");
+        return;
+    }
+    for name in args.split_whitespace() {
+        if !env_remove(name) {
+            crate::console_println!("unset: '{}': not set", name);
+        }
+    }
+}
+
+/// Define or list shell aliases.
+///
+/// Usage:
+///   `alias`            — list all aliases
+///   `alias name=value` — define alias
+///   `alias name value` — define alias (alternative form)
+fn cmd_alias(args: &str) {
+    if args.is_empty() {
+        let aliases = ALIASES.lock();
+        if aliases.is_empty() {
+            crate::console_println!("(no aliases defined)");
+        } else {
+            for (k, v) in aliases.iter() {
+                crate::console_println!("alias {}='{}'", k, v);
+            }
+        }
+        return;
+    }
+
+    // Try `name=value` form first.
+    if let Some(eq_pos) = args.find('=') {
+        let name = args.get(..eq_pos).unwrap_or("").trim();
+        let value = args.get(eq_pos.saturating_add(1)..).unwrap_or("");
+        // Strip surrounding quotes if present.
+        let value = value.trim();
+        let value = strip_quotes(value);
+        if name.is_empty() {
+            crate::console_println!("alias: invalid alias name");
+            return;
+        }
+        alias_set(name, value);
+    } else {
+        // `alias name value` form.
+        let mut parts = args.splitn(2, ' ');
+        let name = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if name.is_empty() {
+            crate::console_println!("alias: invalid alias name");
+            return;
+        }
+        if value.is_empty() {
+            // Show this single alias.
+            if let Some(v) = alias_get(name) {
+                crate::console_println!("alias {}='{}'", name, v);
+            } else {
+                crate::console_println!("alias: '{}': not found", name);
+            }
+        } else {
+            alias_set(name, value);
+        }
+    }
+}
+
+/// Remove one or more aliases.
+///
+/// Usage: `unalias NAME [NAME ...]` or `unalias -a` (remove all).
+fn cmd_unalias(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: unalias [-a] NAME [NAME ...]");
+        return;
+    }
+    if args.trim() == "-a" {
+        ALIASES.lock().clear();
+        return;
+    }
+    for name in args.split_whitespace() {
+        if !alias_remove(name) {
+            crate::console_println!("unalias: '{}': not found", name);
+        }
+    }
+}
+
+/// Strip matching leading/trailing quotes (`'` or `"`) from a string.
+fn strip_quotes(s: &str) -> &str {
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        let first = bytes[0];
+        let last = bytes[s.len().saturating_sub(1)];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return s.get(1..s.len().saturating_sub(1)).unwrap_or(s);
+        }
+    }
+    s
+}
+
+/// Keep the `PWD` environment variable in sync with the shell's CWD.
+fn sync_env_pwd() {
+    let cwd = get_cwd();
+    env_set("PWD", &cwd);
 }
 
 /// `tee FILE TEXT` — write TEXT to FILE and also display it.
@@ -3817,9 +4179,13 @@ fn cmd_cd(args: &str) {
     }
 
     // Update the working directory.
-    let mut cwd = CWD.lock();
-    cwd.clear();
-    cwd.push_str(&target);
+    {
+        let mut cwd = CWD.lock();
+        cwd.clear();
+        cwd.push_str(&target);
+    }
+    // Keep $PWD in sync.
+    sync_env_pwd();
 }
 
 /// `id` / `whoami` — show the current task's identity.

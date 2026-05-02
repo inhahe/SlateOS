@@ -19,6 +19,21 @@
 
 ## Cross-Zone Requests
 
+- drivers: virtio-blk driver only discovers the FIRST PCI device
+  (pci::find_device returns first match).  QEMU can present multiple
+  virtio-blk devices (disk.img=vda, ext4_test.img=vdb, swap.img=vdc)
+  but only vda is registered.  Need pci::find_all_devices() or a
+  scan loop so all virtio-blk devices become available.  Blocking
+  ext4 boot-time self-tests (ext4_test.img at build/ext4_test.img).
+
+- kernel-core: CRC32C self-test fails for 32-zero-byte input.
+  Result 0x8A9136AA is byte-swapped from expected 0xAA36918A.
+  Consistent but wrong — our ext4 checksums are self-compatible
+  but incompatible with Linux.  Affects all ext4 metadata checksums
+  (superblock, group descriptors, inodes, dir entries, extent blocks).
+  Combined with the now-fixed journal byte order, this is the remaining
+  barrier to full Linux ext4 image compatibility.
+
 - kernel-ipc: Wire SYS_CLOCK_MONOTONIC (syscall/handlers.rs) to use
   hpet::elapsed_ns() when HPET is available, falling back to the APIC tick
   counter if not.  The HPET gives 10 ns resolution vs 10 ms from the APIC

@@ -436,6 +436,167 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     hard link test files cleaned up OK");
     }
 
+    // --- Fallocate tests ---
+    serial_println!("[ext4]   Testing fallocate...");
+    {
+        let fa_path = if root == "/" {
+            alloc::string::String::from("/_ext4_fallocate_test")
+        } else {
+            format!("{}/_ext4_fallocate_test", root)
+        };
+
+        // 1. Fallocate on a new empty file.
+        crate::fs::Vfs::write_file(&fa_path, b"")?;
+        crate::fs::Vfs::fallocate(&fa_path, 32768)?; // 32 KiB
+        // File size should still be 0 (fallocate doesn't change size).
+        let stat = crate::fs::Vfs::stat(&fa_path)?;
+        if stat.size != 0 {
+            serial_println!("[ext4]   FAIL: fallocate on empty file changed size to {}", stat.size);
+            let _ = crate::fs::Vfs::remove(&fa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     fallocate empty file (32K): size=0 OK");
+
+        // Reading should return zeros (UNWRITTEN extent).
+        // write some data, verify it works.
+        crate::fs::Vfs::write_file(&fa_path, b"after fallocate")?;
+        let data = crate::fs::Vfs::read_file(&fa_path)?;
+        if data != b"after fallocate" {
+            serial_println!("[ext4]   FAIL: read after write to fallocated file returned wrong data");
+            let _ = crate::fs::Vfs::remove(&fa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     write + read after fallocate: OK");
+
+        // 2. Fallocate on a non-empty file (extend pre-allocation).
+        crate::fs::Vfs::fallocate(&fa_path, 65536)?; // 64 KiB
+        let data2 = crate::fs::Vfs::read_file(&fa_path)?;
+        if data2 != b"after fallocate" {
+            serial_println!("[ext4]   FAIL: fallocate on non-empty file corrupted data");
+            let _ = crate::fs::Vfs::remove(&fa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     fallocate non-empty file (64K): data preserved OK");
+
+        crate::fs::Vfs::remove(&fa_path)?;
+        serial_println!("[ext4]     fallocate test file cleaned up OK");
+    }
+
+    // --- Write-at tests ---
+    serial_println!("[ext4]   Testing write_at paths...");
+    {
+        let wa_path = if root == "/" {
+            alloc::string::String::from("/_ext4_write_at_test")
+        } else {
+            format!("{}/_ext4_write_at_test", root)
+        };
+
+        // Create a file with known content.
+        let initial = b"ABCDEFGHIJKLMNOP";
+        crate::fs::Vfs::write_file(&wa_path, initial)?;
+
+        // 1. write_at within file (overwrite in place).
+        crate::fs::Vfs::write_at(&wa_path, 4, b"xxxx")?;
+        let data = crate::fs::Vfs::read_file(&wa_path)?;
+        if data != b"ABCDxxxxIJKLMNOP" {
+            serial_println!(
+                "[ext4]   FAIL: write_at in-place: got {:?}",
+                core::str::from_utf8(&data).unwrap_or("?")
+            );
+            let _ = crate::fs::Vfs::remove(&wa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     write_at in-place: OK");
+
+        // 2. write_at at EOF (append via extend_file_data).
+        let file_size = crate::fs::Vfs::stat(&wa_path)?.size;
+        crate::fs::Vfs::write_at(&wa_path, file_size, b"APPEND")?;
+        let data = crate::fs::Vfs::read_file(&wa_path)?;
+        if data != b"ABCDxxxxIJKLMNOPAPPEND" {
+            serial_println!(
+                "[ext4]   FAIL: write_at at EOF: got {:?}",
+                core::str::from_utf8(&data).unwrap_or("?")
+            );
+            let _ = crate::fs::Vfs::remove(&wa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     write_at at EOF (append): OK");
+
+        // 3. write_at crossing EOF (mixed: overwrite tail + append new).
+        let file_size = crate::fs::Vfs::stat(&wa_path)?.size;
+        // Write starting 4 bytes before EOF, extending 4 bytes past.
+        let cross_offset = file_size.saturating_sub(4);
+        crate::fs::Vfs::write_at(&wa_path, cross_offset, b"CROSSEOF")?;
+        let data = crate::fs::Vfs::read_file(&wa_path)?;
+        // Original: ABCDxxxxIJKLMNOPAPPEND (22 bytes)
+        // cross_offset = 18, write "CROSSEOF" (8 bytes)
+        // Result: ABCDxxxxIJKLMNOPAPCROSSEOF (26 bytes)
+        let expected_len = cross_offset as usize + 8;
+        if data.len() != expected_len {
+            serial_println!(
+                "[ext4]   FAIL: write_at crossing EOF: len={}, expected {}",
+                data.len(), expected_len
+            );
+            let _ = crate::fs::Vfs::remove(&wa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        // Verify the overwritten portion.
+        if data.get(cross_offset as usize..cross_offset as usize + 8)
+            != Some(b"CROSSEOF".as_slice())
+        {
+            serial_println!("[ext4]   FAIL: write_at crossing EOF: data mismatch at boundary");
+            let _ = crate::fs::Vfs::remove(&wa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        // Verify unchanged prefix.
+        if data.get(..cross_offset as usize)
+            != Some(&b"ABCDxxxxIJKLMNOPAP"[..cross_offset as usize])
+        {
+            serial_println!("[ext4]   FAIL: write_at crossing EOF: prefix corrupted");
+            let _ = crate::fs::Vfs::remove(&wa_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     write_at crossing EOF: OK ({} bytes)", data.len());
+
+        crate::fs::Vfs::remove(&wa_path)?;
+        serial_println!("[ext4]     write_at test file cleaned up OK");
+    }
+
+    // --- Truncate tests ---
+    serial_println!("[ext4]   Testing truncate...");
+    {
+        let tr_path = if root == "/" {
+            alloc::string::String::from("/_ext4_truncate_test")
+        } else {
+            format!("{}/_ext4_truncate_test", root)
+        };
+
+        crate::fs::Vfs::write_file(&tr_path, b"0123456789ABCDEF")?;
+
+        // Truncate to shorter.
+        crate::fs::Vfs::truncate(&tr_path, 8)?;
+        let data = crate::fs::Vfs::read_file(&tr_path)?;
+        if data != b"01234567" {
+            serial_println!("[ext4]   FAIL: truncate to 8 bytes: got {:?}", data);
+            let _ = crate::fs::Vfs::remove(&tr_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     truncate shrink (16→8): OK");
+
+        // Truncate to zero.
+        crate::fs::Vfs::truncate(&tr_path, 0)?;
+        let data = crate::fs::Vfs::read_file(&tr_path)?;
+        if !data.is_empty() {
+            serial_println!("[ext4]   FAIL: truncate to 0: {} bytes remain", data.len());
+            let _ = crate::fs::Vfs::remove(&tr_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     truncate to zero: OK");
+
+        crate::fs::Vfs::remove(&tr_path)?;
+        serial_println!("[ext4]     truncate test file cleaned up OK");
+    }
+
     // --- Htree hash function tests ---
     htree::self_test()?;
 

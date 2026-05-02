@@ -55,6 +55,15 @@
 - fs: (RESOLVED) Root mount now uses FAT on virtio-blk device.
   The FAT driver auto-mounts at "/" on boot, init deploys binaries fine.
 
+## Known Limitations (fs zone)
+
+- ext4 parse_dir_entries and volume name parsing use from_utf8_lossy(),
+  which violates CLAUDE.md ("silent data corruption").  Paths should be
+  treated as opaque bytes, not forced to UTF-8.  Fixing requires changing
+  the VFS DirEntry name type from String to Vec<u8> or OsStr, then
+  propagating through all VFS consumers.  Deferred until the VFS can be
+  refactored — affects driver.rs:3049 and superblock.rs:286.
+
 ## Judgment Calls
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from

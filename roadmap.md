@@ -432,6 +432,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell `sed` command: stream editor with s/old/new/[g] substitution, /pattern/d delete, /pattern/p print, -i in-place, -n suppress, pipe input support
   - [x] Tar archive round-trip self-test: build archive with tar_build_header, write to disk, read back, parse with tar_parse_header, verify entry count
   - [x] Kshell `awk` command: pattern-action text processing with field splitting ($1..$N, $NF), -F separator, /pattern/ matching, BEGIN/END blocks, NR/NF variables, print expressions, pipe input
+  - [x] ext4 POSIX rename fix: replace existing destination files instead of returning AlreadyExists; properly frees inode data/xattr/number when link count reaches zero
+  - [x] FAT POSIX rename fix: replace existing destination files; frees cluster chain and LFN entries of overwritten file
+  - [x] Notify event coalescing: duplicate events (same type + path) suppressed in watch queue; self-test for coalescing and overflow behavior
+  - [x] Journal O(1) ring buffer: replaced Vec with VecDeque for O(1) oldest-entry eviction instead of O(n) Vec::remove(0)
+  - [x] Kshell `journal` command: view filesystem change journal entries with -n N, --all, --since SEQ, --stats, --flush
+  - [x] Kshell `file` magic bytes detection: reads first 512 bytes and matches 30+ binary signatures (ELF, PE, PNG, JPEG, PDF, ZIP, gzip, tar, WASM, SQLite, audio/video formats, shebang scripts, Unicode BOMs); falls back to text-vs-binary heuristic
+  - [x] DEFLATE/gzip decompression (fs::compress): RFC 1951 inflate (stored, fixed Huffman, dynamic Huffman blocks), RFC 1952 gzip wrapper with CRC-32 ISO verification
+  - [x] Kshell `gunzip`/`gzip` command: decompress .gz files with -t test, -l list sizes, -o explicit output; auto-strips .gz extension
+  - [x] Tar .tar.gz transparency: auto-detects gzip magic bytes and decompresses before extracting/listing
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

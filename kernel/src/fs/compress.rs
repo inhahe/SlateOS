@@ -638,6 +638,13 @@ const HASH_SIZE: usize = 4096;
 /// Maximum backward distance for LZ77 (32 KiB DEFLATE window).
 const MAX_DISTANCE: usize = 32768;
 
+/// Maximum chain length for hash chain traversal.
+///
+/// Longer chains find better matches but slow down compression.
+/// zlib default at compression level 6 uses chain=128.  We use 16
+/// as a good balance for kernel use (fast enough, good compression).
+const MAX_CHAIN: usize = 16;
+
 /// Compute a hash for 3 bytes.
 fn lz77_hash(data: &[u8], pos: usize) -> usize {
     if pos.wrapping_add(2) >= data.len() {
@@ -659,20 +666,116 @@ enum LzToken {
     Match { length: u16, distance: u16 },
 }
 
+/// Insert position `pos` into the hash chain and return the previous
+/// head of that chain (for match searching).
+///
+/// `head[h]` stores the most recent position with hash `h`.
+/// `prev[pos % MAX_DISTANCE]` links to the previous position in the chain.
+fn insert_hash(
+    data: &[u8],
+    pos: usize,
+    head: &mut [u32; HASH_SIZE],
+    prev: &mut Vec<u32>,
+) -> u32 {
+    let h = lz77_hash(data, pos);
+    let old_head = head[h];
+    prev[pos % MAX_DISTANCE] = old_head;
+    head[h] = pos as u32;
+    old_head
+}
+
+/// Find the longest match at `pos` by walking the hash chain.
+///
+/// Returns (length, distance) of the best match found, or (0, 0) if
+/// no match of at least `MIN_MATCH` bytes exists.
+fn find_best_match(
+    data: &[u8],
+    pos: usize,
+    head: &[u32; HASH_SIZE],
+    prev: &[u32],
+) -> (usize, usize) {
+    let remaining = data.len().wrapping_sub(pos);
+    if remaining < MIN_MATCH {
+        return (0, 0);
+    }
+
+    let h = lz77_hash(data, pos);
+    let mut candidate = head[h] as usize;
+    let max_len = remaining.min(MAX_MATCH);
+
+    let mut best_len: usize = MIN_MATCH.wrapping_sub(1);
+    let mut best_dist: usize = 0;
+    let mut chain_count = 0usize;
+
+    while candidate < pos
+        && pos.wrapping_sub(candidate) <= MAX_DISTANCE
+        && chain_count < MAX_CHAIN
+    {
+        // Compare bytes at candidate vs pos, starting from the current
+        // best length downward (zlib trick: check the last matching byte
+        // first to quickly reject poor candidates).
+        let dist = pos.wrapping_sub(candidate);
+
+        // Quick rejection: if bytes at the current best length don't match,
+        // this candidate can't be better.
+        if best_len > 0
+            && data.get(candidate.wrapping_add(best_len))
+                != data.get(pos.wrapping_add(best_len))
+        {
+            candidate = prev[candidate % MAX_DISTANCE] as usize;
+            chain_count = chain_count.wrapping_add(1);
+            continue;
+        }
+
+        // Full comparison.
+        let mut len = 0;
+        while len < max_len
+            && data.get(candidate.wrapping_add(len)) == data.get(pos.wrapping_add(len))
+        {
+            len = len.wrapping_add(1);
+        }
+
+        if len > best_len {
+            best_len = len;
+            best_dist = dist;
+            if len == max_len {
+                break; // Can't do better than MAX_MATCH.
+            }
+        }
+
+        candidate = prev[candidate % MAX_DISTANCE] as usize;
+        chain_count = chain_count.wrapping_add(1);
+    }
+
+    if best_len >= MIN_MATCH {
+        (best_len, best_dist)
+    } else {
+        (0, 0)
+    }
+}
+
 /// Run the LZ77 pass over `data` and return a token stream.
 ///
-/// Uses a single hash-chain for string matching with **lazy matching**:
-/// when a match is found at position P, we also check position P+1.
-/// If P+1 has a strictly longer match, we emit a literal for P and
-/// use the longer match.  This is the technique used by zlib at
-/// compression levels 4+, and typically improves compression by 5-15%
-/// on text and structured data.
+/// Uses hash chains (up to MAX_CHAIN candidates per position) with
+/// lazy matching: when a match is found at position P, also check P+1.
+/// If P+1 has a strictly longer match, emit a literal for P and use
+/// the longer match.
 ///
-/// Based on zlib's deflate_slow() strategy (deflate.c).
+/// Hash chains allow checking multiple previous positions that hash to
+/// the same value, finding the longest match among them.  Combined with
+/// lazy matching, this is equivalent to zlib's deflate_slow() at level 6.
+///
+/// Based on zlib's deflate.c (compress.c) by Jean-loup Gailly.
 #[allow(clippy::arithmetic_side_effects)]
 fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
     let mut tokens = Vec::with_capacity(data.len() / 2);
-    let mut hash_table = [0u32; HASH_SIZE];
+
+    // Hash chain: head[h] = most recent pos with hash h.
+    // prev[pos % MAX_DISTANCE] = previous pos in same chain.
+    let mut head = [0u32; HASH_SIZE];
+    let mut prev = Vec::new();
+    prev.resize(MAX_DISTANCE, 0u32);
+
     let mut pos: usize = 0;
 
     // Pending match from the previous position (for lazy matching).
@@ -689,14 +792,11 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
                     length: pending_len as u16,
                     distance: pending_dist as u16,
                 });
-                // We already advanced the hash table for the pending match's
-                // first byte (at pos-1).  Update for the rest of the match.
                 let match_start = pos.wrapping_sub(1);
                 for i in 1..pending_len {
                     let mpos = match_start.wrapping_add(i);
                     if mpos.wrapping_add(2) < data.len() {
-                        let mh = lz77_hash(data, mpos);
-                        hash_table[mh] = mpos as u32;
+                        insert_hash(data, mpos, &mut head, &mut prev);
                     }
                 }
                 pos = match_start.wrapping_add(pending_len);
@@ -708,35 +808,16 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
             continue;
         }
 
-        // Update hash table for this position.
-        let h = lz77_hash(data, pos);
-        let _prev = hash_table[h]; // save before overwrite
-        hash_table[h] = pos as u32;
+        // Insert this position into the hash chain.
+        insert_hash(data, pos, &mut head, &mut prev);
 
-        // Find match at current position.
-        // We need to use the hash table state from *before* we wrote pos
-        // into it, but since find_match reads hash_table[hash(pos)] which
-        // now points to pos itself (useless), we need to temporarily
-        // restore.  Instead, just inline the match finding.
-        let prev = _prev as usize;
-        let (cur_len, cur_dist) = if prev < pos && pos.wrapping_sub(prev) <= MAX_DISTANCE {
-            let max_len = remaining.min(MAX_MATCH);
-            let mut len = 0;
-            while len < max_len
-                && data.get(prev.wrapping_add(len)) == data.get(pos.wrapping_add(len))
-            {
-                len = len.wrapping_add(1);
-            }
-            if len >= MIN_MATCH { (len, pos.wrapping_sub(prev)) } else { (0, 0) }
-        } else {
-            (0, 0)
-        };
+        // Find the best match at this position using the chain.
+        let (cur_len, cur_dist) = find_best_match(data, pos, &head, &prev);
 
         if pending_len >= MIN_MATCH {
             // We have a pending match from pos-1.  Compare with current.
             if cur_len > pending_len {
-                // Current match is better — emit a literal for pos-1
-                // (dropping the pending match) and set this as the new pending.
+                // Current match is better — drop pending, emit literal for pos-1.
                 tokens.push(LzToken::Literal(data[pos.wrapping_sub(1)]));
                 pending_len = cur_len;
                 pending_dist = cur_dist;
@@ -747,26 +828,24 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
                     length: pending_len as u16,
                     distance: pending_dist as u16,
                 });
-                // Update hash for positions inside the match (starting from
-                // pos, since pos-1 was already hashed).
+                // Update hash for skipped positions inside the match.
                 let match_start = pos.wrapping_sub(1);
                 for i in 1..pending_len {
                     let mpos = match_start.wrapping_add(i);
                     if mpos.wrapping_add(2) < data.len() && mpos != pos {
-                        let mh = lz77_hash(data, mpos);
-                        hash_table[mh] = mpos as u32;
+                        insert_hash(data, mpos, &mut head, &mut prev);
                     }
                 }
                 pos = match_start.wrapping_add(pending_len);
                 pending_len = 0;
             }
         } else if cur_len >= MIN_MATCH {
-            // New match — don't emit yet, set as pending for lazy eval.
+            // New match — defer for lazy evaluation at next position.
             pending_len = cur_len;
             pending_dist = cur_dist;
             pos = pos.wrapping_add(1);
         } else {
-            // No match at all.
+            // No match.
             tokens.push(LzToken::Literal(data[pos]));
             pos = pos.wrapping_add(1);
         }

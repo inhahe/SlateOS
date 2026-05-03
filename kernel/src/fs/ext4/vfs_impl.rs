@@ -378,9 +378,40 @@ impl FileSystem for Ext4Fs {
             _ => super::ondisk::dir_type::UNKNOWN,
         };
 
-        // Check that the destination doesn't already exist.
-        if self.driver.resolve_path(to).is_ok() {
-            return Err(KernelError::AlreadyExists);
+        // POSIX rename semantics: if the destination already exists and is a
+        // regular file, replace it.  If it's a directory, return error.
+        if let Ok(dest_ino) = self.driver.resolve_path(to) {
+            let dest_inode = self.driver.read_inode(dest_ino)?;
+            let dest_mode = dest_inode.i_mode & file_type::S_IFMT;
+            if dest_mode == file_type::S_IFDIR {
+                return Err(KernelError::IsADirectory);
+            }
+            // Remove the existing destination's dir entry from its parent.
+            let (dp_path, dp_name) = split_parent_name(to)?;
+            let dp_ino = self.driver.resolve_path(dp_path)?;
+            let mut dp_inode = self.driver.read_inode(dp_ino)?;
+            self.remove_dir_entry(&mut dp_inode, dp_ino, dp_name)?;
+            // Decrement link count; fully free inode if orphaned (mirrors
+            // the remove() path).
+            let mut dest_inode = self.driver.read_inode(dest_ino)?;
+            dest_inode.i_links_count = dest_inode.i_links_count.saturating_sub(1);
+            if dest_inode.i_links_count == 0 {
+                self.driver.invalidate_extent_cache(dest_ino);
+                self.driver.free_inode_data(dest_ino, &dest_inode)?;
+                self.driver.free_xattr_block(&dest_inode)?;
+                dest_inode.i_size_lo = 0;
+                dest_inode.i_size_high = 0;
+                set_inode_blocks_48(&mut dest_inode, 0);
+                dest_inode.i_file_acl_lo = 0;
+                if let Some(b) = dest_inode.i_osd2.get_mut(2) { *b = 0; }
+                if let Some(b) = dest_inode.i_osd2.get_mut(3) { *b = 0; }
+                self.driver.write_inode(dest_ino, &dest_inode)?;
+                self.driver.free_inode_number(dest_ino, false)?;
+            } else {
+                self.driver.write_inode(dest_ino, &dest_inode)?;
+            }
+            self.driver.write_superblock()?;
+            self.driver.write_group_descs()?;
         }
 
         // Split source and destination into parent + name.

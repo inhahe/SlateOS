@@ -3309,6 +3309,11 @@ impl Ext4Driver {
         &mut self.sb
     }
 
+    /// Read-only access to the group descriptor table.
+    pub fn group_descs(&self) -> &[Ext4GroupDesc] {
+        &self.group_descs
+    }
+
     /// Mutable access to the group descriptor table.
     #[allow(dead_code)]
     pub fn group_descs_mut(&mut self) -> &mut Vec<Ext4GroupDesc> {

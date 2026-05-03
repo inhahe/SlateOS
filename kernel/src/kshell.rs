@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
-    "flock", "fsck", "fsck.fat", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "flock", "fsck", "fsck.ext4", "fsck.fat", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "journal", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4238,7 +4238,23 @@ fn dispatch(line: &str) {
         "id" | "whoami" => cmd_id(),
         "mktemp" => cmd_mktemp(args),
         "mkfs.fat" | "mkfs" => cmd_mkfs_fat(args),
-        "fsck.fat" | "fsck" => cmd_fsck_fat(args),
+        "fsck.fat" => cmd_fsck_fat(args),
+        "fsck.ext4" => cmd_fsck_ext4(args),
+        "fsck" => {
+            // Auto-dispatch: try ext4 first, then FAT.
+            if args.trim().is_empty() {
+                crate::console_println!("Usage: fsck DEVICE  (auto-detects fs type)");
+                crate::console_println!("  fsck.fat DEVICE   — check FAT filesystem");
+                crate::console_println!("  fsck.ext4 DEVICE  — check ext4 filesystem");
+            } else {
+                let dev = args.split_whitespace().find(|w| !w.starts_with('-')).unwrap_or(args.trim());
+                if crate::fs::ext4::probe(dev) {
+                    cmd_fsck_ext4(args);
+                } else {
+                    cmd_fsck_fat(args);
+                }
+            }
+        }
         "tar" => cmd_tar(args),
         "crc32" | "crc32sum" => cmd_crc32(args),
         "base64" => cmd_base64(args),
@@ -4417,6 +4433,7 @@ fn cmd_help() {
     crate::console_println!("  mktemp [D] Create temporary file (default /tmp)");
     crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
     crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
+    crate::console_println!("  fsck.ext4 [-v] DEVICE       Check ext4 filesystem consistency (read-only)");
     crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz supported)");
     crate::console_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
@@ -11181,7 +11198,7 @@ fn is_builtin(name: &str) -> bool {
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "flock" | "split"
-        | "lsblk" | "blkdev" | "glob"
+        | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "unzip" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
@@ -12536,6 +12553,63 @@ fn cmd_fsck_fat(args: &str) {
         }
         Err(e) => {
             crate::console_println!("fsck.fat: {:?}", e);
+            set_exit(1);
+        }
+    }
+}
+
+/// `fsck.ext4 [-v] DEVICE` — check ext4 filesystem consistency.
+///
+/// Performs read-only checks: superblock validation, bitmap free count
+/// vs group descriptor, inode scan, directory tree walk with link count
+/// verification.
+fn cmd_fsck_ext4(args: &str) {
+    let mut verbose = false;
+    let mut device = "";
+
+    for w in args.split_whitespace() {
+        if w == "-v" || w == "--verbose" {
+            verbose = true;
+        } else if w == "-h" || w == "--help" {
+            crate::console_println!("Usage: fsck.ext4 [-v] DEVICE");
+            crate::console_println!("  Check ext4 filesystem consistency (read-only).");
+            crate::console_println!("  -v  Verbose output (show all phases)");
+            return;
+        } else {
+            device = w;
+        }
+    }
+
+    if device.is_empty() {
+        crate::console_println!("Usage: fsck.ext4 [-v] DEVICE");
+        set_exit(1);
+        return;
+    }
+
+    crate::console_println!("fsck.ext4: checking '{}'...", device);
+
+    match crate::fs::ext4::fsck::fsck_ext4(device) {
+        Ok(report) => {
+            for msg in &report.messages {
+                if verbose || msg.starts_with("Phase") || msg.starts_with("Summary")
+                    || msg.starts_with("  Filesystem") || msg.starts_with("  ") && !msg.starts_with("  All ")
+                    || report.errors > 0
+                {
+                    crate::console_println!("{}", msg);
+                }
+            }
+            if !verbose && report.errors == 0 {
+                crate::console_println!(
+                    "fsck.ext4: clean — {} files, {} dirs, {} symlinks, 0 errors",
+                    report.files, report.dirs, report.symlinks
+                );
+            }
+            if report.errors > 0 {
+                set_exit(1);
+            }
+        }
+        Err(e) => {
+            crate::console_println!("fsck.ext4: {:?}", e);
             set_exit(1);
         }
     }

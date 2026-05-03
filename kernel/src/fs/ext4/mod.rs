@@ -30,6 +30,7 @@
 
 pub mod balloc;
 pub mod driver;
+pub mod fsck;
 pub mod htree;
 pub mod io;
 pub mod journal;

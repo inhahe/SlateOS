@@ -493,7 +493,313 @@ fn inflate_codes(
 }
 
 // ---------------------------------------------------------------------------
-// Gzip wrapper (RFC 1952)
+// DEFLATE deflate (compression)
+// ---------------------------------------------------------------------------
+
+/// Bit writer — writes bits to a byte buffer, LSB first.
+struct BitWriter {
+    data: Vec<u8>,
+    current: u8,
+    bits_used: u8,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self { data: Vec::new(), current: 0, bits_used: 0 }
+    }
+
+    /// Write `n` bits (1..=16) from `val` (LSB first).
+    fn write_bits(&mut self, val: u32, n: u8) {
+        let mut v = val;
+        let mut remaining = n;
+        while remaining > 0 {
+            let space = 8u8.wrapping_sub(self.bits_used);
+            let take = remaining.min(space);
+            let mask = (1u32 << take).wrapping_sub(1);
+            self.current |= ((v & mask) as u8) << self.bits_used;
+            v >>= take;
+            self.bits_used = self.bits_used.wrapping_add(take);
+            remaining = remaining.wrapping_sub(take);
+            if self.bits_used >= 8 {
+                self.data.push(self.current);
+                self.current = 0;
+                self.bits_used = 0;
+            }
+        }
+    }
+
+    /// Flush any remaining partial byte (pad with zeros).
+    fn flush(&mut self) {
+        if self.bits_used > 0 {
+            self.data.push(self.current);
+            self.current = 0;
+            self.bits_used = 0;
+        }
+    }
+
+    /// Write a raw byte (must be byte-aligned).
+    fn write_byte(&mut self, b: u8) {
+        if self.bits_used == 0 {
+            self.data.push(b);
+        } else {
+            self.write_bits(u32::from(b), 8);
+        }
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        self.flush();
+        self.data
+    }
+}
+
+/// Fixed Huffman code table for the encoder.
+///
+/// Returns (code, length) for a literal/length symbol.
+/// The codes are reversed (LSB-first) for the bit writer.
+fn fixed_code(sym: u16) -> (u16, u8) {
+    match sym {
+        0..=143 => {
+            // 8-bit codes: 00110000..10111111 (0x30..0xBF)
+            let code = sym.wrapping_add(0x30);
+            (reverse_bits(code, 8), 8)
+        }
+        144..=255 => {
+            // 9-bit codes: 110010000..111111111 (0x190..0x1FF)
+            let code = sym.wrapping_sub(144).wrapping_add(0x190);
+            (reverse_bits(code, 9), 9)
+        }
+        256..=279 => {
+            // 7-bit codes: 0000000..0010111 (0x00..0x17)
+            let code = sym.wrapping_sub(256);
+            (reverse_bits(code, 7), 7)
+        }
+        280..=287 => {
+            // 8-bit codes: 11000000..11000111 (0xC0..0xC7)
+            let code = sym.wrapping_sub(280).wrapping_add(0xC0);
+            (reverse_bits(code, 8), 8)
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Reverse `n` bits of `val`.
+fn reverse_bits(val: u16, n: u8) -> u16 {
+    let mut result: u16 = 0;
+    let mut v = val;
+    for _ in 0..n {
+        result = (result << 1) | (v & 1);
+        v >>= 1;
+    }
+    result
+}
+
+/// Fixed Huffman code for a distance (0..29): all are 5-bit codes.
+fn fixed_dist_code(dist_sym: u16) -> (u16, u8) {
+    (reverse_bits(dist_sym, 5), 5)
+}
+
+/// Find the length code (257..285) and extra bits for a match length.
+fn encode_length(length: usize) -> Option<(u16, u32, u8)> {
+    for (i, &base) in LENGTH_BASE.iter().enumerate() {
+        let extra = LENGTH_EXTRA[i];
+        let range = 1usize << extra;
+        if length >= base as usize && length < (base as usize).wrapping_add(range) {
+            let sym = (i as u16).wrapping_add(257);
+            let extra_val = (length.wrapping_sub(base as usize)) as u32;
+            return Some((sym, extra_val, extra));
+        }
+    }
+    None
+}
+
+/// Find the distance code (0..29) and extra bits for a match distance.
+fn encode_distance(distance: usize) -> Option<(u16, u32, u8)> {
+    for (i, &base) in DIST_BASE.iter().enumerate() {
+        let extra = DIST_EXTRA[i];
+        let range = 1usize << extra;
+        if distance >= base as usize && distance < (base as usize).wrapping_add(range) {
+            let sym = i as u16;
+            let extra_val = (distance.wrapping_sub(base as usize)) as u32;
+            return Some((sym, extra_val, extra));
+        }
+    }
+    None
+}
+
+/// Minimum match length for LZ77.
+const MIN_MATCH: usize = 3;
+
+/// Maximum match length (symbol 285 = length 258).
+const MAX_MATCH: usize = 258;
+
+/// Hash table size for LZ77 string matching (must be power of 2).
+const HASH_SIZE: usize = 4096;
+
+/// Maximum backward distance for LZ77 (32 KiB DEFLATE window).
+const MAX_DISTANCE: usize = 32768;
+
+/// Compute a hash for 3 bytes.
+fn lz77_hash(data: &[u8], pos: usize) -> usize {
+    if pos.wrapping_add(2) >= data.len() {
+        return 0;
+    }
+    let h = (u32::from(data[pos]) << 10)
+        ^ (u32::from(data[pos.wrapping_add(1)]) << 5)
+        ^ u32::from(data[pos.wrapping_add(2)]);
+    (h as usize) & (HASH_SIZE.wrapping_sub(1))
+}
+
+/// Compress data using DEFLATE with fixed Huffman codes.
+///
+/// Uses LZ77 with a simple hash-chain for string matching, then
+/// encodes matches and literals using the fixed Huffman codes
+/// defined in RFC 1951 §3.2.6.
+///
+/// This is a "level 1" compressor — fast, reasonable compression.
+/// It won't match gzip -9 but produces valid DEFLATE output.
+pub fn deflate(data: &[u8]) -> Vec<u8> {
+    let mut writer = BitWriter::new();
+
+    // For very small inputs, just use a stored block.
+    if data.len() <= 64 {
+        deflate_stored(&mut writer, data, true);
+        return writer.into_bytes();
+    }
+
+    // Single block with fixed Huffman codes.
+    // BFINAL=1, BTYPE=01 (fixed Huffman).
+    writer.write_bits(1, 1); // BFINAL
+    writer.write_bits(1, 2); // BTYPE=01
+
+    // LZ77 with hash chain.
+    let mut hash_table = [0u32; HASH_SIZE];
+    let mut pos: usize = 0;
+
+    while pos < data.len() {
+        let remaining = data.len().wrapping_sub(pos);
+
+        if remaining < MIN_MATCH {
+            // Not enough bytes for a match — emit literal.
+            let (code, bits) = fixed_code(u16::from(data[pos]));
+            writer.write_bits(u32::from(code), bits);
+            pos = pos.wrapping_add(1);
+            continue;
+        }
+
+        // Look for a match.
+        let h = lz77_hash(data, pos);
+        let prev = hash_table[h] as usize;
+        hash_table[h] = pos as u32;
+
+        let mut best_len: usize = 0;
+        let mut best_dist: usize = 0;
+
+        // Check if the hash points to a valid recent position.
+        if prev < pos && pos.wrapping_sub(prev) <= MAX_DISTANCE {
+            // Count matching bytes.
+            let max_len = remaining.min(MAX_MATCH);
+            let mut len = 0;
+            while len < max_len
+                && data.get(prev.wrapping_add(len)) == data.get(pos.wrapping_add(len))
+            {
+                len = len.wrapping_add(1);
+            }
+            if len >= MIN_MATCH {
+                best_len = len;
+                best_dist = pos.wrapping_sub(prev);
+            }
+        }
+
+        if best_len >= MIN_MATCH {
+            // Emit length/distance pair.
+            if let (Some((len_sym, len_extra, len_ebits)), Some((dist_sym, dist_extra, dist_ebits))) =
+                (encode_length(best_len), encode_distance(best_dist))
+            {
+                let (lcode, lbits) = fixed_code(len_sym);
+                writer.write_bits(u32::from(lcode), lbits);
+                if len_ebits > 0 {
+                    writer.write_bits(len_extra, len_ebits);
+                }
+                let (dcode, dbits) = fixed_dist_code(dist_sym);
+                writer.write_bits(u32::from(dcode), dbits);
+                if dist_ebits > 0 {
+                    writer.write_bits(dist_extra, dist_ebits);
+                }
+
+                // Update hash for all positions in the match.
+                for i in 1..best_len {
+                    let mpos = pos.wrapping_add(i);
+                    if mpos.wrapping_add(2) < data.len() {
+                        let mh = lz77_hash(data, mpos);
+                        hash_table[mh] = mpos as u32;
+                    }
+                }
+
+                pos = pos.wrapping_add(best_len);
+                continue;
+            }
+        }
+
+        // No match — emit literal.
+        let (code, bits) = fixed_code(u16::from(data[pos]));
+        writer.write_bits(u32::from(code), bits);
+        pos = pos.wrapping_add(1);
+    }
+
+    // End of block (symbol 256).
+    let (code, bits) = fixed_code(256);
+    writer.write_bits(u32::from(code), bits);
+
+    writer.into_bytes()
+}
+
+/// Write a stored (uncompressed) DEFLATE block.
+fn deflate_stored(writer: &mut BitWriter, data: &[u8], bfinal: bool) {
+    writer.write_bits(u32::from(bfinal), 1); // BFINAL
+    writer.write_bits(0, 2);                  // BTYPE=00 (stored)
+    writer.flush();                           // align to byte
+
+    let len = data.len() as u16;
+    // LEN
+    writer.write_byte(len as u8);
+    writer.write_byte((len >> 8) as u8);
+    // NLEN
+    let nlen = !len;
+    writer.write_byte(nlen as u8);
+    writer.write_byte((nlen >> 8) as u8);
+    // Raw data.
+    for &b in data {
+        writer.write_byte(b);
+    }
+}
+
+/// Create a gzip-compressed byte vector from uncompressed data.
+///
+/// Wraps `deflate()` output in a gzip header (RFC 1952) with
+/// CRC-32 and original-size trailer.
+pub fn gzip(data: &[u8]) -> Vec<u8> {
+    let compressed = deflate(data);
+    let crc = crc32_iso(data);
+    let size = data.len() as u32;
+
+    let mut out = Vec::with_capacity(10 + compressed.len() + 8);
+    // Gzip header (10 bytes).
+    out.push(0x1F); out.push(0x8B); // ID
+    out.push(0x08);                  // CM = deflate
+    out.push(0x00);                  // FLG
+    out.extend_from_slice(&[0, 0, 0, 0]); // MTIME
+    out.push(0x04);                  // XFL = fastest compression
+    out.push(0xFF);                  // OS = unknown
+    // DEFLATE data.
+    out.extend_from_slice(&compressed);
+    // Trailer: CRC32 + ISIZE.
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Gzip wrapper (RFC 1952) — decompression
 // ---------------------------------------------------------------------------
 
 /// Gzip flag bits.
@@ -752,6 +1058,44 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[compress]   Fixed Huffman table construction verified ✓");
+
+    // Test deflate → inflate round-trip with a non-trivial string.
+    let original = b"Hello, world! Hello, world! This is a test of DEFLATE compression. \
+                     AAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBB repetition helps compression.";
+    let compressed = deflate(original);
+    let decompressed = inflate(&compressed)?;
+    if decompressed.as_slice() != &original[..] {
+        crate::serial_println!(
+            "[compress]   FAIL: deflate round-trip mismatch (orig={}, dec={})",
+            original.len(), decompressed.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[compress]   Deflate round-trip verified ({} -> {} -> {} bytes) ✓",
+        original.len(), compressed.len(), decompressed.len()
+    );
+
+    // Test gzip → gunzip round-trip.
+    let gz_data = gzip(original);
+    let ungz_data = gunzip(&gz_data)?;
+    if ungz_data.as_slice() != &original[..] {
+        crate::serial_println!("[compress]   FAIL: gzip round-trip mismatch");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[compress]   Gzip compress round-trip verified ({} -> {} bytes) ✓",
+        original.len(), gz_data.len()
+    );
+
+    // Test with empty input.
+    let empty_gz = gzip(b"");
+    let empty_result = gunzip(&empty_gz)?;
+    if !empty_result.is_empty() {
+        crate::serial_println!("[compress]   FAIL: empty gzip round-trip produced data");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[compress]   Empty input round-trip verified ✓");
 
     crate::serial_println!("[compress] Self-test passed.");
     Ok(())

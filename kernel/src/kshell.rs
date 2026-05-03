@@ -13392,11 +13392,12 @@ fn cmd_tar(args: &str) {
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        crate::console_println!("Usage: tar [-c|-x|-t][v]f archive.tar [files...]");
-        crate::console_println!("  -cf  Create archive from files/directories");
-        crate::console_println!("  -xf  Extract archive (-C dir to set target)");
-        crate::console_println!("  -tf  List archive contents");
-        crate::console_println!("  -v   Verbose output");
+        crate::console_println!("Usage: tar [-c|-x|-t][z][v]f archive [files...]");
+        crate::console_println!("  -cf   Create archive from files/directories");
+        crate::console_println!("  -czf  Create gzip-compressed archive (.tar.gz)");
+        crate::console_println!("  -xf   Extract archive (auto-detects .tar.gz)");
+        crate::console_println!("  -tf   List archive contents");
+        crate::console_println!("  -v    Verbose output");
         return;
     }
 
@@ -13405,6 +13406,7 @@ fn cmd_tar(args: &str) {
     let extract = flags.contains('x');
     let list = flags.contains('t');
     let verbose = flags.contains('v');
+    let gzip_compress = flags.contains('z');
 
     // Exactly one mode required.
     let mode_count = u8::from(create) + u8::from(extract) + u8::from(list);
@@ -13453,11 +13455,25 @@ fn cmd_tar(args: &str) {
         archive_data.extend_from_slice(&[0u8; TAR_BLOCK_SIZE]);
         archive_data.extend_from_slice(&[0u8; TAR_BLOCK_SIZE]);
 
-        match Vfs::write_file(&archive_path, &archive_data) {
+        // If -z flag, gzip-compress the archive before writing.
+        let write_data = if gzip_compress {
+            let compressed = crate::fs::compress::gzip(&archive_data);
+            if verbose {
+                crate::console_println!(
+                    "tar: gzip compressed {} -> {} bytes",
+                    archive_data.len(), compressed.len()
+                );
+            }
+            compressed
+        } else {
+            archive_data
+        };
+
+        match Vfs::write_file(&archive_path, &write_data) {
             Ok(()) => {
                 crate::console_println!(
                     "tar: created '{}' ({} files, {} bytes)",
-                    archive_path, file_count, archive_data.len()
+                    archive_path, file_count, write_data.len()
                 );
             }
             Err(e) => {
@@ -14450,17 +14466,19 @@ fn cmd_gunzip(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
         crate::console_println!(
-            "Usage: gunzip [-t|-l] FILE.gz [-o OUTPUT]\n\
-             \x20      gzip -d FILE.gz [-o OUTPUT]\n\
+            "Usage: gunzip [-t|-l] FILE.gz [-o OUTPUT]   Decompress\n\
+             \x20      gzip FILE [-o OUTPUT]              Compress\n\
+             \x20      gzip -d FILE.gz [-o OUTPUT]        Decompress\n\
              \x20 -t   Test integrity only (no output written)\n\
              \x20 -l   List compressed/uncompressed sizes\n\
-             \x20 -o F Write decompressed data to F instead of auto-naming"
+             \x20 -o F Write output to F instead of auto-naming"
         );
         return;
     }
 
     let mut test_only = false;
     let mut list_mode = false;
+    let mut compress_mode = false;
     let mut input_path: Option<&str> = None;
     let mut output_path: Option<&str> = None;
     let mut skip_next = false;
@@ -14473,7 +14491,8 @@ fn cmd_gunzip(args: &str) {
         match p {
             "-t" | "--test" => test_only = true,
             "-l" | "--list" => list_mode = true,
-            "-d" => {} // gzip -d: already in decompress mode
+            "-d" => {} // gzip -d: explicit decompress mode (no-op, default for gunzip)
+            "-c" => compress_mode = true, // explicit compress mode
             "-o" => {
                 if let Some(&out) = parts.get(i.wrapping_add(1)) {
                     output_path = Some(out);
@@ -14499,20 +14518,51 @@ fn cmd_gunzip(args: &str) {
         }
     };
 
-    // Read the compressed data.
-    let compressed = match crate::fs::Vfs::read_file(&input) {
+    // Read the input data.
+    let file_data = match crate::fs::Vfs::read_file(&input) {
         Ok(d) => d,
         Err(e) => {
-            crate::console_println!("gunzip: '{}': {:?}", input, e);
+            crate::console_println!("gzip: '{}': {:?}", input, e);
             return;
         }
     };
 
-    // Verify it's actually gzip.
-    if compressed.len() < 18
-        || compressed.first() != Some(&0x1F)
-        || compressed.get(1) != Some(&0x8B)
-    {
+    // Auto-detect: if the file starts with gzip magic and we're not
+    // explicitly compressing, decompress.  If -c is given or the file
+    // is not gzip, compress.
+    let is_gzip = file_data.len() >= 2
+        && file_data.first() == Some(&0x1F)
+        && file_data.get(1) == Some(&0x8B);
+
+    if compress_mode || (!is_gzip && !test_only && !list_mode) {
+        // COMPRESS mode.
+        let compressed = crate::fs::compress::gzip(&file_data);
+
+        let out = if let Some(explicit) = output_path {
+            resolve_path(explicit)
+        } else {
+            alloc::format!("{}.gz", input)
+        };
+
+        match crate::fs::Vfs::write_file(&out, &compressed) {
+            Ok(()) => {
+                crate::console_println!(
+                    "gzip: '{}' -> '{}' ({} -> {} bytes, {:.1}%)",
+                    input, out, file_data.len(), compressed.len(),
+                    if file_data.is_empty() { 0.0 }
+                    else { (compressed.len() as f64 / file_data.len() as f64) * 100.0 }
+                );
+            }
+            Err(e) => {
+                crate::console_println!("gzip: write '{}': {:?}", out, e);
+            }
+        }
+        return;
+    }
+
+    // DECOMPRESS mode from here on.
+    let compressed = file_data;
+    if !is_gzip {
         crate::console_println!("gunzip: '{}': not in gzip format", input);
         return;
     }

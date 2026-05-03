@@ -3082,7 +3082,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
+    "alias", "append", "awk", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
     "base64", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
@@ -4135,6 +4135,7 @@ fn dispatch_with_input(line: &str, input: &str) {
         "xargs" => cmd_xargs_input(args, input),
         "column" => cmd_column_input(args, input),
         "sed" => cmd_sed_input(args, input),
+        "awk" => cmd_awk_input(args, input),
         _ => {
             // Command doesn't support piped input — just run normally.
             dispatch(line);
@@ -4244,6 +4245,7 @@ fn dispatch(line: &str) {
         "wipe" => cmd_wipe(args),
         "checksum" | "cksum" => cmd_checksum(args),
         "sed" => cmd_sed(args),
+        "awk" => cmd_awk(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -4416,6 +4418,7 @@ fn cmd_help() {
     crate::console_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
     crate::console_println!("  wipe FILE     Secure delete (zero-fill + remove)");
     crate::console_println!("  sed [-i] [-n] 's/old/new/[g]' FILE  Stream editor (substitute/delete/print)");
+    crate::console_println!("  awk [-F sep] 'program' FILE  Text processing ($1..$N, NR, NF, /pattern/)");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -13984,4 +13987,555 @@ fn sed_replace_all(text: &str, pattern: &str, replacement: &str) -> alloc::strin
     }
     result.push_str(&text[start..]);
     result
+}
+
+// ---------------------------------------------------------------------------
+// awk — pattern scanning and text processing (subset)
+// ---------------------------------------------------------------------------
+
+/// `awk` command — pattern-action text processing.
+///
+/// Supported features:
+///   - Field splitting: `$0` (whole line), `$1`, `$2`, ... `$NF`
+///   - `-F SEP` field separator (default: whitespace)
+///   - `{ print }`, `{ print $1, $3 }`
+///   - `/pattern/ { action }` — pattern matching
+///   - `BEGIN { ... }` and `END { ... }` blocks
+///   - `NR` (record number), `NF` (field count), `FS` (separator)
+///   - Pipe input support
+///
+/// Examples:
+///   awk '{ print $1 }' file.txt            First field of each line
+///   awk -F: '{ print $1, $3 }' /etc/passwd User and UID
+///   awk '/error/ { print NR, $0 }' log     Matching lines with number
+///   awk 'NR > 5 { print }' file            Skip first 5 lines
+///   awk 'BEGIN { print "header" } { print $1 } END { print NR, "lines" }' file
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn cmd_awk(args: &str) {
+    if args.trim().is_empty() {
+        crate::console_println!("Usage: awk [-F sep] 'program' [file ...]");
+        crate::console_println!("  Fields: $0 (line), $1..$N, $NF (last)");
+        crate::console_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
+        crate::console_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        return;
+    }
+
+    // Parse -F flag and program.
+    let (fs_char, program, files) = parse_awk_args(args);
+
+    if program.is_empty() {
+        crate::console_println!("awk: no program specified");
+        return;
+    }
+
+    let rules = parse_awk_program(&program);
+
+    // Process files.
+    if files.is_empty() {
+        crate::console_println!("awk: no input file specified");
+        return;
+    }
+
+    let mut nr: usize = 0;
+
+    // Run BEGIN blocks.
+    for rule in &rules {
+        if rule.is_begin {
+            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+        }
+    }
+
+    for file in &files {
+        let path = resolve_path(file);
+        let data = match crate::fs::Vfs::read_file(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::console_println!("awk: '{}': {:?}", path, e);
+                continue;
+            }
+        };
+
+        let text = core::str::from_utf8(&data).unwrap_or("");
+        for line in text.lines() {
+            nr = nr.wrapping_add(1);
+            let fields = awk_split_fields(line, &fs_char);
+            let nf = fields.len();
+
+            for rule in &rules {
+                if rule.is_begin || rule.is_end {
+                    continue;
+                }
+                if awk_pattern_matches(&rule.pattern, line, nr, nf) {
+                    awk_exec_action(&rule.action, line, &fields, nr, nf, &fs_char);
+                }
+            }
+        }
+    }
+
+    // Run END blocks.
+    for rule in &rules {
+        if rule.is_end {
+            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+        }
+    }
+}
+
+/// `awk` pipe-input variant.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_awk_input(args: &str, input: &str) {
+    let (fs_char, program, _files) = parse_awk_args(args);
+    if program.is_empty() {
+        shell_print!("{}", input);
+        return;
+    }
+
+    let rules = parse_awk_program(&program);
+    let mut nr: usize = 0;
+
+    // BEGIN blocks.
+    for rule in &rules {
+        if rule.is_begin {
+            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+        }
+    }
+
+    for line in input.lines() {
+        nr = nr.wrapping_add(1);
+        let fields = awk_split_fields(line, &fs_char);
+        let nf = fields.len();
+
+        for rule in &rules {
+            if rule.is_begin || rule.is_end {
+                continue;
+            }
+            if awk_pattern_matches(&rule.pattern, line, nr, nf) {
+                awk_exec_action(&rule.action, line, &fields, nr, nf, &fs_char);
+            }
+        }
+    }
+
+    // END blocks.
+    for rule in &rules {
+        if rule.is_end {
+            awk_exec_action(&rule.action, "", &[], nr, 0, &fs_char);
+        }
+    }
+}
+
+/// Parsed awk rule (pattern + action).
+struct AwkRule {
+    pattern: alloc::string::String,
+    action: alloc::string::String,
+    is_begin: bool,
+    is_end: bool,
+}
+
+/// Parse awk command-line arguments: -F, program, files.
+fn parse_awk_args(args: &str) -> (alloc::string::String, alloc::string::String, alloc::vec::Vec<alloc::string::String>) {
+    let mut fs = alloc::string::String::from(" ");
+    let mut program = alloc::string::String::new();
+    let mut files: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let mut i = 0;
+    let mut got_program = false;
+
+    while i < parts.len() {
+        if parts[i] == "-F" && i + 1 < parts.len() {
+            fs = alloc::string::String::from(parts[i + 1]);
+            i += 2;
+            continue;
+        }
+        if parts[i].starts_with("-F") {
+            fs = alloc::string::String::from(&parts[i][2..]);
+            i += 1;
+            continue;
+        }
+
+        if !got_program {
+            // The program may be quoted — find matching quote.
+            let part = parts[i];
+            if part.starts_with('\'') {
+                // Collect until closing quote.
+                let mut prog = alloc::string::String::from(&part[1..]);
+                if prog.ends_with('\'') {
+                    prog.pop();
+                    program = prog;
+                } else {
+                    i += 1;
+                    while i < parts.len() {
+                        prog.push(' ');
+                        let p = parts[i];
+                        if p.ends_with('\'') {
+                            prog.push_str(&p[..p.len() - 1]);
+                            break;
+                        }
+                        prog.push_str(p);
+                        i += 1;
+                    }
+                    program = prog;
+                }
+            } else {
+                program = alloc::string::String::from(part);
+            }
+            got_program = true;
+        } else {
+            files.push(alloc::string::String::from(parts[i]));
+        }
+        i += 1;
+    }
+
+    (fs, program, files)
+}
+
+/// Parse an awk program into rules.
+///
+/// Supports: `BEGIN { ... }`, `END { ... }`, `/pattern/ { ... }`,
+/// `condition { ... }`, bare `{ ... }`.
+fn parse_awk_program(program: &str) -> alloc::vec::Vec<AwkRule> {
+    let mut rules = alloc::vec::Vec::new();
+    let bytes = program.as_bytes();
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        // Skip whitespace.
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            break;
+        }
+
+        // Check for BEGIN/END.
+        let rest = &program[pos..];
+        if rest.starts_with("BEGIN") {
+            pos += 5;
+            let action = extract_brace_block(program, &mut pos);
+            rules.push(AwkRule {
+                pattern: alloc::string::String::new(),
+                action,
+                is_begin: true,
+                is_end: false,
+            });
+            continue;
+        }
+        if rest.starts_with("END") {
+            pos += 3;
+            let action = extract_brace_block(program, &mut pos);
+            rules.push(AwkRule {
+                pattern: alloc::string::String::new(),
+                action,
+                is_begin: false,
+                is_end: true,
+            });
+            continue;
+        }
+
+        // Pattern + action.
+        // Pattern: text before `{`, or empty if `{` is first.
+        let pattern_start = pos;
+
+        // Find the start of the action block.
+        while pos < bytes.len() && bytes[pos] != b'{' {
+            pos += 1;
+        }
+        let pattern = program[pattern_start..pos].trim();
+
+        let action = if pos < bytes.len() && bytes[pos] == b'{' {
+            extract_brace_block(program, &mut pos)
+        } else {
+            // No action — default is "print $0".
+            alloc::string::String::from("print")
+        };
+
+        rules.push(AwkRule {
+            pattern: alloc::string::String::from(pattern),
+            action,
+            is_begin: false,
+            is_end: false,
+        });
+    }
+
+    // If no rules were parsed, treat the whole program as a single action.
+    if rules.is_empty() && !program.trim().is_empty() {
+        rules.push(AwkRule {
+            pattern: alloc::string::String::new(),
+            action: alloc::string::String::from(program.trim()),
+            is_begin: false,
+            is_end: false,
+        });
+    }
+
+    rules
+}
+
+/// Extract the contents between matching `{` and `}`, advancing `pos`.
+#[allow(clippy::arithmetic_side_effects)]
+fn extract_brace_block(program: &str, pos: &mut usize) -> alloc::string::String {
+    let bytes = program.as_bytes();
+    // Skip whitespace before `{`.
+    while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
+        *pos += 1;
+    }
+    if *pos >= bytes.len() || bytes[*pos] != b'{' {
+        return alloc::string::String::new();
+    }
+    *pos += 1; // Skip opening `{`.
+
+    let start = *pos;
+    let mut depth: u32 = 1;
+    while *pos < bytes.len() && depth > 0 {
+        match bytes[*pos] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth > 0 {
+            *pos += 1;
+        }
+    }
+    let end = *pos;
+    if *pos < bytes.len() {
+        *pos += 1; // Skip closing `}`.
+    }
+
+    alloc::string::String::from(program[start..end].trim())
+}
+
+/// Split a line into fields using the given separator.
+fn awk_split_fields<'a>(line: &'a str, fs: &str) -> alloc::vec::Vec<&'a str> {
+    if fs == " " {
+        // Whitespace splitting (default): split on runs of whitespace.
+        line.split_whitespace().collect()
+    } else if fs.len() == 1 {
+        line.split(fs.as_bytes()[0] as char).collect()
+    } else {
+        alloc::vec![line]
+    }
+}
+
+/// Check if a pattern matches the current line.
+#[allow(clippy::arithmetic_side_effects)]
+fn awk_pattern_matches(pattern: &str, line: &str, nr: usize, nf: usize) -> bool {
+    if pattern.is_empty() {
+        return true; // No pattern — match all.
+    }
+
+    // /regex/ pattern — literal string match.
+    if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
+        let pat = &pattern[1..pattern.len() - 1];
+        return line.contains(pat);
+    }
+
+    // NR comparisons: NR > N, NR < N, NR == N, NR >= N, NR <= N, NR != N
+    if pattern.starts_with("NR") {
+        let rest = pattern[2..].trim();
+        if let Some(n_str) = rest.strip_prefix(">=") {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nr >= n;
+            }
+        }
+        if let Some(n_str) = rest.strip_prefix("<=") {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nr <= n;
+            }
+        }
+        if let Some(n_str) = rest.strip_prefix("!=") {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nr != n;
+            }
+        }
+        if let Some(n_str) = rest.strip_prefix("==") {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nr == n;
+            }
+        }
+        if let Some(n_str) = rest.strip_prefix('>') {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nr > n;
+            }
+        }
+        if let Some(n_str) = rest.strip_prefix('<') {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nr < n;
+            }
+        }
+    }
+
+    // NF comparisons.
+    if pattern.starts_with("NF") {
+        let rest = pattern[2..].trim();
+        if let Some(n_str) = rest.strip_prefix(">=") {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nf >= n;
+            }
+        }
+        if let Some(n_str) = rest.strip_prefix('>') {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nf > n;
+            }
+        }
+        if let Some(n_str) = rest.strip_prefix("==") {
+            if let Ok(n) = n_str.trim().parse::<usize>() {
+                return nf == n;
+            }
+        }
+    }
+
+    // Fallback: treat as a literal substring match.
+    line.contains(pattern)
+}
+
+/// Execute an awk action for a line.
+#[allow(clippy::arithmetic_side_effects)]
+fn awk_exec_action(
+    action: &str,
+    line: &str,
+    fields: &[&str],
+    nr: usize,
+    nf: usize,
+    _fs: &str,
+) {
+    // Split action by `;` for multiple statements.
+    for stmt in action.split(';') {
+        let stmt = stmt.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+
+        if stmt == "print" || stmt == "print $0" {
+            crate::console_println!("{}", line);
+        } else if stmt.starts_with("print ") || stmt.starts_with("print\t") {
+            let expr = stmt[6..].trim();
+            let output = awk_format_print(expr, line, fields, nr, nf);
+            crate::console_println!("{}", output);
+        } else {
+            // Unknown statement — ignore.
+        }
+    }
+}
+
+/// Evaluate a print expression, expanding $N, NR, NF, and string literals.
+#[allow(clippy::arithmetic_side_effects)]
+fn awk_format_print(
+    expr: &str,
+    line: &str,
+    fields: &[&str],
+    nr: usize,
+    nf: usize,
+) -> alloc::string::String {
+    let mut result = alloc::string::String::new();
+    let parts = awk_split_print_args(expr);
+
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            result.push(' ');
+        }
+        let val = awk_eval_expr(part.trim(), line, fields, nr, nf);
+        result.push_str(&val);
+    }
+
+    result
+}
+
+/// Split print arguments by commas (respecting quotes).
+fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
+    let mut parts = alloc::vec::Vec::new();
+    let mut current = alloc::string::String::new();
+    let mut in_quote = false;
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                in_quote = !in_quote;
+                current.push('"');
+            }
+            b',' if !in_quote => {
+                parts.push(core::mem::take(&mut current));
+            }
+            _ => {
+                current.push(bytes[i] as char);
+            }
+        }
+        i += 1;
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Evaluate a single awk expression.
+#[allow(clippy::arithmetic_side_effects)]
+fn awk_eval_expr(
+    expr: &str,
+    line: &str,
+    fields: &[&str],
+    nr: usize,
+    nf: usize,
+) -> alloc::string::String {
+    let expr = expr.trim();
+
+    // String literal: "..."
+    if expr.starts_with('"') && expr.ends_with('"') && expr.len() >= 2 {
+        let inner = &expr[1..expr.len() - 1];
+        // Handle common escape sequences.
+        let mut result = alloc::string::String::new();
+        let bytes = inner.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    b'n' => result.push('\n'),
+                    b't' => result.push('\t'),
+                    b'\\' => result.push('\\'),
+                    b'"' => result.push('"'),
+                    _ => {
+                        result.push('\\');
+                        result.push(bytes[i + 1] as char);
+                    }
+                }
+                i += 2;
+            } else {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        return result;
+    }
+
+    // Built-in variables.
+    if expr == "NR" {
+        return alloc::format!("{}", nr);
+    }
+    if expr == "NF" {
+        return alloc::format!("{}", nf);
+    }
+    if expr == "$0" {
+        return alloc::string::String::from(line);
+    }
+    if expr == "$NF" {
+        return fields.last().map_or(
+            alloc::string::String::new(),
+            |f| alloc::string::String::from(*f),
+        );
+    }
+
+    // Field reference: $N
+    if expr.starts_with('$') {
+        if let Ok(n) = expr[1..].parse::<usize>() {
+            if n == 0 {
+                return alloc::string::String::from(line);
+            }
+            return fields.get(n.wrapping_sub(1)).map_or(
+                alloc::string::String::new(),
+                |f| alloc::string::String::from(*f),
+            );
+        }
+    }
+
+    // Bare word — treat as literal.
+    alloc::string::String::from(expr)
 }

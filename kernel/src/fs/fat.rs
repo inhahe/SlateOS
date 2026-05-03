@@ -3515,16 +3515,35 @@ impl FileSystem for FatFs {
         let to_parent_cluster = self.resolve_dir_cluster(to_parent_path)?;
 
         // Check for existing destination by walking the directory.
+        // POSIX rename semantics: if the destination exists and is a file,
+        // replace it atomically.  If it's a directory, fail (can't replace
+        // a dir by overwriting).
         let dest_entries = if to_parent_cluster == 0 {
             self.read_root_dir()?
         } else {
             self.read_dir_cluster(to_parent_cluster)?
         };
-        let dest_exists = dest_entries.iter().any(|e| {
+        if let Some(dest_entry) = dest_entries.iter().find(|e| {
             !e.is_volume_label() && e.display_name().eq_ignore_ascii_case(to_filename)
-        });
-        if dest_exists {
-            return Err(KernelError::AlreadyExists);
+        }) {
+            if dest_entry.is_directory() {
+                // Can't replace a directory via rename (POSIX: EISDIR if
+                // source is a file and dest is a directory).
+                return Err(KernelError::IsADirectory);
+            }
+            // Destination is a file — remove it before creating the new entry.
+            // Free the destination's cluster chain first.
+            if dest_entry.first_cluster >= 2 {
+                let _ = self.free_chain(dest_entry.first_cluster);
+            }
+            // Find and delete the destination's directory entry + LFN entries.
+            let dest_name83 = dest_entry.name;
+            if let Ok((d_lba, d_off, true)) =
+                self.find_or_create_slot_in(to_parent_cluster, &dest_name83)
+            {
+                let _ = self.delete_lfn_entries(d_lba, d_off, &dest_name83);
+                let _ = self.delete_dir_entry(d_lba, d_off);
+            }
         }
 
         // 3. Create the new directory entry (with LFN if needed) pointing
@@ -4758,6 +4777,35 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::IoError);
     }
     crate::serial_println!("[fat]   LFN rename verified: '{}' -> '{}'", lfn_src, lfn_dst);
+
+    // --- rename overwrite test (POSIX semantics) ---
+    // Rename should replace an existing destination file.
+    let overwrite_src = "/rename src.txt";
+    let _ = crate::fs::Vfs::remove(overwrite_src);
+
+    crate::fs::Vfs::write_file(overwrite_src, b"source data\n")?;
+    // lfn_dst still exists from above with "LFN rename test data.\n"
+    crate::fs::Vfs::rename(overwrite_src, lfn_dst)?;
+
+    // Source should be gone.
+    match crate::fs::Vfs::read_file(overwrite_src) {
+        Err(KernelError::NotFound) => {}
+        _ => {
+            crate::serial_println!("[fat]   rename overwrite FAILED: source still exists");
+            let _ = crate::fs::Vfs::remove(overwrite_src);
+            let _ = crate::fs::Vfs::remove(lfn_dst);
+            return Err(KernelError::IoError);
+        }
+    }
+
+    // Destination should have the NEW data.
+    let overwrite_read = crate::fs::Vfs::read_file(lfn_dst)?;
+    if overwrite_read.as_slice() != b"source data\n" {
+        crate::serial_println!("[fat]   rename overwrite FAILED: destination has wrong data");
+        let _ = crate::fs::Vfs::remove(lfn_dst);
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[fat]   rename overwrite verified (POSIX semantics)");
 
     crate::fs::Vfs::remove(lfn_dst)?;
 

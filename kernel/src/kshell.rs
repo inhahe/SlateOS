@@ -12761,7 +12761,7 @@ fn cmd_cpuinfo() {
 // ---------------------------------------------------------------------------
 
 /// USTAR header constants.
-const TAR_BLOCK_SIZE: usize = 512;
+pub const TAR_BLOCK_SIZE: usize = 512;
 const TAR_MAGIC: &[u8; 6] = b"ustar\0";
 const TAR_VERSION: &[u8; 2] = b"00";
 
@@ -12774,7 +12774,7 @@ const TAR_SYMTYPE: u8 = b'2';       // Symbolic link
 ///
 /// Returns a 512-byte header with checksum computed.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn tar_build_header(
+pub fn tar_build_header(
     path: &str,
     size: u64,
     mtime_ns: u64,
@@ -12877,7 +12877,7 @@ fn tar_build_header(
 /// Parse a USTAR header. Returns (name, size, mtime_sec, typeflag, linkname)
 /// or None if the block is all zeros (end-of-archive).
 #[allow(clippy::arithmetic_side_effects)]
-fn tar_parse_header(header: &[u8; TAR_BLOCK_SIZE]) -> Option<(alloc::string::String, u64, u64, u8, alloc::string::String)> {
+pub fn tar_parse_header(header: &[u8; TAR_BLOCK_SIZE]) -> Option<(alloc::string::String, u64, u64, u8, alloc::string::String)> {
     // Check for end-of-archive (all zeros).
     if header.iter().all(|&b| b == 0) {
         return None;

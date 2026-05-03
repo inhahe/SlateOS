@@ -4857,6 +4857,131 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[fat]   LFN operations tests passed");
 
     // ---------------------------------------------------------------
+    // tar archive round-trip test
+    // ---------------------------------------------------------------
+    crate::serial_println!("[fat]   Testing tar round-trip...");
+    {
+        // Create a test directory tree.
+        let _ = crate::fs::Vfs::remove("/TARTEST/sub/deep.txt");
+        let _ = crate::fs::Vfs::rmdir("/TARTEST/sub");
+        let _ = crate::fs::Vfs::remove("/TARTEST/hello.txt");
+        let _ = crate::fs::Vfs::rmdir("/TARTEST");
+
+        crate::fs::Vfs::mkdir("/TARTEST")?;
+        crate::fs::Vfs::mkdir("/TARTEST/sub")?;
+        crate::fs::Vfs::write_file("/TARTEST/hello.txt", b"Hello from tar test!\n")?;
+        crate::fs::Vfs::write_file("/TARTEST/sub/deep.txt", b"Nested file content.\n")?;
+
+        // Build tar archive in memory using the kshell's tar functions.
+        // We call the low-level tar_build_header/tar_parse_header functions
+        // directly since the kshell command requires string args.
+        let mut archive: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut file_count: u32 = 0;
+
+        // Manually archive the test tree.
+        // 1) Directory header for TARTEST/
+        let hdr = crate::kshell::tar_build_header("TARTEST/", 0, 0, 0o755, 0, 0, b'5', "");
+        archive.extend_from_slice(&hdr);
+        file_count += 1;
+
+        // 2) File: TARTEST/hello.txt
+        let hello_data = b"Hello from tar test!\n";
+        let hdr2 = crate::kshell::tar_build_header(
+            "TARTEST/hello.txt", hello_data.len() as u64, 0, 0o644, 0, 0, b'0', "",
+        );
+        archive.extend_from_slice(&hdr2);
+        archive.extend_from_slice(hello_data);
+        // Pad to 512-byte boundary.
+        let remainder = hello_data.len() % 512;
+        if remainder != 0 {
+            let padding = 512 - remainder;
+            archive.extend_from_slice(&alloc::vec![0u8; padding]);
+        }
+        file_count += 1;
+
+        // 3) Directory: TARTEST/sub/
+        let hdr3 = crate::kshell::tar_build_header("TARTEST/sub/", 0, 0, 0o755, 0, 0, b'5', "");
+        archive.extend_from_slice(&hdr3);
+        file_count += 1;
+
+        // 4) File: TARTEST/sub/deep.txt
+        let deep_data = b"Nested file content.\n";
+        let hdr4 = crate::kshell::tar_build_header(
+            "TARTEST/sub/deep.txt", deep_data.len() as u64, 0, 0o644, 0, 0, b'0', "",
+        );
+        archive.extend_from_slice(&hdr4);
+        archive.extend_from_slice(deep_data);
+        let rem2 = deep_data.len() % 512;
+        if rem2 != 0 {
+            archive.extend_from_slice(&alloc::vec![0u8; 512 - rem2]);
+        }
+        file_count += 1;
+
+        // End-of-archive markers.
+        archive.extend_from_slice(&[0u8; 512]);
+        archive.extend_from_slice(&[0u8; 512]);
+
+        // Save the archive.
+        crate::fs::Vfs::write_file("/test.tar", &archive)?;
+        crate::serial_println!(
+            "[fat]     Created test.tar: {} entries, {} bytes",
+            file_count, archive.len()
+        );
+
+        // Verify the archive can be parsed.
+        let readback = crate::fs::Vfs::read_file("/test.tar")?;
+        if readback.len() != archive.len() {
+            crate::serial_println!("[fat]   tar FAILED: archive size mismatch");
+            return Err(KernelError::IoError);
+        }
+
+        // Parse headers.
+        let mut offset: usize = 0;
+        let mut parsed_count: u32 = 0;
+        while offset + 512 <= readback.len() {
+            let mut hdr_buf = [0u8; 512];
+            hdr_buf.copy_from_slice(&readback[offset..offset + 512]);
+            offset += 512;
+
+            match crate::kshell::tar_parse_header(&hdr_buf) {
+                Some((name, size, _mtime, typeflag, _link)) => {
+                    crate::serial_println!(
+                        "[fat]     tar entry: '{}' type={} size={}",
+                        name, typeflag as char, size
+                    );
+                    parsed_count += 1;
+                    // Skip data blocks.
+                    if size > 0 {
+                        let blocks = (size as usize + 511) / 512;
+                        offset += blocks * 512;
+                    }
+                }
+                None => break, // End of archive.
+            }
+        }
+
+        if parsed_count != file_count {
+            crate::serial_println!(
+                "[fat]   tar FAILED: parsed {} entries, expected {}",
+                parsed_count, file_count
+            );
+            let _ = crate::fs::Vfs::remove("/test.tar");
+            return Err(KernelError::IoError);
+        }
+        crate::serial_println!(
+            "[fat]   tar round-trip verified: {} entries",
+            parsed_count
+        );
+
+        // Clean up.
+        let _ = crate::fs::Vfs::remove("/test.tar");
+        let _ = crate::fs::Vfs::remove("/TARTEST/sub/deep.txt");
+        let _ = crate::fs::Vfs::rmdir("/TARTEST/sub");
+        let _ = crate::fs::Vfs::remove("/TARTEST/hello.txt");
+        let _ = crate::fs::Vfs::rmdir("/TARTEST");
+    }
+
+    // ---------------------------------------------------------------
     // fsck consistency check (run on the live volume after all tests)
     // ---------------------------------------------------------------
     crate::serial_println!("[fat]   Testing fsck...");

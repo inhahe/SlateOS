@@ -25,6 +25,8 @@
 //! uses longest-prefix matching to route operations to the correct
 //! filesystem.
 
+#[allow(dead_code)]
+pub mod bzip2;
 pub mod cache;
 pub mod compress;
 pub mod devfs;

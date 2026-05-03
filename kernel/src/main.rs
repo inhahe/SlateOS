@@ -615,6 +615,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::compress::self_test() {
                 serial_println!("WARNING: Compression self-test failed: {:?}", e);
             }
+            // Run bzip2 decompression self-test (BWT, MTF, RLE round-trips).
+            if let Err(e) = fs::bzip2::self_test() {
+                serial_println!("WARNING: Bzip2 self-test failed: {:?}", e);
+            }
             // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
             if let Err(e) = fs::memfs::self_test() {
                 serial_println!("WARNING: MemFs self-test failed: {:?}", e);

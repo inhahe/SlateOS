@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
-    "base64", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp",
+    "base64", "bunzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
@@ -4261,6 +4261,7 @@ fn dispatch(line: &str) {
         "wipe" => cmd_wipe(args),
         "checksum" | "cksum" => cmd_checksum(args),
         "gunzip" | "gzip" => cmd_gunzip(args),
+        "bunzip2" | "bzcat" => cmd_bunzip2(args),
         "unzip" => cmd_unzip(args),
         "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
@@ -4434,8 +4435,9 @@ fn cmd_help() {
     crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
     crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
     crate::console_println!("  fsck.ext4 [-v] DEVICE       Check ext4 filesystem consistency (read-only)");
-    crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz supported)");
+    crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz/.tar.bz2 supported)");
     crate::console_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
+    crate::console_println!("  bunzip2 F [-o OUT] Decompress bzip2 file (bzcat alias)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
     crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
@@ -7209,6 +7211,11 @@ fn detect_magic(header: &[u8]) -> Option<&'static str> {
         return Some("gzip compressed data");
     }
 
+    // bzip2
+    if header.len() >= 4 && header.starts_with(b"BZh") {
+        return Some("bzip2 compressed data");
+    }
+
     // xz
     if header.starts_with(b"\xfd7zXZ\x00") {
         return Some("XZ compressed data");
@@ -7420,6 +7427,8 @@ fn extension_hint(path: &str) -> &'static str {
         // Archive and compressed formats.
         "tar" => "tar archive",
         "gz" | "gzip" => "gzip compressed",
+        "bz2" => "bzip2 compressed",
+        "tbz2" | "tbz" => "bzip2 compressed tar archive",
         "zip" => "ZIP archive",
         "xz" => "XZ compressed",
 
@@ -11199,7 +11208,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "unzip" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzcat" | "unzip" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -13577,7 +13586,7 @@ fn cmd_tar(args: &str) {
             }
         };
 
-        // Auto-detect gzip: if file starts with 0x1f 0x8b, decompress first.
+        // Auto-detect compression: gzip (0x1f 0x8b) or bzip2 ("BZh").
         let data = if raw_data.len() >= 2
             && raw_data.first() == Some(&0x1F)
             && raw_data.get(1) == Some(&0x8B)
@@ -13594,6 +13603,26 @@ fn cmd_tar(args: &str) {
                 }
                 Err(e) => {
                     crate::console_println!("tar: gzip decompress failed: {:?}", e);
+                    return;
+                }
+            }
+        } else if raw_data.len() >= 4
+            && raw_data.first() == Some(&b'B')
+            && raw_data.get(1) == Some(&b'Z')
+            && raw_data.get(2) == Some(&b'h')
+        {
+            match crate::fs::bzip2::bunzip2(&raw_data) {
+                Ok(decompressed) => {
+                    if verbose {
+                        crate::console_println!(
+                            "tar: decompressed bzip2: {} -> {} bytes",
+                            raw_data.len(), decompressed.len()
+                        );
+                    }
+                    decompressed
+                }
+                Err(e) => {
+                    crate::console_println!("tar: bzip2 decompress failed: {:?}", e);
                     return;
                 }
             }
@@ -15046,6 +15075,126 @@ fn cmd_gunzip(args: &str) {
         }
         Err(e) => {
             crate::console_println!("gunzip: write '{}': {:?}", out, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bunzip2 — bzip2 decompression
+// ---------------------------------------------------------------------------
+
+fn cmd_bunzip2(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: bunzip2 [-t] FILE.bz2 [-o OUTPUT]   Decompress bzip2 file\n\
+             \x20      bzcat FILE.bz2                    Decompress to stdout\n\
+             \x20 -t   Test integrity only (no output written)\n\
+             \x20 -o F Write output to F instead of auto-naming"
+        );
+        return;
+    }
+
+    let mut test_only = false;
+    let mut input_path: Option<&str> = None;
+    let mut output_path: Option<&str> = None;
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-t" | "--test" => test_only = true,
+            "-o" => {
+                if let Some(&out) = parts.get(i.wrapping_add(1)) {
+                    output_path = Some(out);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("bunzip2: -o requires an argument");
+                    return;
+                }
+            }
+            _ => {
+                if input_path.is_none() {
+                    input_path = Some(p);
+                }
+            }
+        }
+    }
+
+    let input = match input_path {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("bunzip2: no input file specified");
+            return;
+        }
+    };
+
+    // Read the input data.
+    let file_data = match crate::fs::Vfs::read_file(&input) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("bunzip2: '{}': {:?}", input, e);
+            return;
+        }
+    };
+
+    // Verify bzip2 magic.
+    if file_data.len() < 4
+        || file_data.first() != Some(&b'B')
+        || file_data.get(1) != Some(&b'Z')
+        || file_data.get(2) != Some(&b'h')
+    {
+        crate::console_println!("bunzip2: '{}': not a bzip2 file", input);
+        return;
+    }
+
+    // Decompress.
+    let decompressed = match crate::fs::bzip2::bunzip2(&file_data) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("bunzip2: '{}': decompression failed: {:?}", input, e);
+            return;
+        }
+    };
+
+    if test_only {
+        crate::console_println!(
+            "bunzip2: '{}': OK ({} -> {} bytes)",
+            input, file_data.len(), decompressed.len()
+        );
+        return;
+    }
+
+    // Determine output path.
+    let out = if let Some(explicit) = output_path {
+        resolve_path(explicit)
+    } else {
+        // Strip .bz2 extension.
+        if input.ends_with(".bz2") {
+            alloc::string::String::from(&input[..input.len().saturating_sub(4)])
+        } else if input.ends_with(".tbz2") {
+            let base = &input[..input.len().saturating_sub(5)];
+            alloc::format!("{}.tar", base)
+        } else if input.ends_with(".tbz") {
+            let base = &input[..input.len().saturating_sub(4)];
+            alloc::format!("{}.tar", base)
+        } else {
+            alloc::format!("{}.out", input)
+        }
+    };
+
+    match crate::fs::Vfs::write_file(&out, &decompressed) {
+        Ok(()) => {
+            crate::console_println!(
+                "bunzip2: '{}' -> '{}' ({} -> {} bytes)",
+                input, out, file_data.len(), decompressed.len()
+            );
+        }
+        Err(e) => {
+            crate::console_println!("bunzip2: write '{}': {:?}", out, e);
         }
     }
 }

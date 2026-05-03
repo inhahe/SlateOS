@@ -428,6 +428,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell `base64` command: RFC 4648 Base64 encode/decode with 76-char line wrap
   - [x] Kshell `checksum` command: unified checksum utility supporting CRC32C and SHA-256
   - [x] Kshell `wipe` command: secure delete (zero-fill file contents, sync to disk, then remove)
+  - [x] Buffer cache adaptive read-ahead: window starts at 4 sectors, doubles per sequential batch (up to 128), resets on random access (based on Linux mm/readahead.c)
+  - [x] Kshell `sed` command: stream editor with s/old/new/[g] substitution, /pattern/d delete, /pattern/p print, -i in-place, -n suppress, pipe input support
+  - [x] Tar archive round-trip self-test: build archive with tar_build_header, write to disk, read back, parse with tar_parse_header, verify entry count
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

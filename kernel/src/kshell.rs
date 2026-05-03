@@ -3094,7 +3094,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "rev", "rm",
-    "rmdir", "run", "select", "seq", "set", "sha256", "sleep", "sort", "source",
+    "rmdir", "run", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
@@ -4134,6 +4134,7 @@ fn dispatch_with_input(line: &str, input: &str) {
         "paste" => cmd_paste_input(args, input),
         "xargs" => cmd_xargs_input(args, input),
         "column" => cmd_column_input(args, input),
+        "sed" => cmd_sed_input(args, input),
         _ => {
             // Command doesn't support piped input — just run normally.
             dispatch(line);
@@ -4242,6 +4243,7 @@ fn dispatch(line: &str) {
         "base64" => cmd_base64(args),
         "wipe" => cmd_wipe(args),
         "checksum" | "cksum" => cmd_checksum(args),
+        "sed" => cmd_sed(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -4413,6 +4415,7 @@ fn cmd_help() {
     crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
     crate::console_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
     crate::console_println!("  wipe FILE     Secure delete (zero-fill + remove)");
+    crate::console_println!("  sed [-i] [-n] 's/old/new/[g]' FILE  Stream editor (substitute/delete/print)");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -13605,4 +13608,380 @@ fn cmd_checksum(args: &str) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// sed — stream editor (subset)
+// ---------------------------------------------------------------------------
+
+/// `sed` command — stream editor for text transformation.
+///
+/// Supported commands:
+///   `s/pattern/replacement/[g]`  — substitute (first or all)
+///   `/pattern/d`                 — delete matching lines
+///   `Nd`                         — delete line N
+///
+/// Flags:
+///   `-i`   In-place edit (modify file directly)
+///   `-n`   Suppress default output
+///   `-e CMD`  Specify command (can repeat)
+///
+/// Examples:
+///   sed 's/old/new/g' file.txt         Replace all occurrences
+///   sed -i 's/old/new/' file.txt       In-place substitution
+///   sed '/pattern/d' file.txt          Delete matching lines
+///   sed -n '/pattern/p' file.txt       Print matching lines (like grep)
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn cmd_sed(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
+        crate::console_println!("       sed [-i] [-n] '/pattern/d' [file]");
+        crate::console_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
+        return;
+    }
+
+    let mut in_place = false;
+    let mut suppress = false;
+    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut file_args: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    let mut i = 0;
+
+    while i < parts.len() {
+        match parts[i] {
+            "-i" => in_place = true,
+            "-n" => suppress = true,
+            "-e" => {
+                i += 1;
+                if i < parts.len() {
+                    commands.push(alloc::string::String::from(parts[i]));
+                }
+            }
+            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
+                if commands.is_empty() {
+                    commands.push(alloc::string::String::from(s));
+                } else {
+                    file_args.push(s);
+                }
+            }
+            _ => {
+                file_args.push(parts[i]);
+            }
+        }
+        i += 1;
+    }
+
+    if commands.is_empty() {
+        crate::console_println!("sed: no command specified");
+        return;
+    }
+
+    // Parse sed commands.
+    let parsed: alloc::vec::Vec<SedCmd> = commands.iter()
+        .filter_map(|c| parse_sed_command(c))
+        .collect();
+
+    if parsed.is_empty() {
+        crate::console_println!("sed: invalid command syntax");
+        return;
+    }
+
+    // Process each file (or use empty content if no file given).
+    if file_args.is_empty() {
+        crate::console_println!("sed: no input file specified");
+        return;
+    }
+
+    for &file in &file_args {
+        let path = resolve_path(file);
+        let data = match crate::fs::Vfs::read_file(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::console_println!("sed: '{}': {:?}", path, e);
+                continue;
+            }
+        };
+
+        let text = core::str::from_utf8(&data).unwrap_or("");
+        let mut output = alloc::string::String::new();
+
+        for (line_idx, line) in text.lines().enumerate() {
+            let line_num = line_idx.wrapping_add(1);
+            let mut current = alloc::string::String::from(line);
+            let mut deleted = false;
+            let mut print_this = false;
+
+            for cmd in &parsed {
+                match cmd {
+                    SedCmd::Substitute { pattern, replacement, global, addr } => {
+                        if sed_addr_matches(addr, line_num, &current) {
+                            if *global {
+                                current = sed_replace_all(&current, pattern, replacement);
+                            } else {
+                                current = sed_replace_first(&current, pattern, replacement);
+                            }
+                        }
+                    }
+                    SedCmd::Delete { addr } => {
+                        if sed_addr_matches(addr, line_num, &current) {
+                            deleted = true;
+                        }
+                    }
+                    SedCmd::Print { addr } => {
+                        if sed_addr_matches(addr, line_num, &current) {
+                            print_this = true;
+                        }
+                    }
+                }
+            }
+
+            if !deleted {
+                if !suppress || print_this {
+                    output.push_str(&current);
+                    output.push('\n');
+                }
+                if suppress && print_this {
+                    // Already added above.
+                }
+            }
+        }
+
+        if in_place {
+            match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
+                Ok(()) => {}
+                Err(e) => {
+                    crate::console_println!("sed: write '{}': {:?}", path, e);
+                }
+            }
+        } else {
+            // Print output (without trailing newline already in output).
+            if output.ends_with('\n') {
+                output.pop();
+            }
+            crate::console_println!("{}", output);
+        }
+    }
+}
+
+/// Parsed sed command.
+enum SedCmd {
+    /// `s/pattern/replacement/[g]`
+    Substitute {
+        pattern: alloc::string::String,
+        replacement: alloc::string::String,
+        global: bool,
+        addr: SedAddr,
+    },
+    /// `/pattern/d` or `Nd`
+    Delete { addr: SedAddr },
+    /// `/pattern/p`
+    Print { addr: SedAddr },
+}
+
+/// Sed address (line selector).
+enum SedAddr {
+    /// All lines.
+    All,
+    /// Specific line number.
+    Line(usize),
+    /// Lines matching a pattern.
+    Pattern(alloc::string::String),
+}
+
+/// Check if a sed address matches the current line.
+fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
+    match addr {
+        SedAddr::All => true,
+        SedAddr::Line(n) => line_num == *n,
+        SedAddr::Pattern(pat) => line.contains(pat.as_str()),
+    }
+}
+
+/// Parse a sed command string into a `SedCmd`.
+fn parse_sed_command(cmd: &str) -> Option<SedCmd> {
+    let bytes = cmd.as_bytes();
+
+    // Substitution: s/pattern/replacement/[g]
+    if bytes.first() == Some(&b's') && bytes.len() >= 4 {
+        let delim = bytes[1];
+        // Find pattern end.
+        let pat_start = 2;
+        let pat_end = find_unescaped(bytes, delim, pat_start)?;
+        let rep_start = pat_end + 1;
+        let rep_end = find_unescaped(bytes, delim, rep_start).unwrap_or(bytes.len());
+        let flags = if rep_end < bytes.len() {
+            &cmd[rep_end + 1..]
+        } else {
+            ""
+        };
+
+        let pattern = alloc::string::String::from(cmd.get(pat_start..pat_end)?);
+        let replacement = alloc::string::String::from(cmd.get(rep_start..rep_end).unwrap_or(""));
+        let global = flags.contains('g');
+
+        return Some(SedCmd::Substitute {
+            pattern,
+            replacement,
+            global,
+            addr: SedAddr::All,
+        });
+    }
+
+    // Address commands: /pattern/d or /pattern/p
+    if bytes.first() == Some(&b'/') {
+        let pat_end = find_unescaped(bytes, b'/', 1)?;
+        let pattern = alloc::string::String::from(cmd.get(1..pat_end)?);
+        let action = cmd.get(pat_end + 1..)?;
+
+        return match action.trim() {
+            "d" => Some(SedCmd::Delete {
+                addr: SedAddr::Pattern(pattern),
+            }),
+            "p" => Some(SedCmd::Print {
+                addr: SedAddr::Pattern(pattern),
+            }),
+            _ => None,
+        };
+    }
+
+    // Line number commands: Nd
+    if bytes.last() == Some(&b'd') {
+        let num_str = &cmd[..cmd.len().saturating_sub(1)];
+        if let Ok(n) = num_str.parse::<usize>() {
+            return Some(SedCmd::Delete {
+                addr: SedAddr::Line(n),
+            });
+        }
+    }
+
+    None
+}
+
+/// Find the position of an unescaped delimiter byte starting from `start`.
+fn find_unescaped(bytes: &[u8], delim: u8, start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i] == delim {
+            // Check if preceded by backslash.
+            if i > start && bytes[i - 1] == b'\\' {
+                i += 1;
+                continue;
+            }
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Replace the first occurrence of `pattern` in `text` with `replacement`.
+fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::string::String {
+    if pattern.is_empty() {
+        return alloc::string::String::from(text);
+    }
+    if let Some(pos) = text.find(pattern) {
+        let mut result = alloc::string::String::with_capacity(text.len());
+        result.push_str(&text[..pos]);
+        result.push_str(replacement);
+        result.push_str(&text[pos + pattern.len()..]);
+        result
+    } else {
+        alloc::string::String::from(text)
+    }
+}
+
+/// `sed` pipe-input variant: processes piped text instead of a file.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_sed_input(args: &str, input: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let mut suppress = false;
+    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut i = 0;
+
+    while i < parts.len() {
+        match parts[i] {
+            "-n" => suppress = true,
+            "-e" => {
+                i += 1;
+                if i < parts.len() {
+                    commands.push(alloc::string::String::from(parts[i]));
+                }
+            }
+            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
+                if commands.is_empty() {
+                    commands.push(alloc::string::String::from(s));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let parsed: alloc::vec::Vec<SedCmd> = commands.iter()
+        .filter_map(|c| parse_sed_command(c))
+        .collect();
+
+    if parsed.is_empty() {
+        shell_print!("{}", input);
+        return;
+    }
+
+    let mut output = alloc::string::String::new();
+    for (line_idx, line) in input.lines().enumerate() {
+        let line_num = line_idx.wrapping_add(1);
+        let mut current = alloc::string::String::from(line);
+        let mut deleted = false;
+        let mut print_this = false;
+
+        for cmd in &parsed {
+            match cmd {
+                SedCmd::Substitute { pattern, replacement, global, addr } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        if *global {
+                            current = sed_replace_all(&current, pattern, replacement);
+                        } else {
+                            current = sed_replace_first(&current, pattern, replacement);
+                        }
+                    }
+                }
+                SedCmd::Delete { addr } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        deleted = true;
+                    }
+                }
+                SedCmd::Print { addr } => {
+                    if sed_addr_matches(addr, line_num, &current) {
+                        print_this = true;
+                    }
+                }
+            }
+        }
+
+        if !deleted && (!suppress || print_this) {
+            output.push_str(&current);
+            output.push('\n');
+        }
+    }
+
+    if output.ends_with('\n') {
+        output.pop();
+    }
+    shell_print!("{}", output);
+}
+
+/// Replace all occurrences of `pattern` in `text` with `replacement`.
+fn sed_replace_all(text: &str, pattern: &str, replacement: &str) -> alloc::string::String {
+    if pattern.is_empty() {
+        return alloc::string::String::from(text);
+    }
+    let mut result = alloc::string::String::with_capacity(text.len());
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(pattern) {
+        let abs_pos = start + pos;
+        result.push_str(&text[start..abs_pos]);
+        result.push_str(replacement);
+        start = abs_pos + pattern.len();
+    }
+    result.push_str(&text[start..]);
+    result
 }

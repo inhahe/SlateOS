@@ -421,6 +421,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell `split` command: split files by line count (-l N, default 1000) or byte size (-b SIZE with K/M/G); xaa/xab/... output naming
   - [x] Procfs `/proc/bcache`: buffer cache statistics (hit rate, dirty count, utilization, read-ahead, expired flush counts)
   - [x] Buffer cache age-based writeback: dirty_since_ns timestamps, flush_expired() writes back entries >5s old, expired_flushes counter; wired into `sync` command
+  - [x] FAT LFN operation fix: rename, rmdir, mkdir, fallocate, write_at, truncate all use resolve_path() instead of to_83_name() (which silently failed for any long filename)
+  - [x] FAT self-test expansion: LFN operation tests (mkdir/rmdir/rename/write_at/truncate/fallocate with long names), fsck consistency check after test suite
+  - [x] Kshell `tar` command: USTAR archive create (-cf), extract (-xf [-C dir]), list (-tf), verbose (-v), recursive directories, symlink support, proper padding and checksum
+  - [x] Kshell `crc32` command: CRC32C file checksum using hardware-compatible Castagnoli polynomial
+  - [x] Kshell `base64` command: RFC 4648 Base64 encode/decode with 76-char line wrap
+  - [x] Kshell `checksum` command: unified checksum utility supporting CRC32C and SHA-256
+  - [x] Kshell `wipe` command: secure delete (zero-fill file contents, sync to disk, then remove)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

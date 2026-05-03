@@ -431,6 +431,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Buffer cache adaptive read-ahead: window starts at 4 sectors, doubles per sequential batch (up to 128), resets on random access (based on Linux mm/readahead.c)
   - [x] Kshell `sed` command: stream editor with s/old/new/[g] substitution, /pattern/d delete, /pattern/p print, -i in-place, -n suppress, pipe input support
   - [x] Tar archive round-trip self-test: build archive with tar_build_header, write to disk, read back, parse with tar_parse_header, verify entry count
+  - [x] Kshell `awk` command: pattern-action text processing with field splitting ($1..$N, $NF), -F separator, /pattern/ matching, BEGIN/END blocks, NR/NF variables, print expressions, pipe input
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

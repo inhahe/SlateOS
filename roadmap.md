@@ -441,6 +441,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DEFLATE/gzip decompression (fs::compress): RFC 1951 inflate (stored, fixed Huffman, dynamic Huffman blocks), RFC 1952 gzip wrapper with CRC-32 ISO verification
   - [x] Kshell `gunzip`/`gzip` command: decompress .gz files with -t test, -l list sizes, -o explicit output; auto-strips .gz extension
   - [x] Tar .tar.gz transparency: auto-detects gzip magic bytes and decompresses before extracting/listing
+  - [x] Kshell `unzip` command: ZIP archive listing and extraction with stored and deflated entries, CRC-32 verification, automatic directory creation
+  - [x] DEFLATE compression (fs::compress::deflate): LZ77 with hash-chain + fixed Huffman encoding; gzip() wrapper creates RFC 1952 streams; round-trip self-tests
+  - [x] Kshell `gzip` compression mode: auto-detects non-gzip input and compresses; tar -czf creates gzip-compressed archives
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

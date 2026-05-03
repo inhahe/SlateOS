@@ -7071,14 +7071,284 @@ fn cmd_file(args: &str) {
             if path.starts_with("/dev/") && entry.size == 0 {
                 shell_println!("{}: character special", path);
             } else {
-                let hint = extension_hint(&path);
-                shell_println!("{}: regular file, {} bytes ({})", path, entry.size, hint);
+                // Read up to 512 bytes for magic byte detection.
+                let magic_hint = match crate::fs::Vfs::read_at(&path, 0, 512) {
+                    Ok(header) => detect_magic(&header),
+                    Err(_) => None,
+                };
+                if let Some(hint) = magic_hint {
+                    shell_println!("{}: {}, {} bytes", path, hint, entry.size);
+                } else {
+                    let ext_hint = extension_hint(&path);
+                    shell_println!("{}: regular file, {} bytes ({})", path, entry.size, ext_hint);
+                }
             }
         }
         crate::fs::EntryType::VolumeLabel => {
             shell_println!("{}: volume label", path);
         }
     }
+}
+
+/// Detect file type from magic bytes in the file header.
+///
+/// Reads the first bytes and matches against known signatures.
+/// Returns `None` if no signature matches (falls back to extension).
+fn detect_magic(header: &[u8]) -> Option<&'static str> {
+    if header.is_empty() {
+        return Some("empty");
+    }
+
+    // Check fixed-offset signatures.
+    // Order matters: more specific patterns first where ambiguity exists.
+
+    // ELF binary
+    if header.starts_with(b"\x7FELF") {
+        // ELF class: header[4] — 1=32-bit, 2=64-bit
+        let bits = match header.get(4) {
+            Some(1) => "32-bit",
+            Some(2) => "64-bit",
+            _ => "",
+        };
+        // ELF type: header[16..18] LE — 1=relocatable, 2=executable, 3=shared, 4=core
+        let etype = if header.len() >= 18 {
+            let et = u16::from_le_bytes([header[16], header[17]]);
+            match et {
+                1 => " relocatable",
+                2 => " executable",
+                3 => " shared object",
+                4 => " core dump",
+                _ => "",
+            }
+        } else {
+            ""
+        };
+        return Some(match (bits, etype) {
+            ("64-bit", " executable") => "ELF 64-bit executable",
+            ("64-bit", " shared object") => "ELF 64-bit shared object",
+            ("64-bit", " relocatable") => "ELF 64-bit relocatable",
+            ("64-bit", " core dump") => "ELF 64-bit core dump",
+            ("32-bit", " executable") => "ELF 32-bit executable",
+            ("32-bit", " shared object") => "ELF 32-bit shared object",
+            ("32-bit", " relocatable") => "ELF 32-bit relocatable",
+            ("32-bit", " core dump") => "ELF 32-bit core dump",
+            _ => "ELF binary",
+        });
+    }
+
+    // PE/COFF (Windows executables, also used by UEFI)
+    if header.starts_with(b"MZ") {
+        return Some("PE executable (MZ)");
+    }
+
+    // PNG
+    if header.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("PNG image data");
+    }
+
+    // JPEG
+    if header.starts_with(b"\xff\xd8\xff") {
+        return Some("JPEG image data");
+    }
+
+    // GIF
+    if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        return Some("GIF image data");
+    }
+
+    // BMP
+    if header.starts_with(b"BM") && header.len() >= 6 {
+        return Some("BMP image data");
+    }
+
+    // WebP (RIFF....WEBP)
+    if header.starts_with(b"RIFF") && header.len() >= 12 && &header[8..12] == b"WEBP" {
+        return Some("WebP image data");
+    }
+
+    // TIFF (little-endian or big-endian)
+    if header.starts_with(b"II\x2a\x00") || header.starts_with(b"MM\x00\x2a") {
+        return Some("TIFF image data");
+    }
+
+    // PDF
+    if header.starts_with(b"%PDF") {
+        return Some("PDF document");
+    }
+
+    // ZIP archive (including JAR, DOCX, XLSX, etc.)
+    if header.starts_with(b"PK\x03\x04") {
+        return Some("ZIP archive");
+    }
+
+    // gzip
+    if header.starts_with(b"\x1f\x8b") {
+        return Some("gzip compressed data");
+    }
+
+    // xz
+    if header.starts_with(b"\xfd7zXZ\x00") {
+        return Some("XZ compressed data");
+    }
+
+    // bzip2
+    if header.starts_with(b"BZ") && header.len() >= 3 && header[2] == b'h' {
+        return Some("bzip2 compressed data");
+    }
+
+    // 7z
+    if header.starts_with(b"7z\xbc\xaf\x27\x1c") {
+        return Some("7-zip archive");
+    }
+
+    // Zstandard
+    if header.len() >= 4 {
+        let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        if magic == 0xFD2F_B528 {
+            return Some("Zstandard compressed data");
+        }
+    }
+
+    // RAR
+    if header.starts_with(b"Rar!\x1a\x07") {
+        return Some("RAR archive");
+    }
+
+    // USTAR tar archive (magic at offset 257)
+    if header.len() >= 263 && &header[257..262] == b"ustar" {
+        return Some("POSIX tar archive (ustar)");
+    }
+
+    // WebAssembly
+    if header.starts_with(b"\x00asm") {
+        return Some("WebAssembly binary");
+    }
+
+    // SQLite
+    if header.starts_with(b"SQLite format 3") {
+        return Some("SQLite 3.x database");
+    }
+
+    // FLAC audio
+    if header.starts_with(b"fLaC") {
+        return Some("FLAC audio");
+    }
+
+    // Ogg container (Vorbis, Opus, etc.)
+    if header.starts_with(b"OggS") {
+        return Some("Ogg data");
+    }
+
+    // MP3 (ID3 tag or sync word)
+    if header.starts_with(b"ID3") {
+        return Some("MP3 audio (ID3)");
+    }
+    if header.len() >= 2 && header[0] == 0xFF && (header[1] & 0xE0) == 0xE0 {
+        return Some("MP3 audio");
+    }
+
+    // WAV (RIFF....WAVE)
+    if header.starts_with(b"RIFF") && header.len() >= 12 && &header[8..12] == b"WAVE" {
+        return Some("WAVE audio");
+    }
+
+    // AVI (RIFF....AVI )
+    if header.starts_with(b"RIFF") && header.len() >= 12 && &header[8..12] == b"AVI " {
+        return Some("AVI video");
+    }
+
+    // Matroska/WebM
+    if header.starts_with(b"\x1a\x45\xdf\xa3") {
+        return Some("Matroska/WebM video");
+    }
+
+    // MIDI
+    if header.starts_with(b"MThd") {
+        return Some("MIDI audio");
+    }
+
+    // Shell script / shebang
+    if header.starts_with(b"#!") {
+        // Try to identify the interpreter.
+        let line_end = header.iter().position(|&b| b == b'\n').unwrap_or(header.len().min(80));
+        let shebang = core::str::from_utf8(header.get(2..line_end).unwrap_or(&[])).unwrap_or("");
+        if shebang.contains("python") {
+            return Some("Python script");
+        } else if shebang.contains("bash") {
+            return Some("Bash script");
+        } else if shebang.contains("sh") {
+            return Some("shell script");
+        } else if shebang.contains("perl") {
+            return Some("Perl script");
+        } else if shebang.contains("ruby") {
+            return Some("Ruby script");
+        } else if shebang.contains("node") {
+            return Some("Node.js script");
+        }
+        return Some("script with shebang");
+    }
+
+    // UTF-8 BOM
+    if header.starts_with(b"\xEF\xBB\xBF") {
+        return Some("UTF-8 Unicode text (with BOM)");
+    }
+
+    // UTF-16 BOM
+    if header.starts_with(b"\xFF\xFE") {
+        return Some("UTF-16 Unicode text (little-endian)");
+    }
+    if header.starts_with(b"\xFE\xFF") {
+        return Some("UTF-16 Unicode text (big-endian)");
+    }
+
+    // JSON heuristic: starts with { or [
+    if header.first() == Some(&b'{') || header.first() == Some(&b'[') {
+        // Validate at least a few bytes look like JSON.
+        let s = core::str::from_utf8(header.get(..64.min(header.len())).unwrap_or(&[]));
+        if s.is_ok() {
+            return Some("JSON data");
+        }
+    }
+
+    // XML / HTML heuristic
+    if header.starts_with(b"<?xml") {
+        return Some("XML document");
+    }
+    if header.starts_with(b"<!DOCTYPE html") || header.starts_with(b"<html") || header.starts_with(b"<HTML") {
+        return Some("HTML document");
+    }
+
+    // Fall back to text vs binary heuristic.
+    // Scan the first bytes for non-text characters.
+    let check_len = header.len().min(256);
+    let mut non_text = 0usize;
+    for &b in header.get(..check_len).unwrap_or(&[]) {
+        match b {
+            // Common text bytes: printable ASCII, tab, newline, carriage return.
+            0x09 | 0x0A | 0x0D | 0x20..=0x7E => {}
+            // High bytes could be UTF-8 continuation.
+            0x80..=0xFF => {}
+            // Null and other control chars are strong binary indicators.
+            _ => {
+                non_text = non_text.saturating_add(1);
+            }
+        }
+    }
+
+    if non_text == 0 && check_len > 0 {
+        // Looks like text — try to determine if it's valid UTF-8.
+        if core::str::from_utf8(header.get(..check_len).unwrap_or(&[])).is_ok() {
+            return Some("ASCII text");
+        }
+        return Some("text data");
+    }
+
+    if non_text > 0 && check_len > 0 {
+        // Has some binary bytes — likely binary data.
+        return Some("data");
+    }
+
+    None
 }
 
 /// Map a file extension to a human-readable type hint for the `file` command.

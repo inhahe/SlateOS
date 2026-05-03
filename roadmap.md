@@ -445,6 +445,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DEFLATE compression (fs::compress::deflate): LZ77 with hash-chain + fixed Huffman encoding; gzip() wrapper creates RFC 1952 streams; round-trip self-tests
   - [x] Kshell `gzip` compression mode: auto-detects non-gzip input and compresses; tar -czf creates gzip-compressed archives
   - [x] Buffer cache runtime-tunable parameters: readahead_max, readahead_initial, dirty_expire_secs backed by AtomicU32/AtomicU64, sysctl callback dispatch (notify_subsystem) propagates changes to cache atomics, seconds→nanoseconds conversion, self-tests for full sysctl→cache propagation path
+  - [x] Kshell `zip` command: create ZIP archives with local file headers, central directory, EOCD record; deflate compression (method 8) with stored fallback (method 0); recursive directory inclusion; `-0` store-only mode
+  - [x] ext4 fsck: four-phase read-only consistency checker — superblock validation, group descriptor free counts vs actual bitmaps (block + inode), inode scan with type classification, directory tree walk with link count verification; `fsck` auto-detects ext4 vs FAT; verbose mode
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

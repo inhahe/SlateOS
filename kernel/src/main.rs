@@ -611,6 +611,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::journal::self_test() {
                 serial_println!("WARNING: Change journal self-test failed: {:?}", e);
             }
+            // Run DEFLATE/gzip decompression self-test.
+            if let Err(e) = fs::compress::self_test() {
+                serial_println!("WARNING: Compression self-test failed: {:?}", e);
+            }
             // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
             if let Err(e) = fs::memfs::self_test() {
                 serial_println!("WARNING: MemFs self-test failed: {:?}", e);

@@ -26,6 +26,7 @@
 //! filesystem.
 
 pub mod cache;
+pub mod compress;
 pub mod devfs;
 pub mod ext4;
 pub mod fat;

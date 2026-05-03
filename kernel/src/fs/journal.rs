@@ -30,6 +30,7 @@
 //! - design.txt lines 1013-1035: "detect filesystem changes since last API call,
 //!   even if program was closed or OS rebooted"
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -155,7 +156,9 @@ const JOURNAL_FILE: &str = "/_JOURNAL";
 
 struct JournalInner {
     /// Ring buffer of journal entries (oldest at head, newest at tail).
-    entries: Vec<JournalEntry>,
+    /// Uses VecDeque so eviction of the oldest entry is O(1) instead
+    /// of O(n) with Vec::remove(0).
+    entries: VecDeque<JournalEntry>,
     /// Next sequence number to assign.
     next_seq: u64,
     /// Number of entries written since last flush.
@@ -165,7 +168,7 @@ struct JournalInner {
 }
 
 static JOURNAL: Mutex<JournalInner> = Mutex::new(JournalInner {
-    entries: Vec::new(),
+    entries: VecDeque::new(),
     next_seq: 1,
     unflushed: 0,
     initialized: false,
@@ -199,13 +202,13 @@ pub fn init() {
                     if entry.seq > max_seq {
                         max_seq = entry.seq;
                     }
-                    journal.entries.push(entry);
+                    journal.entries.push_back(entry);
                     count = count.wrapping_add(1);
                 }
             }
-            // Trim to max size if the file was huge.
+            // Trim to max size if the file was huge — O(1) per pop.
             while journal.entries.len() > JOURNAL_MAX_ENTRIES {
-                journal.entries.remove(0);
+                journal.entries.pop_front();
             }
             journal.next_seq = max_seq.wrapping_add(1);
             journal.initialized = true;
@@ -259,11 +262,11 @@ fn record_with_old_path(event_type: JournalEventType, path: &str, old_path: &str
         old_path: String::from(old_path),
     };
 
-    journal.entries.push(entry);
+    journal.entries.push_back(entry);
 
-    // Evict oldest if over capacity.
+    // Evict oldest if over capacity — O(1) per pop with VecDeque.
     while journal.entries.len() > JOURNAL_MAX_ENTRIES {
-        journal.entries.remove(0);
+        journal.entries.pop_front();
     }
 
     journal.unflushed = journal.unflushed.wrapping_add(1);
@@ -352,7 +355,7 @@ pub fn stats() -> (usize, u64) {
 // ---------------------------------------------------------------------------
 
 /// Serialize all entries to a JSON-lines string.
-fn serialize_entries(entries: &[JournalEntry]) -> String {
+fn serialize_entries(entries: &VecDeque<JournalEntry>) -> String {
     let mut buf = String::with_capacity(entries.len() * 128);
     for entry in entries {
         buf.push_str(&entry.to_json_line());

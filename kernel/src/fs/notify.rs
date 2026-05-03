@@ -344,6 +344,18 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
             }
         }
 
+        // Event coalescing: if an identical event (same type + path) is
+        // already pending, skip the duplicate to avoid flooding a consumer
+        // with repeated writes to the same file.
+        let already_queued = watch.events.iter().any(|e| {
+            e.event_type == event_type
+                && e.path == path
+                && e.new_path.as_deref() == new_path
+        });
+        if already_queued {
+            continue;
+        }
+
         // Queue the event.
         if watch.events.len() >= watch.max_events {
             // Queue full — drop oldest event and set overflow flag.
@@ -533,12 +545,67 @@ pub fn self_test() -> KernelResult<()> {
     close_watch(create_only_id)?;
     crate::serial_println!("[notify]   Event mask filtering verified ✓");
 
-    // Clean up.
+    // Test event coalescing: duplicate events should be suppressed.
+    emit_modified("/COALESCE.TXT");
+    emit_modified("/COALESCE.TXT");
+    emit_modified("/COALESCE.TXT");
+    let events = read_events(watch_id, 10)?;
+    if events.len() != 1 {
+        crate::serial_println!(
+            "[notify]   FAIL: coalescing expected 1 event, got {}",
+            events.len()
+        );
+        close_watch(watch_id)?;
+        close_watch(rec_id)?;
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   Event coalescing verified ✓");
+
+    // Different event types on the same path should NOT coalesce.
+    emit_created("/MULTI.TXT");
+    emit_modified("/MULTI.TXT");
+    emit_deleted("/MULTI.TXT");
+    let events = read_events(watch_id, 10)?;
+    if events.len() != 3 {
+        crate::serial_println!(
+            "[notify]   FAIL: different types expected 3, got {}",
+            events.len()
+        );
+        close_watch(watch_id)?;
+        close_watch(rec_id)?;
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   Different types not coalesced ✓");
+
+    // Test overflow: create a small-capacity watch and flood it.
     close_watch(watch_id)?;
     close_watch(rec_id)?;
 
+    let overflow_id = create_watch("/", FsEventMask::ALL_CHANGES, false)?;
+    // Push DEFAULT_MAX_EVENTS + extra unique events to trigger overflow.
+    for i in 0..DEFAULT_MAX_EVENTS + 10 {
+        let p = alloc::format!("/OVF_{}", i);
+        emit_created(&p);
+    }
+    let events = read_events(overflow_id, DEFAULT_MAX_EVENTS + 20)?;
+    // First event should be Overflow indicator.
+    if events.is_empty() || events[0].event_type != FsEventType::Overflow {
+        crate::serial_println!(
+            "[notify]   FAIL: overflow event not first (got {} events, first type={:?})",
+            events.len(),
+            events.first().map(|e| e.event_type),
+        );
+        close_watch(overflow_id)?;
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[notify]   Overflow detection verified ({} events after overflow) ✓",
+        events.len()
+    );
+    close_watch(overflow_id)?;
+
     // Verify closed watch returns error.
-    match read_events(watch_id, 10) {
+    match read_events(overflow_id, 10) {
         Err(KernelError::InvalidHandle) => {}
         _ => {
             crate::serial_println!("[notify]   FAIL: closed watch didn't return InvalidHandle");

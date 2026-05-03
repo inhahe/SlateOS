@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "flock", "fsck", "fsck.fat", "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "irq", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "irq", "journal", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4244,6 +4244,7 @@ fn dispatch(line: &str) {
         "base64" => cmd_base64(args),
         "wipe" => cmd_wipe(args),
         "checksum" | "cksum" => cmd_checksum(args),
+        "journal" => cmd_journal(args),
         "sed" => cmd_sed(args),
         "awk" => cmd_awk(args),
         "run" | "exec" => cmd_run(args),
@@ -4404,6 +4405,7 @@ fn cmd_help() {
     crate::console_println!("  symlink T P Create symlink at P pointing to T");
     crate::console_println!("  xattr F .. Extended attributes (list/get/set/rm)");
     crate::console_println!("  watch P [-r] Monitor filesystem changes (press key to stop)");
+    crate::console_println!("  journal [-n N] Show filesystem change journal entries");
     crate::console_println!("  basename P Extract filename from path");
     crate::console_println!("  dirname P  Extract directory from path");
     crate::console_println!("  realpath P Resolve path (follow symlinks)");
@@ -10904,7 +10906,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -11442,6 +11444,168 @@ fn cmd_watch(args: &str) {
     let _ = crate::fs::notify::close_watch(watch_id);
 
     crate::console_println!("\nStopped. {} events captured.", event_count);
+}
+
+/// Display filesystem change journal entries.
+///
+/// Usage:
+/// - `journal`           — show last 20 entries
+/// - `journal -n 50`     — show last 50 entries
+/// - `journal --all`     — show all entries in the ring buffer
+/// - `journal --stats`   — show journal statistics
+/// - `journal --flush`   — flush unflushed entries to disk
+/// - `journal --since N` — show entries with sequence number > N
+fn cmd_journal(args: &str) {
+    let args = args.trim();
+
+    // Parse arguments.
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    if parts.first() == Some(&"--stats") || parts.first() == Some(&"-s") {
+        let (count, seq) = crate::fs::journal::stats();
+        let cursor = crate::fs::journal::cursor();
+        crate::console_println!("Journal statistics:");
+        crate::console_println!("  Entries in buffer: {}", count);
+        crate::console_println!("  Current sequence:  {}", seq);
+        crate::console_println!("  Cursor position:   {}", cursor);
+        return;
+    }
+
+    if parts.first() == Some(&"--flush") || parts.first() == Some(&"-f") {
+        match crate::fs::journal::flush() {
+            Ok(()) => crate::console_println!("Journal flushed to disk."),
+            Err(e) => crate::console_println!("journal: flush failed: {:?}", e),
+        }
+        return;
+    }
+
+    // Determine how many entries to show and from which sequence.
+    let mut since_seq = 0u64;
+    let mut max_show: usize = 20;
+    let mut show_all = false;
+
+    let mut i = 0;
+    while i < parts.len() {
+        match parts[i] {
+            "-n" => {
+                if let Some(&count_str) = parts.get(i.wrapping_add(1)) {
+                    if let Some(n) = parse_u64_decimal(count_str) {
+                        max_show = n as usize;
+                    } else {
+                        crate::console_println!("journal: invalid count: {}", count_str);
+                        return;
+                    }
+                    i = i.wrapping_add(1);
+                } else {
+                    crate::console_println!("journal: -n requires a number");
+                    return;
+                }
+            }
+            "--all" | "-a" => {
+                show_all = true;
+            }
+            "--since" => {
+                if let Some(&seq_str) = parts.get(i.wrapping_add(1)) {
+                    if let Some(n) = parse_u64_decimal(seq_str) {
+                        since_seq = n;
+                    } else {
+                        crate::console_println!("journal: invalid sequence: {}", seq_str);
+                        return;
+                    }
+                    i = i.wrapping_add(1);
+                } else {
+                    crate::console_println!("journal: --since requires a number");
+                    return;
+                }
+            }
+            "--help" | "-h" => {
+                crate::console_println!(
+                    "Usage: journal [-n N] [--all] [--since SEQ] [--stats] [--flush]\n\
+                     \x20 -n N        Show last N entries (default 20)\n\
+                     \x20 --all       Show all entries in the ring buffer\n\
+                     \x20 --since SEQ Show entries after sequence number SEQ\n\
+                     \x20 --stats     Show journal statistics\n\
+                     \x20 --flush     Flush journal to disk"
+                );
+                return;
+            }
+            _ => {}
+        }
+        i = i.wrapping_add(1);
+    }
+
+    let (entries, current_seq) = crate::fs::journal::read_since(since_seq);
+
+    if entries.is_empty() {
+        if since_seq > 0 {
+            crate::console_println!("No journal entries since seq {}.", since_seq);
+        } else {
+            crate::console_println!("Journal is empty.");
+        }
+        return;
+    }
+
+    // If not --all and not --since, show only the last N entries.
+    let display_entries = if show_all || since_seq > 0 {
+        &entries[..]
+    } else if entries.len() > max_show {
+        crate::console_println!(
+            "... ({} older entries omitted, use --all or -n to see more)",
+            entries.len().saturating_sub(max_show)
+        );
+        &entries[entries.len().saturating_sub(max_show)..]
+    } else {
+        &entries[..]
+    };
+
+    // Print entries in a table format.
+    for entry in display_entries {
+        let type_str = match entry.event_type {
+            crate::fs::journal::JournalEventType::Created => "CREATE",
+            crate::fs::journal::JournalEventType::Modified => "MODIFY",
+            crate::fs::journal::JournalEventType::Deleted => "DELETE",
+            crate::fs::journal::JournalEventType::Renamed => "RENAME",
+        };
+
+        // Format timestamp as seconds since boot.
+        let secs = entry.timestamp_ns / 1_000_000_000;
+        let ms = (entry.timestamp_ns % 1_000_000_000) / 1_000_000;
+
+        if entry.event_type == crate::fs::journal::JournalEventType::Renamed
+            && !entry.old_path.is_empty()
+        {
+            crate::console_println!(
+                "  #{:<6} {}.{:03}s  {:<6}  {} -> {}",
+                entry.seq, secs, ms, type_str, entry.old_path, entry.path
+            );
+        } else {
+            crate::console_println!(
+                "  #{:<6} {}.{:03}s  {:<6}  {}",
+                entry.seq, secs, ms, type_str, entry.path
+            );
+        }
+    }
+
+    crate::console_println!(
+        "\n{} entries shown (current sequence: {})",
+        display_entries.len(),
+        current_seq
+    );
+}
+
+/// Parse a decimal string as u64 (no_std-safe).
+fn parse_u64_decimal(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut val = 0u64;
+    for b in s.bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        val = val.checked_mul(10)?.checked_add(u64::from(b.wrapping_sub(b'0')))?;
+    }
+    Some(val)
 }
 
 /// - `trash --list` / `trash -l` — list trash contents

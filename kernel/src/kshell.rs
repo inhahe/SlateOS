@@ -3099,7 +3099,7 @@ const COMMANDS: &[&str] = &[
     "do", "done", "elif", "else", "expr", "fi", "if",
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
-    "uname", "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
+    "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version",
     "watch", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4245,6 +4245,7 @@ fn dispatch(line: &str) {
         "wipe" => cmd_wipe(args),
         "checksum" | "cksum" => cmd_checksum(args),
         "gunzip" | "gzip" => cmd_gunzip(args),
+        "unzip" => cmd_unzip(args),
         "journal" => cmd_journal(args),
         "sed" => cmd_sed(args),
         "awk" => cmd_awk(args),
@@ -4417,6 +4418,7 @@ fn cmd_help() {
     crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
     crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz supported)");
     crate::console_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
+    crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
     crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
     crate::console_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
@@ -11178,7 +11180,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "unzip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -13790,6 +13792,366 @@ fn tar_mkdir_p(path: &str) -> crate::error::KernelResult<()> {
 
 // ---------------------------------------------------------------------------
 // crc32 — CRC32C file checksum
+// ---------------------------------------------------------------------------
+// unzip — ZIP archive extraction and listing
+// ---------------------------------------------------------------------------
+
+/// ZIP local file header signature.
+const ZIP_LOCAL_SIG: u32 = 0x0403_4B50;
+/// ZIP central directory file header signature.
+const ZIP_CENTRAL_SIG: u32 = 0x0201_4B50;
+/// ZIP end of central directory signature.
+const ZIP_EOCD_SIG: u32 = 0x0605_4B50;
+
+/// Read a little-endian u16 from a byte slice at `off`.
+fn zip_u16(data: &[u8], off: usize) -> u16 {
+    let lo = *data.get(off).unwrap_or(&0);
+    let hi = *data.get(off.wrapping_add(1)).unwrap_or(&0);
+    u16::from(lo) | (u16::from(hi) << 8)
+}
+
+/// Read a little-endian u32 from a byte slice at `off`.
+fn zip_u32(data: &[u8], off: usize) -> u32 {
+    let b0 = u32::from(*data.get(off).unwrap_or(&0));
+    let b1 = u32::from(*data.get(off.wrapping_add(1)).unwrap_or(&0));
+    let b2 = u32::from(*data.get(off.wrapping_add(2)).unwrap_or(&0));
+    let b3 = u32::from(*data.get(off.wrapping_add(3)).unwrap_or(&0));
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+/// A parsed ZIP central directory entry.
+struct ZipEntry {
+    /// Filename (relative path inside the archive).
+    name: alloc::string::String,
+    /// Compression method: 0=stored, 8=deflated.
+    method: u16,
+    /// CRC-32 of uncompressed data.
+    crc32: u32,
+    /// Compressed size.
+    compressed_size: u32,
+    /// Uncompressed size.
+    uncompressed_size: u32,
+    /// Offset of local file header in the archive.
+    local_header_offset: u32,
+}
+
+/// Find the End of Central Directory record by scanning backwards.
+///
+/// The EOCD is at most 22 + 65535 bytes from the end (22 bytes fixed +
+/// up to 65535 bytes of comment).  We scan from the end for the signature.
+fn zip_find_eocd(data: &[u8]) -> Option<usize> {
+    if data.len() < 22 {
+        return None;
+    }
+    // Scan backwards from the end, up to 65557 bytes back.
+    let search_start = data.len().saturating_sub(65557);
+    let mut pos = data.len().saturating_sub(22);
+    loop {
+        if zip_u32(data, pos) == ZIP_EOCD_SIG {
+            return Some(pos);
+        }
+        if pos == search_start {
+            return None;
+        }
+        pos = pos.saturating_sub(1);
+    }
+}
+
+/// Parse the central directory and return a list of entries.
+fn zip_parse_central_dir(data: &[u8]) -> Option<alloc::vec::Vec<ZipEntry>> {
+    let eocd_off = zip_find_eocd(data)?;
+
+    let total_entries = zip_u16(data, eocd_off.wrapping_add(10)) as usize;
+    let cd_offset = zip_u32(data, eocd_off.wrapping_add(16)) as usize;
+
+    let mut entries = alloc::vec::Vec::with_capacity(total_entries);
+    let mut off = cd_offset;
+
+    for _ in 0..total_entries {
+        if off.wrapping_add(46) > data.len() {
+            break;
+        }
+        let sig = zip_u32(data, off);
+        if sig != ZIP_CENTRAL_SIG {
+            break;
+        }
+
+        let method = zip_u16(data, off.wrapping_add(10));
+        let crc32 = zip_u32(data, off.wrapping_add(16));
+        let compressed_size = zip_u32(data, off.wrapping_add(20));
+        let uncompressed_size = zip_u32(data, off.wrapping_add(24));
+        let name_len = zip_u16(data, off.wrapping_add(28)) as usize;
+        let extra_len = zip_u16(data, off.wrapping_add(30)) as usize;
+        let comment_len = zip_u16(data, off.wrapping_add(32)) as usize;
+        let local_header_offset = zip_u32(data, off.wrapping_add(42));
+
+        let name_start = off.wrapping_add(46);
+        let name_end = name_start.wrapping_add(name_len).min(data.len());
+        let name_bytes = data.get(name_start..name_end).unwrap_or(&[]);
+        let name = core::str::from_utf8(name_bytes)
+            .map(alloc::string::String::from)
+            .unwrap_or_else(|_| alloc::format!("<invalid-utf8@{}>", off));
+
+        entries.push(ZipEntry {
+            name,
+            method,
+            crc32,
+            compressed_size,
+            uncompressed_size,
+            local_header_offset,
+        });
+
+        off = off.wrapping_add(46)
+            .wrapping_add(name_len)
+            .wrapping_add(extra_len)
+            .wrapping_add(comment_len);
+    }
+
+    Some(entries)
+}
+
+/// Extract the compressed data for a ZIP entry from the archive.
+///
+/// Reads the local file header to find the actual data start (the
+/// local header may have different extra field lengths than the
+/// central directory entry).
+fn zip_entry_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Option<&'a [u8]> {
+    let off = entry.local_header_offset as usize;
+    if off.wrapping_add(30) > data.len() {
+        return None;
+    }
+    let sig = zip_u32(data, off);
+    if sig != ZIP_LOCAL_SIG {
+        return None;
+    }
+    let name_len = zip_u16(data, off.wrapping_add(26)) as usize;
+    let extra_len = zip_u16(data, off.wrapping_add(28)) as usize;
+    let data_start = off.wrapping_add(30).wrapping_add(name_len).wrapping_add(extra_len);
+    let data_end = data_start.wrapping_add(entry.compressed_size as usize);
+    data.get(data_start..data_end.min(data.len()))
+}
+
+/// `unzip` command — list or extract ZIP archives.
+///
+/// - `unzip -l archive.zip`        — list contents
+/// - `unzip archive.zip`           — extract all files
+/// - `unzip archive.zip -d DIR`    — extract to directory
+fn cmd_unzip(args: &str) {
+    use crate::fs::Vfs;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: unzip [-l] archive.zip [-d dir]\n\
+             \x20 -l      List archive contents\n\
+             \x20 -d DIR  Extract to directory DIR"
+        );
+        return;
+    }
+
+    let mut list_mode = false;
+    let mut archive_arg: Option<&str> = None;
+    let mut target_dir = alloc::string::String::from("/");
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-l" | "--list" => list_mode = true,
+            "-d" => {
+                if let Some(&dir) = parts.get(i.wrapping_add(1)) {
+                    target_dir = resolve_path(dir);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("unzip: -d requires a directory argument");
+                    return;
+                }
+            }
+            _ => {
+                if archive_arg.is_none() {
+                    archive_arg = Some(p);
+                }
+            }
+        }
+    }
+
+    let archive_path = match archive_arg {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("unzip: no archive file specified");
+            return;
+        }
+    };
+
+    let data = match Vfs::read_file(&archive_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("unzip: '{}': {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let entries = match zip_parse_central_dir(&data) {
+        Some(e) => e,
+        None => {
+            crate::console_println!("unzip: '{}': not a valid ZIP archive", archive_path);
+            return;
+        }
+    };
+
+    if list_mode {
+        crate::console_println!(
+            "  {:>10}  {:>10}  {:>6}  Name",
+            "Size", "Compressed", "Method"
+        );
+        crate::console_println!("  {}  {}  {}  {}", "-" .repeat(10), "-".repeat(10), "-".repeat(6), "-".repeat(30));
+
+        let mut total_size: u64 = 0;
+        let mut total_compressed: u64 = 0;
+        for entry in &entries {
+            let method_str = match entry.method {
+                0 => "stored",
+                8 => "deflat",
+                _ => "???",
+            };
+            crate::console_println!(
+                "  {:>10}  {:>10}  {:>6}  {}",
+                entry.uncompressed_size, entry.compressed_size,
+                method_str, entry.name
+            );
+            total_size = total_size.saturating_add(u64::from(entry.uncompressed_size));
+            total_compressed = total_compressed.saturating_add(u64::from(entry.compressed_size));
+        }
+        crate::console_println!("  {}  {}  {}  {}", "-".repeat(10), "-".repeat(10), "-".repeat(6), "-".repeat(30));
+        crate::console_println!(
+            "  {:>10}  {:>10}  {:>6}  {} files",
+            total_size, total_compressed, "", entries.len()
+        );
+        return;
+    }
+
+    // Extract mode.
+    let mut extracted: u32 = 0;
+    let mut errors: u32 = 0;
+
+    for entry in &entries {
+        // Build output path.
+        let clean_name = entry.name.trim_start_matches('/');
+        if clean_name.is_empty() {
+            continue;
+        }
+
+        let out_path = if target_dir == "/" {
+            alloc::format!("/{}", clean_name)
+        } else {
+            alloc::format!("{}/{}", target_dir.trim_end_matches('/'), clean_name)
+        };
+
+        // Directory entries end with '/'.
+        if entry.name.ends_with('/') {
+            match Vfs::mkdir(&out_path) {
+                Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
+                Err(e) => {
+                    crate::console_println!("  unzip: mkdir '{}': {:?}", out_path, e);
+                    errors = errors.saturating_add(1);
+                }
+            }
+            crate::console_println!("  creating: {}", out_path);
+            continue;
+        }
+
+        // Ensure parent directory exists.
+        if let Some(slash) = out_path.rfind('/') {
+            let parent = &out_path[..slash];
+            if !parent.is_empty() {
+                let _ = Vfs::mkdir_all(parent);
+            }
+        }
+
+        // Get the compressed data.
+        let compressed_data = match zip_entry_data(&data, &entry) {
+            Some(d) => d,
+            None => {
+                crate::console_println!("  unzip: '{}': could not read data", entry.name);
+                errors = errors.saturating_add(1);
+                continue;
+            }
+        };
+
+        // Decompress based on method.
+        let file_data = match entry.method {
+            0 => {
+                // Stored — data is uncompressed.
+                compressed_data.to_vec()
+            }
+            8 => {
+                // Deflated — decompress.
+                match crate::fs::compress::inflate(compressed_data) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        crate::console_println!(
+                            "  unzip: '{}': inflate failed: {:?}",
+                            entry.name, e
+                        );
+                        errors = errors.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+            _ => {
+                crate::console_println!(
+                    "  unzip: '{}': unsupported compression method {}",
+                    entry.name, entry.method
+                );
+                errors = errors.saturating_add(1);
+                continue;
+            }
+        };
+
+        // Verify CRC-32 if non-zero.
+        if entry.crc32 != 0 {
+            let actual_crc = crate::fs::compress::crc32_iso_pub(&file_data);
+            if actual_crc != entry.crc32 {
+                crate::console_println!(
+                    "  unzip: '{}': CRC mismatch (expected {:#010x}, got {:#010x})",
+                    entry.name, entry.crc32, actual_crc
+                );
+                errors = errors.saturating_add(1);
+                continue;
+            }
+        }
+
+        // Write the file.
+        match Vfs::write_file(&out_path, &file_data) {
+            Ok(()) => {
+                crate::console_println!(
+                    "  extracting: {} ({} bytes)",
+                    out_path, file_data.len()
+                );
+                extracted = extracted.saturating_add(1);
+            }
+            Err(e) => {
+                crate::console_println!("  unzip: write '{}': {:?}", out_path, e);
+                errors = errors.saturating_add(1);
+            }
+        }
+    }
+
+    crate::console_println!(
+        "unzip: {} files extracted{} from '{}'",
+        extracted,
+        if errors > 0 {
+            alloc::format!(", {} errors", errors)
+        } else {
+            alloc::string::String::new()
+        },
+        archive_path
+    );
+}
+
 // ---------------------------------------------------------------------------
 
 /// `crc32 FILE [FILE ...]` — compute CRC32C checksum for files.

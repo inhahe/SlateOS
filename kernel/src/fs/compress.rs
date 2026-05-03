@@ -622,7 +622,7 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
 
 /// Compute CRC-32 (ISO 3309) of a byte slice.
 ///
-/// This is the polynomial used by gzip, PNG, and Ethernet.
+/// This is the polynomial used by gzip, PNG, ZIP, and Ethernet.
 /// Different from CRC32C used by ext4 and our `crypto::crc32c()`.
 fn crc32_iso(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
@@ -639,6 +639,13 @@ fn crc32_iso(data: &[u8]) -> u32 {
     }
 
     crc ^ 0xFFFF_FFFF
+}
+
+/// Public wrapper for CRC-32 ISO (gzip/ZIP/PNG polynomial).
+///
+/// Exposed for use by the `unzip` command to verify file integrity.
+pub fn crc32_iso_pub(data: &[u8]) -> u32 {
+    crc32_iso(data)
 }
 
 // ---------------------------------------------------------------------------

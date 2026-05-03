@@ -661,32 +661,65 @@ enum LzToken {
 
 /// Run the LZ77 pass over `data` and return a token stream.
 ///
-/// Uses a single hash-chain for string matching (same as before, but
-/// now separated from the encoding step so we can choose the best
-/// Huffman table after seeing all tokens).
+/// Uses a single hash-chain for string matching with **lazy matching**:
+/// when a match is found at position P, we also check position P+1.
+/// If P+1 has a strictly longer match, we emit a literal for P and
+/// use the longer match.  This is the technique used by zlib at
+/// compression levels 4+, and typically improves compression by 5-15%
+/// on text and structured data.
+///
+/// Based on zlib's deflate_slow() strategy (deflate.c).
 #[allow(clippy::arithmetic_side_effects)]
 fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
     let mut tokens = Vec::with_capacity(data.len() / 2);
     let mut hash_table = [0u32; HASH_SIZE];
     let mut pos: usize = 0;
 
+    // Pending match from the previous position (for lazy matching).
+    let mut pending_len: usize = 0;
+    let mut pending_dist: usize = 0;
+
     while pos < data.len() {
         let remaining = data.len().wrapping_sub(pos);
 
         if remaining < MIN_MATCH {
+            // Flush any pending match.
+            if pending_len >= MIN_MATCH {
+                tokens.push(LzToken::Match {
+                    length: pending_len as u16,
+                    distance: pending_dist as u16,
+                });
+                // We already advanced the hash table for the pending match's
+                // first byte (at pos-1).  Update for the rest of the match.
+                let match_start = pos.wrapping_sub(1);
+                for i in 1..pending_len {
+                    let mpos = match_start.wrapping_add(i);
+                    if mpos.wrapping_add(2) < data.len() {
+                        let mh = lz77_hash(data, mpos);
+                        hash_table[mh] = mpos as u32;
+                    }
+                }
+                pos = match_start.wrapping_add(pending_len);
+                pending_len = 0;
+                continue;
+            }
             tokens.push(LzToken::Literal(data[pos]));
             pos = pos.wrapping_add(1);
             continue;
         }
 
+        // Update hash table for this position.
         let h = lz77_hash(data, pos);
-        let prev = hash_table[h] as usize;
+        let _prev = hash_table[h]; // save before overwrite
         hash_table[h] = pos as u32;
 
-        let mut best_len: usize = 0;
-        let mut best_dist: usize = 0;
-
-        if prev < pos && pos.wrapping_sub(prev) <= MAX_DISTANCE {
+        // Find match at current position.
+        // We need to use the hash table state from *before* we wrote pos
+        // into it, but since find_match reads hash_table[hash(pos)] which
+        // now points to pos itself (useless), we need to temporarily
+        // restore.  Instead, just inline the match finding.
+        let prev = _prev as usize;
+        let (cur_len, cur_dist) = if prev < pos && pos.wrapping_sub(prev) <= MAX_DISTANCE {
             let max_len = remaining.min(MAX_MATCH);
             let mut len = 0;
             while len < max_len
@@ -694,30 +727,57 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
             {
                 len = len.wrapping_add(1);
             }
-            if len >= MIN_MATCH {
-                best_len = len;
-                best_dist = pos.wrapping_sub(prev);
-            }
-        }
-
-        if best_len >= MIN_MATCH {
-            tokens.push(LzToken::Match {
-                length: best_len as u16,
-                distance: best_dist as u16,
-            });
-            // Update hash for positions inside the match.
-            for i in 1..best_len {
-                let mpos = pos.wrapping_add(i);
-                if mpos.wrapping_add(2) < data.len() {
-                    let mh = lz77_hash(data, mpos);
-                    hash_table[mh] = mpos as u32;
-                }
-            }
-            pos = pos.wrapping_add(best_len);
+            if len >= MIN_MATCH { (len, pos.wrapping_sub(prev)) } else { (0, 0) }
         } else {
+            (0, 0)
+        };
+
+        if pending_len >= MIN_MATCH {
+            // We have a pending match from pos-1.  Compare with current.
+            if cur_len > pending_len {
+                // Current match is better — emit a literal for pos-1
+                // (dropping the pending match) and set this as the new pending.
+                tokens.push(LzToken::Literal(data[pos.wrapping_sub(1)]));
+                pending_len = cur_len;
+                pending_dist = cur_dist;
+                pos = pos.wrapping_add(1);
+            } else {
+                // Pending match is equal or better — emit it.
+                tokens.push(LzToken::Match {
+                    length: pending_len as u16,
+                    distance: pending_dist as u16,
+                });
+                // Update hash for positions inside the match (starting from
+                // pos, since pos-1 was already hashed).
+                let match_start = pos.wrapping_sub(1);
+                for i in 1..pending_len {
+                    let mpos = match_start.wrapping_add(i);
+                    if mpos.wrapping_add(2) < data.len() && mpos != pos {
+                        let mh = lz77_hash(data, mpos);
+                        hash_table[mh] = mpos as u32;
+                    }
+                }
+                pos = match_start.wrapping_add(pending_len);
+                pending_len = 0;
+            }
+        } else if cur_len >= MIN_MATCH {
+            // New match — don't emit yet, set as pending for lazy eval.
+            pending_len = cur_len;
+            pending_dist = cur_dist;
+            pos = pos.wrapping_add(1);
+        } else {
+            // No match at all.
             tokens.push(LzToken::Literal(data[pos]));
             pos = pos.wrapping_add(1);
         }
+    }
+
+    // Flush any remaining pending match.
+    if pending_len >= MIN_MATCH {
+        tokens.push(LzToken::Match {
+            length: pending_len as u16,
+            distance: pending_dist as u16,
+        });
     }
 
     tokens

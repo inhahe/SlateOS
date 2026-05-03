@@ -3100,7 +3100,7 @@ const COMMANDS: &[&str] = &[
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version",
-    "watch", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd",
+    "watch", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4246,6 +4246,7 @@ fn dispatch(line: &str) {
         "checksum" | "cksum" => cmd_checksum(args),
         "gunzip" | "gzip" => cmd_gunzip(args),
         "unzip" => cmd_unzip(args),
+        "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
         "sed" => cmd_sed(args),
         "awk" => cmd_awk(args),
@@ -4419,6 +4420,7 @@ fn cmd_help() {
     crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz supported)");
     crate::console_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
+    crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
     crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
     crate::console_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
@@ -11180,7 +11182,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "unzip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "unzip" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -14166,6 +14168,341 @@ fn cmd_unzip(args: &str) {
         },
         archive_path
     );
+}
+
+// ---------------------------------------------------------------------------
+// zip — ZIP archive creation
+// ---------------------------------------------------------------------------
+
+/// Write a little-endian u16 to a byte vector.
+fn zip_write_u16(buf: &mut Vec<u8>, val: u16) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+/// Write a little-endian u32 to a byte vector.
+fn zip_write_u32(buf: &mut Vec<u8>, val: u32) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+/// One entry prepared for writing into a ZIP archive.
+struct ZipWriteEntry {
+    /// Relative path inside the archive.
+    name: String,
+    /// Uncompressed CRC-32 (ISO 3309).
+    crc32: u32,
+    /// Compressed data (method 8) or raw data (method 0).
+    data: Vec<u8>,
+    /// Compression method: 0=stored, 8=deflated.
+    method: u16,
+    /// Original (uncompressed) size.
+    uncompressed_size: u32,
+}
+
+/// Build a ZIP archive in memory from a list of prepared entries.
+///
+/// Produces a valid ZIP file: local file headers, central directory,
+/// and end of central directory record.
+#[allow(clippy::arithmetic_side_effects)]
+fn zip_build_archive(entries: &[ZipWriteEntry]) -> Vec<u8> {
+    let mut archive = Vec::new();
+
+    // Offsets of each local file header (needed for central directory).
+    let mut local_offsets: Vec<u32> = Vec::with_capacity(entries.len());
+
+    // --- Local file headers + file data ---
+    for entry in entries {
+        local_offsets.push(archive.len() as u32);
+
+        // Local file header (30 bytes + name + data).
+        zip_write_u32(&mut archive, ZIP_LOCAL_SIG); // signature
+        zip_write_u16(&mut archive, 20);            // version needed (2.0)
+        zip_write_u16(&mut archive, 0);             // general purpose bit flag
+        zip_write_u16(&mut archive, entry.method);  // compression method
+        zip_write_u16(&mut archive, 0);             // mod time (unused)
+        zip_write_u16(&mut archive, 0x0021);        // mod date (1980-01-01, minimum valid DOS date)
+        zip_write_u32(&mut archive, entry.crc32);   // CRC-32
+        zip_write_u32(&mut archive, entry.data.len() as u32); // compressed size
+        zip_write_u32(&mut archive, entry.uncompressed_size); // uncompressed size
+        zip_write_u16(&mut archive, entry.name.len() as u16); // file name length
+        zip_write_u16(&mut archive, 0);             // extra field length
+        archive.extend_from_slice(entry.name.as_bytes());
+        archive.extend_from_slice(&entry.data);
+    }
+
+    // --- Central directory ---
+    let cd_start = archive.len() as u32;
+
+    for (i, entry) in entries.iter().enumerate() {
+        zip_write_u32(&mut archive, ZIP_CENTRAL_SIG); // signature
+        zip_write_u16(&mut archive, 20);              // version made by (2.0)
+        zip_write_u16(&mut archive, 20);              // version needed (2.0)
+        zip_write_u16(&mut archive, 0);               // general purpose bit flag
+        zip_write_u16(&mut archive, entry.method);    // compression method
+        zip_write_u16(&mut archive, 0);               // mod time
+        zip_write_u16(&mut archive, 0x0021);          // mod date
+        zip_write_u32(&mut archive, entry.crc32);     // CRC-32
+        zip_write_u32(&mut archive, entry.data.len() as u32); // compressed size
+        zip_write_u32(&mut archive, entry.uncompressed_size); // uncompressed size
+        zip_write_u16(&mut archive, entry.name.len() as u16); // file name length
+        zip_write_u16(&mut archive, 0);               // extra field length
+        zip_write_u16(&mut archive, 0);               // file comment length
+        zip_write_u16(&mut archive, 0);               // disk number start
+        zip_write_u16(&mut archive, 0);               // internal file attributes
+        zip_write_u32(&mut archive, 0);               // external file attributes
+        zip_write_u32(&mut archive, local_offsets[i]); // local header offset
+        archive.extend_from_slice(entry.name.as_bytes());
+    }
+
+    let cd_end = archive.len() as u32;
+    let cd_size = cd_end.wrapping_sub(cd_start);
+
+    // --- End of central directory ---
+    zip_write_u32(&mut archive, ZIP_EOCD_SIG);
+    zip_write_u16(&mut archive, 0);                       // disk number
+    zip_write_u16(&mut archive, 0);                       // disk with central dir
+    zip_write_u16(&mut archive, entries.len() as u16);    // entries on this disk
+    zip_write_u16(&mut archive, entries.len() as u16);    // total entries
+    zip_write_u32(&mut archive, cd_size);                 // central dir size
+    zip_write_u32(&mut archive, cd_start);                // central dir offset
+    zip_write_u16(&mut archive, 0);                       // comment length
+
+    archive
+}
+
+/// Recursively collect all files under a directory, returning
+/// (relative_path, absolute_path) pairs.
+///
+/// Directories themselves are added as entries with trailing `/`
+/// (ZIP convention for directory markers).
+fn zip_collect_files(
+    base: &str,
+    prefix: &str,
+    files: &mut Vec<(String, String)>,
+    depth: usize,
+) {
+    use crate::fs::Vfs;
+
+    if depth > 16 {
+        return; // Safety limit.
+    }
+
+    let entries = match Vfs::readdir(base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in &entries {
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+
+        let abs_path = if base == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", base, entry.name)
+        };
+
+        let rel_path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            alloc::format!("{}/{}", prefix, entry.name)
+        };
+
+        if entry.entry_type == crate::fs::vfs::EntryType::Directory {
+            // Add directory marker (trailing /).
+            files.push((alloc::format!("{}/", rel_path), String::new()));
+            // Recurse.
+            zip_collect_files(&abs_path, &rel_path, files, depth.saturating_add(1));
+        } else {
+            files.push((rel_path, abs_path));
+        }
+    }
+}
+
+/// `zip archive.zip file1 [file2 ...] [-0]` — create a ZIP archive.
+///
+/// - `zip archive.zip file1 file2`    — compress files into archive
+/// - `zip archive.zip dir/`           — recursively add directory
+/// - `zip -0 archive.zip file1`       — store without compression
+/// - `zip -r archive.zip dir`         — recursively add directory (explicit -r)
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_zip(args: &str) {
+    use crate::fs::Vfs;
+
+    if args.trim().is_empty() || args.trim() == "--help" || args.trim() == "-h" {
+        crate::console_println!(
+            "Usage: zip [-0] [-r] archive.zip file1 [file2 ...]\n\
+             Create a ZIP archive.\n  \
+               -0      Store files uncompressed (method 0)\n  \
+               -r      Recurse into directories"
+        );
+        return;
+    }
+
+    let mut store_only = false;
+    let mut recursive = true; // Default: recurse into dirs (like Info-ZIP).
+    let mut positional: Vec<&str> = Vec::new();
+
+    for token in args.split_whitespace() {
+        match token {
+            "-0" => store_only = true,
+            "-r" => recursive = true,
+            _ if token.starts_with('-') && positional.is_empty() => {
+                // Handle combined flags like -0r.
+                for ch in token.chars().skip(1) {
+                    match ch {
+                        '0' => store_only = true,
+                        'r' => recursive = true,
+                        _ => {
+                            crate::console_println!("zip: unknown option '-{}'", ch);
+                            return;
+                        }
+                    }
+                }
+            }
+            _ => positional.push(token),
+        }
+    }
+
+    if positional.len() < 2 {
+        crate::console_println!("zip: need at least an archive name and one file");
+        return;
+    }
+
+    let archive_path = resolve_path(positional[0]);
+
+    // Collect all input files.
+    let mut input_files: Vec<(String, String)> = Vec::new(); // (name_in_zip, abs_path)
+
+    for &token in positional.iter().skip(1) {
+        let abs = resolve_path(token);
+
+        // Check if it's a directory.
+        match Vfs::lstat(&abs) {
+            Ok(meta) if meta.entry_type == crate::fs::vfs::EntryType::Directory => {
+                if recursive {
+                    // Use the directory's base name as the archive prefix.
+                    let dir_name = token.rsplit('/').next()
+                        .unwrap_or(token)
+                        .trim_end_matches('/');
+                    // Add directory marker.
+                    input_files.push((alloc::format!("{}/", dir_name), String::new()));
+                    zip_collect_files(&abs, dir_name, &mut input_files, 0);
+                } else {
+                    crate::console_println!("zip: '{}' is a directory (use -r)", token);
+                }
+            }
+            Ok(_) => {
+                // Regular file — use the filename (last component) as name in archive.
+                let name = token.rsplit('/').next().unwrap_or(token);
+                input_files.push((String::from(name), abs));
+            }
+            Err(e) => {
+                crate::console_println!("zip: '{}': {:?}", token, e);
+                set_exit(1);
+                return;
+            }
+        }
+    }
+
+    if input_files.is_empty() {
+        crate::console_println!("zip: no input files");
+        return;
+    }
+
+    // Build ZIP entries.
+    let mut entries: Vec<ZipWriteEntry> = Vec::with_capacity(input_files.len());
+    let mut total_in: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut errors: usize = 0;
+
+    for (name, abs_path) in &input_files {
+        if abs_path.is_empty() {
+            // Directory marker — no data.
+            entries.push(ZipWriteEntry {
+                name: name.clone(),
+                crc32: 0,
+                data: Vec::new(),
+                method: 0,
+                uncompressed_size: 0,
+            });
+            continue;
+        }
+
+        let raw_data = match Vfs::read_file(abs_path) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::console_println!("  zip: read '{}': {:?}", abs_path, e);
+                errors = errors.saturating_add(1);
+                continue;
+            }
+        };
+
+        let crc32 = crate::fs::compress::crc32_iso_pub(&raw_data);
+        let uncompressed_size = raw_data.len() as u32;
+
+        let (data, method) = if store_only || raw_data.is_empty() {
+            (raw_data.clone(), 0u16)
+        } else {
+            let compressed = crate::fs::compress::deflate(&raw_data);
+            // Only use compression if it actually saves space.
+            if compressed.len() < raw_data.len() {
+                (compressed, 8u16)
+            } else {
+                (raw_data.clone(), 0u16)
+            }
+        };
+
+        let method_label = if method == 8 { "deflated" } else { "stored" };
+        crate::console_println!(
+            "  adding: {} ({}, {} → {} bytes)",
+            name, method_label, uncompressed_size, data.len()
+        );
+
+        total_in = total_in.wrapping_add(u64::from(uncompressed_size));
+        total_out = total_out.wrapping_add(data.len() as u64);
+
+        entries.push(ZipWriteEntry {
+            name: name.clone(),
+            crc32,
+            data,
+            method,
+            uncompressed_size,
+        });
+    }
+
+    if entries.is_empty() {
+        crate::console_println!("zip: nothing to add");
+        return;
+    }
+
+    // Build and write the archive.
+    let archive = zip_build_archive(&entries);
+    match Vfs::write_file(&archive_path, &archive) {
+        Ok(()) => {
+            let ratio = if total_in > 0 {
+                100u64.saturating_sub(total_out.saturating_mul(100) / total_in)
+            } else {
+                0
+            };
+            crate::console_println!(
+                "zip: created '{}' ({} bytes, {} entries, {}% compression{})",
+                archive_path,
+                archive.len(),
+                entries.len(),
+                ratio,
+                if errors > 0 {
+                    alloc::format!(", {} errors", errors)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        Err(e) => {
+            crate::console_println!("zip: write '{}': {:?}", archive_path, e);
+            set_exit(1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -133,6 +133,32 @@ pub const PARAM_SCHED_INTERACTIVE_THRESHOLD: u16 = 10;
 /// Default: 2.
 pub const PARAM_SCHED_INTERACTIVE_BOOST: u16 = 11;
 
+// --- Filesystem / Buffer Cache (20-29) ---
+
+/// Buffer cache read-ahead maximum window (sectors).
+///
+/// Maximum number of sectors to prefetch during sequential access.
+/// Higher values improve large-file throughput but consume more cache.
+///
+/// Default: 128 (64 KiB).
+pub const PARAM_FS_READAHEAD_MAX: u16 = 20;
+
+/// Buffer cache read-ahead initial window (sectors).
+///
+/// Starting prefetch window size, doubles on sustained sequential reads.
+///
+/// Default: 4 (2 KiB).
+pub const PARAM_FS_READAHEAD_INITIAL: u16 = 21;
+
+/// Buffer cache dirty entry expiry (seconds).
+///
+/// How long a dirty entry can remain in cache before background
+/// writeback flushes it to disk.  Lower values reduce data loss risk
+/// on crash; higher values reduce I/O.
+///
+/// Default: 5.
+pub const PARAM_FS_DIRTY_EXPIRE_SECS: u16 = 22;
+
 // ---------------------------------------------------------------------------
 // Parameter definition
 // ---------------------------------------------------------------------------
@@ -368,6 +394,31 @@ pub fn init() {
         8,
     );
 
+    // Filesystem / buffer cache parameters.
+    reg.register(
+        PARAM_FS_READAHEAD_MAX,
+        "fs.readahead_max",
+        128,    // 64 KiB default
+        1,
+        1024,   // 512 KiB maximum
+    );
+
+    reg.register(
+        PARAM_FS_READAHEAD_INITIAL,
+        "fs.readahead_initial",
+        4,      // 2 KiB default
+        1,
+        64,
+    );
+
+    reg.register(
+        PARAM_FS_DIRTY_EXPIRE_SECS,
+        "fs.dirty_expire_secs",
+        5,      // 5 seconds
+        1,      // 1 second minimum
+        60,     // 60 seconds maximum
+    );
+
     let count = reg.count;
     drop(reg);
 
@@ -386,6 +437,10 @@ pub fn get(id: u16) -> Option<u64> {
 ///
 /// Returns the old value on success, `None` if the ID is unknown or
 /// the value is out of range.
+///
+/// After updating the registry, this function dispatches to the
+/// relevant subsystem setter so the change takes effect immediately
+/// (e.g., updating atomic tunables in the buffer cache).
 pub fn set(id: u16, value: u64) -> Option<u64> {
     let result = REGISTRY.lock().set(id, value);
     if let Some(old) = result {
@@ -395,8 +450,38 @@ pub fn set(id: u16, value: u64) -> Option<u64> {
                 info.name, value, old
             );
         }
+        // Propagate the new value to the owning subsystem.
+        notify_subsystem(id, value);
     }
     result
+}
+
+/// Dispatch a parameter change to the subsystem that owns it.
+///
+/// This is the bridge between the sysctl registry (which stores u64
+/// values) and subsystem-specific atomic tunables.  Each parameter
+/// ID that has a runtime-tunable backing variable gets a match arm
+/// here.
+fn notify_subsystem(id: u16, value: u64) {
+    match id {
+        PARAM_FS_READAHEAD_MAX => {
+            // Registry value is in sectors; cache setter takes u32.
+            crate::fs::cache::set_readahead_max(value as u32);
+        }
+        PARAM_FS_READAHEAD_INITIAL => {
+            crate::fs::cache::set_readahead_initial(value as u32);
+        }
+        PARAM_FS_DIRTY_EXPIRE_SECS => {
+            // Registry stores seconds; cache tunable is nanoseconds.
+            // Saturating multiply avoids overflow on large values
+            // (clamped to 60s max by the registry, so 60 * 1e9 fits u64).
+            let ns = value.saturating_mul(1_000_000_000);
+            crate::fs::cache::set_dirty_expire_ns(ns);
+        }
+        // Other subsystems will add arms here as they register
+        // runtime-tunable parameters.
+        _ => {}
+    }
 }
 
 /// Get metadata for a parameter by ID.
@@ -736,6 +821,60 @@ pub fn self_test() {
     // Restore Desktop defaults.
     assert!(apply_memory_profile(0));
     assert_eq!(current_memory_profile(), Some(WorkloadProfile::Desktop));
+
+    // -----------------------------------------------------------------------
+    // Filesystem / buffer cache parameter callbacks
+    // -----------------------------------------------------------------------
+    // Verify that sysctl set() propagates values to the cache atomics.
+
+    // Read-ahead max: default 128 sectors.
+    assert_eq!(get(PARAM_FS_READAHEAD_MAX), Some(128));
+    assert_eq!(crate::fs::cache::get_readahead_max(), 128);
+
+    // Change to 256 — should propagate to the cache atomic.
+    assert_eq!(set(PARAM_FS_READAHEAD_MAX, 256), Some(128));
+    assert_eq!(get(PARAM_FS_READAHEAD_MAX), Some(256));
+    assert_eq!(crate::fs::cache::get_readahead_max(), 256);
+
+    // Out of range — rejected by registry, cache unchanged.
+    assert_eq!(set(PARAM_FS_READAHEAD_MAX, 0), None);
+    assert_eq!(crate::fs::cache::get_readahead_max(), 256);
+    assert_eq!(set(PARAM_FS_READAHEAD_MAX, 2000), None);
+    assert_eq!(crate::fs::cache::get_readahead_max(), 256);
+
+    // Restore default.
+    let _ = set(PARAM_FS_READAHEAD_MAX, 128);
+    assert_eq!(crate::fs::cache::get_readahead_max(), 128);
+
+    // Read-ahead initial: default 4 sectors.
+    assert_eq!(get(PARAM_FS_READAHEAD_INITIAL), Some(4));
+    assert_eq!(crate::fs::cache::get_readahead_initial(), 4);
+
+    let _ = set(PARAM_FS_READAHEAD_INITIAL, 8);
+    assert_eq!(crate::fs::cache::get_readahead_initial(), 8);
+    let _ = set(PARAM_FS_READAHEAD_INITIAL, 4); // restore
+
+    // Dirty expire: default 5 seconds → 5_000_000_000 ns in cache.
+    assert_eq!(get(PARAM_FS_DIRTY_EXPIRE_SECS), Some(5));
+    assert_eq!(crate::fs::cache::get_dirty_expire_ns(), 5_000_000_000);
+
+    // Change to 10 seconds → 10_000_000_000 ns.
+    let _ = set(PARAM_FS_DIRTY_EXPIRE_SECS, 10);
+    assert_eq!(get(PARAM_FS_DIRTY_EXPIRE_SECS), Some(10));
+    assert_eq!(crate::fs::cache::get_dirty_expire_ns(), 10_000_000_000);
+
+    // Restore default.
+    let _ = set(PARAM_FS_DIRTY_EXPIRE_SECS, 5);
+    assert_eq!(crate::fs::cache::get_dirty_expire_ns(), 5_000_000_000);
+
+    // Name-based lookup for fs parameters.
+    let info = find_by_name("fs.readahead_max");
+    assert!(info.is_some());
+    assert_eq!(info.unwrap().value, 128);
+
+    let info = find_by_name("fs.dirty_expire_secs");
+    assert!(info.is_some());
+    assert_eq!(info.unwrap().value, 5);
 
     serial_println!("[sysctl] Self-test PASSED");
 }

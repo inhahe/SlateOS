@@ -47,6 +47,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::blkdev::{self, SECTOR_SIZE};
@@ -85,6 +86,58 @@ const READAHEAD_MAX: u32 = 128;
 
 /// Minimum consecutive sequential accesses before triggering read-ahead.
 const READAHEAD_THRESHOLD: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// Runtime-tunable parameters (sysctl/sysfs)
+// ---------------------------------------------------------------------------
+
+/// Runtime read-ahead maximum window (sectors).
+/// Default: `READAHEAD_MAX` (128).  Can be adjusted via sysctl.
+static TUNABLE_READAHEAD_MAX: AtomicU32 = AtomicU32::new(READAHEAD_MAX);
+
+/// Runtime dirty expiry in nanoseconds.
+/// Default: `DIRTY_EXPIRE_NS` (5 seconds).  Can be adjusted via sysctl.
+static TUNABLE_DIRTY_EXPIRE_NS: AtomicU64 = AtomicU64::new(DIRTY_EXPIRE_NS);
+
+/// Runtime read-ahead initial window (sectors).
+/// Default: `READAHEAD_INITIAL` (4).  Can be adjusted via sysctl.
+static TUNABLE_READAHEAD_INITIAL: AtomicU32 = AtomicU32::new(READAHEAD_INITIAL);
+
+/// Get the current read-ahead maximum window.
+pub fn get_readahead_max() -> u32 {
+    TUNABLE_READAHEAD_MAX.load(Ordering::Relaxed)
+}
+
+/// Set the read-ahead maximum window.  Clamped to 1..=1024.
+pub fn set_readahead_max(val: u32) {
+    let clamped = val.clamp(1, 1024);
+    TUNABLE_READAHEAD_MAX.store(clamped, Ordering::Relaxed);
+    crate::serial_println!("[cache] readahead_max set to {}", clamped);
+}
+
+/// Get the current dirty expiry in nanoseconds.
+pub fn get_dirty_expire_ns() -> u64 {
+    TUNABLE_DIRTY_EXPIRE_NS.load(Ordering::Relaxed)
+}
+
+/// Set the dirty expiry in nanoseconds.  Clamped to 500ms..=60s.
+pub fn set_dirty_expire_ns(val: u64) {
+    let clamped = val.clamp(500_000_000, 60_000_000_000);
+    TUNABLE_DIRTY_EXPIRE_NS.store(clamped, Ordering::Relaxed);
+    crate::serial_println!("[cache] dirty_expire_ns set to {}", clamped);
+}
+
+/// Get the current read-ahead initial window.
+pub fn get_readahead_initial() -> u32 {
+    TUNABLE_READAHEAD_INITIAL.load(Ordering::Relaxed)
+}
+
+/// Set the read-ahead initial window.  Clamped to 1..=64.
+pub fn set_readahead_initial(val: u32) {
+    let clamped = val.clamp(1, 64);
+    TUNABLE_READAHEAD_INITIAL.store(clamped, Ordering::Relaxed);
+    crate::serial_println!("[cache] readahead_initial set to {}", clamped);
+}
 
 // ---------------------------------------------------------------------------
 // Cache entry
@@ -194,6 +247,10 @@ impl ReadAheadTracker {
             last_lba: u64::MAX,
             seq_count: 0,
             prefetched_up_to: 0,
+            // Use the compile-time constant here because this is a const fn
+            // (used to initialize the static BufferCacheInner).  The runtime
+            // tunable is consulted in update_readahead_tracker() when the
+            // window resets or grows.
             window: READAHEAD_INITIAL,
         }
     }
@@ -494,13 +551,13 @@ fn update_readahead_tracker(
         if tracker.seq_count > 0
             && tracker.seq_count % tracker.window == 0
         {
-            tracker.window = tracker.window.saturating_mul(2).min(READAHEAD_MAX);
+            tracker.window = tracker.window.saturating_mul(2).min(get_readahead_max());
         }
     } else {
         // Non-sequential access — reset everything.
         tracker.seq_count = 0;
         tracker.prefetched_up_to = 0;
-        tracker.window = READAHEAD_INITIAL;
+        tracker.window = get_readahead_initial();
     }
     tracker.last_lba = lba;
 
@@ -728,7 +785,7 @@ pub fn flush_expired() -> usize {
             && cache.entries[i].dirty_since_ns > 0
         {
             let age = now_ns.saturating_sub(cache.entries[i].dirty_since_ns);
-            if age >= DIRTY_EXPIRE_NS {
+            if age >= get_dirty_expire_ns() {
                 if cache.writeback_entry(i).is_ok() {
                     flushed = flushed.saturating_add(1);
                 }

@@ -955,6 +955,151 @@ pub fn crc32_iso_pub(data: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Adler-32 checksum (RFC 1950)
+// ---------------------------------------------------------------------------
+
+/// Compute the Adler-32 checksum of `data`.
+///
+/// Used by zlib as an integrity check.  Simpler and faster than CRC-32
+/// but with slightly weaker error detection.
+///
+/// RFC 1950 §8: adler32 = (s2 << 16) | s1
+///   s1 = 1 + sum of all bytes mod 65521
+///   s2 = sum of all running s1 values mod 65521
+#[allow(clippy::arithmetic_side_effects)]
+pub fn adler32(data: &[u8]) -> u32 {
+    const MOD: u32 = 65521;
+    let mut s1: u32 = 1;
+    let mut s2: u32 = 0;
+
+    // Process in chunks of 5552 to avoid overflow of the u32
+    // accumulators before taking the modulus.  5552 is the largest
+    // n such that 255*n*(n+1)/2 + n*255 < 2^32.
+    for chunk in data.chunks(5552) {
+        for &byte in chunk {
+            s1 = s1.wrapping_add(u32::from(byte));
+            s2 = s2.wrapping_add(s1);
+        }
+        s1 %= MOD;
+        s2 %= MOD;
+    }
+
+    (s2 << 16) | s1
+}
+
+// ---------------------------------------------------------------------------
+// zlib wrapper (RFC 1950)
+// ---------------------------------------------------------------------------
+
+/// Decompress zlib-wrapped data (RFC 1950).
+///
+/// Format: 2-byte header + raw DEFLATE + 4-byte Adler-32 (big-endian).
+///
+/// The header encodes compression method (must be 8 = deflate) and
+/// window size.  We validate the checksum on the decompressed output.
+///
+/// ## Errors
+///
+/// Returns `CorruptedData` if the header is invalid, the DEFLATE
+/// stream is malformed, or the Adler-32 checksum doesn't match.
+pub fn zlib_inflate(data: &[u8]) -> KernelResult<Vec<u8>> {
+    if data.len() < 6 {
+        return Err(KernelError::CorruptedData);
+    }
+
+    // --- Parse header (RFC 1950 §2.2) ---
+    let cmf = data[0];
+    let flg = data[1];
+
+    // CMF: lower 4 bits = CM (compression method), upper 4 = CINFO.
+    let cm = cmf & 0x0F;
+    if cm != 8 {
+        // Only deflate (method 8) is defined.
+        return Err(KernelError::CorruptedData);
+    }
+
+    // Header checksum: (CMF*256 + FLG) must be divisible by 31.
+    let header_check = u16::from(cmf)
+        .wrapping_mul(256)
+        .wrapping_add(u16::from(flg));
+    if header_check % 31 != 0 {
+        return Err(KernelError::CorruptedData);
+    }
+
+    // FDICT bit (bit 5 of FLG): preset dictionary.  We don't support
+    // preset dictionaries — they're rare (used in some PDF streams).
+    if flg & 0x20 != 0 {
+        return Err(KernelError::CorruptedData);
+    }
+
+    // Compressed data starts at offset 2.
+    let compressed = data.get(2..data.len().saturating_sub(4))
+        .ok_or(KernelError::CorruptedData)?;
+
+    // --- Decompress ---
+    let decompressed = inflate(compressed)?;
+
+    // --- Verify Adler-32 (big-endian, last 4 bytes) ---
+    let trailer_start = data.len().saturating_sub(4);
+    let stored_adler = u32::from(data[trailer_start]) << 24
+        | u32::from(data[trailer_start.wrapping_add(1)]) << 16
+        | u32::from(data[trailer_start.wrapping_add(2)]) << 8
+        | u32::from(data[trailer_start.wrapping_add(3)]);
+
+    let computed_adler = adler32(&decompressed);
+    if stored_adler != computed_adler {
+        crate::serial_println!(
+            "[compress] zlib Adler-32 mismatch: stored={:#010x} computed={:#010x}",
+            stored_adler, computed_adler,
+        );
+        return Err(KernelError::CorruptedData);
+    }
+
+    Ok(decompressed)
+}
+
+/// Compress data into zlib format (RFC 1950).
+///
+/// Produces: CMF + FLG + raw DEFLATE + Adler-32 (big-endian).
+///
+/// Uses deflation level implied by our fixed-Huffman `deflate()`.
+/// Window size is set to 32768 (maximum, CINFO=7).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn zlib_deflate(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+
+    // --- Header ---
+    // CMF: CM=8 (deflate), CINFO=7 (32K window) → 0x78
+    let cmf: u8 = 0x78;
+    // FLG: FLEVEL=2 (default compression), FDICT=0
+    // Must satisfy (CMF*256 + FLG) % 31 == 0
+    // 0x78 * 256 = 30720.  30720 + FLG ≡ 0 (mod 31).
+    // 30720 mod 31 = 30720 - 991*31 = 30720 - 30721 = ... let me compute.
+    // 31 * 991 = 30721.  30720 mod 31 = 30720 - 990*31 = 30720 - 30690 = 30.
+    // So FLG must be 31 - 30 = 1.  But FLEVEL=2 means bits 6-7 = 10 (0x80).
+    // 30720 + 0x80 = 30848. 30848 mod 31 = 30848 - 995*31 = 30848 - 30845 = 3.
+    // FLG = 0x80 + (31-3) = 0x80 + 28 = 0x9C.
+    // Check: 30720 + 0x9C = 30720 + 156 = 30876. 30876 / 31 = 996. 996*31=30876. ✓
+    let flg: u8 = 0x9C;
+
+    out.push(cmf);
+    out.push(flg);
+
+    // --- Compressed data ---
+    let compressed = deflate(data);
+    out.extend_from_slice(&compressed);
+
+    // --- Adler-32 (big-endian) ---
+    let checksum = adler32(data);
+    out.push((checksum >> 24) as u8);
+    out.push((checksum >> 16) as u8);
+    out.push((checksum >> 8) as u8);
+    out.push(checksum as u8);
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1096,6 +1241,40 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[compress]   Empty input round-trip verified ✓");
+
+    // --- Adler-32 test ---
+    // RFC 1950 example: adler32("Wikipedia") should be 0x11E60398.
+    let adler = adler32(b"Wikipedia");
+    if adler != 0x11E6_0398 {
+        crate::serial_println!(
+            "[compress]   FAIL: Adler-32 expected 0x11E60398, got {:#010x}",
+            adler
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[compress]   Adler-32 verified ✓");
+
+    // --- zlib round-trip test ---
+    let zlib_input = b"The quick brown fox jumps over the lazy dog. Repeated for compression gain. The quick brown fox jumps over the lazy dog.";
+    let zlib_compressed = zlib_deflate(zlib_input);
+    let zlib_decompressed = zlib_inflate(&zlib_compressed)?;
+    if zlib_decompressed != zlib_input {
+        crate::serial_println!("[compress]   FAIL: zlib round-trip mismatch");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[compress]   zlib round-trip verified ({} -> {} bytes) ✓",
+        zlib_input.len(), zlib_compressed.len()
+    );
+
+    // zlib empty input round-trip.
+    let zlib_empty = zlib_deflate(b"");
+    let zlib_empty_out = zlib_inflate(&zlib_empty)?;
+    if !zlib_empty_out.is_empty() {
+        crate::serial_println!("[compress]   FAIL: zlib empty round-trip produced data");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[compress]   zlib empty round-trip verified ✓");
 
     crate::serial_println!("[compress] Self-test passed.");
     Ok(())

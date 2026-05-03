@@ -66,13 +66,22 @@ const MAX_ENTRIES: usize = 2048;
 /// Maximum number of distinct block devices the cache supports.
 const MAX_DEVICES: usize = 8;
 
-/// Number of sectors to prefetch when sequential access is detected.
+/// Initial number of sectors to prefetch when sequential access begins.
 ///
-/// When reads hit 2+ consecutive sectors, we speculatively read ahead
-/// this many sectors beyond the current read.  This dramatically
-/// improves sequential read throughput (directory scans, file reads)
-/// by overlapping I/O with computation.
-const READAHEAD_SECTORS: usize = 8;
+/// The adaptive algorithm starts with this window and doubles it on
+/// each consecutive sequential read (up to `READAHEAD_MAX`).  This
+/// prevents over-prefetching on short sequential runs while delivering
+/// high throughput on large file reads.
+///
+/// Based on Linux's readahead algorithm (mm/readahead.c): start small,
+/// grow the window as the pattern holds, cap at a maximum.
+const READAHEAD_INITIAL: u32 = 4;
+
+/// Maximum read-ahead window in sectors.
+///
+/// 128 sectors × 512 bytes = 64 KiB.  Beyond this, prefetching
+/// consumes too much cache capacity for diminishing throughput gains.
+const READAHEAD_MAX: u32 = 128;
 
 /// Minimum consecutive sequential accesses before triggering read-ahead.
 const READAHEAD_THRESHOLD: u32 = 2;
@@ -157,10 +166,14 @@ pub struct CacheStats {
 // Inner state
 // ---------------------------------------------------------------------------
 
-/// Per-device sequential access tracker for read-ahead.
+/// Per-device sequential access tracker for adaptive read-ahead.
 ///
-/// Detects sequential read patterns and triggers prefetch.
-/// Each device gets one tracker; the window moves on every read.
+/// Detects sequential read patterns and dynamically adjusts the
+/// prefetch window.  Based on Linux's readahead algorithm:
+/// - Start with a small window (`READAHEAD_INITIAL`)
+/// - Double the window on each consecutive sequential read
+/// - Cap at `READAHEAD_MAX`
+/// - Reset to initial on random access
 struct ReadAheadTracker {
     /// Last sector read on this device.
     last_lba: u64,
@@ -169,6 +182,10 @@ struct ReadAheadTracker {
     /// Highest sector we've already prefetched up to (exclusive).
     /// Avoids re-prefetching the same range on consecutive reads.
     prefetched_up_to: u64,
+    /// Current read-ahead window size (in sectors).
+    /// Starts at `READAHEAD_INITIAL`, doubles on each sequential
+    /// batch, caps at `READAHEAD_MAX`.
+    window: u32,
 }
 
 impl ReadAheadTracker {
@@ -177,6 +194,7 @@ impl ReadAheadTracker {
             last_lba: u64::MAX,
             seq_count: 0,
             prefetched_up_to: 0,
+            window: READAHEAD_INITIAL,
         }
     }
 }
@@ -468,10 +486,21 @@ fn update_readahead_tracker(
     if lba == tracker.last_lba.wrapping_add(1) {
         // Sequential: LBA is exactly one past the last read.
         tracker.seq_count = tracker.seq_count.saturating_add(1);
+
+        // Adaptive window growth: double the window each time we
+        // exhaust the current prefetch range.  This means small
+        // sequential runs use a small window (low cache pressure)
+        // while large file reads ramp up to full throughput.
+        if tracker.seq_count > 0
+            && tracker.seq_count % tracker.window == 0
+        {
+            tracker.window = tracker.window.saturating_mul(2).min(READAHEAD_MAX);
+        }
     } else {
-        // Non-sequential access — reset the window.
+        // Non-sequential access — reset everything.
         tracker.seq_count = 0;
         tracker.prefetched_up_to = 0;
+        tracker.window = READAHEAD_INITIAL;
     }
     tracker.last_lba = lba;
 
@@ -528,15 +557,16 @@ pub fn read_sector(
     cache.index.insert((dev_id, lba), idx);
     cache.touch(idx);
 
-    // OPT: Sequential read-ahead.  If we detect a pattern of
-    // consecutive sector reads, speculatively prefetch the next
-    // READAHEAD_SECTORS into the cache.  This dramatically reduces
-    // latency for sequential file reads and directory traversals
-    // by overlapping I/O with processing.
+    // OPT: Adaptive sequential read-ahead.  When we detect a pattern
+    // of consecutive sector reads, speculatively prefetch ahead into
+    // the cache.  The window starts small (READAHEAD_INITIAL) and
+    // doubles on sustained sequential access (up to READAHEAD_MAX).
+    // Based on Linux's readahead algorithm (mm/readahead.c).
     let should_readahead = update_readahead_tracker(&mut cache, dev_id, lba);
     if should_readahead {
         let ra_start = lba.wrapping_add(1);
-        let ra_end = ra_start.saturating_add(READAHEAD_SECTORS as u64);
+        let window = u64::from(cache.readahead[dev_id as usize].window);
+        let ra_end = ra_start.saturating_add(window);
         let prefetch_from = cache.readahead[dev_id as usize].prefetched_up_to.max(ra_start);
         if prefetch_from < ra_end {
             cache.readaheads = cache.readaheads.wrapping_add(1);

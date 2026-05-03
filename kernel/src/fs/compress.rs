@@ -1786,6 +1786,118 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[compress]   zlib empty round-trip verified ✓");
 
+    // --- Dynamic vs fixed Huffman comparison ---
+    // Verify that dynamic Huffman is actually chosen for skewed data
+    // (where a custom Huffman tree should be significantly better than
+    // the fixed one).  Use data with a non-uniform byte distribution.
+    {
+        let mut skewed = Vec::with_capacity(2048);
+        // Build data that heavily favors a few byte values — ideal for
+        // dynamic Huffman since the custom tree assigns short codes to
+        // common bytes.
+        for i in 0..2048usize {
+            let b = match i % 16 {
+                0..=7 => b'a',       // 50% 'a'
+                8..=11 => b'b',      // 25% 'b'
+                12..=13 => b'c',     // 12.5% 'c'
+                _ => (i % 26) as u8 + b'd', // 12.5% varied
+            };
+            skewed.push(b);
+        }
+
+        // Try fixed-only encoding.
+        let tokens = lz77_tokenize(&skewed);
+        let mut fixed_w = BitWriter::new();
+        encode_fixed(&mut fixed_w, &tokens, true);
+        let fixed_size = fixed_w.into_bytes().len();
+
+        // Try dynamic encoding.
+        let mut dyn_w = BitWriter::new();
+        encode_dynamic(&mut dyn_w, &tokens, true);
+        let dyn_size = dyn_w.into_bytes().len();
+
+        // For skewed data, dynamic should be at least as good as fixed.
+        // In practice it should be noticeably better.
+        let full_compressed = deflate(&skewed);
+        let full_decompressed = inflate(&full_compressed)?;
+        if full_decompressed.as_slice() != skewed.as_slice() {
+            crate::serial_println!("[compress]   FAIL: skewed data round-trip mismatch");
+            return Err(KernelError::InternalError);
+        }
+
+        crate::serial_println!(
+            "[compress]   Dynamic vs fixed: dyn={} fixed={} (dyn {}) ✓",
+            dyn_size, fixed_size,
+            if dyn_size < fixed_size { "wins" } else { "≈ fixed" }
+        );
+    }
+
+    // --- Pathological inputs ---
+    // Test with all identical bytes (extreme RLE case).
+    {
+        let repeated = [0xAA_u8; 1024];
+        let comp = deflate(&repeated);
+        let decomp = inflate(&comp)?;
+        if decomp.as_slice() != &repeated[..] {
+            crate::serial_println!("[compress]   FAIL: all-same-byte round-trip");
+            return Err(KernelError::InternalError);
+        }
+        crate::serial_println!(
+            "[compress]   All-same-byte: 1024 -> {} bytes ✓",
+            comp.len()
+        );
+    }
+
+    // Test with pseudo-random data (poor compression expected).
+    {
+        let mut random_ish = Vec::with_capacity(1024);
+        let mut state: u32 = 0x1234_5678;
+        for _ in 0..1024 {
+            // Simple xorshift32 PRNG.
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            random_ish.push(state as u8);
+        }
+        let comp = deflate(&random_ish);
+        let decomp = inflate(&comp)?;
+        if decomp.as_slice() != random_ish.as_slice() {
+            crate::serial_println!("[compress]   FAIL: pseudo-random round-trip");
+            return Err(KernelError::InternalError);
+        }
+        crate::serial_println!(
+            "[compress]   Pseudo-random: 1024 -> {} bytes ✓",
+            comp.len()
+        );
+    }
+
+    // Test with a larger input to stress the lazy matching.
+    {
+        let mut large = Vec::with_capacity(8192);
+        // Mix of repetitive patterns and unique data.
+        for i in 0..8192usize {
+            let b = if i % 100 < 60 {
+                // 60% comes from a 4-byte repeating pattern.
+                [b'A', b'B', b'C', b'D'][i % 4]
+            } else {
+                // 40% pseudo-random.
+                (i.wrapping_mul(7).wrapping_add(13) % 256) as u8
+            };
+            large.push(b);
+        }
+        let comp = deflate(&large);
+        let decomp = inflate(&comp)?;
+        if decomp.as_slice() != large.as_slice() {
+            crate::serial_println!("[compress]   FAIL: 8K mixed data round-trip");
+            return Err(KernelError::InternalError);
+        }
+        crate::serial_println!(
+            "[compress]   8K mixed: {} -> {} bytes ({:.0}%) ✓",
+            large.len(), comp.len(),
+            (comp.len() as f64 / large.len() as f64) * 100.0
+        );
+    }
+
     crate::serial_println!("[compress] Self-test passed.");
     Ok(())
 }

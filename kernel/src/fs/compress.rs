@@ -649,29 +649,24 @@ fn lz77_hash(data: &[u8], pos: usize) -> usize {
     (h as usize) & (HASH_SIZE.wrapping_sub(1))
 }
 
-/// Compress data using DEFLATE with fixed Huffman codes.
+// ---------------------------------------------------------------------------
+// LZ77 tokenizer (shared by fixed and dynamic Huffman)
+// ---------------------------------------------------------------------------
+
+/// An LZ77 token: either a literal byte or a length/distance match.
+enum LzToken {
+    Literal(u8),
+    Match { length: u16, distance: u16 },
+}
+
+/// Run the LZ77 pass over `data` and return a token stream.
 ///
-/// Uses LZ77 with a simple hash-chain for string matching, then
-/// encodes matches and literals using the fixed Huffman codes
-/// defined in RFC 1951 §3.2.6.
-///
-/// This is a "level 1" compressor — fast, reasonable compression.
-/// It won't match gzip -9 but produces valid DEFLATE output.
-pub fn deflate(data: &[u8]) -> Vec<u8> {
-    let mut writer = BitWriter::new();
-
-    // For very small inputs, just use a stored block.
-    if data.len() <= 64 {
-        deflate_stored(&mut writer, data, true);
-        return writer.into_bytes();
-    }
-
-    // Single block with fixed Huffman codes.
-    // BFINAL=1, BTYPE=01 (fixed Huffman).
-    writer.write_bits(1, 1); // BFINAL
-    writer.write_bits(1, 2); // BTYPE=01
-
-    // LZ77 with hash chain.
+/// Uses a single hash-chain for string matching (same as before, but
+/// now separated from the encoding step so we can choose the best
+/// Huffman table after seeing all tokens).
+#[allow(clippy::arithmetic_side_effects)]
+fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
+    let mut tokens = Vec::with_capacity(data.len() / 2);
     let mut hash_table = [0u32; HASH_SIZE];
     let mut pos: usize = 0;
 
@@ -679,14 +674,11 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
         let remaining = data.len().wrapping_sub(pos);
 
         if remaining < MIN_MATCH {
-            // Not enough bytes for a match — emit literal.
-            let (code, bits) = fixed_code(u16::from(data[pos]));
-            writer.write_bits(u32::from(code), bits);
+            tokens.push(LzToken::Literal(data[pos]));
             pos = pos.wrapping_add(1);
             continue;
         }
 
-        // Look for a match.
         let h = lz77_hash(data, pos);
         let prev = hash_table[h] as usize;
         hash_table[h] = pos as u32;
@@ -694,9 +686,7 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
         let mut best_len: usize = 0;
         let mut best_dist: usize = 0;
 
-        // Check if the hash points to a valid recent position.
         if prev < pos && pos.wrapping_sub(prev) <= MAX_DISTANCE {
-            // Count matching bytes.
             let max_len = remaining.min(MAX_MATCH);
             let mut len = 0;
             while len < max_len
@@ -711,46 +701,506 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
         }
 
         if best_len >= MIN_MATCH {
-            // Emit length/distance pair.
-            if let (Some((len_sym, len_extra, len_ebits)), Some((dist_sym, dist_extra, dist_ebits))) =
-                (encode_length(best_len), encode_distance(best_dist))
-            {
-                let (lcode, lbits) = fixed_code(len_sym);
-                writer.write_bits(u32::from(lcode), lbits);
-                if len_ebits > 0 {
-                    writer.write_bits(len_extra, len_ebits);
+            tokens.push(LzToken::Match {
+                length: best_len as u16,
+                distance: best_dist as u16,
+            });
+            // Update hash for positions inside the match.
+            for i in 1..best_len {
+                let mpos = pos.wrapping_add(i);
+                if mpos.wrapping_add(2) < data.len() {
+                    let mh = lz77_hash(data, mpos);
+                    hash_table[mh] = mpos as u32;
                 }
-                let (dcode, dbits) = fixed_dist_code(dist_sym);
-                writer.write_bits(u32::from(dcode), dbits);
-                if dist_ebits > 0 {
-                    writer.write_bits(dist_extra, dist_ebits);
-                }
+            }
+            pos = pos.wrapping_add(best_len);
+        } else {
+            tokens.push(LzToken::Literal(data[pos]));
+            pos = pos.wrapping_add(1);
+        }
+    }
 
-                // Update hash for all positions in the match.
-                for i in 1..best_len {
-                    let mpos = pos.wrapping_add(i);
-                    if mpos.wrapping_add(2) < data.len() {
-                        let mh = lz77_hash(data, mpos);
-                        hash_table[mh] = mpos as u32;
-                    }
-                }
+    tokens
+}
 
-                pos = pos.wrapping_add(best_len);
-                continue;
+// ---------------------------------------------------------------------------
+// Dynamic Huffman tree construction (RFC 1951 §3.2.7)
+// ---------------------------------------------------------------------------
+
+/// Maximum code length bits for lit/len and distance codes.
+const MAX_CODE_BITS: u8 = 15;
+
+/// Build canonical Huffman code lengths from symbol frequencies.
+///
+/// Uses a simplified package-merge / length-limited Huffman algorithm:
+/// 1. Sort symbols by frequency (non-zero only).
+/// 2. Build a standard Huffman tree.
+/// 3. Limit code lengths to `max_bits` by pushing overflow down.
+///
+/// Returns a vector of code lengths indexed by symbol (0 = unused).
+#[allow(clippy::arithmetic_side_effects)]
+fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
+    let n = freqs.len();
+    let mut lengths = Vec::new();
+    lengths.resize(n, 0u8);
+
+    // Collect non-zero frequency symbols.
+    let mut symbols: Vec<(u32, usize)> = freqs.iter().enumerate()
+        .filter(|(_, f)| **f > 0)
+        .map(|(i, f)| (*f, i))
+        .collect();
+
+    if symbols.is_empty() {
+        return lengths;
+    }
+
+    if symbols.len() == 1 {
+        // Single symbol — assign length 1.
+        lengths[symbols[0].1] = 1;
+        return lengths;
+    }
+
+    // Sort by frequency (ascending), break ties by symbol index.
+    symbols.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    // Build Huffman tree via bottom-up merge.
+    // We track tree depths using a second array.
+    let count = symbols.len();
+    // Internal nodes: freq and max leaf depth.
+    let mut node_freq: Vec<u32> = symbols.iter().map(|s| s.0).collect();
+    let mut node_depth: Vec<u8> = Vec::new();
+    node_depth.resize(count, 0u8);
+
+    // Repeatedly merge the two lowest-frequency nodes.
+    // We use a simple O(n^2) approach (fine for 286 symbols).
+    let mut active: Vec<bool> = Vec::new();
+    active.resize(count, true);
+    // parent_of[i] = index of the merged node, or usize::MAX if root.
+    let mut parent_of: Vec<usize> = Vec::new();
+    parent_of.resize(count, usize::MAX);
+
+    // We need count-1 merges to build the tree.
+    let total_nodes = count.saturating_mul(2).saturating_sub(1);
+    node_freq.resize(total_nodes, 0);
+    node_depth.resize(total_nodes, 0);
+    active.resize(total_nodes, false);
+    parent_of.resize(total_nodes, usize::MAX);
+
+    let mut next_node = count;
+
+    for _ in 0..count.saturating_sub(1) {
+        // Find two smallest active nodes.
+        let mut min1 = usize::MAX;
+        let mut min2 = usize::MAX;
+        let mut f1 = u32::MAX;
+        let mut f2 = u32::MAX;
+
+        for i in 0..next_node {
+            if active[i] {
+                if node_freq[i] < f1 || (node_freq[i] == f1 && i < min1) {
+                    f2 = f1;
+                    min2 = min1;
+                    f1 = node_freq[i];
+                    min1 = i;
+                } else if node_freq[i] < f2 || (node_freq[i] == f2 && i < min2) {
+                    f2 = node_freq[i];
+                    min2 = i;
+                }
             }
         }
 
-        // No match — emit literal.
-        let (code, bits) = fixed_code(u16::from(data[pos]));
-        writer.write_bits(u32::from(code), bits);
-        pos = pos.wrapping_add(1);
+        if min1 == usize::MAX || min2 == usize::MAX {
+            break;
+        }
+
+        // Create merged node.
+        let merged = next_node;
+        next_node = next_node.saturating_add(1);
+        node_freq[merged] = f1.saturating_add(f2);
+        node_depth[merged] = node_depth[min1]
+            .max(node_depth[min2])
+            .saturating_add(1);
+        active[merged] = true;
+        active[min1] = false;
+        active[min2] = false;
+        parent_of[min1] = merged;
+        parent_of[min2] = merged;
     }
 
-    // End of block (symbol 256).
+    // Compute depth of each leaf by walking up to root.
+    for i in 0..count {
+        let mut depth: u8 = 0;
+        let mut node = i;
+        while parent_of[node] != usize::MAX {
+            depth = depth.saturating_add(1);
+            node = parent_of[node];
+        }
+        lengths[symbols[i].1] = depth;
+    }
+
+    // Limit to max_bits.  If any code exceeds max_bits, redistribute
+    // by a simple heuristic: increment the shortest code and decrement
+    // the longest until all fit.
+    for _ in 0..64 {
+        // Safety iteration limit.
+        let overflow = lengths.iter().any(|l| *l > max_bits);
+        if !overflow {
+            break;
+        }
+
+        // Find the longest code and the shortest code > 1.
+        let mut longest_sym = 0usize;
+        let mut longest_len = 0u8;
+        let mut shortest_sym = 0usize;
+        let mut shortest_len = u8::MAX;
+
+        for (i, &l) in lengths.iter().enumerate() {
+            if l > longest_len {
+                longest_len = l;
+                longest_sym = i;
+            }
+            if l > 0 && l < shortest_len {
+                shortest_len = l;
+                shortest_sym = i;
+            }
+        }
+
+        if longest_len <= max_bits {
+            break;
+        }
+
+        // Push down: shorten the longest, lengthen the shortest.
+        lengths[longest_sym] = lengths[longest_sym].saturating_sub(1);
+        if shortest_sym != longest_sym {
+            lengths[shortest_sym] = lengths[shortest_sym].saturating_add(1);
+        }
+    }
+
+    lengths
+}
+
+/// Build canonical Huffman codes from code lengths.
+///
+/// Returns (code, length) for each symbol.  Codes are reversed
+/// (LSB-first) for the DEFLATE bit writer.
+///
+/// RFC 1951 §3.2.2: canonical codes are assigned in ascending order
+/// of code length, then symbol value within the same length.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_canonical_codes(lengths: &[u8]) -> Vec<(u16, u8)> {
+    let max_len = lengths.iter().copied().max().unwrap_or(0);
+    let mut codes = Vec::new();
+    codes.resize(lengths.len(), (0u16, 0u8));
+
+    if max_len == 0 {
+        return codes;
+    }
+
+    // Count codes of each length.
+    let mut bl_count = Vec::new();
+    bl_count.resize(max_len as usize + 1, 0u16);
+    for &l in lengths {
+        if l > 0 {
+            bl_count[l as usize] = bl_count[l as usize].wrapping_add(1);
+        }
+    }
+
+    // Compute starting code for each length.
+    let mut next_code = Vec::new();
+    next_code.resize(max_len as usize + 1, 0u16);
+    let mut code: u16 = 0;
+    for bits in 1..=max_len {
+        code = (code.wrapping_add(bl_count[bits as usize - 1])) << 1;
+        next_code[bits as usize] = code;
+    }
+
+    // Assign codes.
+    for (sym, &l) in lengths.iter().enumerate() {
+        if l > 0 {
+            let c = next_code[l as usize];
+            next_code[l as usize] = c.wrapping_add(1);
+            codes[sym] = (reverse_bits(c, l), l);
+        }
+    }
+
+    codes
+}
+
+// CL_ORDER for the encoder uses the same constant defined at line 256
+// (the [u8; 19] array).  Encoder code casts to usize as needed.
+
+/// Run-length encode code lengths for the dynamic Huffman header.
+///
+/// Uses symbols 0-15 for actual lengths, 16 (repeat previous 3-6x),
+/// 17 (repeat zero 3-10x), 18 (repeat zero 11-138x).
+#[allow(clippy::arithmetic_side_effects)]
+fn rle_code_lengths(lengths: &[u8]) -> Vec<(u8, u8)> {
+    // Vec of (symbol, extra_bits_value)
+    let mut rle: Vec<(u8, u8)> = Vec::new();
+    let mut i = 0;
+
+    while i < lengths.len() {
+        let val = lengths[i];
+
+        if val == 0 {
+            // Count consecutive zeros.
+            let mut run = 1usize;
+            while i.wrapping_add(run) < lengths.len()
+                && lengths[i.wrapping_add(run)] == 0
+                && run < 138
+            {
+                run = run.wrapping_add(1);
+            }
+
+            if run >= 11 {
+                // Symbol 18: repeat zero 11-138 times.
+                rle.push((18, (run.wrapping_sub(11)) as u8));
+            } else if run >= 3 {
+                // Symbol 17: repeat zero 3-10 times.
+                rle.push((17, (run.wrapping_sub(3)) as u8));
+            } else {
+                for _ in 0..run {
+                    rle.push((0, 0));
+                }
+            }
+            i = i.wrapping_add(run);
+        } else {
+            rle.push((val, 0));
+            i = i.wrapping_add(1);
+
+            // Count consecutive repeats of `val`.
+            let mut run = 0usize;
+            while i.wrapping_add(run) < lengths.len()
+                && lengths[i.wrapping_add(run)] == val
+                && run < 6
+            {
+                run = run.wrapping_add(1);
+            }
+
+            if run >= 3 {
+                // Symbol 16: repeat previous 3-6 times.
+                rle.push((16, (run.wrapping_sub(3)) as u8));
+                i = i.wrapping_add(run);
+            }
+        }
+    }
+
+    rle
+}
+
+/// Encode tokens using dynamic Huffman codes (BTYPE=10).
+///
+/// Builds optimal Huffman trees from the token frequencies, encodes
+/// the tree in the block header, then encodes all tokens.
+#[allow(clippy::arithmetic_side_effects)]
+fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
+    // --- Count symbol frequencies ---
+    let mut lit_freq = [0u32; 286]; // 0-255 literals, 256 end, 257-285 lengths
+    let mut dist_freq = [0u32; 30]; // 0-29 distance codes
+
+    lit_freq[256] = 1; // End-of-block always present.
+
+    for token in tokens {
+        match token {
+            LzToken::Literal(b) => {
+                lit_freq[*b as usize] = lit_freq[*b as usize].saturating_add(1);
+            }
+            LzToken::Match { length, distance } => {
+                if let Some((sym, _, _)) = encode_length(*length as usize) {
+                    lit_freq[sym as usize] = lit_freq[sym as usize].saturating_add(1);
+                }
+                if let Some((sym, _, _)) = encode_distance(*distance as usize) {
+                    dist_freq[sym as usize] = dist_freq[sym as usize].saturating_add(1);
+                }
+            }
+        }
+    }
+
+    // --- Build code lengths ---
+    let lit_lengths = build_code_lengths(&lit_freq, MAX_CODE_BITS);
+    let dist_lengths = build_code_lengths(&dist_freq, MAX_CODE_BITS);
+
+    // HLIT: number of lit/len codes - 257 (max 286 codes).
+    // Find the last non-zero length.
+    let hlit = lit_lengths.iter().rposition(|&l| l > 0)
+        .map(|p| p.saturating_add(1))
+        .unwrap_or(257)
+        .max(257);
+    // HDIST: number of distance codes - 1 (at least 1).
+    let hdist = dist_lengths.iter().rposition(|&l| l > 0)
+        .map(|p| p.saturating_add(1))
+        .unwrap_or(1)
+        .max(1);
+
+    // Concatenate lit/len + distance code lengths for RLE.
+    let mut all_lengths: Vec<u8> = Vec::with_capacity(hlit.wrapping_add(hdist));
+    all_lengths.extend_from_slice(lit_lengths.get(..hlit).unwrap_or(&lit_lengths));
+    // Pad if needed.
+    while all_lengths.len() < hlit {
+        all_lengths.push(0);
+    }
+    all_lengths.extend_from_slice(dist_lengths.get(..hdist).unwrap_or(&dist_lengths));
+    while all_lengths.len() < hlit.wrapping_add(hdist) {
+        all_lengths.push(0);
+    }
+
+    // Run-length encode the combined lengths.
+    let rle = rle_code_lengths(&all_lengths);
+
+    // Count frequencies of the RLE symbols (0-18).
+    let mut cl_freq = [0u32; 19];
+    for &(sym, _) in &rle {
+        cl_freq[sym as usize] = cl_freq[sym as usize].saturating_add(1);
+    }
+
+    // Build code-length Huffman tree.
+    let cl_lengths = build_code_lengths(&cl_freq, 7);
+    let cl_codes = build_canonical_codes(&cl_lengths);
+
+    // HCLEN: number of code-length codes - 4.
+    // Find the last non-zero in the permuted order.
+    let mut hclen = 4usize;
+    for i in (0..19).rev() {
+        if cl_lengths[CL_ORDER[i] as usize] > 0 {
+            hclen = i.saturating_add(1).max(4);
+            break;
+        }
+    }
+
+    // --- Emit block header ---
+    writer.write_bits(u32::from(bfinal), 1); // BFINAL
+    writer.write_bits(2, 2);                  // BTYPE=10 (dynamic)
+
+    writer.write_bits((hlit.wrapping_sub(257)) as u32, 5);  // HLIT
+    writer.write_bits((hdist.wrapping_sub(1)) as u32, 5);   // HDIST
+    writer.write_bits((hclen.wrapping_sub(4)) as u32, 4);   // HCLEN
+
+    // Emit code-length code lengths (3 bits each, permuted order).
+    for i in 0..hclen {
+        let l = cl_lengths[CL_ORDER[i] as usize];
+        writer.write_bits(u32::from(l), 3);
+    }
+
+    // Emit RLE-encoded literal/length + distance code lengths.
+    for &(sym, extra) in &rle {
+        let (code, bits) = cl_codes[sym as usize];
+        if bits > 0 {
+            writer.write_bits(u32::from(code), bits);
+        }
+        // Extra bits for repeat symbols.
+        match sym {
+            16 => writer.write_bits(u32::from(extra), 2), // 3-6
+            17 => writer.write_bits(u32::from(extra), 3), // 3-10
+            18 => writer.write_bits(u32::from(extra), 7), // 11-138
+            _ => {}
+        }
+    }
+
+    // --- Build and use the actual lit/len and distance codes ---
+    let lit_codes = build_canonical_codes(&lit_lengths);
+    let dist_codes = build_canonical_codes(&dist_lengths);
+
+    // Emit tokens.
+    for token in tokens {
+        match token {
+            LzToken::Literal(b) => {
+                let (code, bits) = lit_codes[*b as usize];
+                writer.write_bits(u32::from(code), bits);
+            }
+            LzToken::Match { length, distance } => {
+                if let (Some((len_sym, len_extra, len_ebits)), Some((dist_sym, dist_extra, dist_ebits))) =
+                    (encode_length(*length as usize), encode_distance(*distance as usize))
+                {
+                    let (lcode, lbits) = lit_codes[len_sym as usize];
+                    writer.write_bits(u32::from(lcode), lbits);
+                    if len_ebits > 0 {
+                        writer.write_bits(len_extra, len_ebits);
+                    }
+                    let (dcode, dbits) = dist_codes[dist_sym as usize];
+                    writer.write_bits(u32::from(dcode), dbits);
+                    if dist_ebits > 0 {
+                        writer.write_bits(dist_extra, dist_ebits);
+                    }
+                }
+            }
+        }
+    }
+
+    // End of block.
+    let (code, bits) = lit_codes[256];
+    writer.write_bits(u32::from(code), bits);
+}
+
+/// Encode tokens using fixed Huffman codes (BTYPE=01).
+#[allow(clippy::arithmetic_side_effects)]
+fn encode_fixed(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
+    writer.write_bits(u32::from(bfinal), 1); // BFINAL
+    writer.write_bits(1, 2);                  // BTYPE=01
+
+    for token in tokens {
+        match token {
+            LzToken::Literal(b) => {
+                let (code, bits) = fixed_code(u16::from(*b));
+                writer.write_bits(u32::from(code), bits);
+            }
+            LzToken::Match { length, distance } => {
+                if let (Some((len_sym, len_extra, len_ebits)), Some((dist_sym, dist_extra, dist_ebits))) =
+                    (encode_length(*length as usize), encode_distance(*distance as usize))
+                {
+                    let (lcode, lbits) = fixed_code(len_sym);
+                    writer.write_bits(u32::from(lcode), lbits);
+                    if len_ebits > 0 {
+                        writer.write_bits(len_extra, len_ebits);
+                    }
+                    let (dcode, dbits) = fixed_dist_code(dist_sym);
+                    writer.write_bits(u32::from(dcode), dbits);
+                    if dist_ebits > 0 {
+                        writer.write_bits(dist_extra, dist_ebits);
+                    }
+                }
+            }
+        }
+    }
+
+    // End of block.
     let (code, bits) = fixed_code(256);
     writer.write_bits(u32::from(code), bits);
+}
 
-    writer.into_bytes()
+/// Compress data using DEFLATE with optimal Huffman encoding.
+///
+/// Uses LZ77 with hash-chain string matching, then tries both fixed
+/// and dynamic Huffman encoding and picks the smaller output.  Dynamic
+/// Huffman typically saves 20-40% for text and structured data.
+///
+/// Based on RFC 1951 §3.2.5–3.2.7 and zlib's deflate strategy.
+pub fn deflate(data: &[u8]) -> Vec<u8> {
+    // For very small inputs, just use a stored block.
+    if data.len() <= 64 {
+        let mut writer = BitWriter::new();
+        deflate_stored(&mut writer, data, true);
+        return writer.into_bytes();
+    }
+
+    // Run LZ77 once, then encode with both strategies.
+    let tokens = lz77_tokenize(data);
+
+    // Try fixed Huffman.
+    let mut fixed_writer = BitWriter::new();
+    encode_fixed(&mut fixed_writer, &tokens, true);
+    let fixed_output = fixed_writer.into_bytes();
+
+    // Try dynamic Huffman.
+    let mut dynamic_writer = BitWriter::new();
+    encode_dynamic(&mut dynamic_writer, &tokens, true);
+    let dynamic_output = dynamic_writer.into_bytes();
+
+    // Pick the smaller output.
+    if dynamic_output.len() < fixed_output.len() {
+        dynamic_output
+    } else {
+        fixed_output
+    }
 }
 
 /// Write a stored (uncompressed) DEFLATE block.

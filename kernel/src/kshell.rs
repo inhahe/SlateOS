@@ -3083,8 +3083,8 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
-    "cd", "chattr", "chmod", "chown", "clear", "cls", "cmp", "column", "comm", "command", "copy",
-    "cp", "cpuinfo",
+    "base64", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp",
+    "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "flock", "fsck", "fsck.fat", "glob", "grep", "hash", "head", "help", "hexdump", "hostname", "http",
@@ -3100,7 +3100,7 @@ const COMMANDS: &[&str] = &[
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "uptime", "ver", "version",
-    "watch", "wc", "wget", "which", "while", "whoami", "write", "xattr", "xxd",
+    "watch", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4238,6 +4238,10 @@ fn dispatch(line: &str) {
         "mkfs.fat" | "mkfs" => cmd_mkfs_fat(args),
         "fsck.fat" | "fsck" => cmd_fsck_fat(args),
         "tar" => cmd_tar(args),
+        "crc32" | "crc32sum" => cmd_crc32(args),
+        "base64" => cmd_base64(args),
+        "wipe" => cmd_wipe(args),
+        "checksum" | "cksum" => cmd_checksum(args),
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
@@ -4405,6 +4409,10 @@ fn cmd_help() {
     crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
     crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
     crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives");
+    crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
+    crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
+    crate::console_println!("  checksum [-t sha256|crc32] FILE  Compute file checksum");
+    crate::console_println!("  wipe FILE     Secure delete (zero-fill + remove)");
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
@@ -13312,4 +13320,289 @@ fn tar_mkdir_p(path: &str) -> crate::error::KernelResult<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// crc32 — CRC32C file checksum
+// ---------------------------------------------------------------------------
+
+/// `crc32 FILE [FILE ...]` — compute CRC32C checksum for files.
+fn cmd_crc32(args: &str) {
+    if args.trim().is_empty() {
+        crate::console_println!("Usage: crc32 <file> [file ...]");
+        return;
+    }
+
+    for token in args.split_whitespace() {
+        let path = resolve_path(token);
+        match crate::fs::Vfs::read_file(&path) {
+            Ok(data) => {
+                let checksum = crate::crypto::crc32c(&data);
+                crate::console_println!("{:08x} {} {}", checksum, data.len(), path);
+            }
+            Err(e) => {
+                crate::console_println!("crc32: '{}': {:?}", path, e);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// base64 — Base64 encode/decode
+// ---------------------------------------------------------------------------
+
+/// Standard Base64 alphabet (RFC 4648).
+const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encode bytes to Base64.
+#[allow(clippy::arithmetic_side_effects)]
+fn base64_encode(data: &[u8]) -> alloc::string::String {
+    let mut out = alloc::string::String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i < data.len() {
+        let b0 = data[i];
+        let b1 = if i + 1 < data.len() { data[i + 1] } else { 0 };
+        let b2 = if i + 2 < data.len() { data[i + 2] } else { 0 };
+
+        let idx0 = (b0 >> 2) as usize;
+        let idx1 = (((b0 & 0x03) << 4) | (b1 >> 4)) as usize;
+        let idx2 = (((b1 & 0x0F) << 2) | (b2 >> 6)) as usize;
+        let idx3 = (b2 & 0x3F) as usize;
+
+        out.push(B64_CHARS[idx0] as char);
+        out.push(B64_CHARS[idx1] as char);
+
+        if i + 1 < data.len() {
+            out.push(B64_CHARS[idx2] as char);
+        } else {
+            out.push('=');
+        }
+
+        if i + 2 < data.len() {
+            out.push(B64_CHARS[idx3] as char);
+        } else {
+            out.push('=');
+        }
+
+        i += 3;
+    }
+    out
+}
+
+/// Decode a Base64 character to its 6-bit value, or None for padding/invalid.
+fn b64_decode_char(c: u8) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+/// Decode Base64 to bytes.
+#[allow(clippy::arithmetic_side_effects)]
+fn base64_decode(input: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    // Strip whitespace.
+    let clean: alloc::vec::Vec<u8> = input.bytes()
+        .filter(|&b| !b.is_ascii_whitespace())
+        .collect();
+
+    if clean.len() % 4 != 0 {
+        return Err("invalid base64 length");
+    }
+
+    let mut out = alloc::vec::Vec::with_capacity(clean.len() / 4 * 3);
+
+    let mut i = 0;
+    while i < clean.len() {
+        let c0 = b64_decode_char(clean[i]).ok_or("invalid base64 character")?;
+        let c1 = b64_decode_char(clean[i + 1]).ok_or("invalid base64 character")?;
+
+        out.push((c0 << 2) | (c1 >> 4));
+
+        if clean[i + 2] != b'=' {
+            let c2 = b64_decode_char(clean[i + 2]).ok_or("invalid base64 character")?;
+            out.push(((c1 & 0x0F) << 4) | (c2 >> 2));
+
+            if clean[i + 3] != b'=' {
+                let c3 = b64_decode_char(clean[i + 3]).ok_or("invalid base64 character")?;
+                out.push(((c2 & 0x03) << 6) | c3);
+            }
+        }
+
+        i += 4;
+    }
+
+    Ok(out)
+}
+
+/// `base64 [-d] FILE` — encode or decode Base64.
+///
+/// Without -d: read file, output Base64 (76-char line wrap).
+/// With -d: read Base64 text file, decode to binary and write to stdout.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_base64(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!("Usage: base64 [-d] <file>");
+        crate::console_println!("  -d   Decode (input is Base64 text)");
+        return;
+    }
+
+    let decode = parts[0] == "-d" || parts[0] == "--decode";
+    let file_arg = if decode {
+        if parts.len() < 2 {
+            crate::console_println!("base64: missing file argument");
+            return;
+        }
+        parts[1]
+    } else {
+        parts[0]
+    };
+
+    let path = resolve_path(file_arg);
+    let data = match crate::fs::Vfs::read_file(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("base64: '{}': {:?}", path, e);
+            return;
+        }
+    };
+
+    if decode {
+        // Input is Base64 text — decode and write binary to stdout.
+        let text = core::str::from_utf8(&data).unwrap_or("");
+        match base64_decode(text) {
+            Ok(decoded) => {
+                // Print as text if valid UTF-8, otherwise show hex summary.
+                if let Ok(s) = core::str::from_utf8(&decoded) {
+                    crate::console_println!("{}", s);
+                } else {
+                    crate::console_println!("<binary: {} bytes>", decoded.len());
+                }
+            }
+            Err(e) => {
+                crate::console_println!("base64: decode error: {}", e);
+            }
+        }
+    } else {
+        // Encode file content to Base64 with 76-char line wrapping.
+        let encoded = base64_encode(&data);
+        let line_width = 76;
+        let bytes = encoded.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + line_width).min(bytes.len());
+            if let Ok(line) = core::str::from_utf8(&bytes[offset..end]) {
+                crate::console_println!("{}", line);
+            }
+            offset = end;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wipe — secure delete (zero-fill then remove)
+// ---------------------------------------------------------------------------
+
+/// `wipe FILE [FILE ...]` — overwrite file contents with zeros, then delete.
+///
+/// Provides a basic secure-delete: fills the file with zero bytes
+/// (same size), syncs to disk, then removes the directory entry.
+/// This prevents casual recovery of deleted file content from disk.
+fn cmd_wipe(args: &str) {
+    if args.trim().is_empty() {
+        crate::console_println!("Usage: wipe <file> [file ...]");
+        crate::console_println!("  Overwrites file with zeros, then deletes it");
+        return;
+    }
+
+    for token in args.split_whitespace() {
+        let path = resolve_path(token);
+        match crate::fs::Vfs::stat(&path) {
+            Ok(meta) => {
+                let size = meta.size as usize;
+                if size > 0 {
+                    // Zero-fill the file.
+                    let zeros = alloc::vec![0u8; size];
+                    if let Err(e) = crate::fs::Vfs::write_file(&path, &zeros) {
+                        crate::console_println!("wipe: write '{}': {:?}", path, e);
+                        continue;
+                    }
+                    // Sync to ensure zeros hit disk.
+                    let _ = crate::fs::Vfs::sync();
+                }
+                // Remove the file.
+                match crate::fs::Vfs::remove(&path) {
+                    Ok(()) => {
+                        crate::console_println!("wiped: {} ({} bytes zeroed)", path, size);
+                    }
+                    Err(e) => {
+                        crate::console_println!("wipe: remove '{}': {:?}", path, e);
+                    }
+                }
+            }
+            Err(e) => {
+                crate::console_println!("wipe: '{}': {:?}", path, e);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// checksum — combined checksum utility
+// ---------------------------------------------------------------------------
+
+/// `checksum [-t sha256|crc32] FILE [FILE ...]` — compute file checksum.
+///
+/// Default algorithm is CRC32C for speed.
+fn cmd_checksum(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!("Usage: checksum [-t sha256|crc32] <file> [file ...]");
+        return;
+    }
+
+    let (algo, files_start) = if parts[0] == "-t" && parts.len() >= 3 {
+        (parts[1], 2)
+    } else {
+        ("crc32", 0)
+    };
+
+    for &file in &parts[files_start..] {
+        let path = resolve_path(file);
+        match crate::fs::Vfs::read_file(&path) {
+            Ok(data) => {
+                match algo {
+                    "crc32" | "crc32c" => {
+                        let cksum = crate::crypto::crc32c(&data);
+                        crate::console_println!("CRC32C {:08x}  {}", cksum, path);
+                    }
+                    "sha256" => {
+                        match crate::fs::Vfs::content_hash(&path) {
+                            Ok(hash) => {
+                                let mut hex = alloc::string::String::with_capacity(64);
+                                for byte in &hash {
+                                    hex.push_str(&alloc::format!("{:02x}", byte));
+                                }
+                                crate::console_println!("SHA256 {}  {}", hex, path);
+                            }
+                            Err(e) => {
+                                crate::console_println!("checksum: sha256 '{}': {:?}", path, e);
+                            }
+                        }
+                    }
+                    _ => {
+                        crate::console_println!("checksum: unknown algorithm '{}' (use crc32 or sha256)", algo);
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                crate::console_println!("checksum: '{}': {:?}", path, e);
+            }
+        }
+    }
 }

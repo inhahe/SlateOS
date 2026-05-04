@@ -1182,15 +1182,35 @@ pub fn zero_pool_stats() -> (u64, u64) {
 // - Windows "zero page thread" (system thread that pre-zeros free pages)
 // - Linux CONFIG_INIT_ON_FREE_DEFAULT_ON (init_on_free kernel parameter)
 
-/// Check if zero-on-free mode is active (`mm.zero_on_alloc == 1`).
-///
-/// Reads the sysctl parameter each time — the sysctl lock is a spinlock
-/// with no contention on the read path, so this is effectively a single
-/// memory load.
+/// Cached copy of the `mm.zero_on_alloc == 1` sysctl, updated by
+/// [`set_zero_on_free_mode()`].  Avoids taking the sysctl registry
+/// lock on every `free_frame()` call (~50 cycles per lock acquire
+/// vs. 1 cycle for a Relaxed atomic load).
+static ZERO_ON_FREE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// OPT: Read the cached atomic instead of calling sysctl::get()
+/// (which takes the REGISTRY spinlock).  free_frame() calls this on
+/// every invocation — the lock was the single biggest hot-path
+/// overhead in the per-CPU cache fast path.
 #[inline]
 fn is_zero_on_free() -> bool {
-    crate::sysctl::get(crate::sysctl::PARAM_MM_ZERO_ON_ALLOC)
-        .unwrap_or(0) == 1
+    ZERO_ON_FREE_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Update the cached zero-on-free mode.
+///
+/// Called by the sysctl dispatch handler when `mm.zero_on_alloc` changes.
+/// Also resets the generation counter when switching to zero-on-free mode
+/// so that settled detection starts fresh.
+pub fn set_zero_on_free_mode(active: bool) {
+    let was = ZERO_ON_FREE_ACTIVE.swap(active, Ordering::Release);
+    if active && !was {
+        // Switching to zero-on-free: reset the generation counter so
+        // alloc_frame_zeroed() doesn't skip zeroing until all frames
+        // have been freed at least once under the new mode.
+        ZERO_ON_FREE_COUNT.store(0, Ordering::Release);
+        ZERO_ON_FREE_SETTLED.store(false, Ordering::Release);
+    }
 }
 
 /// Number of frames zeroed-on-free since the mode was enabled.
@@ -1581,9 +1601,12 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
         // smp::fast_cpu_index()), exclusive per-CPU access.
         let cached = unsafe { PCPU_CACHES[cpu].pop() };
         if let Some(addr) = cached {
+            // OPT: Increment counter while interrupts are still disabled
+            // to avoid re-entering the atomic after restore_interrupts.
+            // Relaxed ordering — diagnostic counter, no ordering constraint.
+            PCPU_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             // SAFETY: flags from disable_interrupts() above.
             unsafe { restore_interrupts(flags); }
-            PCPU_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
         }
 

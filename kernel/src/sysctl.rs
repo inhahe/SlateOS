@@ -478,6 +478,10 @@ fn notify_subsystem(id: u16, value: u64) {
             let ns = value.saturating_mul(1_000_000_000);
             crate::fs::cache::set_dirty_expire_ns(ns);
         }
+        PARAM_MM_ZERO_ON_ALLOC => {
+            // value 0 = zero-on-alloc (default), 1 = zero-on-free.
+            crate::mm::frame::set_zero_on_free_mode(value == 1);
+        }
         // Other subsystems will add arms here as they register
         // runtime-tunable parameters.
         _ => {}

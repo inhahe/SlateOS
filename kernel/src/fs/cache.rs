@@ -799,6 +799,42 @@ pub fn flush_expired() -> usize {
     flushed
 }
 
+/// Non-blocking variant of [`flush_expired()`] for softirq context.
+///
+/// Uses `try_lock` to avoid deadlock when called from the timer softirq
+/// handler — if the interrupted code holds the cache lock, this returns
+/// `None` instead of spinning.  The softirq will retry on the next
+/// invocation (~5 seconds later).
+///
+/// Returns `Some(n)` with the number of entries written back, or `None`
+/// if the lock was already held.
+pub fn try_flush_expired() -> Option<usize> {
+    let mut cache = CACHE.try_lock()?;
+    cache.ensure_init();
+
+    let now_ns = crate::hpet::elapsed_ns();
+    let mut flushed: usize = 0;
+
+    for i in 0..cache.entries.len() {
+        if cache.entries[i].valid
+            && cache.entries[i].dirty
+            && cache.entries[i].dirty_since_ns > 0
+        {
+            let age = now_ns.saturating_sub(cache.entries[i].dirty_since_ns);
+            if age >= get_dirty_expire_ns() {
+                if cache.writeback_entry(i).is_ok() {
+                    flushed = flushed.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    cache.expired_flushes = cache.expired_flushes
+        .wrapping_add(flushed as u64);
+
+    Some(flushed)
+}
+
 /// Invalidate (drop) all cached entries for a specific device.
 ///
 /// Dirty entries are flushed before being discarded.

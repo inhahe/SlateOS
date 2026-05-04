@@ -61,7 +61,7 @@
 //!   `MAX_SOFTIRQ_RESTART` (10) limit.
 //! - LWN article: "A new softirq mechanism" (context on design tradeoffs).
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 use crate::smp::MAX_CPUS;
 
@@ -287,11 +287,26 @@ pub unsafe fn process_pending() {
 // Softirq handlers
 // ---------------------------------------------------------------------------
 
+/// Tick counter for periodic cache writeback (global across all CPUs).
+///
+/// Wraps to 0 — that's fine since we just check divisibility.
+/// Only CPU 0 runs the flush to avoid redundant work.
+static CACHE_FLUSH_TICKS: AtomicU16 = AtomicU16::new(0);
+
+/// Number of timer ticks between cache writeback attempts.
+///
+/// At 100 Hz tick rate, 500 ticks ≈ 5 seconds.  This matches
+/// `DIRTY_EXPIRE_NS` (5 seconds) — entries dirty longer than the
+/// expiry window are written back to their backing store, bounding
+/// the data-loss window on crash.
+const CACHE_FLUSH_INTERVAL: u16 = 500;
+
 /// Timer softirq handler.
 ///
 /// Processes sleep-queue wakeups (tasks that called `SYS_SLEEP` or
-/// similar and whose deadline has passed) and IPC timer expirations
-/// (completion-port notifications for expired kernel timers).
+/// similar and whose deadline has passed), IPC timer expirations
+/// (completion-port notifications for expired kernel timers), and
+/// periodic cache writeback (every ~5 seconds on CPU 0).
 ///
 /// Previously this work ran inline in `handle_timer_irq` with
 /// interrupts disabled.  Running it here with interrupts enabled
@@ -299,6 +314,18 @@ pub unsafe fn process_pending() {
 fn handle_timer() {
     crate::sched::process_sleep_wakeups();
     crate::ipc::timer::process_timer_expirations();
+
+    // Periodic background writeback of dirty cache entries.
+    //
+    // Only CPU 0 runs the flush to avoid multiple CPUs doing the same work.
+    // We use try_flush_expired() which returns None if the cache lock is
+    // already held (avoids deadlock in softirq context).
+    let ticks = CACHE_FLUSH_TICKS.fetch_add(1, Ordering::Relaxed);
+    if ticks % CACHE_FLUSH_INTERVAL == 0 && crate::smp::current_cpu_index() == 0 {
+        // Ignore result — if the lock is contended, we'll retry in
+        // ~5 seconds.  No log spam; this is background housekeeping.
+        let _ = crate::fs::cache::try_flush_expired();
+    }
 }
 
 /// Scheduler softirq handler — proactive push-based load balancing.

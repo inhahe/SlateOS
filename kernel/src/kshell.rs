@@ -3093,12 +3093,12 @@ const COMMANDS: &[&str] = &[
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
-    "reboot", "ren", "rev", "rm",
+    "reboot", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
-    "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
+    "then", "throttle", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
     // Scripting keywords and commands
@@ -4162,6 +4162,8 @@ fn dispatch(line: &str) {
         "cpuinfo" | "cpu" => cmd_cpuinfo(),
         "watchdog" => cmd_watchdog(),
         "kill" => cmd_kill(args),
+        "renice" => cmd_renice(args),
+        "throttle" => cmd_throttle(args),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4728,6 +4730,100 @@ fn cmd_kill(args: &str) {
             "Failed to kill task {} (not found, already dead, or is the current task).",
             task_id,
         );
+    }
+}
+
+/// Change a task's scheduling priority.
+///
+/// Usage: `renice <task_id> <priority>`
+///
+/// Priority is 0 (highest) to 31 (lowest/idle).  Lower numbers run
+/// first.  Use `ps` to see current priorities.
+fn cmd_renice(args: &str) {
+    let words: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if words.len() < 2 {
+        shell_println!("Usage: renice <task_id> <priority>");
+        shell_println!("  priority: 0 (highest) to 31 (lowest/idle)");
+        return;
+    }
+
+    let Some(&tid_str) = words.get(0) else { return };
+    let Some(&pri_str) = words.get(1) else { return };
+
+    let Ok(task_id) = tid_str.parse::<u64>() else {
+        shell_println!("Invalid task ID: {}", tid_str);
+        return;
+    };
+
+    let Ok(priority) = pri_str.parse::<u8>() else {
+        shell_println!("Invalid priority: {} (must be 0-31)", pri_str);
+        return;
+    };
+
+    if priority > 31 {
+        shell_println!("Priority must be 0-31, got {}", priority);
+        return;
+    }
+
+    if let Some(old) = crate::sched::set_priority(task_id, priority) {
+        shell_println!(
+            "Task {} priority changed: {} -> {}",
+            task_id, old, priority
+        );
+    } else {
+        shell_println!("Task {} not found.", task_id);
+    }
+}
+
+/// Set or query a task's CPU bandwidth quota.
+///
+/// Usage:
+///   `throttle <task_id> <percent>`  — set quota (1-100%, 0=unlimited)
+///   `throttle <task_id>`            — query current quota
+///
+/// A task with a 50% quota can use at most 50 ticks out of every 100
+/// (1-second bandwidth period) before being throttled.
+fn cmd_throttle(args: &str) {
+    let words: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if words.is_empty() {
+        shell_println!("Usage: throttle <task_id> [percent]");
+        shell_println!("  percent: 1-100 (CPU%), 0=unlimited");
+        shell_println!("  omit percent to query current quota");
+        return;
+    }
+
+    let Some(&tid_str) = words.get(0) else { return };
+    let Ok(task_id) = tid_str.parse::<u64>() else {
+        shell_println!("Invalid task ID: {}", tid_str);
+        return;
+    };
+
+    if let Some(&pct_str) = words.get(1) {
+        // Set quota.
+        let Ok(pct) = pct_str.parse::<u8>() else {
+            shell_println!("Invalid percentage: {} (must be 0-100)", pct_str);
+            return;
+        };
+        if pct > 100 {
+            shell_println!("Percentage must be 0-100, got {}", pct);
+            return;
+        }
+        crate::sched::set_cpu_quota(task_id, pct);
+        if pct == 0 {
+            shell_println!("Task {} CPU quota: unlimited", task_id);
+        } else {
+            shell_println!("Task {} CPU quota: {}%", task_id, pct);
+        }
+    } else {
+        // Query quota.
+        match crate::sched::get_cpu_quota(task_id) {
+            Some(0) | None => {
+                shell_println!("Task {} CPU quota: unlimited", task_id);
+            }
+            Some(pct) => {
+                shell_println!("Task {} CPU quota: {}%", task_id, pct);
+            }
+        }
     }
 }
 
@@ -11383,7 +11479,7 @@ fn is_builtin(name: &str) -> bool {
         | "export" | "set" | "unset" | "alias" | "unalias" | "return"
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
-        | "cpuinfo" | "cpu" | "watchdog" | "kill"
+        | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
     )
 }
 

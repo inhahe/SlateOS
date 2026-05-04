@@ -140,15 +140,13 @@ fn alloc_port() -> u16 {
     p
 }
 
-/// Generate an initial sequence number.
+/// Generate a cryptographically-random initial sequence number.
 ///
-/// Uses the APIC tick count as a simple entropy source.
-/// A real ISN should be more unpredictable.
-#[allow(clippy::arithmetic_side_effects)]
+/// Uses the kernel CSPRNG (ChaCha20) to prevent ISN prediction attacks.
+/// A predictable ISN allows off-path attackers to inject forged TCP
+/// segments (CVE-2001-0328 and variants).
 fn generate_isn() -> u32 {
-    let ticks = crate::apic::tick_count();
-    // Mix with a constant to spread the values.
-    (ticks as u32).wrapping_mul(2654435761) // Knuth's multiplicative hash.
+    crate::rng::next_u32()
 }
 
 // ---------------------------------------------------------------------------

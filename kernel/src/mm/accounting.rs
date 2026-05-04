@@ -74,6 +74,13 @@ struct AccountingEntry {
     /// This counts the total virtual range committed, not just resident.
     /// Increments on map, does NOT decrement on unmap (tracks lifetime peak).
     total_mapped_ever: u64,
+
+    /// RSS limit in frames.  0 = unlimited (default).
+    ///
+    /// When set, `charge()` returns `false` if the new RSS would exceed
+    /// this limit.  The caller (page fault handler, mmap) should return
+    /// `OutOfMemory` to the process.
+    rss_limit_frames: u64,
 }
 
 impl AccountingEntry {
@@ -82,6 +89,7 @@ impl AccountingEntry {
         rss_frames: 0,
         peak_rss_frames: 0,
         total_mapped_ever: 0,
+        rss_limit_frames: 0,
     };
 }
 
@@ -172,12 +180,48 @@ pub fn destroy_address_space(pml4_phys: u64) {
 // Charge / uncharge
 // ---------------------------------------------------------------------------
 
+/// Check if charging `n` frames would exceed the RSS limit.
+///
+/// Returns `true` if the charge is allowed (under limit or no limit set).
+/// Returns `false` if the charge would exceed the limit.
+///
+/// Call this BEFORE allocating/mapping frames when resource limits are
+/// being enforced.  If it returns `false`, the caller should return
+/// `OutOfMemory` to the process without allocating.
+///
+/// Does NOT modify any counters — call [`charge`] after the actual mapping.
+#[inline]
+#[allow(dead_code)] // Public API for page fault handler.
+pub fn try_charge(pml4_phys: u64, n: u64) -> bool {
+    if pml4_phys == 0
+        || pml4_phys == KERNEL_PML4.load(core::sync::atomic::Ordering::Relaxed)
+    {
+        return true; // Kernel mappings always allowed.
+    }
+
+    let table = ACCOUNTING.lock();
+    for entry in table.iter() {
+        if entry.pml4_phys == pml4_phys {
+            // No limit set → always allowed.
+            if entry.rss_limit_frames == 0 {
+                return true;
+            }
+            return entry.rss_frames.saturating_add(n) <= entry.rss_limit_frames;
+        }
+    }
+
+    // Not tracked → no limit → allow.
+    true
+}
+
 /// Increment the RSS for an address space by `n` frames.
 ///
 /// Called after successfully mapping `n` frames into the address space.
 /// Skips accounting for the kernel address space (pml4 == kernel PML4).
 ///
 /// This is the hot-path function — kept as lean as possible.
+/// Does NOT check limits — use [`try_charge`] beforehand if limits
+/// are being enforced.
 #[inline]
 pub fn charge(pml4_phys: u64, n: u64) {
     // Skip kernel mappings (boot-time identity maps, HHDM, etc.).
@@ -247,6 +291,56 @@ pub fn reset_rss(pml4_phys: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Resource limits
+// ---------------------------------------------------------------------------
+
+/// Set the RSS limit for an address space, in 16 KiB frames.
+///
+/// `limit_frames = 0` means unlimited (default).
+///
+/// Returns `true` if the address space was found and the limit was set.
+/// Returns `false` if the PML4 is not tracked.
+///
+/// The limit is enforced by [`try_charge`] — call that before allocating
+/// frames.  [`charge`] itself does NOT enforce limits (it's the
+/// post-mapping bookkeeping path).
+#[allow(dead_code)] // Public API for capability/security zone.
+pub fn set_rss_limit(pml4_phys: u64, limit_frames: u64) -> bool {
+    if pml4_phys == 0 {
+        return false;
+    }
+
+    let mut table = ACCOUNTING.lock();
+    for entry in table.iter_mut() {
+        if entry.pml4_phys == pml4_phys {
+            entry.rss_limit_frames = limit_frames;
+            return true;
+        }
+    }
+    false
+}
+
+/// Get the current RSS limit for an address space.
+///
+/// Returns `Some(0)` if unlimited, `Some(n)` if limited, or `None`
+/// if the PML4 is not tracked.
+#[must_use]
+#[allow(dead_code)] // Public API for capability/security zone.
+pub fn get_rss_limit(pml4_phys: u64) -> Option<u64> {
+    if pml4_phys == 0 {
+        return None;
+    }
+
+    let table = ACCOUNTING.lock();
+    for entry in table.iter() {
+        if entry.pml4_phys == pml4_phys {
+            return Some(entry.rss_limit_frames);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
 
@@ -261,6 +355,8 @@ pub struct AddressSpaceStats {
     pub peak_rss_frames: u64,
     /// Total frames ever mapped (lifetime).
     pub total_mapped_ever: u64,
+    /// RSS limit in frames (0 = unlimited).
+    pub rss_limit_frames: u64,
 }
 
 impl AddressSpaceStats {
@@ -296,6 +392,7 @@ pub fn query(pml4_phys: u64) -> Option<AddressSpaceStats> {
                 rss_frames: entry.rss_frames,
                 peak_rss_frames: entry.peak_rss_frames,
                 total_mapped_ever: entry.total_mapped_ever,
+                rss_limit_frames: entry.rss_limit_frames,
             });
         }
     }
@@ -328,6 +425,7 @@ pub fn largest_rss() -> Option<AddressSpaceStats> {
         rss_frames: e.rss_frames,
         peak_rss_frames: e.peak_rss_frames,
         total_mapped_ever: e.total_mapped_ever,
+        rss_limit_frames: e.rss_limit_frames,
     })
 }
 
@@ -346,6 +444,7 @@ pub fn all_stats() -> alloc::vec::Vec<AddressSpaceStats> {
             rss_frames: e.rss_frames,
             peak_rss_frames: e.peak_rss_frames,
             total_mapped_ever: e.total_mapped_ever,
+            rss_limit_frames: e.rss_limit_frames,
         })
         .collect()
 }
@@ -426,14 +525,36 @@ pub fn self_test() {
     charge(0, 999);
     serial_println!("[accounting]   Kernel PML4 exclusion: OK");
 
-    // -- 6. Destroy --
+    // -- 6. RSS limits --
+    // Set a limit of 30 frames on address space a.
+    assert!(set_rss_limit(pml4_a, 30), "set_rss_limit(a, 30) failed");
+    let lim = get_rss_limit(pml4_a);
+    assert_eq!(lim, Some(30), "limit should be 30");
+
+    // a has RSS=20 (from earlier).  try_charge(a, 5) should succeed (25<=30).
+    assert!(try_charge(pml4_a, 5), "try_charge(a,5) should succeed (20+5<=30)");
+    // try_charge(a, 15) should fail (20+15=35>30).
+    assert!(!try_charge(pml4_a, 15), "try_charge(a,15) should fail (20+15>30)");
+    // Exact boundary: try_charge(a, 10) should succeed (20+10=30).
+    assert!(try_charge(pml4_a, 10), "try_charge(a,10) should succeed (20+10=30)");
+
+    // Unlimited (0) should always allow.
+    assert!(set_rss_limit(pml4_a, 0), "clear limit failed");
+    assert!(try_charge(pml4_a, 1000), "unlimited should allow any charge");
+
+    // b has no limit → try_charge always succeeds.
+    assert!(try_charge(pml4_b, 1000), "no limit should allow any charge");
+
+    serial_println!("[accounting]   RSS limits: OK");
+
+    // -- 7. Destroy --
     destroy_address_space(pml4_a);
     assert!(query(pml4_a).is_none(), "a should be gone after destroy");
     destroy_address_space(pml4_b);
     assert!(query(pml4_b).is_none(), "b should be gone after destroy");
     serial_println!("[accounting]   Destroy: OK");
 
-    // -- 7. all_stats count --
+    // -- 8. all_stats count --
     let count = tracked_count();
     // After cleanup, our test entries should be gone.  (There may be
     // real address spaces tracked by the system.)
@@ -449,6 +570,7 @@ impl PartialEq for AddressSpaceStats {
             && self.rss_frames == other.rss_frames
             && self.peak_rss_frames == other.peak_rss_frames
             && self.total_mapped_ever == other.total_mapped_ever
+            && self.rss_limit_frames == other.rss_limit_frames
     }
 }
 impl Eq for AddressSpaceStats {}

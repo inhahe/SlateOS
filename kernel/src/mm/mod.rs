@@ -65,6 +65,33 @@ pub struct MemoryInfo {
     /// Free frames.
     pub free_frames: usize,
 
+    // --- Buddy allocator fragmentation ---
+    /// Free blocks per buddy order (order 0..=10).
+    ///
+    /// `order_counts[i]` = number of contiguous 2^i frame blocks on the
+    /// free list.  A healthy allocator has blocks at high orders; many
+    /// small blocks at order 0 with few at high orders indicates
+    /// external fragmentation.
+    pub order_counts: [usize; frame::BUDDY_MAX_ORDER + 1],
+    /// Fragmentation index (0–100).
+    ///
+    /// 0 = all free memory in a single max-order block (no fragmentation).
+    /// 100 = all free memory in order-0 blocks (maximum fragmentation).
+    ///
+    /// Calculated as: `100 − (weighted_avg_order / max_order × 100)`.
+    /// where the weight of each block is its frame count.
+    pub fragmentation_pct: u8,
+
+    // --- Per-CPU frame cache ---
+    /// Allocations served from per-CPU cache (no global lock).
+    pub pcpu_cache_hits: u64,
+    /// Allocations that missed per-CPU cache (needed global lock).
+    pub pcpu_cache_misses: u64,
+    /// Batch refill operations (global → per-CPU).
+    pub pcpu_refill_ops: u64,
+    /// Batch drain operations (per-CPU → global).
+    pub pcpu_drain_ops: u64,
+
     // --- Zero-page pool ---
     /// Pre-zeroed frames currently in the pool.
     pub zero_pool_count: usize,
@@ -120,6 +147,28 @@ impl core::fmt::Display for MemoryInfo {
 
         writeln!(f, "Physical:  {} MiB total, {} MiB used, {} MiB free ({} frames)",
             total_mb, used_mb, free_mb, self.free_frames)?;
+
+        // Buddy allocator fragmentation.
+        write!(f, "Buddy:     frag={}%  orders=[", self.fragmentation_pct)?;
+        for (i, &count) in self.order_counts.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", count)?;
+        }
+        writeln!(f, "]")?;
+
+        // Per-CPU frame cache efficiency.
+        let total_allocs = self.pcpu_cache_hits.saturating_add(self.pcpu_cache_misses);
+        let hit_pct = if total_allocs > 0 {
+            self.pcpu_cache_hits.saturating_mul(100) / total_allocs
+        } else {
+            0
+        };
+        writeln!(f, "PCPU:      hit={}% ({}/{})  refills={}  drains={}",
+            hit_pct, self.pcpu_cache_hits, total_allocs,
+            self.pcpu_refill_ops, self.pcpu_drain_ops)?;
+
         writeln!(f, "Zero pool: {} frames (hits: {}, misses: {})",
             self.zero_pool_count, self.zero_pool_hits, self.zero_pool_misses)?;
         writeln!(f, "Heap:      slab={}/{}  large={}  failures={}",
@@ -168,12 +217,28 @@ pub fn memory_info() -> MemoryInfo {
     let kswapd_reclaim_cycles = kswapd::reclaim_cycles();
     let kswapd_total_reclaimed = kswapd::total_reclaimed();
 
+    // Buddy order distribution and fragmentation index.
+    let order_counts = frame::stats().map_or(
+        [0usize; frame::BUDDY_MAX_ORDER + 1],
+        |s| s.order_counts,
+    );
+    let fragmentation_pct = compute_fragmentation(&order_counts);
+
+    // Per-CPU frame cache diagnostics.
+    let pcpu = frame::pcpu_cache_stats();
+
     MemoryInfo {
         total_bytes,
         free_bytes,
         used_bytes,
         total_frames,
         free_frames,
+        order_counts,
+        fragmentation_pct,
+        pcpu_cache_hits: pcpu.cache_hits,
+        pcpu_cache_misses: pcpu.cache_misses,
+        pcpu_refill_ops: pcpu.refill_ops,
+        pcpu_drain_ops: pcpu.drain_ops,
         zero_pool_count,
         zero_pool_hits,
         zero_pool_misses,
@@ -190,4 +255,50 @@ pub fn memory_info() -> MemoryInfo {
         oom_events: oom::oom_event_count(),
         oom_kills: oom::oom_kill_count(),
     }
+}
+
+/// Compute a fragmentation index (0–100) from buddy order counts.
+///
+/// The index is the complement of the weighted average order:
+///   `100 − (weighted_avg_order / max_order × 100)`
+///
+/// Each block of order *i* contributes `2^i` frames as its weight,
+/// so the average naturally reflects where the bulk of free memory
+/// lives in the order spectrum.
+///
+/// - 0: all free memory in max-order blocks (no fragmentation).
+/// - 100: all free memory in order-0 blocks (maximum fragmentation).
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn compute_fragmentation(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> u8 {
+    let max_order = frame::BUDDY_MAX_ORDER;
+    let mut total_frames: u64 = 0;
+    let mut weighted_order_sum: u64 = 0;
+
+    for (order, &count) in order_counts.iter().enumerate() {
+        let frames_per_block = 1u64 << order;
+        let frames = (count as u64).saturating_mul(frames_per_block);
+        total_frames = total_frames.saturating_add(frames);
+        // Weight: order × frames-in-this-order.
+        weighted_order_sum = weighted_order_sum
+            .saturating_add((order as u64).saturating_mul(frames));
+    }
+
+    if total_frames == 0 {
+        return 0; // No free memory — nothing to fragment.
+    }
+
+    // weighted_avg_order = weighted_order_sum / total_frames  (scaled ×100).
+    let avg_order_x100 = weighted_order_sum
+        .saturating_mul(100)
+        .checked_div(total_frames)
+        .unwrap_or(0);
+    let max_order_x100 = (max_order as u64).saturating_mul(100);
+
+    // Complement: 100 when avg=0, 0 when avg=max_order.
+    let frag = 100u64.saturating_sub(
+        avg_order_x100.saturating_mul(100).checked_div(max_order_x100).unwrap_or(0)
+    );
+
+    // Clamp to u8 (always in 0..=100).
+    frag.min(100) as u8
 }

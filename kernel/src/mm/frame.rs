@@ -782,6 +782,19 @@ static mut PCPU_CACHES: [PerCpuFrameCache; MAX_CPUS] = {
 /// allocator directly.
 static PCPU_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// Per-CPU cache diagnostic counters.
+// These measure how often the per-CPU cache satisfies allocations vs.
+// falling through to the global buddy allocator.
+
+/// Number of alloc_frame() calls satisfied from per-CPU cache (hot path).
+static PCPU_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+/// Number of alloc_frame() calls that missed the cache (needed refill).
+static PCPU_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+/// Number of batch refill operations from global → per-CPU cache.
+static PCPU_REFILL_OPS: AtomicU64 = AtomicU64::new(0);
+/// Number of batch drain operations from per-CPU cache → global.
+static PCPU_DRAIN_OPS: AtomicU64 = AtomicU64::new(0);
+
 /// Enable per-CPU frame caches.
 ///
 /// Call after SMP initialization is complete (all CPUs are online and
@@ -848,6 +861,8 @@ fn pcpu_refill(cpu: usize) -> usize {
     };
     let mut guard = allocator.lock();
 
+    PCPU_REFILL_OPS.fetch_add(1, Ordering::Relaxed);
+
     let mut refilled = 0;
     for _ in 0..PCPU_BATCH {
         match guard.alloc_inner(0) {
@@ -876,6 +891,8 @@ fn pcpu_drain(cpu: usize) -> usize {
         return 0;
     };
     let mut guard = allocator.lock();
+
+    PCPU_DRAIN_OPS.fetch_add(1, Ordering::Relaxed);
 
     let mut drained = 0;
     for _ in 0..PCPU_BATCH {
@@ -1260,6 +1277,11 @@ fn zero_on_free_block(addr: u64, order: usize) -> bool {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Maximum buddy order exported for diagnostics.
+///
+/// Order N = 2^N frames.  Order 10 = 1024 frames = 16 MiB.
+pub const BUDDY_MAX_ORDER: usize = MAX_ORDER;
+
 /// Allocator statistics snapshot.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Public stats API; fields used by diagnostics/sysctl.
@@ -1272,6 +1294,36 @@ pub struct FrameAllocStats {
     pub free_bytes: usize,
     /// Number of free blocks per order level.
     pub order_counts: [usize; MAX_ORDER + 1],
+}
+
+/// Per-CPU frame cache diagnostic statistics.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Public stats API; fields used by MemoryInfo.
+pub struct PerCpuCacheStats {
+    /// Allocations satisfied directly from per-CPU cache (hot path).
+    pub cache_hits: u64,
+    /// Allocations that missed the per-CPU cache (needed global lock).
+    pub cache_misses: u64,
+    /// Number of batch refills from global allocator into per-CPU caches.
+    pub refill_ops: u64,
+    /// Number of batch drains from per-CPU caches back to global allocator.
+    pub drain_ops: u64,
+}
+
+/// Get a snapshot of per-CPU cache diagnostic statistics.
+///
+/// These counters measure how effectively the per-CPU caches absorb
+/// allocation/free traffic without touching the global buddy lock.
+/// A high hit ratio (hits / (hits + misses)) means the caches are
+/// sized well for the workload.
+#[must_use]
+pub fn pcpu_cache_stats() -> PerCpuCacheStats {
+    PerCpuCacheStats {
+        cache_hits: PCPU_CACHE_HITS.load(Ordering::Relaxed),
+        cache_misses: PCPU_CACHE_MISSES.load(Ordering::Relaxed),
+        refill_ops: PCPU_REFILL_OPS.load(Ordering::Relaxed),
+        drain_ops: PCPU_DRAIN_OPS.load(Ordering::Relaxed),
+    }
 }
 
 /// Find the highest physical address in the memory map and compute
@@ -1531,11 +1583,13 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
         if let Some(addr) = cached {
             // SAFETY: flags from disable_interrupts() above.
             unsafe { restore_interrupts(flags); }
+            PCPU_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
         }
 
         // Cache empty — batch-refill from global allocator.
         // (This acquires the global lock internally.)
+        PCPU_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
         let refilled = pcpu_refill(cpu);
 
         if refilled > 0 {

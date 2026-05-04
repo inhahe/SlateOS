@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
+    "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
@@ -4166,6 +4166,7 @@ fn dispatch(line: &str) {
         "kill" => cmd_kill(args),
         "renice" => cmd_renice(args),
         "throttle" => cmd_throttle(args),
+        "taskset" => cmd_taskset(args),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4621,6 +4622,43 @@ fn cmd_meminfo() {
         pool_misses,
         hit_pct
     );
+
+    // Memory pressure state.
+    let pi = crate::mm::pressure::pressure_info();
+    let level_str = match pi.level {
+        crate::mm::pressure::PressureLevel::None => "none",
+        crate::mm::pressure::PressureLevel::Low => "low",
+        crate::mm::pressure::PressureLevel::Medium => "medium",
+        crate::mm::pressure::PressureLevel::Critical => "CRITICAL",
+    };
+    crate::console_println!("Pressure:");
+    crate::console_println!(
+        "  Level: {}, Shrinkers: {}, Notified: {}, Freed: {} objects",
+        level_str,
+        pi.active_shrinkers,
+        pi.total_notifications,
+        pi.total_freed
+    );
+
+    // Swap summary.
+    let (swap_total, swap_used, swap_devs) = crate::mm::swap::summary();
+    if swap_devs > 0 || swap_total > 0 {
+        crate::console_println!("Swap:");
+        crate::console_println!(
+            "  {} KiB used / {} KiB total ({} device{})",
+            swap_used / 1024,
+            swap_total / 1024,
+            swap_devs,
+            if swap_devs == 1 { "" } else { "s" }
+        );
+    }
+
+    // OOM stats.
+    let oom_events = crate::mm::oom::oom_event_count();
+    let oom_kills = crate::mm::oom::oom_kill_count();
+    if oom_events > 0 {
+        crate::console_println!("OOM: {} events, {} kills", oom_events, oom_kills);
+    }
 }
 
 /// Display a compact system overview (like `top` snapshot).
@@ -4957,6 +4995,86 @@ fn cmd_throttle(args: &str) {
             }
             Some(pct) => {
                 shell_println!("Task {} CPU quota: {}%", task_id, pct);
+            }
+        }
+    }
+}
+
+fn cmd_taskset(args: &str) {
+    let words: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if words.is_empty() {
+        shell_println!("Usage: taskset <task_id> [mask]");
+        shell_println!("  mask: hex CPU affinity bitmask (e.g. 0x3 = CPUs 0,1)");
+        shell_println!("  omit mask to query current affinity");
+        shell_println!("  0xf = CPUs 0-3, 0xff = CPUs 0-7, etc.");
+        return;
+    }
+
+    let Some(&tid_str) = words.get(0) else { return };
+    let Ok(task_id) = tid_str.parse::<u64>() else {
+        shell_println!("Invalid task ID: {}", tid_str);
+        return;
+    };
+
+    if let Some(&mask_str) = words.get(1) {
+        // Set affinity.
+        let mask = if let Some(hex) = mask_str.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16).ok()
+        } else if let Some(hex) = mask_str.strip_prefix("0X") {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            mask_str.parse::<u64>().ok()
+        };
+
+        let Some(mask) = mask else {
+            shell_println!("Invalid mask: {} (use hex 0x... or decimal)", mask_str);
+            return;
+        };
+
+        if mask == 0 {
+            shell_println!("Error: mask cannot be 0 (task must be runnable on at least one CPU)");
+            return;
+        }
+
+        match crate::sched::set_cpu_affinity(task_id, mask) {
+            Some(old) => {
+                shell_println!("Task {} affinity: 0x{:x} -> 0x{:x}", task_id, old, mask);
+                // Show which CPUs are allowed.
+                let mut cpus = alloc::string::String::new();
+                for bit in 0..64u32 {
+                    if (mask >> bit) & 1 == 1 {
+                        if !cpus.is_empty() {
+                            cpus.push(',');
+                        }
+                        use core::fmt::Write;
+                        let _ = write!(cpus, "{}", bit);
+                    }
+                }
+                shell_println!("  Allowed CPUs: {}", cpus);
+            }
+            None => {
+                shell_println!("Task {} not found or invalid mask", task_id);
+            }
+        }
+    } else {
+        // Query affinity.
+        match crate::sched::get_cpu_affinity(task_id) {
+            Some(mask) => {
+                shell_println!("Task {} affinity: 0x{:x}", task_id, mask);
+                let mut cpus = alloc::string::String::new();
+                for bit in 0..64u32 {
+                    if (mask >> bit) & 1 == 1 {
+                        if !cpus.is_empty() {
+                            cpus.push(',');
+                        }
+                        use core::fmt::Write;
+                        let _ = write!(cpus, "{}", bit);
+                    }
+                }
+                shell_println!("  Allowed CPUs: {}", cpus);
+            }
+            None => {
+                shell_println!("Task {} not found", task_id);
             }
         }
     }
@@ -11630,7 +11748,7 @@ fn is_builtin(name: &str) -> bool {
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
-        | "profile" | "top"
+        | "taskset" | "profile" | "top"
     )
 }
 
@@ -12888,6 +13006,18 @@ fn cmd_free() {
     crate::console_println!(
         "Heap:   {:>6} slab allocs  {:>6} live  {:>6} large",
         info.heap_slab_allocs, heap_live, info.heap_large_allocs
+    );
+
+    // Pressure level at a glance.
+    let level_str = match crate::mm::pressure::current_level() {
+        crate::mm::pressure::PressureLevel::None => "none",
+        crate::mm::pressure::PressureLevel::Low => "low",
+        crate::mm::pressure::PressureLevel::Medium => "medium",
+        crate::mm::pressure::PressureLevel::Critical => "CRITICAL",
+    };
+    crate::console_println!(
+        "Pressure: {}  Fragmentation: {}%",
+        level_str, info.fragmentation_pct
     );
 }
 

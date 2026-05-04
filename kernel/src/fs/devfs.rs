@@ -36,51 +36,16 @@ use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
 
-use spin::Mutex;
-
 // ---------------------------------------------------------------------------
-// PRNG state
+// Random bytes — delegates to kernel CSPRNG (rng module)
 // ---------------------------------------------------------------------------
 
-/// xorshift64 PRNG state, seeded from HPET at first use.
-static PRNG_STATE: Mutex<u64> = Mutex::new(0);
-
-/// Seed the PRNG if not yet initialized.
-fn prng_seed_if_needed() {
-    let mut state = PRNG_STATE.lock();
-    if *state == 0 {
-        // Seed from HPET + a constant to avoid zero state.
-        *state = crate::hpet::elapsed_ns() | 1;
-    }
-}
-
-/// Generate a pseudo-random u64 using xorshift64.
-fn prng_next() -> u64 {
-    prng_seed_if_needed();
-    let mut state = PRNG_STATE.lock();
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
-
-/// Fill a buffer with pseudo-random bytes.
+/// Fill a buffer with cryptographically-secure random bytes.
+///
+/// Delegates to the kernel CSPRNG (ChaCha20-based, seeded from hardware
+/// entropy sources).  This replaces the previous weak xorshift64 PRNG.
 fn fill_random(buf: &mut [u8]) {
-    let mut pos = 0;
-    while pos < buf.len() {
-        let val = prng_next();
-        let bytes = val.to_le_bytes();
-        let remaining = buf.len().saturating_sub(pos);
-        let copy_len = remaining.min(8);
-        if let Some(dest) = buf.get_mut(pos..pos.wrapping_add(copy_len)) {
-            if let Some(src) = bytes.get(..copy_len) {
-                dest.copy_from_slice(src);
-            }
-        }
-        pos = pos.wrapping_add(copy_len);
-    }
+    crate::rng::fill(buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +211,7 @@ impl FileSystem for DevFs {
             }
             "random" | "urandom" => {
                 // /dev/random: writes contribute to entropy pool.
-                // For our simple PRNG, XOR the data into the state.
+                // Mix user-supplied data into the kernel CSPRNG.
                 if !data.is_empty() {
                     let mut hash: u64 = 0;
                     for chunk in data.chunks(8) {
@@ -259,13 +224,7 @@ impl FileSystem for DevFs {
                         }
                         hash ^= u64::from_le_bytes(buf);
                     }
-                    prng_seed_if_needed();
-                    let mut state = PRNG_STATE.lock();
-                    *state ^= hash;
-                    // Ensure state never becomes zero (xorshift degenerate).
-                    if *state == 0 {
-                        *state = 1;
-                    }
+                    crate::rng::add_interrupt_entropy(hash);
                 }
                 Ok(())
             }

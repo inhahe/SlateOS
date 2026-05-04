@@ -75,6 +75,7 @@ mod net;
 mod pci;
 mod port;
 mod proc;
+mod rng;
 mod rtc;
 mod sched;
 mod security;
@@ -421,6 +422,11 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = hpet::self_test() {
         serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
     }
+
+    // Step 19d: Initialize kernel CSPRNG.
+    // Seeds ChaCha20 from RDRAND/RDSEED (if available), HPET counter,
+    // and TSC jitter.  Must be after HPET init for timer-based entropy.
+    rng::init();
 
     console::boot_step_update(console::BootStatus::Ok, "Hardware tables (ACPI/HPET)");
 
@@ -858,6 +864,11 @@ extern "C" fn kmain() -> ! {
     // ktimer fires callbacks via the workqueue after a tick-based delay.
     // Requires both the workqueue worker and TIMER softirq to be active.
     ktimer::self_test();
+
+    // Step 22e: CSPRNG self-test.
+    // Verifies output quality now that we've accumulated some interrupt
+    // entropy during the boot process (ISR timing mixed in).
+    rng::self_test();
 
     // Zero-on-free test — runs here because it needs HHDM + per-CPU
     // caches, which aren't available during the early frame allocator

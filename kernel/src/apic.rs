@@ -810,6 +810,12 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
         ISR_MEASURE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
+    // Feed interrupt timing jitter into the kernel CSPRNG entropy pool.
+    // The TSC value at ISR entry contains genuine hardware noise from
+    // pipeline effects, cache misses, and inter-interrupt timing.
+    // Cost: one atomic XOR + one atomic add (~2 cycles).
+    crate::rng::add_interrupt_entropy(crate::bench::rdtsc());
+
     // Raise softirqs for deferred work.  These will be processed below
     // with interrupts re-enabled, so device IRQs can preempt.
     //

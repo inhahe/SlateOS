@@ -132,6 +132,10 @@ pub struct MemoryInfo {
     pub oom_events: u64,
     /// Number of processes killed by OOM since boot.
     pub oom_kills: u64,
+
+    // --- Per-process accounting ---
+    /// Number of user-mode address spaces currently tracked.
+    pub tracked_address_spaces: usize,
 }
 
 impl core::fmt::Display for MemoryInfo {
@@ -182,8 +186,11 @@ impl core::fmt::Display for MemoryInfo {
         writeln!(f, "kswapd:    {} (cycles: {}, reclaimed: {} pages)",
             if self.kswapd_running { "running" } else { "stopped" },
             self.kswapd_reclaim_cycles, self.kswapd_total_reclaimed)?;
-        write!(f, "OOM:       {} events, {} kills",
-            self.oom_events, self.oom_kills)
+        writeln!(f, "OOM:       {} events, {} kills",
+            self.oom_events, self.oom_kills)?;
+        write!(f, "Tracking:  {} user address space{}",
+            self.tracked_address_spaces,
+            if self.tracked_address_spaces == 1 { "" } else { "s" })
     }
 }
 
@@ -255,6 +262,7 @@ pub fn memory_info() -> MemoryInfo {
         kswapd_total_reclaimed,
         oom_events: oom::oom_event_count(),
         oom_kills: oom::oom_kill_count(),
+        tracked_address_spaces: accounting::tracked_count(),
     }
 }
 

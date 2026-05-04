@@ -1342,6 +1342,14 @@ pub fn load_average_x100() -> u64 {
 /// mechanism (it used to boost starved tasks every 500ms in the O(1)
 /// scheduler; CFS/EEVDF avoid the problem via virtual runtime tracking).
 fn check_starvation() {
+    // Read threshold from sysctl (allows runtime tuning).
+    // 0 = anti-starvation disabled.
+    let threshold = crate::sysctl::get(crate::sysctl::PARAM_SCHED_STARVATION_THRESHOLD)
+        .unwrap_or(STARVATION_THRESHOLD_TICKS);
+    if threshold == 0 {
+        return; // Anti-starvation disabled.
+    }
+
     let now = crate::apic::tick_count();
 
     // Use try_lock to avoid blocking timer_tick if the scheduler is
@@ -1364,7 +1372,7 @@ fn check_starvation() {
             continue; // Not tracking yet (idle tasks, etc.)
         }
         let waited = now.saturating_sub(task.ready_since_tick);
-        if waited >= STARVATION_THRESHOLD_TICKS {
+        if waited >= threshold {
             let current_prio = task.effective_priority();
             if current_prio > 0 && boost_count < boost_list.len() {
                 // Only boost if not already at highest priority.

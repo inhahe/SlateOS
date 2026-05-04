@@ -133,6 +133,15 @@ pub const PARAM_SCHED_INTERACTIVE_THRESHOLD: u16 = 10;
 /// Default: 2.
 pub const PARAM_SCHED_INTERACTIVE_BOOST: u16 = 11;
 
+/// Anti-starvation threshold (ticks).
+///
+/// A Ready task waiting this many ticks without being scheduled gets
+/// a temporary priority boost to prevent indefinite starvation.
+/// At 100 Hz, 200 ticks = 2 seconds.  Set to 0 to disable anti-starvation.
+///
+/// Default: 200.
+pub const PARAM_SCHED_STARVATION_THRESHOLD: u16 = 12;
+
 // --- Filesystem / Buffer Cache (20-29) ---
 
 /// Buffer cache read-ahead maximum window (sectors).
@@ -392,6 +401,14 @@ pub fn init() {
         2,  // 2 priority levels
         0,
         8,
+    );
+
+    reg.register(
+        PARAM_SCHED_STARVATION_THRESHOLD,
+        "sched.starvation_threshold",
+        200,    // 200 ticks = 2 seconds at 100 Hz
+        0,      // 0 = disable anti-starvation
+        1000,   // 10 seconds max
     );
 
     // Filesystem / buffer cache parameters.

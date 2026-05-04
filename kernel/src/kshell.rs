@@ -3094,7 +3094,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "profile", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
-    "rmdir", "run", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
+    "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
@@ -4167,6 +4167,7 @@ fn dispatch(line: &str) {
         "renice" => cmd_renice(args),
         "throttle" => cmd_throttle(args),
         "taskset" => cmd_taskset(args),
+        "schedstat" => cmd_schedstat(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -5079,6 +5080,84 @@ fn cmd_taskset(args: &str) {
             }
         }
     }
+}
+
+/// Display detailed per-task scheduling statistics.
+///
+/// Shows wait time (starvation) metrics alongside CPU time,
+/// schedule count, and run-to-wait ratio for each task.
+/// Sorted by total wait time descending — tasks at the top are
+/// experiencing the most scheduling delay.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_schedstat() {
+    let mut task_list = crate::sched::task_list();
+    if task_list.is_empty() {
+        shell_println!("No tasks.");
+        return;
+    }
+
+    // Sort by total_wait_ticks descending (most starved first).
+    task_list.sort_by(|a, b| b.total_wait_ticks.cmp(&a.total_wait_ticks));
+
+    shell_println!(
+        "{:<6} {:<12} {:<4} {:>8} {:>8} {:>8} {:>6} {:>6}",
+        "TID", "NAME", "PRI", "RUN", "WAIT", "MAX_W", "SCHED", "W/R%"
+    );
+    shell_println!("---------------------------------------------------------------------");
+
+    for info in &task_list {
+        let name = core::str::from_utf8(
+            info.name.get(..info.name_len).unwrap_or(&info.name)
+        ).unwrap_or("?");
+
+        // Format run time (total_ticks) as ss.t
+        let run_secs = info.total_ticks / 100;
+        let run_tenths = (info.total_ticks % 100) / 10;
+
+        // Format total wait time as ss.t
+        let wait_secs = info.total_wait_ticks / 100;
+        let wait_tenths = (info.total_wait_ticks % 100) / 10;
+
+        // Format max wait time as ms (each tick = 10ms)
+        let max_wait_ms = info.max_wait_ticks.saturating_mul(10);
+
+        // Wait/Run ratio as percentage.
+        // High values indicate starvation (spending more time waiting
+        // than running).
+        let wr_pct = if info.total_ticks > 0 {
+            info.total_wait_ticks.saturating_mul(100) / info.total_ticks
+        } else if info.total_wait_ticks > 0 {
+            999 // Infinite wait, no run time.
+        } else {
+            0
+        };
+
+        shell_println!(
+            "{:<6} {:<12} {:<4} {:>5}.{} {:>5}.{} {:>5}ms {:>6} {:>5}%",
+            info.id,
+            &name[..name.len().min(12)],
+            info.priority,
+            run_secs, run_tenths,
+            wait_secs, wait_tenths,
+            max_wait_ms,
+            info.schedule_count,
+            wr_pct
+        );
+    }
+
+    // Summary line.
+    let total_wait: u64 = task_list.iter().map(|t| t.total_wait_ticks).sum();
+    let total_run: u64 = task_list.iter().map(|t| t.total_ticks).sum();
+    let global_wr = if total_run > 0 {
+        total_wait.saturating_mul(100) / total_run
+    } else { 0 };
+    shell_println!("");
+    shell_println!(
+        "System: total_wait={}ms total_run={}ms overall_wait/run={}%",
+        total_wait.saturating_mul(10),
+        total_run.saturating_mul(10),
+        global_wr
+    );
 }
 
 fn cmd_ps() {
@@ -11749,7 +11828,7 @@ fn is_builtin(name: &str) -> bool {
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
-        | "taskset" | "profile" | "top"
+        | "taskset" | "schedstat" | "profile" | "top"
     )
 }
 

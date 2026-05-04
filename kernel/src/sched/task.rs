@@ -328,6 +328,35 @@ pub struct Task {
     /// Useful for detecting tasks that are being scheduled too
     /// frequently (excessive context switch overhead).
     pub schedule_count: u64,
+
+    // --- CPU bandwidth limiting ---
+
+    /// CPU bandwidth quota as a percentage (0 = unlimited, 1–100).
+    ///
+    /// Limits how many ticks per bandwidth period (100 ticks = 1 second)
+    /// this task may consume.  A value of 50 means 50% of one CPU core.
+    ///
+    /// Enforcement: when `cpu_period_used >= cpu_quota_pct`, the task is
+    /// throttled (removed from the run queue) until the next period reset.
+    /// The BSP drives period resets every [`BANDWIDTH_PERIOD_TICKS`] ticks.
+    ///
+    /// Set via [`set_cpu_quota`](super::set_cpu_quota).
+    pub cpu_quota_pct: u8,
+
+    /// Ticks consumed by this task in the current bandwidth period.
+    ///
+    /// Incremented on each timer tick.  Reset to 0 at each period
+    /// boundary (every 100 ticks / 1 second).  When this reaches
+    /// `cpu_quota_pct`, the task is throttled.
+    pub cpu_period_used: u64,
+
+    /// Whether this task is currently throttled due to exceeding its
+    /// CPU bandwidth quota.
+    ///
+    /// When true, the task is in [`TaskState::Ready`] but NOT in any
+    /// run queue.  It will be re-enqueued by the period-reset logic
+    /// in [`unthrottle_expired`](super::unthrottle_expired).
+    pub throttled: bool,
 }
 
 impl Task {
@@ -421,6 +450,9 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
+            cpu_quota_pct: 0,
+            cpu_period_used: 0,
+            throttled: false,
         }
     }
 
@@ -479,6 +511,9 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
+            cpu_quota_pct: 0,
+            cpu_period_used: 0,
+            throttled: false,
         }
     }
 
@@ -558,6 +593,9 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
+            cpu_quota_pct: 0,
+            cpu_period_used: 0,
+            throttled: false,
         })
     }
 

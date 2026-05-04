@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
+    "slabinfo", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
@@ -4168,6 +4168,7 @@ fn dispatch(line: &str) {
         "throttle" => cmd_throttle(args),
         "taskset" => cmd_taskset(args),
         "schedstat" => cmd_schedstat(),
+        "slabinfo" => cmd_slabinfo(),
         "stack" => cmd_stack(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4424,6 +4425,7 @@ fn cmd_help() {
     crate::console_println!("  renice TID PRI  Change task priority (0=highest, 31=lowest)");
     crate::console_println!("  throttle TID [%] Set/query CPU bandwidth quota");
     crate::console_println!("  taskset TID [0xMASK] Set/query CPU affinity");
+    crate::console_println!("  slabinfo  Show per-size-class heap allocator statistics");
     crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
@@ -11935,7 +11937,7 @@ fn is_builtin(name: &str) -> bool {
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
-        | "taskset" | "schedstat" | "stack" | "profile" | "top"
+        | "taskset" | "schedstat" | "slabinfo" | "stack" | "profile" | "top"
     )
 }
 
@@ -13212,6 +13214,56 @@ fn cmd_free() {
 ///
 /// Similar to Linux's `cat /proc/vmstat` — a flat list of named counters
 /// useful for diagnosing system behavior and scripting.
+/// Display per-size-class slab allocator statistics.
+///
+/// Shows allocation patterns and active objects per class for
+/// leak detection and memory profiling.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_slabinfo() {
+    let classes = crate::mm::heap::class_stats();
+    let overall = crate::mm::heap::stats();
+
+    shell_println!("Kernel slab allocator — per-size-class statistics");
+    shell_println!("");
+    shell_println!(
+        "{:>6} {:>10} {:>10} {:>8} {:>5}",
+        "SIZE", "ALLOCS", "FREES", "ACTIVE", "PCT"
+    );
+    shell_println!("---------------------------------------------");
+
+    let mut total_active: u64 = 0;
+    for class in &classes {
+        if class.allocs == 0 && class.frees == 0 {
+            continue; // Skip unused classes.
+        }
+        total_active = total_active.saturating_add(class.active);
+        let pct = if overall.slab_allocs > 0 {
+            class.allocs.saturating_mul(100) / overall.slab_allocs
+        } else {
+            0
+        };
+        shell_println!(
+            "{:>5}B {:>10} {:>10} {:>8} {:>4}%",
+            class.class_size, class.allocs, class.frees, class.active, pct,
+        );
+    }
+
+    shell_println!("---------------------------------------------");
+    shell_println!(
+        "{:>6} {:>10} {:>10} {:>8}",
+        "TOTAL",
+        overall.slab_allocs,
+        overall.slab_frees,
+        total_active,
+    );
+    shell_println!("");
+    shell_println!(
+        "Large allocs: {}  Large frees: {}  Refills: {}  Failures: {}",
+        overall.large_allocs, overall.large_frees,
+        overall.slab_refills, overall.alloc_failures,
+    );
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_vmstat() {
     let info = crate::mm::memory_info();

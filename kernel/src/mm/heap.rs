@@ -57,6 +57,21 @@ static SLAB_REFILLS: AtomicU64 = AtomicU64::new(0);
 /// Total number of failed allocations (OOM).
 static ALLOC_FAILURES: AtomicU64 = AtomicU64::new(0);
 
+/// Per-size-class allocation counters (for leak detection / profiling).
+///
+/// `CLASS_ALLOCS[i]` counts total allocations from size class `i` since boot.
+/// `CLASS_FREES[i]` counts total frees back to size class `i` since boot.
+/// Active objects = allocs - frees.  A monotonically growing difference
+/// suggests a leak in that size class.
+static CLASS_ALLOCS: [AtomicU64; 11] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 11]
+};
+static CLASS_FREES: [AtomicU64; 11] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 11]
+};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -539,8 +554,11 @@ unsafe impl GlobalAlloc for KernelHeap {
 
         if ptr.is_null() {
             ALLOC_FAILURES.fetch_add(1, Ordering::Relaxed);
-        } else if class_idx.is_some() {
+        } else if let Some(idx) = class_idx {
             SLAB_ALLOCS.fetch_add(1, Ordering::Relaxed);
+            if let Some(counter) = CLASS_ALLOCS.get(idx) {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         } else {
             LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);
         }
@@ -563,6 +581,9 @@ unsafe impl GlobalAlloc for KernelHeap {
             if let Some(idx) = class_idx {
                 // SAFETY: ptr was allocated from slab for this class.
                 if unsafe { pcpu_slab_dealloc(ptr, idx) } {
+                    if let Some(counter) = CLASS_FREES.get(idx) {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
                     return;
                 }
             }
@@ -578,6 +599,9 @@ unsafe impl GlobalAlloc for KernelHeap {
             Some(idx) => {
                 inner.slab_dealloc(ptr, idx);
                 SLAB_FREES.fetch_add(1, Ordering::Relaxed);
+                if let Some(counter) = CLASS_FREES.get(idx) {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
             }
             // SAFETY: Caller guarantees ptr was allocated with this layout.
             None => {
@@ -655,6 +679,49 @@ pub fn stats() -> HeapStats {
 /// succeeds.  Provided for API consistency with [`frame::try_stats`].
 pub fn try_stats() -> Option<HeapStats> {
     Some(stats())
+}
+
+/// Per-size-class statistics for leak detection and profiling.
+#[derive(Debug, Clone, Copy)]
+pub struct SlabClassStats {
+    /// Size of objects in this class (bytes).
+    pub class_size: usize,
+    /// Total allocations from this class since boot.
+    pub allocs: u64,
+    /// Total frees to this class since boot.
+    pub frees: u64,
+    /// Currently active (in-use) objects: allocs - frees.
+    pub active: u64,
+}
+
+/// Read per-size-class slab statistics.
+///
+/// Returns an array of 11 entries (one per size class, from 8B to 8192B).
+/// The `active` field (allocs - frees) indicates how many objects of
+/// that size are currently alive.  A steadily growing `active` count
+/// suggests a memory leak in that size class.
+#[must_use]
+#[allow(dead_code)] // Public diagnostic API.
+pub fn class_stats() -> [SlabClassStats; NUM_CLASSES] {
+    let mut result = [SlabClassStats {
+        class_size: 0,
+        allocs: 0,
+        frees: 0,
+        active: 0,
+    }; NUM_CLASSES];
+
+    for (i, entry) in result.iter_mut().enumerate() {
+        let allocs = CLASS_ALLOCS.get(i)
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        let frees = CLASS_FREES.get(i)
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        entry.class_size = SIZE_CLASSES.get(i).copied().unwrap_or(0);
+        entry.allocs = allocs;
+        entry.frees = frees;
+        entry.active = allocs.saturating_sub(frees);
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------

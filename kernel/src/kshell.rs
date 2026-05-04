@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "flock", "fsck", "fsck.ext4", "fsck.fat", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "irq", "journal", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "irq", "journal", "kill", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4161,6 +4161,7 @@ fn dispatch(line: &str) {
         "meminfo" | "mem" => cmd_meminfo(),
         "cpuinfo" | "cpu" => cmd_cpuinfo(),
         "watchdog" => cmd_watchdog(),
+        "kill" => cmd_kill(args),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4692,6 +4693,40 @@ fn cmd_watchdog() {
         shell_println!(
             "{:<5} {:>12} {:>8}{}",
             i, heartbeat, stall, indicator
+        );
+    }
+}
+
+/// Kill a task by its ID.
+///
+/// Usage: `kill <task_id>`
+///
+/// Terminates the specified task.  Cannot kill the current task (the
+/// shell itself) or idle tasks.  Use `ps` to find task IDs.
+fn cmd_kill(args: &str) {
+    let args = args.trim();
+    if args.is_empty() {
+        shell_println!("Usage: kill <task_id>");
+        shell_println!("Use 'ps' to see task IDs.");
+        return;
+    }
+
+    let Ok(task_id) = args.parse::<u64>() else {
+        shell_println!("Invalid task ID: {}", args);
+        return;
+    };
+
+    if task_id == 0 {
+        shell_println!("Cannot kill task 0 (BSP idle).");
+        return;
+    }
+
+    if crate::sched::kill_task(task_id) {
+        shell_println!("Killed task {}.", task_id);
+    } else {
+        shell_println!(
+            "Failed to kill task {} (not found, already dead, or is the current task).",
+            task_id,
         );
     }
 }
@@ -11348,7 +11383,7 @@ fn is_builtin(name: &str) -> bool {
         | "export" | "set" | "unset" | "alias" | "unalias" | "return"
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
-        | "cpuinfo" | "cpu" | "watchdog"
+        | "cpuinfo" | "cpu" | "watchdog" | "kill"
     )
 }
 

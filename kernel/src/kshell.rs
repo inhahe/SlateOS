@@ -3098,7 +3098,7 @@ const COMMANDS: &[&str] = &[
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
-    "then", "throttle", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
+    "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
     // Scripting keywords and commands
@@ -4160,6 +4160,7 @@ fn dispatch(line: &str) {
         "cd" => cmd_cd(args),
         "meminfo" | "mem" => cmd_meminfo(),
         "cpuinfo" | "cpu" => cmd_cpuinfo(),
+        "top" => cmd_top(),
         "profile" => cmd_profile(args),
         "watchdog" => cmd_watchdog(),
         "kill" => cmd_kill(args),
@@ -4620,6 +4621,86 @@ fn cmd_meminfo() {
         pool_misses,
         hit_pct
     );
+}
+
+/// Display a compact system overview (like `top` snapshot).
+///
+/// Shows uptime, load average, memory summary, CPU utilization per-CPU,
+/// memory pressure status, and the top tasks by CPU time.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_top() {
+    let ticks = crate::apic::tick_count();
+    let seconds = ticks / 100;
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+
+    // --- Header: uptime + load ---
+    let load = crate::sched::load_average_x100();
+    let stats = crate::sched::sched_stats();
+    let active = stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited);
+    shell_println!(
+        "up {:02}:{:02}:{:02}  load: {}.{:02}  tasks: {} active  ctx: {}",
+        hours, minutes % 60, seconds % 60,
+        load / 100, load % 100,
+        active, stats.total_ctx_switches,
+    );
+
+    // --- Memory ---
+    let mem = crate::mm::memory_info();
+    let total_mb = mem.total_bytes / (1024 * 1024);
+    let used_mb = mem.used_bytes / (1024 * 1024);
+    let free_mb = mem.free_bytes / (1024 * 1024);
+    let pressure = crate::mm::pressure::current_level();
+    shell_println!(
+        "Mem: {} MiB total, {} MiB used, {} MiB free  frag: {}%  pressure: {}",
+        total_mb, used_mb, free_mb, mem.fragmentation_pct, pressure,
+    );
+
+    // --- CPU utilization bar (compact) ---
+    let num_cpus = stats.num_cpus;
+    if num_cpus > 0 {
+        shell_print!("CPU:");
+        for i in 0..num_cpus {
+            let (total, idle) = stats.cpu_ticks.get(i).copied().unwrap_or((0, 0));
+            let util = if total > 0 {
+                total.saturating_sub(idle).saturating_mul(100) / total
+            } else {
+                0
+            };
+            shell_print!(" [{}]{}%", i, util);
+        }
+        shell_println!("");
+    }
+
+    // --- Top tasks (sorted by CPU time, descending) ---
+    shell_println!("");
+    let mut task_list = crate::sched::task_list();
+    task_list.sort_by(|a, b| b.total_ticks.cmp(&a.total_ticks));
+
+    shell_println!(
+        "{:<5} {:<12} {:<8} {:>3} {:>8}",
+        "TID", "NAME", "STATE", "PRI", "TIME"
+    );
+    shell_println!("----------------------------------------------");
+    // Show top 10 (or all if fewer).
+    let show_count = task_list.len().min(10);
+    for info in task_list.iter().take(show_count) {
+        let name = core::str::from_utf8(
+            info.name.get(..info.name_len).unwrap_or(&info.name)
+        ).unwrap_or("?");
+        let total_secs = info.total_ticks / 100;
+        let frac = (info.total_ticks % 100) / 10;
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        shell_println!(
+            "{:<5} {:<12} {:<8} {:>3} {:>4}:{:02}.{}",
+            info.id, name, info.state, info.priority,
+            mins, secs, frac,
+        );
+    }
+    if task_list.len() > show_count {
+        shell_println!("  ... ({} more)", task_list.len() - show_count);
+    }
 }
 
 /// Display CPU utilization and scheduler statistics.
@@ -11549,7 +11630,7 @@ fn is_builtin(name: &str) -> bool {
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
-        | "profile"
+        | "profile" | "top"
     )
 }
 

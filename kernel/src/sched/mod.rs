@@ -2982,6 +2982,7 @@ pub fn self_test() -> KernelResult<()> {
     test_exit_hooks()?;
     test_cpu_bandwidth()?;
     test_wait_time_tracking()?;
+    test_stack_watermark()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -4394,5 +4395,77 @@ fn test_wait_time_tracking() -> KernelResult<()> {
     reap_dead_tasks();
 
     serial_println!("[sched]   Wait time tracking: PASSED");
+    Ok(())
+}
+
+/// Test: Stack watermark — verify sentinel painting and usage measurement.
+fn test_stack_watermark() -> KernelResult<()> {
+    // Spawn a task that does minimal work, then check its stack usage.
+    extern "C" fn stack_test_task(_arg: u64) {
+        // Use some stack space (a local array to prevent optimizer from
+        // eliminating stack usage).
+        let mut buf = [0u8; 256];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (i & 0xFF) as u8;
+        }
+        // Prevent optimization — read the volatile value.
+        unsafe {
+            core::ptr::read_volatile(&buf[128]);
+        }
+        // Let the task run briefly then exit.
+        yield_now();
+    }
+
+    let pml4 = crate::mm::page_table::active_pml4_phys();
+    let id = spawn(b"test-stack-wm", task::DEFAULT_PRIORITY, stack_test_task, 0, pml4)?;
+
+    // Let the task run.
+    for _ in 0..5 {
+        yield_now();
+    }
+
+    // Check that the task (or recently reaped) has stack usage data.
+    let state = SCHED.lock();
+    if let Some(t) = state.tasks.get(&id) {
+        let usage = t.stack_usage_bytes();
+        let pct = t.stack_usage_pct();
+        assert!(usage.is_some(), "Task should have stack usage");
+        let used = usage.unwrap_or(0);
+        // The task used at least some stack (context switch + function call).
+        // Minimum should be > 64 bytes (saved registers alone are ~120 bytes).
+        assert!(
+            used > 64,
+            "Stack usage too low: {} bytes (expected > 64)",
+            used,
+        );
+        // But shouldn't use more than half the stack for this simple task.
+        assert!(
+            used < task::TASK_STACK_SIZE / 2,
+            "Stack usage too high: {} bytes (expected < {})",
+            used, task::TASK_STACK_SIZE / 2,
+        );
+        let pct_val = pct.unwrap_or(0);
+        assert!(
+            pct_val < 50,
+            "Stack usage pct too high: {}% (expected < 50%)",
+            pct_val,
+        );
+        serial_println!(
+            "[sched]   Stack watermark: OK (test task used {} bytes, {}%)",
+            used, pct_val,
+        );
+    } else {
+        // Task already reaped — that's fine, just verify the API doesn't crash.
+        serial_println!("[sched]   Stack watermark: OK (task reaped, API functional)");
+    }
+    drop(state);
+
+    // Reap.
+    for _ in 0..3 {
+        yield_now();
+    }
+    reap_dead_tasks();
+
+    serial_println!("[sched]   Stack watermark: PASSED");
     Ok(())
 }

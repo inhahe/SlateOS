@@ -10,7 +10,7 @@
 param(
     [switch]$NoBuild,
     [switch]$Test,
-    [int]$Timeout = 30,
+    [int]$Timeout = 45,
     [int]$Memory = 256,
     [int]$Smp = 2
 )

@@ -3092,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
-    "printf", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
+    "printf", "profile", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
@@ -4160,6 +4160,7 @@ fn dispatch(line: &str) {
         "cd" => cmd_cd(args),
         "meminfo" | "mem" => cmd_meminfo(),
         "cpuinfo" | "cpu" => cmd_cpuinfo(),
+        "profile" => cmd_profile(args),
         "watchdog" => cmd_watchdog(),
         "kill" => cmd_kill(args),
         "renice" => cmd_renice(args),
@@ -4669,6 +4670,59 @@ fn cmd_cpuinfo() {
         stats.total_tasks_exited,
         stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited)
     );
+}
+
+/// Show or set the system workload profile.
+///
+/// Usage:
+///   `profile`                — show current profile
+///   `profile desktop`       — set to Desktop (balanced, general use)
+///   `profile server`        — set to Server (throughput, long slices)
+///   `profile dev`           — set to Development (short slices, many tasks)
+///   `profile gaming`        — set to Gaming (low latency, responsive)
+///
+/// Sets both scheduler time slices and memory parameters.
+fn cmd_profile(args: &str) {
+    let arg = args.trim();
+
+    if arg.is_empty() {
+        // Show current profiles.
+        let sched_profile = crate::sched::current_workload_profile();
+        let mem_profile = crate::sysctl::current_memory_profile();
+
+        shell_println!("System workload profiles:");
+        match sched_profile {
+            Some(p) => shell_println!("  Scheduler: {:?}", p),
+            None => shell_println!("  Scheduler: custom (manually tuned)"),
+        }
+        match mem_profile {
+            Some(p) => shell_println!("  Memory:    {:?}", p),
+            None => shell_println!("  Memory:    custom (manually tuned)"),
+        }
+        shell_println!("");
+        shell_println!("Available: desktop, server, dev, gaming");
+        return;
+    }
+
+    let profile_id: u8 = match arg {
+        "desktop" | "Desktop" | "0" => 0,
+        "server" | "Server" | "1" => 1,
+        "dev" | "development" | "Development" | "2" => 2,
+        "gaming" | "Gaming" | "3" => 3,
+        _ => {
+            shell_println!("Unknown profile: {}", arg);
+            shell_println!("Available: desktop, server, dev, gaming");
+            return;
+        }
+    };
+
+    if crate::sysctl::apply_system_profile(profile_id) {
+        let names = ["Desktop", "Server", "Development", "Gaming"];
+        let name = names.get(profile_id as usize).unwrap_or(&"?");
+        shell_println!("Applied system profile: {} (sched + memory)", name);
+    } else {
+        shell_println!("Failed to apply profile.");
+    }
 }
 
 /// Display soft lockup watchdog status.
@@ -11495,6 +11549,7 @@ fn is_builtin(name: &str) -> bool {
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
+        | "profile"
     )
 }
 

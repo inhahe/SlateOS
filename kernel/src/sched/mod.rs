@@ -951,6 +951,125 @@ const BANDWIDTH_PERIOD_TICKS: u64 = 100;
 /// is called to reset per-task counters and re-enqueue throttled tasks.
 static BANDWIDTH_TICK: AtomicU64 = AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// Soft lockup watchdog
+// ---------------------------------------------------------------------------
+
+/// Per-CPU heartbeat counters for the soft lockup watchdog.
+///
+/// Each CPU increments its counter on every timer tick.  The BSP
+/// periodically checks that all CPUs have ticked within the expected
+/// interval.  If a CPU's counter hasn't advanced in
+/// `WATCHDOG_THRESHOLD_TICKS`, it's considered soft-locked (stuck in
+/// a non-preemptible code path — typically a deadlocked spinlock or
+/// an infinite loop with interrupts disabled).
+///
+/// Based on Linux's `kernel/watchdog.c` soft lockup detector.
+static WATCHDOG_HEARTBEAT: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const ZERO: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [ZERO; priority_rr::MAX_CPUS]
+};
+
+/// Snapshot of each CPU's heartbeat at the last watchdog check.
+///
+/// If `WATCHDOG_HEARTBEAT[cpu] == WATCHDOG_LAST_SEEN[cpu]` at check
+/// time, the CPU has made zero forward progress since the last check.
+static WATCHDOG_LAST_SEEN: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const ZERO: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [ZERO; priority_rr::MAX_CPUS]
+};
+
+/// Number of consecutive watchdog intervals a CPU has been stalled.
+///
+/// Alert only after `WATCHDOG_ALERT_COUNT` consecutive failures to
+/// avoid false positives from transient IRQ-disabled sections.
+static WATCHDOG_STALL_COUNT: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const ZERO: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [ZERO; priority_rr::MAX_CPUS]
+};
+
+/// How often the watchdog checks (in BSP ticks).
+///
+/// 500 ticks at 100 Hz = every 5 seconds.  Strikes a balance between
+/// timely detection and avoiding noisy false positives.
+const WATCHDOG_CHECK_INTERVAL: u64 = 500;
+
+/// How many consecutive stall intervals before alerting.
+///
+/// 2 means a CPU must be stuck for 10+ seconds (2×5s) before we
+/// report it.  This avoids false positives from legitimate long
+/// IRQ-disabled sections (e.g., TLB shootdown synchronization).
+const WATCHDOG_ALERT_COUNT: u64 = 2;
+
+/// Run the soft lockup watchdog check.
+///
+/// Called by the BSP every `WATCHDOG_CHECK_INTERVAL` ticks.  Checks
+/// each non-BSP CPU's heartbeat counter against the last-seen value.
+/// If unchanged for `WATCHDOG_ALERT_COUNT` consecutive intervals,
+/// reports a soft lockup warning.
+fn watchdog_check() {
+    let num_cpus = crate::smp::cpu_count();
+    if num_cpus <= 1 {
+        return; // Nothing to watch with only the BSP.
+    }
+
+    for cpu in 1..num_cpus {
+        let Some(heartbeat) = WATCHDOG_HEARTBEAT.get(cpu) else { continue };
+        let Some(last_seen) = WATCHDOG_LAST_SEEN.get(cpu) else { continue };
+        let Some(stall_count) = WATCHDOG_STALL_COUNT.get(cpu) else { continue };
+
+        let current = heartbeat.load(Ordering::Relaxed);
+        let previous = last_seen.load(Ordering::Relaxed);
+
+        if current == previous && previous > 0 {
+            // CPU hasn't ticked since last check.
+            let count = stall_count.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            if count >= WATCHDOG_ALERT_COUNT {
+                // Soft lockup detected — report but don't halt.
+                // The CPU may recover (e.g., if it was just a very
+                // long critical section).
+                serial_println!(
+                    "[watchdog] SOFT LOCKUP on CPU {} (no progress for {}+ seconds, heartbeat={})",
+                    cpu,
+                    count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100),
+                    current,
+                );
+            }
+        } else {
+            // CPU is alive — reset stall counter.
+            stall_count.store(0, Ordering::Relaxed);
+        }
+
+        // Record current heartbeat for next comparison.
+        last_seen.store(current, Ordering::Release);
+    }
+}
+
+/// Query watchdog status for diagnostics.
+///
+/// Returns an array of (heartbeat_count, stall_count) per CPU.
+#[must_use]
+#[allow(dead_code)] // Diagnostic API for procfs/kshell.
+pub fn watchdog_status() -> [(u64, u64); priority_rr::MAX_CPUS] {
+    let mut result = [(0u64, 0u64); priority_rr::MAX_CPUS];
+    for (i, entry) in result.iter_mut().enumerate() {
+        if let (Some(hb), Some(sc)) = (
+            WATCHDOG_HEARTBEAT.get(i),
+            WATCHDOG_STALL_COUNT.get(i),
+        ) {
+            *entry = (
+                hb.load(Ordering::Relaxed),
+                sc.load(Ordering::Relaxed),
+            );
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Timer tick handler
+// ---------------------------------------------------------------------------
+
 /// Handle a timer tick from the APIC timer interrupt.
 ///
 /// Called from the timer ISR with interrupts disabled.  Uses `try_lock`
@@ -981,6 +1100,12 @@ pub fn timer_tick() -> bool {
     // contended.
 
     let time_slice_expired = PER_CPU_SCHED.tick(cpu);
+
+    // --- Watchdog heartbeat (no lock needed) ---
+    // Each CPU bumps its counter so the BSP can detect stalls.
+    if let Some(hb) = WATCHDOG_HEARTBEAT.get(cpu) {
+        hb.fetch_add(1, Ordering::Relaxed);
+    }
 
     // --- Per-CPU utilization tracking (no lock needed) ---
     // Increment total and idle tick counters for utilization calculation.
@@ -1025,16 +1150,19 @@ pub fn timer_tick() -> bool {
     // Even if we couldn't acquire SCHED for burst tracking, the
     // time slice tick still happened above — don't lose it.
 
-    // BSP drives bandwidth period resets and load average sampling.
-    // Every BANDWIDTH_PERIOD_TICKS (100 ticks = 1 second):
-    // - Reset CPU bandwidth counters and re-enqueue throttled tasks
-    // - Update the system load average EWMA
+    // BSP drives bandwidth period resets, load average sampling, and
+    // the soft lockup watchdog.
     if cpu == 0 {
         let tick = BANDWIDTH_TICK.fetch_add(1, Ordering::Relaxed);
         #[allow(clippy::arithmetic_side_effects)]
         if tick > 0 && tick % BANDWIDTH_PERIOD_TICKS == 0 {
             unthrottle_expired();
             update_load_average();
+        }
+        // Watchdog check: every WATCHDOG_CHECK_INTERVAL ticks (5s).
+        #[allow(clippy::arithmetic_side_effects)]
+        if tick > 0 && tick % WATCHDOG_CHECK_INTERVAL == 0 {
+            watchdog_check();
         }
     }
 

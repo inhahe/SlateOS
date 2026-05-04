@@ -3100,7 +3100,7 @@ const COMMANDS: &[&str] = &[
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "tee", "test",
     "then", "time", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version",
-    "watch", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
+    "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4160,6 +4160,7 @@ fn dispatch(line: &str) {
         "cd" => cmd_cd(args),
         "meminfo" | "mem" => cmd_meminfo(),
         "cpuinfo" | "cpu" => cmd_cpuinfo(),
+        "watchdog" => cmd_watchdog(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4667,6 +4668,34 @@ fn cmd_cpuinfo() {
     );
 }
 
+/// Display soft lockup watchdog status.
+///
+/// Shows per-CPU heartbeat counts and stall indicators.  A non-zero
+/// stall count means the watchdog has noticed that CPU not ticking
+/// for one or more check intervals (5 seconds each).
+fn cmd_watchdog() {
+    let num_cpus = crate::smp::cpu_count();
+    let status = crate::sched::watchdog_status();
+
+    shell_println!("Soft lockup watchdog (check every 5s, alert after 10s):");
+    shell_println!("{:<5} {:>12} {:>8}", "CPU", "HEARTBEAT", "STALL");
+    shell_println!("-----------------------------");
+    for i in 0..num_cpus {
+        let (heartbeat, stall) = status.get(i).copied().unwrap_or((0, 0));
+        let indicator = if stall >= 2 {
+            " *** LOCKUP ***"
+        } else if stall >= 1 {
+            " (stalled)"
+        } else {
+            ""
+        };
+        shell_println!(
+            "{:<5} {:>12} {:>8}{}",
+            i, heartbeat, stall, indicator
+        );
+    }
+}
+
 fn cmd_ps() {
     let task_list = crate::sched::task_list();
     if task_list.is_empty() {
@@ -4737,15 +4766,32 @@ fn cmd_clear() {
 fn cmd_uptime() {
     let ticks = crate::apic::tick_count();
     // Timer runs at 100 Hz, so ticks / 100 = seconds.
+    #[allow(clippy::arithmetic_side_effects)]
     let seconds = ticks / 100;
+    #[allow(clippy::arithmetic_side_effects)]
     let minutes = seconds / 60;
+    #[allow(clippy::arithmetic_side_effects)]
     let hours = minutes / 60;
+
+    // Load average from scheduler (×100 fixed-point).
+    let load = crate::sched::load_average_x100();
+    #[allow(clippy::arithmetic_side_effects)]
+    let load_whole = load / 100;
+    #[allow(clippy::arithmetic_side_effects)]
+    let load_frac = load % 100;
+
+    // Active (non-idle) task count.
+    let stats = crate::sched::sched_stats();
+    let active = stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited);
+
     shell_println!(
-        "Uptime: {} ticks ({:02}:{:02}:{:02})",
-        ticks,
+        "up {:02}:{:02}:{:02}, load average: {}.{:02}, {} tasks",
         hours,
         minutes % 60,
-        seconds % 60
+        seconds % 60,
+        load_whole,
+        load_frac,
+        active,
     );
 }
 
@@ -11302,7 +11348,7 @@ fn is_builtin(name: &str) -> bool {
         | "export" | "set" | "unset" | "alias" | "unalias" | "return"
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
-        | "cpuinfo" | "cpu"
+        | "cpuinfo" | "cpu" | "watchdog"
     )
 }
 

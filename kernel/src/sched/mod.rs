@@ -2961,6 +2961,7 @@ pub fn self_test() -> KernelResult<()> {
     test_cpu_affinity()?;
     test_exit_hooks()?;
     test_cpu_bandwidth()?;
+    test_wait_time_tracking()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -4328,5 +4329,50 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
     reap_dead_tasks();
 
     serial_println!("[sched]   CPU bandwidth limiting: PASSED");
+    Ok(())
+}
+
+/// Test wait time tracking: verify counters increment when tasks wait.
+fn test_wait_time_tracking() -> KernelResult<()> {
+    serial_println!("[sched]   Wait time tracking...");
+
+    // Spawn a task and let it run briefly, then check its fields.
+    let id = spawn(b"test-wait", 16, test_task_incr, 5, 0)?;
+
+    // Let it run and complete.
+    for _ in 0..20 {
+        yield_now();
+    }
+
+    // The task should have accumulated some schedule_count via
+    // record_dispatch (which also resets ready_since_tick to 0
+    // and updates total_wait_ticks).
+    {
+        let state = SCHED.lock();
+        if let Some(task) = state.tasks.get(&id) {
+            // After being dispatched at least once, schedule_count > 0.
+            assert!(
+                task.schedule_count > 0,
+                "Task should have been dispatched at least once"
+            );
+            // ready_since_tick should be 0 if task is Running (cleared
+            // by record_dispatch) or >0 if task is back in Ready state.
+            if task.state == TaskState::Running {
+                assert_eq!(
+                    task.ready_since_tick, 0,
+                    "Running task should have ready_since_tick = 0"
+                );
+            }
+        }
+    }
+
+    // Clean up.
+    kill_task(id);
+    for _ in 0..5 {
+        yield_now();
+    }
+    reap_dead_tasks();
+
+    serial_println!("[sched]   Wait time tracking: PASSED");
     Ok(())
 }

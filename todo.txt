@@ -1,3 +1,7 @@
+add to roadmap-detailed.md to support 3d acceleration under vmware
+
+make sure latest WINE plan and automatic code change plan are in roadmap
+
 ## Completed
 - Per-CPU scheduler lock refactor: DONE (commit 449e218).  Split global
   SCHED lock into per-CPU spinlocks inside PerCpuScheduler + separate
@@ -26,13 +30,13 @@
   scan loop so all virtio-blk devices become available.  Blocking
   ext4 boot-time self-tests (ext4_test.img at build/ext4_test.img).
 
-- kernel-core: CRC32C self-test fails for 32-zero-byte input.
-  Result 0x8A9136AA is byte-swapped from expected 0xAA36918A.
-  Consistent but wrong — our ext4 checksums are self-compatible
-  but incompatible with Linux.  Affects all ext4 metadata checksums
-  (superblock, group descriptors, inodes, dir entries, extent blocks).
-  Combined with the now-fixed journal byte order, this is the remaining
-  barrier to full Linux ext4 image compatibility.
+- (FIXED) kernel-core: CRC32C self-test was failing because the
+  expected value for 32 zero bytes was wrong (0xAA36918A is a
+  byte-swapped version of the correct value 0x8A9136AA).  Verified
+  against Python reference implementation.  Our CRC32C algorithm was
+  correct all along — ext4 metadata checksums ARE Linux-compatible.
+  Combined with the journal byte order fix, ext4 compatibility is
+  now fully resolved.
 
 - kernel-ipc: Wire SYS_CLOCK_MONOTONIC (syscall/handlers.rs) to use
   hpet::elapsed_ns() when HPET is available, falling back to the APIC tick

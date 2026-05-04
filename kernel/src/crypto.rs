@@ -455,10 +455,13 @@ pub fn self_test_crc32c() -> Result<(), crate::error::KernelError> {
     crate::serial_println!("[crypto]   CRC32C(\"\") = {:#010X} (correct)", empty);
 
     // Test vector 3: 32 zero bytes.
+    // Reference value verified with Python CRC32C (Castagnoli, poly 0x82F63B78).
+    // Previous expected value 0xAA36918A was byte-swapped — our implementation
+    // was correct all along.
     let zeros = [0u8; 32];
     let z_crc = crc32c(&zeros);
-    if z_crc != 0xAA36_918A {
-        crate::serial_println!("[crypto]   FAIL: CRC32C(32 zeros) = {:#010X}, expected 0xAA36918A", z_crc);
+    if z_crc != 0x8A91_36AA {
+        crate::serial_println!("[crypto]   FAIL: CRC32C(32 zeros) = {:#010X}, expected 0x8A9136AA", z_crc);
         return Err(crate::error::KernelError::InternalError);
     }
     crate::serial_println!("[crypto]   CRC32C(32 zeros) = {:#010X} (correct)", z_crc);

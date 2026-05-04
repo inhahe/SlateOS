@@ -4678,12 +4678,16 @@ fn cmd_top() {
     let load = crate::sched::load_average_x100();
     let stats = crate::sched::sched_stats();
     let active = stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited);
+    let starv_boosts = crate::sched::starvation_boost_count();
     shell_println!(
-        "up {:02}:{:02}:{:02}  load: {}.{:02}  tasks: {} active  ctx: {}",
+        "up {:02}:{:02}:{:02}  load: {}.{:02}  tasks: {} active  ctx: {}  steals: {}",
         hours, minutes % 60, seconds % 60,
         load / 100, load % 100,
-        active, stats.total_ctx_switches,
+        active, stats.total_ctx_switches, stats.total_work_steals,
     );
+    if starv_boosts > 0 {
+        shell_println!("  anti-starvation boosts: {}", starv_boosts);
+    }
 
     // --- Memory ---
     let mem = crate::mm::memory_info();
@@ -4718,10 +4722,10 @@ fn cmd_top() {
     task_list.sort_by(|a, b| b.total_ticks.cmp(&a.total_ticks));
 
     shell_println!(
-        "{:<5} {:<12} {:<8} {:>3} {:>8}",
-        "TID", "NAME", "STATE", "PRI", "TIME"
+        "{:<5} {:<12} {:<8} {:>3} {:>8} {:>6}",
+        "TID", "NAME", "STATE", "PRI", "TIME", "WAIT"
     );
-    shell_println!("----------------------------------------------");
+    shell_println!("-----------------------------------------------------");
     // Show top 10 (or all if fewer).
     let show_count = task_list.len().min(10);
     for info in task_list.iter().take(show_count) {
@@ -4732,10 +4736,14 @@ fn cmd_top() {
         let frac = (info.total_ticks % 100) / 10;
         let mins = total_secs / 60;
         let secs = total_secs % 60;
+        // Wait time as seconds.tenths
+        let wait_secs = info.total_wait_ticks / 100;
+        let wait_frac = (info.total_wait_ticks % 100) / 10;
         shell_println!(
-            "{:<5} {:<12} {:<8} {:>3} {:>4}:{:02}.{}",
+            "{:<5} {:<12} {:<8} {:>3} {:>4}:{:02}.{} {:>3}.{}",
             info.id, name, info.state, info.priority,
             mins, secs, frac,
+            wait_secs, wait_frac,
         );
     }
     if task_list.len() > show_count {

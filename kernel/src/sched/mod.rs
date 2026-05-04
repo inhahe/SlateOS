@@ -239,6 +239,93 @@ static RESCHEDULE_PENDING: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
 };
 
 // ---------------------------------------------------------------------------
+// Per-CPU scheduler statistics
+// ---------------------------------------------------------------------------
+
+/// Per-CPU context switch counter.
+///
+/// Incremented every time a context switch actually happens (not when
+/// the same task is re-picked).  Used by /proc/stat and diagnostics.
+static CTX_SWITCHES: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Per-CPU voluntary yield counter (task called yield_now or block).
+static VOLUNTARY_SWITCHES: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Per-CPU preemption counter (timer tick expired the time slice).
+static PREEMPTIONS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Global work steal counter (any CPU stealing from another).
+static WORK_STEALS: AtomicU64 = AtomicU64::new(0);
+
+/// Global task spawn counter.
+static TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
+
+/// Global task exit counter (both natural exits and kills).
+static TASKS_EXITED: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of per-CPU and global scheduler statistics.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Public API for procfs /proc/stat.
+pub struct SchedStats {
+    /// Per-CPU context switch counts.
+    pub ctx_switches: [u64; priority_rr::MAX_CPUS],
+    /// Per-CPU voluntary switch counts (yield/block).
+    pub voluntary_switches: [u64; priority_rr::MAX_CPUS],
+    /// Per-CPU preemption counts (timer-forced).
+    pub preemptions: [u64; priority_rr::MAX_CPUS],
+    /// Total context switches across all CPUs.
+    pub total_ctx_switches: u64,
+    /// Total work steal operations.
+    pub total_work_steals: u64,
+    /// Total tasks spawned since boot.
+    pub total_tasks_spawned: u64,
+    /// Total tasks exited since boot.
+    pub total_tasks_exited: u64,
+    /// Number of online CPUs.
+    pub num_cpus: usize,
+}
+
+/// Collect a snapshot of scheduler statistics.
+#[must_use]
+#[allow(dead_code)] // Public API for procfs /proc/stat.
+pub fn sched_stats() -> SchedStats {
+    let num_cpus = crate::smp::cpu_count().max(1);
+    let mut stats = SchedStats {
+        ctx_switches: [0; priority_rr::MAX_CPUS],
+        voluntary_switches: [0; priority_rr::MAX_CPUS],
+        preemptions: [0; priority_rr::MAX_CPUS],
+        total_ctx_switches: 0,
+        total_work_steals: WORK_STEALS.load(Ordering::Relaxed),
+        total_tasks_spawned: TASKS_SPAWNED.load(Ordering::Relaxed),
+        total_tasks_exited: TASKS_EXITED.load(Ordering::Relaxed),
+        num_cpus,
+    };
+
+    for i in 0..num_cpus.min(priority_rr::MAX_CPUS) {
+        // SAFETY: i < MAX_CPUS (bounded by min above).
+        #[allow(clippy::indexing_slicing)]
+        {
+            stats.ctx_switches[i] = CTX_SWITCHES[i].load(Ordering::Relaxed);
+            stats.voluntary_switches[i] = VOLUNTARY_SWITCHES[i].load(Ordering::Relaxed);
+            stats.preemptions[i] = PREEMPTIONS[i].load(Ordering::Relaxed);
+            stats.total_ctx_switches = stats.total_ctx_switches
+                .saturating_add(stats.ctx_switches[i]);
+        }
+    }
+
+    stats
+}
+
+// ---------------------------------------------------------------------------
 // Task exit hooks
 // ---------------------------------------------------------------------------
 
@@ -632,6 +719,7 @@ pub fn spawn_with_affinity(
     // Wake the target CPU if it's idle (remote CPUs may be in HLT).
     signal_cpu(target_cpu);
 
+    TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
     serial_println!("[sched] Spawned task {} (priority {}, cpu {})", id, prio, target_cpu);
     Ok(id)
 }
@@ -642,6 +730,9 @@ pub fn spawn_with_affinity(
 /// priority ready task is scheduled.  If no other task is ready, the
 /// current task continues running.
 pub fn yield_now() {
+    if let Some(ctr) = VOLUNTARY_SWITCHES.get(current_cpu_id()) {
+        ctr.fetch_add(1, Ordering::Relaxed);
+    }
     schedule_inner(true);
 }
 
@@ -652,6 +743,7 @@ pub fn yield_now() {
 /// queue.
 pub fn task_exit() {
     let current_id = load_current_task();
+    TASKS_EXITED.fetch_add(1, Ordering::Relaxed);
     serial_println!("[sched] Task {} exiting", current_id);
 
     // Notify exit hooks BEFORE marking the task Dead and before
@@ -695,6 +787,9 @@ pub fn current_task_id() -> TaskId {
 /// This is used by IPC channels, futexes, and other blocking
 /// primitives.
 pub fn block_current() {
+    if let Some(ctr) = VOLUNTARY_SWITCHES.get(current_cpu_id()) {
+        ctr.fetch_add(1, Ordering::Relaxed);
+    }
     let current_id = load_current_task();
     {
         let mut state = SCHED.lock();
@@ -876,6 +971,9 @@ pub fn timer_tick() -> bool {
 /// context.  The current task is re-enqueued and the highest-priority
 /// ready task is scheduled.
 pub fn preempt() {
+    if let Some(ctr) = PREEMPTIONS.get(current_cpu_id()) {
+        ctr.fetch_add(1, Ordering::Relaxed);
+    }
     schedule_inner(true);
 }
 
@@ -1189,6 +1287,7 @@ pub fn kill_task(task_id: TaskId) -> bool {
     // other subsystems that have their own locks.
     drop(state);
 
+    TASKS_EXITED.fetch_add(1, Ordering::Relaxed);
     serial_println!("[sched] Killed task {}", task_id);
 
     // Notify exit hooks after the task is marked Dead and the lock
@@ -1885,7 +1984,13 @@ fn schedule_inner(requeue: bool) {
         let mut migrated = alloc::vec::Vec::new();
         let picked = match PER_CPU_SCHED.pick_next_local(cpu) {
             Some(id) => Some(id),
-            None => PER_CPU_SCHED.try_steal(cpu, &mut migrated),
+            None => {
+                let stolen = PER_CPU_SCHED.try_steal(cpu, &mut migrated);
+                if stolen.is_some() {
+                    WORK_STEALS.fetch_add(1, Ordering::Relaxed);
+                }
+                stolen
+            }
         };
         // Update last_cpu for stolen tasks.  If a stolen task's affinity
         // forbids this CPU, put it back on its original (or first allowed)
@@ -1942,7 +2047,10 @@ fn schedule_inner(requeue: bool) {
                     let ready_id = match PER_CPU_SCHED.pick_next_local(cpu) {
                         Some(id) => id,
                         None => match PER_CPU_SCHED.try_steal(cpu, &mut idle_migrated) {
-                            Some(id) => id,
+                            Some(id) => {
+                                WORK_STEALS.fetch_add(1, Ordering::Relaxed);
+                                id
+                            }
                             None => { drop(s); continue; }
                         },
                     };
@@ -2021,6 +2129,11 @@ fn schedule_inner(requeue: bool) {
                                 crate::syscall::entry::set_kernel_stack(stack_top);
                                 crate::gdt::set_kernel_stack(stack_top);
                             }
+                        }
+
+                        // Increment context switch counter.
+                        if let Some(ctr) = CTX_SWITCHES.get(cpu) {
+                            ctr.fetch_add(1, Ordering::Relaxed);
                         }
 
                         // SAFETY: Both pointers valid (from task table
@@ -2154,6 +2267,11 @@ fn schedule_inner(requeue: bool) {
     //   other code runs on this CPU until switch_context returns.
     // - old_ctx_ptr is &mut (exclusive write) and new_ctx_ptr is &
     //   (shared read), pointing to different tasks' contexts.
+    // Increment context switch counter for this CPU.
+    if let Some(ctr) = CTX_SWITCHES.get(cpu) {
+        ctr.fetch_add(1, Ordering::Relaxed);
+    }
+
     unsafe {
         switch_context(&mut *old_ctx_ptr, &*new_ctx_ptr);
     }

@@ -747,6 +747,7 @@ pub fn spawn_with_affinity(
 
     let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
     new_task.cpu_affinity = affinity_mask;
+    new_task.ready_since_tick = crate::apic::tick_count();
     let id = new_task.id;
     let prio = new_task.priority;
     let target_cpu = choose_cpu_for_task(&new_task);
@@ -863,7 +864,7 @@ pub fn wake(task_id: TaskId) -> bool {
         if let Some(task) = state.tasks.get_mut(&task_id)
             && task.state == TaskState::Blocked
         {
-            task.state = TaskState::Ready;
+            task.mark_ready(crate::apic::tick_count());
             // Reset burst counter for the new wake cycle.
             task.burst_ticks = 0;
             let prio = task.effective_priority();
@@ -893,7 +894,7 @@ pub fn try_wake(task_id: TaskId) -> bool {
         if let Some(task) = state.tasks.get_mut(&task_id)
             && task.state == TaskState::Blocked
         {
-            task.state = TaskState::Ready;
+            task.mark_ready(crate::apic::tick_count());
             task.burst_ticks = 0;
             let prio = task.effective_priority();
             let target_cpu = choose_cpu_for_task(task);
@@ -1511,7 +1512,7 @@ pub fn resume(task_id: TaskId) -> bool {
             return false;
         }
 
-        task.state = TaskState::Ready;
+        task.mark_ready(crate::apic::tick_count());
         let prio = task.effective_priority();
         target_cpu = choose_cpu_for_task(task);
         task.last_cpu = target_cpu;
@@ -2116,6 +2117,10 @@ pub struct TaskInfo {
     pub cpu_quota_pct: u8,
     /// Whether the task is currently throttled.
     pub throttled: bool,
+    /// Total time spent waiting in Ready state (ticks).
+    pub total_wait_ticks: u64,
+    /// Maximum single wait duration (ticks).
+    pub max_wait_ticks: u64,
 }
 
 /// Return a snapshot of all tasks in the scheduler.
@@ -2137,6 +2142,8 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             last_cpu: task.last_cpu,
             cpu_quota_pct: task.cpu_quota_pct,
             throttled: task.throttled,
+            total_wait_ticks: task.total_wait_ticks,
+            max_wait_ticks: task.max_wait_ticks,
         })
         .collect()
 }
@@ -2385,7 +2392,7 @@ fn schedule_inner(requeue: bool) {
         if requeue {
             if let Some(task) = state.tasks.get_mut(&current_id) {
                 if task.state == TaskState::Running {
-                    task.state = TaskState::Ready;
+                    task.mark_ready(crate::apic::tick_count());
                     if task.throttled {
                         // Throttled: parked as Ready without a queue slot.
                         // unthrottle_expired() will re-enqueue it.
@@ -2496,9 +2503,9 @@ fn schedule_inner(requeue: bool) {
 
                     // Found a ready task — set it up for switching.
                     if let Some(task) = s.tasks.get_mut(&ready_id) {
+                        task.record_dispatch(crate::apic::tick_count());
                         task.state = TaskState::Running;
                         task.last_cpu = cpu;
-                        task.schedule_count = task.schedule_count.saturating_add(1);
                     }
 
                     // Extract context pointers for old (blocked/dead)
@@ -2594,9 +2601,9 @@ fn schedule_inner(requeue: bool) {
         // We do this before extracting the old task's pointer because
         // the mutable borrow ends when we're done with the task.
         if let Some(next_task) = state.tasks.get_mut(&next_id) {
+            next_task.record_dispatch(crate::apic::tick_count());
             next_task.state = TaskState::Running;
             next_task.last_cpu = cpu;
-            next_task.schedule_count = next_task.schedule_count.saturating_add(1);
         }
 
         // Extract raw pointers and metadata for both tasks under this
@@ -4121,7 +4128,7 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
             let prio = task.effective_priority();
             let cpu = task.last_cpu;
             PER_CPU_SCHED.dequeue(id, prio, cpu);
-            task.state = TaskState::Ready;
+            task.mark_ready(crate::apic::tick_count());
             task.throttled = true;
             task.cpu_period_used = 50;
         }
@@ -4150,7 +4157,7 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
             let prio = task.effective_priority();
             let cpu = task.last_cpu;
             PER_CPU_SCHED.dequeue(id, prio, cpu);
-            task.state = TaskState::Ready;
+            task.mark_ready(crate::apic::tick_count());
         }
     }
 
@@ -4185,7 +4192,7 @@ fn test_cpu_bandwidth() -> KernelResult<()> {
             let prio = task.effective_priority();
             let cpu = task.last_cpu;
             PER_CPU_SCHED.dequeue(id, prio, cpu);
-            task.state = TaskState::Ready;
+            task.mark_ready(crate::apic::tick_count());
         }
     }
     // Raise quota to 50 — period_used (30) < new quota (50), so un-throttle.

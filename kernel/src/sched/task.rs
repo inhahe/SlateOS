@@ -329,6 +329,32 @@ pub struct Task {
     /// frequently (excessive context switch overhead).
     pub schedule_count: u64,
 
+    // --- Wait time tracking (starvation detection) ---
+
+    /// Tick count when the task last entered the Ready state.
+    ///
+    /// Set when transitioning from any state to Ready (blocked→ready,
+    /// or newly spawned and enqueued).  Used to measure how long the
+    /// task waited in the run queue before being dispatched.
+    ///
+    /// A value of 0 means "not waiting" (task is Running/Blocked/Dead).
+    pub ready_since_tick: u64,
+
+    /// Cumulative time spent waiting in the Ready state (in ticks).
+    ///
+    /// Updated each time the task is dispatched (scheduled in): the
+    /// delta `current_tick - ready_since_tick` is added.  This allows
+    /// detecting starvation — tasks with high `total_wait_ticks` relative
+    /// to `total_ticks` are spending more time waiting than running.
+    pub total_wait_ticks: u64,
+
+    /// Maximum single wait duration seen (in ticks).
+    ///
+    /// Tracks the longest continuous wait in the run queue.  Useful
+    /// for latency profiling — a high max_wait_ticks indicates the
+    /// task experienced scheduling starvation at some point.
+    pub max_wait_ticks: u64,
+
     // --- CPU bandwidth limiting ---
 
     /// CPU bandwidth quota as a percentage (0 = unlimited, 1–100).
@@ -420,6 +446,38 @@ impl Task {
         self.total_ticks = self.total_ticks.saturating_add(1);
     }
 
+    /// Mark this task as Ready and record the timestamp for wait
+    /// time tracking.
+    ///
+    /// Call this instead of directly setting `state = TaskState::Ready`
+    /// to ensure the `ready_since_tick` field is properly updated for
+    /// starvation detection.
+    #[inline]
+    pub fn mark_ready(&mut self, current_tick: u64) {
+        self.state = TaskState::Ready;
+        self.ready_since_tick = current_tick;
+    }
+
+    /// Record that this task has been dispatched (scheduled in).
+    ///
+    /// Computes the wait time (time spent in Ready state) and updates
+    /// the `total_wait_ticks` and `max_wait_ticks` counters.
+    ///
+    /// Call this when picking the task for execution (in the context
+    /// switch path).
+    #[inline]
+    pub fn record_dispatch(&mut self, current_tick: u64) {
+        if self.ready_since_tick > 0 {
+            let waited = current_tick.saturating_sub(self.ready_since_tick);
+            self.total_wait_ticks = self.total_wait_ticks.saturating_add(waited);
+            if waited > self.max_wait_ticks {
+                self.max_wait_ticks = waited;
+            }
+        }
+        self.ready_since_tick = 0; // No longer waiting.
+        self.schedule_count = self.schedule_count.saturating_add(1);
+    }
+
     /// Create the idle task (task 0) for the BSP.
     ///
     /// The idle task uses the bootloader-provided stack; no allocation
@@ -450,6 +508,9 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
+            ready_since_tick: 0,
+            total_wait_ticks: 0,
+            max_wait_ticks: 0,
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
@@ -511,6 +572,9 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
+            ready_since_tick: 0,
+            total_wait_ticks: 0,
+            max_wait_ticks: 0,
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
@@ -593,6 +657,9 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             schedule_count: 0,
+            ready_since_tick: 0,
+            total_wait_ticks: 0,
+            max_wait_ticks: 0,
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,

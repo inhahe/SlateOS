@@ -248,8 +248,17 @@ pub fn notify(level: PressureLevel) {
     }
 
     // Update current level (visible to query API).
+    let prev_level = PressureLevel::from_u8(CURRENT_LEVEL.load(Ordering::Acquire));
     CURRENT_LEVEL.store(level as u8, Ordering::Release);
     NOTIFY_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Log level transitions (avoid spamming on repeated same-level notifications).
+    if level != prev_level {
+        crate::klog!(Warn, "mm.pressure",
+            "level transition: {} -> {}",
+            prev_level, level
+        );
+    }
 
     let table = SHRINKERS.lock();
     let mut total_freed: u64 = 0;

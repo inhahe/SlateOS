@@ -236,11 +236,17 @@ extern "C" fn kswapd_entry(_arg: u64) {
         if cycle_reclaimed > 0 {
             RECLAIM_CYCLES.fetch_add(1, Ordering::Relaxed);
             TOTAL_RECLAIMED.fetch_add(cycle_reclaimed as u64, Ordering::Relaxed);
+            let free_now = free_frames();
+            let cycle = RECLAIM_CYCLES.load(Ordering::Relaxed);
             serial_println!(
                 "[kswapd] Reclaimed {} pages (free now: {}, high_wm: {})",
                 cycle_reclaimed,
-                free_frames(),
+                free_now,
                 high,
+            );
+            crate::klog!(Info, "mm.kswapd",
+                "reclaim cycle #{}: freed={} pages, free_now={}, high_wm={}",
+                cycle, cycle_reclaimed, free_now, high
             );
         }
 

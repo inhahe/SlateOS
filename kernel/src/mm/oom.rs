@@ -136,11 +136,18 @@ pub fn handle_oom(needed_pages: usize) -> usize {
     let policy = crate::sysctl::get(crate::sysctl::PARAM_MM_OOM_POLICY)
         .unwrap_or(0) as u8;
 
+    let event_num = OOM_EVENTS.load(Ordering::Relaxed);
     serial_println!(
         "[oom] OOM event #{}: need {} pages, policy={}",
-        OOM_EVENTS.load(Ordering::Relaxed),
+        event_num,
         needed_pages,
         policy,
+    );
+
+    // Structured log entry for dmesg/klog consumers.
+    crate::klog!(Warn, "mm.oom",
+        "OOM event #{}: need={} pages, policy={}",
+        event_num, needed_pages, policy
     );
 
     match policy {
@@ -158,10 +165,14 @@ pub fn handle_oom(needed_pages: usize) -> usize {
                     let freed = cb(policy, needed_pages);
                     if freed > 0 {
                         OOM_KILLS.fetch_add(1, Ordering::Relaxed);
+                        let kills = OOM_KILLS.load(Ordering::Relaxed);
                         serial_println!(
                             "[oom] Killed a process, freed {} pages (total kills: {})",
-                            freed,
-                            OOM_KILLS.load(Ordering::Relaxed),
+                            freed, kills,
+                        );
+                        crate::klog!(Error, "mm.oom",
+                            "OOM kill: freed={} pages, total_kills={}",
+                            freed, kills
                         );
                     } else {
                         serial_println!(

@@ -1733,6 +1733,11 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
     // Allocator lock released before reclamation (lock ordering:
     // SWAP → RECLAIM → page table → frame allocator).
 
+    // Notify shrinkers of medium pressure — direct reclaim is happening.
+    // This gives caches a chance to free memory before we resort to
+    // swapping user pages.
+    super::pressure::notify(super::pressure::PressureLevel::Medium);
+
     // Wake kswapd to continue background reclamation while we do
     // inline reclamation for this specific allocation.  kswapd will
     // keep reclaiming until the high watermark is satisfied.
@@ -1745,6 +1750,10 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
     let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
 
     if reclaimed > 0 {
+        crate::klog!(Info, "mm.frame",
+            "direct reclaim: freed={} pages, needed={}, order={}",
+            reclaimed, needed, order
+        );
         // Retry allocation after reclamation.
         let mut guard = allocator.lock();
         match guard.alloc_inner(order) {
@@ -1795,6 +1804,9 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
         }
     }
 
+    // Medium pressure notification for direct reclaim.
+    super::pressure::notify(super::pressure::PressureLevel::Medium);
+
     // Wake kswapd for background reclamation.
     super::kswapd::wake_kswapd();
 
@@ -1803,6 +1815,10 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
     let reclaimed = super::swap::try_reclaim(needed.saturating_add(2));
 
     if reclaimed > 0 {
+        crate::klog!(Info, "mm.frame",
+            "direct reclaim (constrained): freed={} pages, needed={}, order={}, max_addr={:#x}",
+            reclaimed, needed, order, max_addr
+        );
         let mut guard = allocator.lock();
         match guard.alloc_inner_constrained(order, max_addr) {
             Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),

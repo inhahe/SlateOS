@@ -4839,14 +4839,14 @@ fn cmd_ps() {
 
     if has_quotas {
         shell_println!(
-            "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4} {:<6}",
-            "TID", "NAME", "STATE", "PRI", "TICKS", "SCHED", "CPU", "CPU%"
+            "{:<6} {:<12} {:<10} {:<4} {:>8} {:<8} {:<4} {:<6}",
+            "TID", "NAME", "STATE", "PRI", "TIME", "SCHED", "CPU", "CPU%"
         );
         shell_println!("---------------------------------------------------------------");
     } else {
         shell_println!(
-            "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
-            "TID", "NAME", "STATE", "PRI", "TICKS", "SCHED", "CPU"
+            "{:<6} {:<12} {:<10} {:<4} {:>8} {:<8} {:<4}",
+            "TID", "NAME", "STATE", "PRI", "TIME", "SCHED", "CPU"
         );
         shell_println!("------------------------------------------------------");
     }
@@ -4855,6 +4855,21 @@ fn cmd_ps() {
         let name = core::str::from_utf8(
             info.name.get(..info.name_len).unwrap_or(&info.name)
         ).unwrap_or("?");
+
+        // Format CPU time as mm:ss.t (minutes:seconds.tenths).
+        // Each tick = 10 ms at 100 Hz.
+        #[allow(clippy::arithmetic_side_effects)]
+        let total_tenths = info.total_ticks; // 1 tick = 100ms? No, 1 tick = 10ms = 1/100 sec
+        #[allow(clippy::arithmetic_side_effects)]
+        let total_secs = total_tenths / 100;
+        #[allow(clippy::arithmetic_side_effects)]
+        let frac = (total_tenths % 100) / 10; // tenths of a second
+        #[allow(clippy::arithmetic_side_effects)]
+        let mins = total_secs / 60;
+        #[allow(clippy::arithmetic_side_effects)]
+        let secs = total_secs % 60;
+        let time_str = alloc::format!("{}:{:02}.{}", mins, secs, frac);
+
         if has_quotas {
             let quota_str = if info.cpu_quota_pct == 0 {
                 alloc::string::String::from("-")
@@ -4864,24 +4879,24 @@ fn cmd_ps() {
                 alloc::format!("{}%", info.cpu_quota_pct)
             };
             shell_println!(
-                "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4} {:<6}",
+                "{:<6} {:<12} {:<10} {:<4} {:>8} {:<8} {:<4} {:<6}",
                 info.id,
                 name,
                 info.state,
                 info.priority,
-                info.total_ticks,
+                time_str,
                 info.schedule_count,
                 info.last_cpu,
                 quota_str,
             );
         } else {
             shell_println!(
-                "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
+                "{:<6} {:<12} {:<10} {:<4} {:>8} {:<8} {:<4}",
                 info.id,
                 name,
                 info.state,
                 info.priority,
-                info.total_ticks,
+                time_str,
                 info.schedule_count,
                 info.last_cpu,
             );

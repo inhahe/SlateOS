@@ -772,6 +772,17 @@ impl PerCpuScheduler {
             .is_some_and(|guard| guard.has_real_work())
     }
 
+    /// Get the total number of tasks in a CPU's run queue.
+    ///
+    /// Returns 0 if the CPU index is out of range or the lock is
+    /// contended (uses `try_lock` — safe in ISR context).
+    #[must_use]
+    pub fn queue_length(&self, cpu: usize) -> usize {
+        self.queues.get(cpu)
+            .and_then(|m| m.try_lock())
+            .map_or(0, |guard| guard.total_tasks())
+    }
+
     /// Check if any *other* CPU has real work that could be stolen.
     ///
     /// Lightweight probe for the timer tick load balancer: returns true

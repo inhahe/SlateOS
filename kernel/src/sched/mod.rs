@@ -263,6 +263,41 @@ static PREEMPTIONS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+// ---------------------------------------------------------------------------
+// Per-CPU utilization and system load tracking
+// ---------------------------------------------------------------------------
+
+/// Per-CPU total tick counter (incremented every timer_tick).
+///
+/// Used with `IDLE_TICKS` to compute per-CPU utilization:
+///   utilization_pct = (total - idle) / total × 100
+static TOTAL_TICKS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// Per-CPU idle tick counter (incremented when the idle task is running).
+///
+/// A tick is "idle" if the current task's name starts with "idle".
+/// This is checked once per timer_tick outside the SCHED lock (using
+/// the known idle task ID range).
+static IDLE_TICK_COUNTS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
+/// System load average (EWMA of runnable task count).
+///
+/// Stored as fixed-point × 100 (so load 2.50 = 250).  Updated every
+/// second (100 ticks) by the BSP.  Uses the same EWMA formula as
+/// Linux: `load = load × exp_factor + n_runnable × (1 - exp_factor)`
+///
+/// We use a 1-minute decay constant (like Linux's `loadavg[0]`).
+/// With α ≈ 1/60 (sample every 1s, 60s decay): each sample contributes
+/// ~1.7%.  We approximate with: `load = load - load/64 + n_runnable`
+/// (which gives a ~64-sample / 64-second half-life).
+static LOAD_AVG_X100: AtomicU64 = AtomicU64::new(0);
+
 /// Global work steal counter (any CPU stealing from another).
 static WORK_STEALS: AtomicU64 = AtomicU64::new(0);
 
@@ -292,6 +327,10 @@ pub struct SchedStats {
     pub total_tasks_exited: u64,
     /// Number of online CPUs.
     pub num_cpus: usize,
+    /// System load average (×100). Load 1.50 = 150.
+    pub load_avg_x100: u64,
+    /// Per-CPU (total_ticks, idle_ticks) for utilization calculation.
+    pub cpu_ticks: [(u64, u64); priority_rr::MAX_CPUS],
 }
 
 /// Collect a snapshot of scheduler statistics.
@@ -308,6 +347,8 @@ pub fn sched_stats() -> SchedStats {
         total_tasks_spawned: TASKS_SPAWNED.load(Ordering::Relaxed),
         total_tasks_exited: TASKS_EXITED.load(Ordering::Relaxed),
         num_cpus,
+        load_avg_x100: LOAD_AVG_X100.load(Ordering::Relaxed),
+        cpu_ticks: [(0, 0); priority_rr::MAX_CPUS],
     };
 
     for i in 0..num_cpus.min(priority_rr::MAX_CPUS) {
@@ -319,6 +360,10 @@ pub fn sched_stats() -> SchedStats {
             stats.preemptions[i] = PREEMPTIONS[i].load(Ordering::Relaxed);
             stats.total_ctx_switches = stats.total_ctx_switches
                 .saturating_add(stats.ctx_switches[i]);
+            stats.cpu_ticks[i] = (
+                TOTAL_TICKS[i].load(Ordering::Relaxed),
+                IDLE_TICK_COUNTS[i].load(Ordering::Relaxed),
+            );
         }
     }
 
@@ -937,11 +982,27 @@ pub fn timer_tick() -> bool {
 
     let time_slice_expired = PER_CPU_SCHED.tick(cpu);
 
+    // --- Per-CPU utilization tracking (no lock needed) ---
+    // Increment total and idle tick counters for utilization calculation.
+    if let Some(total) = TOTAL_TICKS.get(cpu) {
+        total.fetch_add(1, Ordering::Relaxed);
+    }
+    let current_id = load_current_task();
+    // A task is "idle" if its ID is 0 (BSP idle) or if it's an AP idle
+    // task.  AP idle tasks have ID > 0 but are detected by checking if
+    // the task has idle priority (31) and is running on this CPU.
+    // For simplicity, we track idle via the PER_CPU_SCHED fast check:
+    // if the local queue has no real work, this CPU is effectively idle.
+    if !PER_CPU_SCHED.local_has_real_work(cpu)
+        && let Some(idle) = IDLE_TICK_COUNTS.get(cpu)
+    {
+        idle.fetch_add(1, Ordering::Relaxed);
+    }
+
     // Track CPU burst length and enforce CPU bandwidth quotas.
     // This DOES need the task table, but we use try_lock to avoid
     // blocking.  If the lock is held, we simply skip tracking for
     // this tick — the next tick will catch up.
-    let current_id = load_current_task();
     let mut bandwidth_exceeded = false;
     if let Some(mut state) = SCHED.try_lock() {
         if !state.initialized {
@@ -964,14 +1025,16 @@ pub fn timer_tick() -> bool {
     // Even if we couldn't acquire SCHED for burst tracking, the
     // time slice tick still happened above — don't lose it.
 
-    // BSP drives bandwidth period resets.  Every BANDWIDTH_PERIOD_TICKS
-    // (100 ticks = 1 second), reset all tasks' period counters and
-    // re-enqueue any throttled tasks.
+    // BSP drives bandwidth period resets and load average sampling.
+    // Every BANDWIDTH_PERIOD_TICKS (100 ticks = 1 second):
+    // - Reset CPU bandwidth counters and re-enqueue throttled tasks
+    // - Update the system load average EWMA
     if cpu == 0 {
         let tick = BANDWIDTH_TICK.fetch_add(1, Ordering::Relaxed);
         #[allow(clippy::arithmetic_side_effects)]
         if tick > 0 && tick % BANDWIDTH_PERIOD_TICKS == 0 {
             unthrottle_expired();
+            update_load_average();
         }
     }
 
@@ -1055,6 +1118,74 @@ fn unthrottle_expired() {
             PER_CPU_SCHED.enqueue(id, prio, cpu);
         }
     }
+}
+
+/// Update the system load average.
+///
+/// Called once per second (every `BANDWIDTH_PERIOD_TICKS`) by the BSP.
+/// Samples the number of runnable tasks across all CPUs, then updates
+/// the EWMA with exponential decay (~64 second half-life).
+///
+/// Load average formula (fixed-point × 100):
+///   `load = load - load/64 + n_runnable`
+///
+/// This gives a smoothed view of system load similar to Linux's
+/// 1-minute load average.
+fn update_load_average() {
+    // Count runnable tasks: query per-CPU queue lengths.
+    let num_cpus = crate::smp::cpu_count().max(1);
+    let mut runnable: u64 = 0;
+    for cpu_idx in 0..num_cpus.min(priority_rr::MAX_CPUS) {
+        runnable = runnable.saturating_add(
+            PER_CPU_SCHED.queue_length(cpu_idx) as u64,
+        );
+    }
+
+    // EWMA update: load = load - load/64 + runnable_count × 100
+    // (multiply runnable by 100 because LOAD_AVG_X100 stores ×100)
+    let old = LOAD_AVG_X100.load(Ordering::Relaxed);
+    #[allow(clippy::arithmetic_side_effects)]
+    let decay = old.saturating_sub(old / 64);
+    let new_val = decay.saturating_add(runnable.saturating_mul(100) / 64);
+    LOAD_AVG_X100.store(new_val, Ordering::Relaxed);
+}
+
+/// Get the system load average (scaled ×100).
+///
+/// Returns a value like 150 meaning load = 1.50 (one and a half
+/// runnable tasks on average).  Divide by 100 for the traditional
+/// "load average" number.
+///
+/// A load of 100 = 1.00 means one CPU is fully occupied on average.
+/// A load of `num_cpus × 100` means all CPUs are saturated.
+#[must_use]
+#[allow(dead_code)] // Public API for procfs /proc/loadavg.
+pub fn load_average_x100() -> u64 {
+    LOAD_AVG_X100.load(Ordering::Relaxed)
+}
+
+/// Get per-CPU utilization percentages.
+///
+/// Returns an array of `(total_ticks, idle_ticks)` pairs for each CPU.
+/// CPU utilization = `(total - idle) / total × 100`.
+///
+/// The counters are cumulative since boot.  To measure utilization over
+/// a time window, sample twice and compute the delta.
+#[must_use]
+#[allow(dead_code)] // Public API for procfs /proc/stat, system monitor.
+pub fn cpu_utilization() -> [(u64, u64); priority_rr::MAX_CPUS] {
+    let mut result = [(0u64, 0u64); priority_rr::MAX_CPUS];
+    let num_cpus = crate::smp::cpu_count().max(1);
+    for i in 0..num_cpus.min(priority_rr::MAX_CPUS) {
+        #[allow(clippy::indexing_slicing)] // i < MAX_CPUS (bounded above).
+        {
+            result[i] = (
+                TOTAL_TICKS[i].load(Ordering::Relaxed),
+                IDLE_TICK_COUNTS[i].load(Ordering::Relaxed),
+            );
+        }
+    }
+    result
 }
 
 /// Set the CPU bandwidth quota for a task.

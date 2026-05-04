@@ -953,6 +953,31 @@ const BANDWIDTH_PERIOD_TICKS: u64 = 100;
 static BANDWIDTH_TICK: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
+// Anti-starvation boost
+// ---------------------------------------------------------------------------
+
+/// Threshold for starvation detection (ticks a task has been waiting).
+///
+/// If a Ready task has been waiting this many ticks without being
+/// dispatched, it gets a temporary priority boost to prevent indefinite
+/// starvation.  At 100 Hz, 200 ticks = 2 seconds.
+///
+/// This is a safety net — in a healthy system, no task should wait this
+/// long.  If boosting activates frequently, it indicates the workload
+/// profile or priority assignment is wrong.
+const STARVATION_THRESHOLD_TICKS: u64 = 200;
+
+/// How often to run the anti-starvation check (in ticks).
+///
+/// At 100 Hz, 100 ticks = 1 second.  We check once per bandwidth
+/// period (1 second) which is frequent enough to catch starvation
+/// within one threshold interval after it begins.
+const STARVATION_CHECK_INTERVAL: u64 = 100;
+
+/// Number of tasks boosted by anti-starvation since boot (diagnostic).
+static STARVATION_BOOSTS: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
 // Soft lockup watchdog
 // ---------------------------------------------------------------------------
 
@@ -1160,6 +1185,11 @@ pub fn timer_tick() -> bool {
             unthrottle_expired();
             update_load_average();
         }
+        // Anti-starvation check: every STARVATION_CHECK_INTERVAL ticks.
+        #[allow(clippy::arithmetic_side_effects)]
+        if tick > 0 && tick % STARVATION_CHECK_INTERVAL == 0 {
+            check_starvation();
+        }
         // Watchdog check: every WATCHDOG_CHECK_INTERVAL ticks (5s).
         #[allow(clippy::arithmetic_side_effects)]
         if tick > 0 && tick % WATCHDOG_CHECK_INTERVAL == 0 {
@@ -1291,6 +1321,91 @@ fn update_load_average() {
 #[allow(dead_code)] // Public API for procfs /proc/loadavg.
 pub fn load_average_x100() -> u64 {
     LOAD_AVG_X100.load(Ordering::Relaxed)
+}
+
+/// Anti-starvation check: boost priority of tasks stuck in Ready too long.
+///
+/// Called periodically by the BSP (every `STARVATION_CHECK_INTERVAL` ticks).
+/// Scans all Ready tasks — if any task has been waiting longer than
+/// `STARVATION_THRESHOLD_TICKS`, temporarily boost it by moving it from
+/// its current priority queue to priority 0 (highest).
+///
+/// The boost is "one-shot": the task's `priority` field is NOT changed
+/// (its *base* priority is preserved).  Instead, we dequeue it from its
+/// current queue and re-enqueue at priority 0.  When the scheduler
+/// picks it, it runs with its normal time slice.  After being dispatched,
+/// `ready_since_tick` resets, so it won't be boosted again until it
+/// genuinely starves again.
+///
+/// This prevents indefinite starvation of low-priority tasks when
+/// many higher-priority tasks are CPU-bound.  Linux has a similar
+/// mechanism (it used to boost starved tasks every 500ms in the O(1)
+/// scheduler; CFS/EEVDF avoid the problem via virtual runtime tracking).
+fn check_starvation() {
+    let now = crate::apic::tick_count();
+
+    // Use try_lock to avoid blocking timer_tick if the scheduler is
+    // already held (e.g., a context switch is in progress).
+    let Some(state) = SCHED.try_lock() else { return };
+
+    // Collect tasks that need boosting (avoid mutating while iterating).
+    // Stack-allocated small buffer for the common case (few starved tasks).
+    let mut boost_list: [(TaskId, u8, usize); 8] = [(0, 0, 0); 8];
+    let mut boost_count = 0usize;
+
+    for (&id, task) in state.tasks.iter() {
+        if task.state != TaskState::Ready {
+            continue;
+        }
+        if task.throttled {
+            continue; // Throttled tasks wait by design.
+        }
+        if task.ready_since_tick == 0 {
+            continue; // Not tracking yet (idle tasks, etc.)
+        }
+        let waited = now.saturating_sub(task.ready_since_tick);
+        if waited >= STARVATION_THRESHOLD_TICKS {
+            let current_prio = task.effective_priority();
+            if current_prio > 0 && boost_count < boost_list.len() {
+                // Only boost if not already at highest priority.
+                // SAFETY: indexing is bounds-checked by boost_count < len.
+                #[allow(clippy::indexing_slicing)]
+                {
+                    boost_list[boost_count] = (id, current_prio, task.last_cpu);
+                }
+                boost_count = boost_count.saturating_add(1);
+            }
+        }
+    }
+
+    // Release read-only lock, re-acquire for mutations.
+    drop(state);
+
+    if boost_count == 0 {
+        return;
+    }
+
+    // Re-enqueue starved tasks at priority 0.
+    for i in 0..boost_count {
+        #[allow(clippy::indexing_slicing)]
+        let (id, old_prio, cpu) = boost_list[i];
+        PER_CPU_SCHED.dequeue(id, old_prio, cpu);
+        PER_CPU_SCHED.enqueue(id, 0, cpu);
+        STARVATION_BOOSTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    serial_println!(
+        "[sched] Anti-starvation: boosted {} task{} to priority 0",
+        boost_count,
+        if boost_count == 1 { "" } else { "s" }
+    );
+}
+
+/// Number of anti-starvation boosts since boot (diagnostic).
+#[must_use]
+#[allow(dead_code)] // Public API for diagnostics.
+pub fn starvation_boost_count() -> u64 {
+    STARVATION_BOOSTS.load(Ordering::Relaxed)
 }
 
 /// Get per-CPU utilization percentages.

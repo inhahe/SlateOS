@@ -13173,6 +13173,7 @@ fn cmd_vmstat() {
     crate::console_println!("sched_tasks_exited     {}", sched.total_tasks_exited);
     crate::console_println!("sched_load_avg_x100    {}", sched.load_avg_x100);
     crate::console_println!("sched_num_cpus         {}", sched.num_cpus);
+    crate::console_println!("sched_starv_boosts     {}", crate::sched::starvation_boost_count());
 
     // --- Per-process accounting ---
     crate::console_println!("tracked_addr_spaces    {}", info.tracked_address_spaces);

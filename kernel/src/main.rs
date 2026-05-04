@@ -84,6 +84,7 @@ mod syscall;
 mod sysctl;
 mod tlb;
 mod virtio;
+mod workqueue;
 
 // ---------------------------------------------------------------------------
 // Kernel entry point
@@ -840,6 +841,17 @@ extern "C" fn kmain() -> ! {
     mm::accounting::self_test();
     mm::rlimits::self_test();
     mm::pressure::self_test();
+
+    // Step 22c: Spawn workqueue worker task.
+    // Provides deferred work execution in full process context (can sleep,
+    // allocate, take locks).  Must be after scheduler (Step 10).
+    match workqueue::init() {
+        Ok(()) => {}
+        Err(e) => {
+            serial_println!("[boot] WARNING: failed to spawn workqueue worker: {:?}", e);
+        }
+    }
+    workqueue::self_test();
 
     // Zero-on-free test — runs here because it needs HHDM + per-CPU
     // caches, which aren't available during the early frame allocator

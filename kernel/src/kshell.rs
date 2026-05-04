@@ -3100,7 +3100,7 @@ const COMMANDS: &[&str] = &[
     "slabinfo", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
-    "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
+    "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4170,6 +4170,7 @@ fn dispatch(line: &str) {
         "schedstat" => cmd_schedstat(),
         "slabinfo" => cmd_slabinfo(),
         "stack" => cmd_stack(),
+        "wq" | "workqueue" => cmd_workqueue(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4427,6 +4428,7 @@ fn cmd_help() {
     crate::console_println!("  taskset TID [0xMASK] Set/query CPU affinity");
     crate::console_println!("  slabinfo  Show per-size-class heap allocator statistics");
     crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
+    crate::console_println!("  wq        Show kernel workqueue status and statistics");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -11938,6 +11940,7 @@ fn is_builtin(name: &str) -> bool {
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
         | "taskset" | "schedstat" | "slabinfo" | "stack" | "profile" | "top"
+        | "wq" | "workqueue"
     )
 }
 
@@ -13262,6 +13265,26 @@ fn cmd_slabinfo() {
         overall.large_allocs, overall.large_frees,
         overall.slab_refills, overall.alloc_failures,
     );
+}
+
+fn cmd_workqueue() {
+    let running = crate::workqueue::is_running();
+    let submitted = crate::workqueue::submitted_count();
+    let executed = crate::workqueue::executed_count();
+    let dropped = crate::workqueue::dropped_count();
+    let pending = crate::workqueue::pending_count();
+
+    shell_println!("Kernel workqueue status");
+    shell_println!("");
+    shell_println!("  Worker task:  {}", if running { "running" } else { "NOT running" });
+    shell_println!("  Pending:      {}", pending);
+    shell_println!("  Submitted:    {}", submitted);
+    shell_println!("  Executed:     {}", executed);
+    shell_println!("  Dropped:      {}", dropped);
+    if submitted > 0 {
+        let drop_pct = dropped.saturating_mul(100) / submitted;
+        shell_println!("  Drop rate:    {}%", drop_pct);
+    }
 }
 
 #[allow(clippy::arithmetic_side_effects)]

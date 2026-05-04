@@ -129,6 +129,10 @@ pub fn register_kill_callback(cb: KillCallback) {
 pub fn handle_oom(needed_pages: usize) -> usize {
     OOM_EVENTS.fetch_add(1, Ordering::Relaxed);
 
+    // Last-resort pressure notification: give all caches one final
+    // chance to free memory before we resort to killing processes.
+    super::pressure::notify(super::pressure::PressureLevel::Critical);
+
     let policy = crate::sysctl::get(crate::sysctl::PARAM_MM_OOM_POLICY)
         .unwrap_or(0) as u8;
 

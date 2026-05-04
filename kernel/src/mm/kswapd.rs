@@ -194,6 +194,11 @@ extern "C" fn kswapd_entry(_arg: u64) {
         WAKE_FLAG.store(false, Ordering::Release);
 
         // ---- Reclaim phase ----
+        // Notify registered shrinkers (caches) of low memory pressure.
+        // They may free cached objects, reducing the need for page-level
+        // reclamation (swap-out).
+        super::pressure::notify(super::pressure::PressureLevel::Low);
+
         let high = watermark_high();
         let batch_size = crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE)
             .unwrap_or(4) as usize;
@@ -237,6 +242,11 @@ extern "C" fn kswapd_entry(_arg: u64) {
                 free_frames(),
                 high,
             );
+        }
+
+        // Clear pressure if memory is now above the high watermark.
+        if free_frames() >= high {
+            super::pressure::clear_pressure();
         }
     }
 }

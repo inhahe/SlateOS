@@ -11,6 +11,12 @@ if (Test-Path $kernelBin) {
     Copy-Item $kernelBin "$cwd\esp\boot\kernel" -Force
 }
 
+# NOTE: WHPX (Windows Hypervisor Platform) is available on this system
+# but causes a kernel hang during early boot (WHPX doesn't fully
+# support our use of XSAVE / MSR writes).  Using TCG (software
+# emulation) instead.  Benchmark numbers under TCG are ~5-10x higher
+# than bare metal due to emulated CLI/STI VM exits — keep this in mind
+# when comparing against baselines.toml targets.
 $proc = Start-Process -FilePath $qemu -ArgumentList @(
     "-drive", "`"if=pflash,format=raw,readonly=on,file=$fw`"",
     "-drive", "format=raw,file=fat:rw:esp",
@@ -22,7 +28,7 @@ $proc = Start-Process -FilePath $qemu -ArgumentList @(
     "-no-shutdown"
 ) -NoNewWindow -PassThru
 
-Start-Sleep -Seconds 25
+Start-Sleep -Seconds 35
 Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
 
 if (Test-Path serial.log) {

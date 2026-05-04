@@ -4159,6 +4159,7 @@ fn dispatch(line: &str) {
         "help" | "?" => cmd_help(),
         "cd" => cmd_cd(args),
         "meminfo" | "mem" => cmd_meminfo(),
+        "cpuinfo" | "cpu" => cmd_cpuinfo(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4210,7 +4211,6 @@ fn dispatch(line: &str) {
         "comm" => cmd_comm(args),
         "diff" => cmd_diff(args),
         "od" => cmd_od(args),
-        "cpuinfo" => cmd_cpuinfo(),
         "fallocate" => cmd_fallocate(args),
         "sort" => cmd_sort(args),
         "uniq" => cmd_uniq(args),
@@ -4614,6 +4614,56 @@ fn cmd_meminfo() {
         pool_hits,
         pool_misses,
         hit_pct
+    );
+}
+
+/// Display CPU utilization and scheduler statistics.
+///
+/// Shows per-CPU utilization percentages, system load average, and
+/// key scheduler counters (context switches, work steals, spawns/exits).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_cpuinfo() {
+    let stats = crate::sched::sched_stats();
+    let num_cpus = stats.num_cpus;
+
+    // System load average.
+    let load_whole = stats.load_avg_x100 / 100;
+    let load_frac = stats.load_avg_x100 % 100;
+    shell_println!("Load average: {}.{:02}", load_whole, load_frac);
+    shell_println!("");
+
+    // Per-CPU utilization.
+    shell_println!(
+        "{:<5} {:>6} {:>6} {:>6} {:>10} {:>8} {:>8}",
+        "CPU", "UTIL%", "TOTAL", "IDLE", "CTX_SW", "VOLUNT", "PREEMPT"
+    );
+    shell_println!("-----------------------------------------------------------");
+    for i in 0..num_cpus {
+        let (total, idle) = stats.cpu_ticks.get(i).copied().unwrap_or((0, 0));
+        let util_pct = if total > 0 {
+            total.saturating_sub(idle).saturating_mul(100) / total
+        } else {
+            0
+        };
+        let ctx = stats.ctx_switches.get(i).copied().unwrap_or(0);
+        let vol = stats.voluntary_switches.get(i).copied().unwrap_or(0);
+        let pre = stats.preemptions.get(i).copied().unwrap_or(0);
+        shell_println!(
+            "{:<5} {:>5}% {:>6} {:>6} {:>10} {:>8} {:>8}",
+            i, util_pct, total, idle, ctx, vol, pre
+        );
+    }
+
+    shell_println!("");
+    shell_println!(
+        "Total ctx switches: {}  Work steals: {}",
+        stats.total_ctx_switches, stats.total_work_steals
+    );
+    shell_println!(
+        "Tasks spawned: {}  Tasks exited: {}  Active: {}",
+        stats.total_tasks_spawned,
+        stats.total_tasks_exited,
+        stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited)
     );
 }
 
@@ -11252,6 +11302,7 @@ fn is_builtin(name: &str) -> bool {
         | "export" | "set" | "unset" | "alias" | "unalias" | "return"
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
+        | "cpuinfo" | "cpu"
     )
 }
 
@@ -13298,21 +13349,6 @@ fn cmd_od(args: &str) {
         'd' => crate::console_println!("{:07}", data.len()),
         'x' => crate::console_println!("{:07x}", data.len()),
         _ => {}
-    }
-}
-
-/// Display per-CPU information.
-///
-/// Shows CPU ID, online status, and basic info for each processor.
-fn cmd_cpuinfo() {
-    let count = crate::smp::cpu_count();
-    crate::console_println!("CPUs online: {}", count);
-    for cpu in 0..count {
-        crate::console_println!(
-            "  CPU {:2}: online (APIC ID {})",
-            cpu,
-            crate::smp::cpu_apic_id(cpu).unwrap_or(0),
-        );
     }
 }
 

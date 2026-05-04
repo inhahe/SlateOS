@@ -4624,24 +4624,58 @@ fn cmd_ps() {
         return;
     }
 
-    shell_println!(
-        "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
-        "TID", "NAME", "STATE", "PRI", "TICKS", "SCHED", "CPU"
-    );
-    shell_println!("------------------------------------------------------");
-    for info in &task_list {
-        let name = core::str::from_utf8(&info.name[..info.name_len])
-            .unwrap_or("?");
+    // Show the CPU% column if any task has a bandwidth quota set.
+    let has_quotas = task_list.iter().any(|t| t.cpu_quota_pct > 0);
+
+    if has_quotas {
+        shell_println!(
+            "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4} {:<6}",
+            "TID", "NAME", "STATE", "PRI", "TICKS", "SCHED", "CPU", "CPU%"
+        );
+        shell_println!("---------------------------------------------------------------");
+    } else {
         shell_println!(
             "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
-            info.id,
-            name,
-            info.state,
-            info.priority,
-            info.total_ticks,
-            info.schedule_count,
-            info.last_cpu,
+            "TID", "NAME", "STATE", "PRI", "TICKS", "SCHED", "CPU"
         );
+        shell_println!("------------------------------------------------------");
+    }
+
+    for info in &task_list {
+        let name = core::str::from_utf8(
+            info.name.get(..info.name_len).unwrap_or(&info.name)
+        ).unwrap_or("?");
+        if has_quotas {
+            let quota_str = if info.cpu_quota_pct == 0 {
+                alloc::string::String::from("-")
+            } else if info.throttled {
+                alloc::format!("{}%T", info.cpu_quota_pct)
+            } else {
+                alloc::format!("{}%", info.cpu_quota_pct)
+            };
+            shell_println!(
+                "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4} {:<6}",
+                info.id,
+                name,
+                info.state,
+                info.priority,
+                info.total_ticks,
+                info.schedule_count,
+                info.last_cpu,
+                quota_str,
+            );
+        } else {
+            shell_println!(
+                "{:<6} {:<12} {:<10} {:<4} {:<8} {:<8} {:<4}",
+                info.id,
+                name,
+                info.state,
+                info.priority,
+                info.total_ticks,
+                info.schedule_count,
+                info.last_cpu,
+            );
+        }
     }
     shell_println!("{} task(s) total", task_list.len());
 }

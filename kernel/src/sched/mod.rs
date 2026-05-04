@@ -1853,6 +1853,10 @@ pub struct TaskInfo {
     pub schedule_count: u64,
     /// CPU this task last ran on.
     pub last_cpu: usize,
+    /// CPU bandwidth quota (0 = unlimited, 1–100 = %).
+    pub cpu_quota_pct: u8,
+    /// Whether the task is currently throttled.
+    pub throttled: bool,
 }
 
 /// Return a snapshot of all tasks in the scheduler.
@@ -1872,6 +1876,8 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             total_ticks: task.total_ticks,
             schedule_count: task.schedule_count,
             last_cpu: task.last_cpu,
+            cpu_quota_pct: task.cpu_quota_pct,
+            throttled: task.throttled,
         })
         .collect()
 }

@@ -35,6 +35,7 @@ pub mod heap;
 pub mod kswapd;
 pub mod oom;
 pub mod page_table;
+pub mod pressure;
 pub mod protect;
 pub mod rlimits;
 pub mod swap;

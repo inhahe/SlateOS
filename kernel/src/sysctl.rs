@@ -687,12 +687,26 @@ pub fn apply_memory_profile(profile_id: u8) -> bool {
     // releases the registry lock, which is fine — the parameters are
     // independent and the lock is very fast (no contention during
     // profile application).
+    // Starvation threshold per profile:
+    // - Desktop (0): 200 ticks (2s) — responsive, protect UI
+    // - Server (1): 500 ticks (5s) — less aggressive, throughput matters
+    // - Development (2): 300 ticks (3s) — balanced for many tasks
+    // - Gaming (3): 100 ticks (1s) — very aggressive, protect frame rate
+    let starv_threshold: u64 = match profile_id {
+        0 => 200,   // Desktop
+        1 => 500,   // Server
+        2 => 300,   // Development
+        3 => 100,   // Gaming
+        _ => 200,   // Fallback
+    };
+
     let ok = set(PARAM_MM_MAX_STACK_FRAMES, preset.max_stack_frames).is_some()
         && set(PARAM_MM_LAZY_DEFAULT, preset.lazy_default).is_some()
         && set(PARAM_MM_OOM_POLICY, preset.oom_policy).is_some()
         && set(PARAM_MM_ZERO_ON_ALLOC, preset.zero_on_alloc).is_some()
         && set(PARAM_MM_SWAPPINESS, preset.swappiness).is_some()
-        && set(PARAM_MM_SWAP_BATCH_SIZE, preset.swap_batch_size).is_some();
+        && set(PARAM_MM_SWAP_BATCH_SIZE, preset.swap_batch_size).is_some()
+        && set(PARAM_SCHED_STARVATION_THRESHOLD, starv_threshold).is_some();
 
     if ok {
         serial_println!(

@@ -838,6 +838,13 @@ extern "C" fn kmain() -> ! {
     mm::kswapd::self_test();
     mm::oom::self_test();
 
+    // Zero-on-free test — runs here because it needs HHDM + per-CPU
+    // caches, which aren't available during the early frame allocator
+    // self-test (test 7 skips there with "HHDM not ready").
+    if let Err(e) = mm::frame::test_zero_on_free() {
+        serial_println!("[FATAL] Zero-on-free self-test failed: {:?}", e);
+    }
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.

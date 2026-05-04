@@ -314,6 +314,7 @@ const CACHE_FLUSH_INTERVAL: u16 = 500;
 fn handle_timer() {
     crate::sched::process_sleep_wakeups();
     crate::ipc::timer::process_timer_expirations();
+    crate::ktimer::process_expirations();
 
     // Periodic background writeback of dirty cache entries.
     //

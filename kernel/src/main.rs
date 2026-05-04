@@ -68,6 +68,7 @@ mod ipc;
 mod keyboard;
 mod klog;
 mod kshell;
+mod ktimer;
 mod limine;
 mod mm;
 mod net;
@@ -852,6 +853,11 @@ extern "C" fn kmain() -> ! {
         }
     }
     workqueue::self_test();
+
+    // Step 22d: Kernel timers self-test.
+    // ktimer fires callbacks via the workqueue after a tick-based delay.
+    // Requires both the workqueue worker and TIMER softirq to be active.
+    ktimer::self_test();
 
     // Zero-on-free test — runs here because it needs HHDM + per-CPU
     // caches, which aren't available during the early frame allocator

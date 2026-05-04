@@ -3100,7 +3100,8 @@ const COMMANDS: &[&str] = &[
     "slabinfo", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
-    "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write", "xattr", "xxd", "zip",
+    "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
+    "ktimer", "timers", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4171,6 +4172,7 @@ fn dispatch(line: &str) {
         "slabinfo" => cmd_slabinfo(),
         "stack" => cmd_stack(),
         "wq" | "workqueue" => cmd_workqueue(),
+        "ktimer" | "timers" => cmd_ktimer(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4429,6 +4431,7 @@ fn cmd_help() {
     crate::console_println!("  slabinfo  Show per-size-class heap allocator statistics");
     crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
     crate::console_println!("  wq        Show kernel workqueue status and statistics");
+    crate::console_println!("  ktimer    Show kernel timer statistics");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -11940,7 +11943,7 @@ fn is_builtin(name: &str) -> bool {
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
         | "taskset" | "schedstat" | "slabinfo" | "stack" | "profile" | "top"
-        | "wq" | "workqueue"
+        | "wq" | "workqueue" | "ktimer" | "timers"
     )
 }
 
@@ -13285,6 +13288,20 @@ fn cmd_workqueue() {
         let drop_pct = dropped.saturating_mul(100) / submitted;
         shell_println!("  Drop rate:    {}%", drop_pct);
     }
+}
+
+fn cmd_ktimer() {
+    let active = crate::ktimer::active_count();
+    let scheduled = crate::ktimer::scheduled_count();
+    let fired = crate::ktimer::fired_count();
+    let cancelled = crate::ktimer::cancelled_count();
+
+    shell_println!("Kernel timers");
+    shell_println!("");
+    shell_println!("  Active:       {}", active);
+    shell_println!("  Scheduled:    {} (total since boot)", scheduled);
+    shell_println!("  Fired:        {}", fired);
+    shell_println!("  Cancelled:    {}", cancelled);
 }
 
 #[allow(clippy::arithmetic_side_effects)]

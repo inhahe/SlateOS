@@ -1475,6 +1475,11 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
         return;
     };
 
+    // Reset the RSS counter to 0.  We're about to free all user pages
+    // directly (not through unmap_frame), so the per-frame uncharge
+    // calls won't fire.  The peak RSS is preserved for diagnostics.
+    super::accounting::reset_rss(pml4_phys);
+
     // Walk PML4 entries 0–255 (user half only).
     // Entries 256–511 point to shared kernel PDPT/PD/PT pages that
     // must not be freed (they belong to every address space).

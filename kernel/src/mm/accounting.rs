@@ -224,6 +224,28 @@ pub fn uncharge(pml4_phys: u64, n: u64) {
     }
 }
 
+/// Reset RSS to zero for an address space.
+///
+/// Called by `clear_user_address_space` which bulk-frees all user pages
+/// without going through `unmap_frame`.  The peak RSS is preserved (it
+/// records the lifetime high-water mark across exec boundaries).
+///
+/// Does NOT destroy the entry — the address space is still tracked and
+/// new `charge` calls will increment from zero.
+pub fn reset_rss(pml4_phys: u64) {
+    if pml4_phys == 0 {
+        return;
+    }
+
+    let mut table = ACCOUNTING.lock();
+    for entry in table.iter_mut() {
+        if entry.pml4_phys == pml4_phys {
+            entry.rss_frames = 0;
+            return;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------

@@ -1368,8 +1368,11 @@ fn check_starvation() {
         if task.throttled {
             continue; // Throttled tasks wait by design.
         }
+        if task.priority >= task::IDLE_PRIORITY {
+            continue; // Idle tasks don't need boosting.
+        }
         if task.ready_since_tick == 0 {
-            continue; // Not tracking yet (idle tasks, etc.)
+            continue; // Not tracking yet.
         }
         let waited = now.saturating_sub(task.ready_since_tick);
         if waited >= threshold {

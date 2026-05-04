@@ -178,7 +178,13 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Capability delegation (parent passes subset to child, can't create new ones)
 - [ ] User/group model with named capability groups
 - [ ] File/directory capability tags (AND-composition between groups, OR within a group)
-- [ ] Resource limits as cgroup-like controls (set at launch, kernel-enforced)
+- [x] Resource limits as cgroup-like controls (set at launch, kernel-enforced)
+  - [x] Per-process ResourceLimits struct (max_rss_frames, cpu_quota_pct, max_threads, max_handles)
+  - [x] PID-indexed limits table with apply/query/update/remove API
+  - [x] RSS limit enforcement wired through mm::accounting::try_charge
+  - [x] CPU bandwidth throttling: per-task quota as % of core, 1-second period, park/unpark
+  - [x] System load average (EWMA of runnable tasks, BSP-driven 1Hz sample)
+  - [x] Per-CPU utilization tracking (total/idle tick counters, cpuinfo command)
 - [x] Capability-gated syscalls
 - [ ] "Request capability from user" dialog mechanism
 - [ ] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware

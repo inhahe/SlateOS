@@ -838,6 +838,7 @@ extern "C" fn kmain() -> ! {
     mm::kswapd::self_test();
     mm::oom::self_test();
     mm::accounting::self_test();
+    mm::rlimits::self_test();
 
     // Zero-on-free test — runs here because it needs HHDM + per-CPU
     // caches, which aren't available during the early frame allocator

@@ -36,6 +36,7 @@ pub mod kswapd;
 pub mod oom;
 pub mod page_table;
 pub mod protect;
+pub mod rlimits;
 pub mod swap;
 pub mod user;
 pub mod vma;

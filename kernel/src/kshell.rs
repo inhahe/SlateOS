@@ -4414,7 +4414,16 @@ fn cmd_help() {
     crate::console_println!("  comm [-123] F1 F2  Compare sorted files (3-column output)");
     crate::console_println!("  diff F1 F2 Line-level diff (unified format)");
     crate::console_println!("  od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] F  Octal/hex dump");
-    crate::console_println!("  cpuinfo   Show per-CPU information");
+    crate::console_println!("  cpuinfo   Show per-CPU utilization and scheduler counters");
+    crate::console_println!("  top       Compact system overview (uptime, memory, CPU, tasks)");
+    crate::console_println!("  vmstat    Show all VM statistics counters");
+    crate::console_println!("  schedstat Per-task scheduling fairness analysis");
+    crate::console_println!("  watchdog  Show per-CPU soft lockup watchdog status");
+    crate::console_println!("  kill TID  Terminate a task by ID");
+    crate::console_println!("  renice TID PRI  Change task priority (0=highest, 31=lowest)");
+    crate::console_println!("  throttle TID [%] Set/query CPU bandwidth quota");
+    crate::console_println!("  taskset TID [0xMASK] Set/query CPU affinity");
+    crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
     crate::console_println!("  uniq FILE Remove adjacent duplicate lines");

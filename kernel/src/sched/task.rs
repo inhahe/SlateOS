@@ -178,6 +178,17 @@ const TASK_STACK_FRAMES: usize = TASK_STACK_SIZE / FRAME_SIZE;
 /// Based on Linux's `CONFIG_SCHED_STACK_END_CHECK` mechanism.
 pub const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
+/// Sentinel pattern used to paint stack memory for watermark tracking.
+///
+/// On task creation, the stack is filled with this repeating 8-byte
+/// pattern (after the canary).  By scanning from the bottom of the
+/// stack upward, we can determine how deep the stack has grown —
+/// the first location where the pattern is absent marks the high
+/// water mark.
+///
+/// Based on Linux's `CONFIG_DEBUG_STACK_USAGE` (STACK_END_MAGIC).
+pub const STACK_SENTINEL: u64 = 0xABBA_CDDC_1234_5678;
+
 /// Maximum number of ticks a CPU burst can be to still count as
 /// "interactive."  At 100 Hz, 5 ticks = 50 ms.  Tasks that use
 /// less than this before blocking are considered I/O-bound / interactive.
@@ -478,6 +489,68 @@ impl Task {
         self.schedule_count = self.schedule_count.saturating_add(1);
     }
 
+    /// Measure stack usage by scanning the sentinel pattern.
+    ///
+    /// Returns the number of bytes of stack actually used (high water
+    /// mark) since task creation.  Returns `None` if the task doesn't
+    /// have an allocated stack (idle tasks, AP idle tasks).
+    ///
+    /// The measurement works by scanning from the bottom of the stack
+    /// (lowest address, just above the canary) upward, counting how
+    /// many sentinel words are still intact.  The first non-sentinel
+    /// word marks where the stack has grown to.
+    ///
+    /// This is a read-only operation and is safe to call while the task
+    /// is running (on another CPU), though the result may be slightly
+    /// stale.
+    #[must_use]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn stack_usage_bytes(&self) -> Option<usize> {
+        if self.stack_bottom == 0 {
+            return None; // Idle task — no allocated stack.
+        }
+
+        // Scan from just above the canary (offset 8) upward.
+        // Each intact sentinel word means 8 bytes of unused stack.
+        let end_addr = self.stack_bottom.wrapping_add(TASK_STACK_SIZE as u64);
+        let total_scannable = TASK_STACK_SIZE.saturating_sub(8);
+
+        let mut unused_words: usize = 0;
+
+        // SAFETY: The stack memory range [stack_bottom..stack_bottom+TASK_STACK_SIZE]
+        // was allocated as contiguous physical frames mapped via HHDM.
+        // We're reading (not writing) aligned u64 values within that range.
+        unsafe {
+            let start = self.stack_bottom as *const u64;
+            let mut ptr = start.add(1); // Skip canary (first 8 bytes).
+            let end = end_addr as *const u64;
+            while (ptr as u64) < (end as u64) {
+                if ptr::read_volatile(ptr) != STACK_SENTINEL {
+                    break;
+                }
+                unused_words = unused_words.saturating_add(1);
+                ptr = ptr.add(1);
+            }
+        }
+
+        let unused_bytes = unused_words.saturating_mul(8);
+        Some(total_scannable.saturating_sub(unused_bytes))
+    }
+
+    /// Stack usage as a percentage (0-100).
+    ///
+    /// Returns `None` for tasks without allocated stacks.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn stack_usage_pct(&self) -> Option<u8> {
+        let used = self.stack_usage_bytes()?;
+        let total = TASK_STACK_SIZE.saturating_sub(8); // Exclude canary.
+        if total == 0 { return Some(0); }
+        #[allow(clippy::arithmetic_side_effects)]
+        let pct = (used * 100) / total;
+        Some(pct.min(100) as u8)
+    }
+
     /// Create the idle task (task 0) for the BSP.
     ///
     /// The idle task uses the bootloader-provided stack; no allocation
@@ -631,6 +704,25 @@ impl Task {
         // SAFETY: stack_bottom is a valid, freshly-allocated HHDM address.
         unsafe {
             ptr::write_volatile(stack_bottom as *mut u64, STACK_CANARY);
+        }
+
+        // Paint the stack with a sentinel pattern for watermark tracking.
+        // Skip the first 8 bytes (canary) and fill the rest.  This lets
+        // us later scan from the bottom up to find how deep the stack grew.
+        // SAFETY: The entire [stack_bottom..stack_top] range is freshly
+        // allocated, contiguous memory accessible via HHDM.  The pointer
+        // arithmetic stays within the 32 KiB allocation (which is well
+        // below usize::MAX on 64-bit systems).
+        #[allow(clippy::arithmetic_side_effects)]
+        unsafe {
+            let start = stack_bottom as *mut u64;
+            let end_addr = stack_bottom.wrapping_add(TASK_STACK_SIZE as u64);
+            let mut ptr = start.add(1); // Skip canary (first 8 bytes).
+            let end = end_addr as *mut u64;
+            while (ptr as u64) < (end as u64) {
+                ptr.write(STACK_SENTINEL);
+                ptr = ptr.add(1);
+            }
         }
 
         // Set up the initial stack and context so that when

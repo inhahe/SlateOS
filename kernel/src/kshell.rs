@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
+    "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
@@ -4168,6 +4168,7 @@ fn dispatch(line: &str) {
         "throttle" => cmd_throttle(args),
         "taskset" => cmd_taskset(args),
         "schedstat" => cmd_schedstat(),
+        "stack" => cmd_stack(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4423,6 +4424,7 @@ fn cmd_help() {
     crate::console_println!("  renice TID PRI  Change task priority (0=highest, 31=lowest)");
     crate::console_println!("  throttle TID [%] Set/query CPU bandwidth quota");
     crate::console_println!("  taskset TID [0xMASK] Set/query CPU affinity");
+    crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -5175,6 +5177,94 @@ fn cmd_schedstat() {
         total_run.saturating_mul(10),
         global_wr
     );
+}
+
+/// Display per-task kernel stack usage (high water mark).
+///
+/// Shows how deep each task's stack has grown, helping identify tasks
+/// that are close to stack overflow.  Based on Linux's
+/// CONFIG_DEBUG_STACK_USAGE which paints stacks with a sentinel.
+fn cmd_stack() {
+    use crate::sched::task::TASK_STACK_SIZE;
+
+    let mut task_list = crate::sched::task_list();
+    if task_list.is_empty() {
+        shell_println!("No tasks.");
+        return;
+    }
+
+    // Sort by stack usage percentage descending (deepest first).
+    task_list.sort_by(|a, b| {
+        let a_pct = a.stack_pct.unwrap_or(0);
+        let b_pct = b.stack_pct.unwrap_or(0);
+        b_pct.cmp(&a_pct)
+    });
+
+    let stack_kb = TASK_STACK_SIZE / 1024;
+    shell_println!("Kernel stack usage (stack size: {} KiB per task)", stack_kb);
+    shell_println!("");
+    shell_println!(
+        "{:<5} {:<14} {:<8} {:>7} {:>5} {:>6}",
+        "TID", "NAME", "STATE", "USED", "PCT", "FREE"
+    );
+    shell_println!("--------------------------------------------------");
+
+    let mut max_pct: u8 = 0;
+    let mut max_pct_name = [0u8; 32];
+    let mut max_pct_name_len = 0;
+
+    for info in &task_list {
+        let name = core::str::from_utf8(
+            info.name.get(..info.name_len).unwrap_or(&info.name)
+        ).unwrap_or("?");
+
+        match (info.stack_used, info.stack_pct) {
+            (Some(used), Some(pct)) => {
+                let free = TASK_STACK_SIZE.saturating_sub(8).saturating_sub(used);
+                let indicator = if pct >= 90 {
+                    " !!!"
+                } else if pct >= 75 {
+                    " !"
+                } else {
+                    ""
+                };
+                shell_println!(
+                    "{:<5} {:<14} {:<8} {:>5}B {:>3}% {:>4}B{}",
+                    info.id,
+                    &name[..name.len().min(14)],
+                    info.state,
+                    used,
+                    pct,
+                    free,
+                    indicator,
+                );
+                if pct > max_pct {
+                    max_pct = pct;
+                    max_pct_name = info.name;
+                    max_pct_name_len = info.name_len;
+                }
+            }
+            _ => {
+                shell_println!(
+                    "{:<5} {:<14} {:<8}     N/A   N/A    N/A",
+                    info.id,
+                    &name[..name.len().min(14)],
+                    info.state,
+                );
+            }
+        }
+    }
+
+    shell_println!("");
+    if max_pct > 0 {
+        let peak_name = core::str::from_utf8(
+            max_pct_name.get(..max_pct_name_len).unwrap_or(&max_pct_name)
+        ).unwrap_or("?");
+        shell_println!("Peak usage: {}% (task '{}')", max_pct, peak_name);
+        if max_pct >= 75 {
+            shell_println!("WARNING: Task '{}' is using {}% of stack!", peak_name, max_pct);
+        }
+    }
 }
 
 fn cmd_ps() {
@@ -11845,7 +11935,7 @@ fn is_builtin(name: &str) -> bool {
         | "break" | "continue" | "shift" | "local" | "printf"
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
-        | "taskset" | "schedstat" | "profile" | "top"
+        | "taskset" | "schedstat" | "stack" | "profile" | "top"
     )
 }
 

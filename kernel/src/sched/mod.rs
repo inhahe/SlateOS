@@ -1054,11 +1054,14 @@ fn watchdog_check() {
                 // Soft lockup detected — report but don't halt.
                 // The CPU may recover (e.g., if it was just a very
                 // long critical section).
+                let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
                 serial_println!(
                     "[watchdog] SOFT LOCKUP on CPU {} (no progress for {}+ seconds, heartbeat={})",
-                    cpu,
-                    count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100),
-                    current,
+                    cpu, stall_secs, current,
+                );
+                crate::klog!(Error, "sched.watchdog",
+                    "soft lockup: cpu={}, stall_seconds={}, heartbeat={}",
+                    cpu, stall_secs, current
                 );
             }
         } else {
@@ -2247,6 +2250,10 @@ pub struct TaskInfo {
     pub total_wait_ticks: u64,
     /// Maximum single wait duration (ticks).
     pub max_wait_ticks: u64,
+    /// Stack usage in bytes (high water mark).  `None` for idle tasks.
+    pub stack_used: Option<usize>,
+    /// Stack usage percentage (0-100).  `None` for idle tasks.
+    pub stack_pct: Option<u8>,
 }
 
 /// Return a snapshot of all tasks in the scheduler.
@@ -2270,6 +2277,8 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             throttled: task.throttled,
             total_wait_ticks: task.total_wait_ticks,
             max_wait_ticks: task.max_wait_ticks,
+            stack_used: task.stack_usage_bytes(),
+            stack_pct: task.stack_usage_pct(),
         })
         .collect()
 }

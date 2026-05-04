@@ -3099,7 +3099,7 @@ const COMMANDS: &[&str] = &[
     "do", "done", "elif", "else", "expr", "fi", "if",
     "split", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
-    "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version",
+    "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "write", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4228,6 +4228,7 @@ fn dispatch(line: &str) {
         "hostname" => cmd_hostname(args),
         "dd" => cmd_dd(args),
         "free" => cmd_free(),
+        "vmstat" => cmd_vmstat(),
         "label" => cmd_label(args),
         "flock" => cmd_flock(args),
         "split" => cmd_split(args),
@@ -11735,7 +11736,7 @@ fn is_builtin(name: &str) -> bool {
         | "du" | "file" | "find" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
-        | "sysctl" | "hostname" | "dd" | "free" | "flock" | "split"
+        | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzcat" | "unzip" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
@@ -13019,6 +13020,83 @@ fn cmd_free() {
         "Pressure: {}  Fragmentation: {}%",
         level_str, info.fragmentation_pct
     );
+}
+
+/// Display virtual memory statistics in a one-counter-per-line format.
+///
+/// Similar to Linux's `cat /proc/vmstat` — a flat list of named counters
+/// useful for diagnosing system behavior and scripting.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_vmstat() {
+    let info = crate::mm::memory_info();
+    let sched = crate::sched::sched_stats();
+    let pi = crate::mm::pressure::pressure_info();
+
+    // --- Memory counters ---
+    crate::console_println!("nr_total_frames        {}", info.total_frames);
+    crate::console_println!("nr_free_frames         {}", info.free_frames);
+    crate::console_println!("nr_used_frames         {}",
+        info.total_frames.saturating_sub(info.free_frames));
+    crate::console_println!("nr_zero_pool           {}", info.zero_pool_count);
+    crate::console_println!("fragmentation_pct      {}", info.fragmentation_pct);
+
+    // --- Buddy order distribution ---
+    for (order, &count) in info.order_counts.iter().enumerate() {
+        crate::console_println!("buddy_order_{:<2}         {}", order, count);
+    }
+
+    // --- Per-CPU frame cache ---
+    crate::console_println!("pcpu_cache_hits        {}", info.pcpu_cache_hits);
+    crate::console_println!("pcpu_cache_misses      {}", info.pcpu_cache_misses);
+    crate::console_println!("pcpu_refill_ops        {}", info.pcpu_refill_ops);
+    crate::console_println!("pcpu_drain_ops         {}", info.pcpu_drain_ops);
+    let total_allocs = info.pcpu_cache_hits.saturating_add(info.pcpu_cache_misses);
+    let hit_pct = if total_allocs > 0 {
+        info.pcpu_cache_hits.saturating_mul(100) / total_allocs
+    } else { 0 };
+    crate::console_println!("pcpu_hit_pct           {}", hit_pct);
+
+    // --- Zero pool ---
+    crate::console_println!("zero_pool_hits         {}", info.zero_pool_hits);
+    crate::console_println!("zero_pool_misses       {}", info.zero_pool_misses);
+
+    // --- Heap ---
+    crate::console_println!("heap_slab_allocs       {}", info.heap_slab_allocs);
+    crate::console_println!("heap_slab_frees        {}", info.heap_slab_frees);
+    crate::console_println!("heap_large_allocs      {}", info.heap_large_allocs);
+    crate::console_println!("heap_alloc_failures    {}", info.heap_alloc_failures);
+
+    // --- Swap ---
+    crate::console_println!("swap_total_bytes       {}", info.swap_total_bytes);
+    crate::console_println!("swap_used_bytes        {}", info.swap_used_bytes);
+    crate::console_println!("swap_devices           {}", info.swap_device_count);
+
+    // --- kswapd ---
+    crate::console_println!("kswapd_running         {}",
+        if info.kswapd_running { 1 } else { 0 });
+    crate::console_println!("kswapd_reclaim_cycles  {}", info.kswapd_reclaim_cycles);
+    crate::console_println!("kswapd_reclaimed       {}", info.kswapd_total_reclaimed);
+
+    // --- OOM ---
+    crate::console_println!("oom_events             {}", info.oom_events);
+    crate::console_println!("oom_kills              {}", info.oom_kills);
+
+    // --- Pressure ---
+    crate::console_println!("pressure_level         {}", pi.level as u8);
+    crate::console_println!("pressure_shrinkers     {}", pi.active_shrinkers);
+    crate::console_println!("pressure_notifications {}", pi.total_notifications);
+    crate::console_println!("pressure_objects_freed {}", pi.total_freed);
+
+    // --- Scheduler ---
+    crate::console_println!("sched_ctx_switches     {}", sched.total_ctx_switches);
+    crate::console_println!("sched_work_steals      {}", sched.total_work_steals);
+    crate::console_println!("sched_tasks_spawned    {}", sched.total_tasks_spawned);
+    crate::console_println!("sched_tasks_exited     {}", sched.total_tasks_exited);
+    crate::console_println!("sched_load_avg_x100    {}", sched.load_avg_x100);
+    crate::console_println!("sched_num_cpus         {}", sched.num_cpus);
+
+    // --- Per-process accounting ---
+    crate::console_println!("tracked_addr_spaces    {}", info.tracked_address_spaces);
 }
 
 /// Format a block device as FAT16/FAT32.

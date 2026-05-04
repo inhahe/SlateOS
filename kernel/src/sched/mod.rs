@@ -55,7 +55,7 @@ use alloc::collections::BTreeMap;
 use crate::cpu;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use spin::Mutex;
 
 use self::context::switch_context;
@@ -237,6 +237,134 @@ static RESCHEDULE_PENDING: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
     const INIT: CachePadded<AtomicBool> = CachePadded::new(AtomicBool::new(false));
     [INIT; priority_rr::MAX_CPUS]
 };
+
+// ---------------------------------------------------------------------------
+// Task exit hooks
+// ---------------------------------------------------------------------------
+
+/// Maximum number of exit hooks that can be registered simultaneously.
+///
+/// This is a small fixed number because exit hooks run in the dying
+/// task's context (for `task_exit`) or while holding the scheduler lock
+/// (for `kill_task`), so they must be lightweight.  8 slots is enough
+/// for the driver framework's crash detector, the IOCP process-exit
+/// notification, and a few future consumers.
+const MAX_EXIT_HOOKS: usize = 8;
+
+/// Registered exit hook function pointers.
+///
+/// Each slot is either null (0) or a valid `fn(TaskId)` cast to u64.
+/// We use `AtomicU64` instead of `Option<fn(TaskId)>` because atomics
+/// allow lock-free registration/unregistration without holding SCHED.
+///
+/// Hooks are called with the dying task's ID.  They must NOT:
+/// - Acquire the SCHED lock (it may already be held)
+/// - Block or allocate
+/// - Take longer than ~1 µs
+///
+/// Appropriate uses: set a flag, enqueue a work item, increment a
+/// counter.
+static EXIT_HOOKS: [AtomicU64; MAX_EXIT_HOOKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_EXIT_HOOKS]
+};
+
+/// Number of registered exit hooks.  Used to avoid scanning all 8
+/// slots when no hooks are registered (the common case during early
+/// boot).
+static EXIT_HOOK_COUNT: AtomicU8 = AtomicU8::new(0);
+
+/// Register an exit hook that will be called when any task dies.
+///
+/// Returns the slot index (0..MAX_EXIT_HOOKS-1) on success, or `None`
+/// if all slots are full.
+///
+/// # Safety contract
+///
+/// The provided function must be safe to call from:
+/// - The dying task's context (interrupts may be enabled or disabled)
+/// - While the SCHED lock may or may not be held (hook must NOT
+///   acquire it)
+///
+/// The hook receives the `TaskId` of the dying task.  It must not
+/// block, allocate, or perform any long-running work.
+pub fn register_exit_hook(hook: fn(TaskId)) -> Option<usize> {
+    let hook_addr = hook as usize as u64;
+    if hook_addr == 0 {
+        // Null function pointer — reject to avoid confusion with
+        // empty slots.
+        return None;
+    }
+
+    for (i, slot) in EXIT_HOOKS.iter().enumerate() {
+        // Try to claim this slot with a CAS from 0 (empty) to our hook.
+        if slot
+            .compare_exchange(0, hook_addr, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            EXIT_HOOK_COUNT.fetch_add(1, Ordering::Release);
+            serial_println!(
+                "[sched] Registered exit hook at slot {} (addr {:#x})",
+                i, hook_addr
+            );
+            return Some(i);
+        }
+    }
+
+    serial_println!("[sched] WARNING: exit hook table full ({} slots)", MAX_EXIT_HOOKS);
+    None
+}
+
+/// Unregister an exit hook by slot index.
+///
+/// Returns `true` if the slot was occupied and is now cleared.
+/// Returns `false` if the index is out of range or the slot was empty.
+pub fn unregister_exit_hook(slot: usize) -> bool {
+    let Some(entry) = EXIT_HOOKS.get(slot) else {
+        return false;
+    };
+
+    let old = entry.swap(0, Ordering::AcqRel);
+    if old != 0 {
+        EXIT_HOOK_COUNT.fetch_sub(1, Ordering::Release);
+        serial_println!("[sched] Unregistered exit hook at slot {}", slot);
+        true
+    } else {
+        false
+    }
+}
+
+/// Invoke all registered exit hooks for a dying task.
+///
+/// Called from `task_exit()` (self-termination) and `kill_task()`
+/// (external kill).  Runs with interrupts in whatever state the
+/// caller left them — hooks must be safe in any context.
+///
+/// If a hook panics (shouldn't happen, but defense-in-depth), we
+/// catch nothing — the panic propagates normally.  Hooks must be
+/// bullet-proof.
+fn notify_exit_hooks(task_id: TaskId) {
+    // Fast path: no hooks registered.
+    if EXIT_HOOK_COUNT.load(Ordering::Acquire) == 0 {
+        return;
+    }
+
+    for slot in &EXIT_HOOKS {
+        let addr = slot.load(Ordering::Acquire);
+        if addr != 0 {
+            // SAFETY: The address was set by register_exit_hook from a
+            // valid fn(TaskId) pointer.  We only clear slots via
+            // unregister_exit_hook (which sets to 0) or never.  The
+            // function pointer remains valid for the lifetime of the
+            // kernel (hooks are registered by subsystem init, never
+            // unloaded).
+            let hook: fn(TaskId) = unsafe {
+                core::mem::transmute::<u64, fn(TaskId)>(addr)
+            };
+            hook(task_id);
+        }
+    }
+}
 
 /// Get the current CPU ID (sequential index).
 ///
@@ -525,6 +653,13 @@ pub fn yield_now() {
 pub fn task_exit() {
     let current_id = load_current_task();
     serial_println!("[sched] Task {} exiting", current_id);
+
+    // Notify exit hooks BEFORE marking the task Dead and before
+    // dropping the SCHED lock.  Hooks run outside the lock to avoid
+    // deadlock (they may access other subsystems that acquire their
+    // own locks).  The task is still Running at this point — hooks
+    // can safely look up the task ID if needed.
+    notify_exit_hooks(current_id);
 
     {
         let mut state = SCHED.lock();
@@ -1050,7 +1185,15 @@ pub fn kill_task(task_id: TaskId) -> bool {
         }
     }
 
+    // Drop the SCHED lock before notifying hooks — hooks may access
+    // other subsystems that have their own locks.
+    drop(state);
+
     serial_println!("[sched] Killed task {}", task_id);
+
+    // Notify exit hooks after the task is marked Dead and the lock
+    // is released.  Hooks see the task as Dead if they check state.
+    notify_exit_hooks(task_id);
     true
 }
 
@@ -2152,6 +2295,7 @@ pub fn self_test() -> KernelResult<()> {
     test_smp_idle_task_safety()?;
     test_transitive_pi_infrastructure()?;
     test_cpu_affinity()?;
+    test_exit_hooks()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
@@ -3194,6 +3338,143 @@ fn test_cpu_affinity() -> KernelResult<()> {
     reap_dead_tasks();
 
     serial_println!("[sched]   CPU affinity: PASSED");
+    Ok(())
+}
+
+/// Counter for exit hook test — incremented by the hook callback.
+static EXIT_HOOK_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Test: task exit hooks — register, fire on exit, unregister.
+///
+/// Verifies:
+/// 1. Registration succeeds and returns a slot index.
+/// 2. Hook fires when a task exits normally (via task_exit).
+/// 3. Hook fires when a task is killed externally (via kill_task).
+/// 4. Unregistration prevents future calls.
+/// 5. Re-registration reuses freed slots.
+/// 6. Full table returns None.
+fn test_exit_hooks() -> KernelResult<()> {
+    // -- 1. Register a hook --
+    fn exit_hook_test_cb(task_id: TaskId) {
+        let _ = task_id; // Suppress unused warning; we just count calls.
+        EXIT_HOOK_TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    }
+
+    EXIT_HOOK_TEST_COUNTER.store(0, Ordering::SeqCst);
+
+    let slot = register_exit_hook(exit_hook_test_cb);
+    if slot.is_none() {
+        serial_println!("[sched]   FAIL: register_exit_hook returned None");
+        return Err(KernelError::InternalError);
+    }
+    let slot = slot.unwrap_or(0); // Safe: checked above.
+
+    // -- 2. Normal task exit fires the hook --
+    let id = spawn(b"test-hook-exit", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
+    // Let the task run and exit naturally.
+    yield_now();
+    yield_now();
+    yield_now();
+    reap_dead_tasks();
+
+    let count = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
+    if count == 0 {
+        serial_println!("[sched]   FAIL: exit hook not called on task_exit (count=0)");
+        unregister_exit_hook(slot);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   Exit hook on normal exit: OK (count={})", count);
+
+    // -- 3. kill_task fires the hook --
+    let before_kill = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
+    let id2 = spawn(b"test-hook-kill", task::DEFAULT_PRIORITY, test_task_block_self, 0, 0)?;
+    // Let the task start and block.
+    yield_now();
+    yield_now();
+
+    kill_task(id2);
+    reap_dead_tasks();
+
+    let after_kill = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
+    if after_kill <= before_kill {
+        serial_println!(
+            "[sched]   FAIL: exit hook not called on kill_task (before={}, after={})",
+            before_kill, after_kill
+        );
+        unregister_exit_hook(slot);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   Exit hook on kill: OK (count={})", after_kill);
+
+    // -- 4. Unregister and verify no more calls --
+    let ok = unregister_exit_hook(slot);
+    if !ok {
+        serial_println!("[sched]   FAIL: unregister_exit_hook returned false");
+        return Err(KernelError::InternalError);
+    }
+
+    let before_unreg = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
+    let id3 = spawn(b"test-hook-unreg", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
+    yield_now();
+    yield_now();
+    yield_now();
+    reap_dead_tasks();
+
+    let after_unreg = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
+    if after_unreg != before_unreg {
+        serial_println!(
+            "[sched]   FAIL: hook called after unregister (before={}, after={})",
+            before_unreg, after_unreg
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sched]   No call after unregister: OK");
+
+    // -- 5. Re-registration reuses freed slot --
+    let reuse_slot = register_exit_hook(exit_hook_test_cb);
+    if reuse_slot.is_none() {
+        serial_println!("[sched]   FAIL: re-registration returned None");
+        return Err(KernelError::InternalError);
+    }
+    unregister_exit_hook(reuse_slot.unwrap_or(0));
+    serial_println!("[sched]   Slot reuse: OK");
+
+    // -- 6. Full table returns None --
+    let mut hook_slots = [0usize; MAX_EXIT_HOOKS];
+    #[allow(clippy::indexing_slicing)] // i is always < MAX_EXIT_HOOKS.
+    for i in 0..MAX_EXIT_HOOKS {
+        if let Some(s) = register_exit_hook(exit_hook_test_cb) {
+            hook_slots[i] = s;
+        } else {
+            serial_println!(
+                "[sched]   FAIL: table full at slot {} (expected {})",
+                i, MAX_EXIT_HOOKS
+            );
+            // Clean up any registered hooks.
+            #[allow(clippy::indexing_slicing)] // j < i < MAX_EXIT_HOOKS.
+            for j in 0..i {
+                unregister_exit_hook(hook_slots[j]);
+            }
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // One more should fail.
+    if register_exit_hook(exit_hook_test_cb).is_some() {
+        serial_println!("[sched]   FAIL: registered beyond MAX_EXIT_HOOKS");
+        for s in &hook_slots {
+            unregister_exit_hook(*s);
+        }
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up all.
+    for s in &hook_slots {
+        unregister_exit_hook(*s);
+    }
+    serial_println!("[sched]   Full table rejection: OK");
+
+    serial_println!("[sched]   Exit hooks: PASSED");
     Ok(())
 }
 

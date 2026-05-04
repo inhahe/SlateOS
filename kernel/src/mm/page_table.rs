@@ -656,8 +656,13 @@ pub fn init(hhdm_offset: u64) {
     HHDM_OFFSET.call_once(|| hhdm_offset);
     PT_PAGE_POOL.lock().hhdm_offset = hhdm_offset;
 
+    // Record the kernel PML4 in the accounting module so that
+    // kernel-space mappings are excluded from per-process RSS tracking.
+    let kernel_pml4 = cr3_to_pml4(read_cr3());
+    super::accounting::set_kernel_pml4(kernel_pml4);
+
     serial_println!("[mm] Page table subsystem initialized");
-    serial_println!("[mm]   Active PML4: {:#x}", cr3_to_pml4(read_cr3()));
+    serial_println!("[mm]   Active PML4: {:#x}", kernel_pml4);
 }
 
 /// Translate a virtual address to a physical address.
@@ -889,6 +894,9 @@ pub unsafe fn map_frame(
         unsafe { write_entry(pt, base_pt_index + i, entry, hhdm); }
     }
 
+    // Track per-address-space RSS for OOM killer and diagnostics.
+    super::accounting::charge(pml4_phys, 1);
+
     Ok(())
 }
 
@@ -961,6 +969,9 @@ pub unsafe fn unmap_frame(
             write_entry(pt, base_pt_index + i, PageTableEntry::EMPTY, hhdm);
         }
     }
+
+    // Track per-address-space RSS for OOM killer and diagnostics.
+    super::accounting::uncharge(pml4_phys, 1);
 
     // The first PTE's physical address is the base of the 16 KiB frame.
     PhysFrame::from_addr(first_pte.phys_addr()).ok_or(KernelError::InternalError)
@@ -1384,6 +1395,9 @@ pub fn alloc_pml4() -> KernelResult<u64> {
         );
     }
 
+    // Register the new address space for per-process memory accounting.
+    super::accounting::init_address_space(new_pml4_phys);
+
     Ok(new_pml4_phys)
 }
 
@@ -1399,6 +1413,9 @@ pub fn alloc_pml4() -> KernelResult<u64> {
 /// - No CPU may be using this PML4 (i.e., it must not be in any CR3).
 /// - All userspace mappings must have been torn down first.
 pub unsafe fn free_pml4(pml4_phys: u64) {
+    // Remove from per-process memory accounting before freeing.
+    super::accounting::destroy_address_space(pml4_phys);
+
     let mut pool = PT_PAGE_POOL.lock();
     // SAFETY: Caller guarantees the PML4 is no longer in use.
     unsafe {

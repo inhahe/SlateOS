@@ -940,6 +940,10 @@ extern "C" fn kmain() -> ! {
     // Records recent alloc/free events for post-mortem debugging.
     mm::alloc_trace::self_test();
 
+    // Step 22e⅞++++i: Allocation latency histogram self-test.
+    // Measures and profiles alloc/free timing for performance analysis.
+    mm::alloc_lat::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

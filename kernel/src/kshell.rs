@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4226,6 +4226,7 @@ fn dispatch(line: &str) {
         "faultinject" | "finject" => cmd_fault_inject(args),
         "frameowner" | "fowner" => cmd_frame_owner(),
         "alloctrace" | "atrace" => cmd_alloc_trace(args),
+        "alloclat" | "alat" => cmd_alloc_lat(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15504,6 +15505,71 @@ fn cmd_alloc_trace(args: &str) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// `alloclat` — show allocation latency histograms.
+///
+/// Usage:
+///   alloclat         — show alloc and free latency histograms
+///   alloclat reset   — reset all measurements
+///   alloclat on|off  — enable/disable measurement
+fn cmd_alloc_lat(args: &str) {
+    use crate::mm::alloc_lat;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "reset" => {
+            alloc_lat::reset();
+            shell_println!("Latency histograms reset");
+        }
+        "on" => {
+            alloc_lat::enable();
+            shell_println!("Latency measurement enabled");
+        }
+        "off" => {
+            alloc_lat::disable();
+            shell_println!("Latency measurement disabled");
+        }
+        _ => {
+            // Show both histograms.
+            shell_println!("=== Allocation Latency ===");
+            shell_println!("");
+
+            let ah = alloc_lat::alloc_histogram();
+            let fh = alloc_lat::free_histogram();
+
+            shell_println!("  Alloc: {} samples, avg={}ns, max={}ns",
+                ah.count, ah.cycles_to_ns(ah.avg_cycles), ah.cycles_to_ns(ah.max_cycles));
+            shell_println!("    p50={}ns  p90={}ns  p99={}ns",
+                ah.cycles_to_ns(ah.percentile(50)),
+                ah.cycles_to_ns(ah.percentile(90)),
+                ah.cycles_to_ns(ah.percentile(99)));
+
+            if ah.count > 0 {
+                shell_println!("    {:>8}  {:>8}  {:>6}  {}", "RANGE", "COUNT", "%", "HISTOGRAM");
+                let mut cumulative: u64 = 0;
+                for (i, &count) in ah.buckets.iter().enumerate() {
+                    if count == 0 {
+                        continue;
+                    }
+                    cumulative = cumulative.saturating_add(count);
+                    let pct = count.saturating_mul(100).checked_div(ah.count).unwrap_or(0);
+                    let lower_ns = ah.cycles_to_ns(alloc_lat::LatencyHist::bucket_lower_cycles(i));
+                    let bar_len = (pct as usize).min(30);
+                    let bar: alloc::string::String = core::iter::repeat('▓').take(bar_len).collect();
+                    shell_println!("    {:>6}ns  {:>8}  {:>5}%  {}", lower_ns, count, pct, bar);
+                }
+            }
+
+            shell_println!("");
+            shell_println!("  Free:  {} samples, avg={}ns, max={}ns",
+                fh.count, fh.cycles_to_ns(fh.avg_cycles), fh.cycles_to_ns(fh.max_cycles));
+
+            shell_println!("");
+            shell_println!("  Status: {}", if alloc_lat::is_enabled() { "enabled" } else { "disabled" });
         }
     }
 }

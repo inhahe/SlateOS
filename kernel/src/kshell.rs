@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "ktimer", "rng", "supervisor", "sv", "timers", "xattr", "xxd", "zip",
+    "ktimer", "ktrace", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4174,6 +4174,7 @@ fn dispatch(line: &str) {
         "wq" | "workqueue" => cmd_workqueue(),
         "ktimer" | "timers" => cmd_ktimer(),
         "rng" | "random" => cmd_rng(),
+        "trace" | "ktrace" => cmd_trace(args),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4436,6 +4437,7 @@ fn cmd_help() {
     crate::console_println!("  ktimer    Show kernel timer statistics");
     crate::console_println!("  rng       Show kernel CSPRNG statistics");
     crate::console_println!("  supervisor Show task supervisor status");
+    crate::console_println!("  trace [N] Show last N kernel trace events (default 20)");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -11947,7 +11949,8 @@ fn is_builtin(name: &str) -> bool {
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
         | "taskset" | "schedstat" | "slabinfo" | "stack" | "profile" | "top"
-        | "wq" | "workqueue" | "ktimer" | "timers" | "rng" | "random" | "supervisor" | "sv"
+        | "wq" | "workqueue" | "ktimer" | "timers" | "rng" | "random" | "trace" | "ktrace"
+        | "supervisor" | "sv"
     )
 }
 
@@ -13338,6 +13341,53 @@ fn cmd_supervisor() {
     shell_println!("  Exits seen:   {}", exits);
     shell_println!("  Restarts:     {}", restarts);
     shell_println!("  Failures:     {}", failures);
+}
+
+fn cmd_trace(args: &str) {
+    let count: usize = if args.is_empty() {
+        20
+    } else {
+        args.trim().parse().unwrap_or(20)
+    };
+    let count = count.min(64); // Cap display to 64 entries.
+
+    let total = crate::ktrace::total_events();
+    let valid = crate::ktrace::valid_count();
+    let enabled = crate::ktrace::is_enabled();
+
+    shell_println!("Kernel trace buffer");
+    shell_println!("  Status:   {}", if enabled { "recording" } else { "paused" });
+    shell_println!("  Events:   {} total, {} in buffer", total, valid);
+    shell_println!("");
+
+    if valid == 0 {
+        shell_println!("  (no events recorded)");
+        return;
+    }
+
+    // Read entries.
+    let mut entries = [crate::ktrace::TraceEntry::empty(); 64];
+    let read_count = crate::ktrace::read_recent(&mut entries[..count]);
+
+    shell_println!("  {:>5}  {:>10}  {:>8}  {:>4}  {:>16}  {:>16}",
+        "TASK", "TIMESTAMP", "CATEGORY", "EVT", "ARG0", "ARG1");
+    shell_println!("  {:->5}  {:->10}  {:->8}  {:->4}  {:->16}  {:->16}",
+        "", "", "", "", "", "");
+
+    for i in 0..read_count {
+        let e = &entries[i];
+        if e.timestamp == 0 {
+            continue; // Empty slot.
+        }
+        shell_println!("  {:>5}  {:>10}  {:>8}  {:>4}  {:#016x}  {:#016x}",
+            e.task_id,
+            e.timestamp % 1_000_000_000, // Show lower 9 digits.
+            e.category_name(),
+            e.event_id(),
+            e.arg0,
+            e.arg1,
+        );
+    }
 }
 
 #[allow(clippy::arithmetic_side_effects)]

@@ -69,6 +69,7 @@ mod keyboard;
 mod klog;
 mod kshell;
 mod ktimer;
+mod ktrace;
 mod limine;
 mod mm;
 mod net;
@@ -820,6 +821,9 @@ extern "C" fn kmain() -> ! {
 
     // Step 22k5: Kernel channel self-test.
     sched::kchannel::self_test();
+
+    // Step 22k6: Kernel trace buffer self-test.
+    ktrace::self_test();
 
     // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();

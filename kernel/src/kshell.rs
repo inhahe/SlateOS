@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4192,6 +4192,7 @@ fn dispatch(line: &str) {
         "pgfault" | "faults" => cmd_pgfault(),
         "irqrate" => cmd_irqrate(),
         "kprofile" => cmd_kprofile(args),
+        "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
         "pressure" | "mempressure" => cmd_pressure(),
@@ -4477,6 +4478,7 @@ fn cmd_help() {
     crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
+    crate::console_println!("  sar        System activity reporter (compact one-liner)");
     crate::console_println!("  syshealth  Active system integrity verification");
     crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
     crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
@@ -14141,6 +14143,72 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+/// `sar` — compact system activity reporter (one-line per call).
+///
+/// Shows a single compact line with key metrics, suitable for repeated
+/// invocation to observe trends over time:
+/// - Memory: used/total MiB, pressure score
+/// - CPU: load, ctx switches/sec (since last call)
+/// - Sched: latency max, tasks
+/// - Heap: in-use KiB, peak KiB
+///
+/// Named after the Unix `sar` (System Activity Reporter) utility.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_sar() {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    // Use statics to track deltas between calls.
+    static LAST_CTX: AtomicU64 = AtomicU64::new(0);
+    static LAST_TICK: AtomicU64 = AtomicU64::new(0);
+
+    let now_tick = crate::apic::tick_count();
+    let stats = crate::sched::sched_stats();
+    let prev_ctx = LAST_CTX.swap(stats.total_ctx_switches, Ordering::Relaxed);
+    let prev_tick = LAST_TICK.swap(now_tick, Ordering::Relaxed);
+
+    let elapsed = now_tick.saturating_sub(prev_tick);
+    let ctx_delta = stats.total_ctx_switches.saturating_sub(prev_ctx);
+
+    // Context switches per second.
+    let ctx_per_sec = if elapsed > 0 {
+        ctx_delta.saturating_mul(u64::from(crate::apic::TICK_RATE_HZ)) / elapsed
+    } else {
+        0
+    };
+
+    // Memory.
+    let mem = crate::mm::memory_info();
+    let used_mb = mem.used_bytes / (1024 * 1024);
+    let total_mb = mem.total_bytes / (1024 * 1024);
+    let mp = crate::mm::memory_pressure();
+
+    // Heap.
+    let heap = crate::mm::heap::stats();
+
+    // Scheduler.
+    let active = stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited);
+    let lat = crate::sched::latency_histogram();
+    let load = stats.load_avg_x100;
+
+    // Print header on first call (elapsed == 0).
+    if elapsed == 0 || prev_tick == 0 {
+        shell_println!("mem_used  mem_tot  press  load   ctx/s  lat_max  tasks  heap_use  heap_pk");
+        shell_println!("-------   -------  -----  ----   -----  -------  -----  --------  -------");
+    }
+
+    shell_println!(
+        "{:>4} MiB {:>4} MiB {:>4}  {}.{:02} {:>6}  {:>4}ms {:>5}  {:>5}KiB {:>5}KiB",
+        used_mb, total_mb,
+        mp.score,
+        load / 100, load % 100,
+        ctx_per_sec,
+        lat.max_ticks * 10,
+        active,
+        heap.bytes_in_use / 1024,
+        heap.peak_bytes_in_use / 1024,
+    );
 }
 
 /// `syshealth` — active system health verification.

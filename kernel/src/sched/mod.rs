@@ -1715,6 +1715,71 @@ pub fn push_balance() {
     }
 }
 
+/// Migrate all tasks from a CPU's run queue to other online CPUs.
+///
+/// Called during CPU hotplug offline.  Drains the target CPU's run queue
+/// and distributes tasks across remaining online CPUs (round-robin).
+/// Tasks with CPU affinity restrictions are placed on an appropriate
+/// allowed CPU.
+///
+/// Returns the number of tasks migrated.
+pub fn migrate_tasks_from_cpu(cpu: usize) -> usize {
+    // Drain everything from the target CPU's run queue.
+    let stolen = PER_CPU_SCHED.drain_all(cpu);
+
+    if stolen.is_empty() {
+        return 0;
+    }
+
+    let count = stolen.len();
+
+    // Distribute to other online CPUs round-robin.
+    let total_cpus = crate::smp::cpu_count();
+    let mut target = 0usize;
+
+    if let Some(mut state) = SCHED.try_lock() {
+        for (task_id, priority) in &stolen {
+            // Find next online CPU that isn't the one being offlined.
+            let mut found_target = false;
+            for _ in 0..total_cpus {
+                if target != cpu && crate::cpu_hotplug::is_scheduling_eligible(target) {
+                    found_target = true;
+                    break;
+                }
+                target = (target + 1) % total_cpus;
+            }
+            if !found_target {
+                // Fallback: BSP (always online).
+                target = 0;
+            }
+
+            // Check affinity if available.
+            let actual_target = if let Some(task) = state.tasks.get_mut(task_id) {
+                if task.can_run_on(target) {
+                    task.last_cpu = target;
+                    target
+                } else {
+                    let correct = choose_cpu_for_task(task);
+                    task.last_cpu = correct;
+                    correct
+                }
+            } else {
+                target
+            };
+
+            PER_CPU_SCHED.enqueue(*task_id, *priority, actual_target);
+            target = (target + 1) % total_cpus;
+        }
+    } else {
+        // Couldn't lock the task table — just enqueue on BSP.
+        for (task_id, priority) in &stolen {
+            PER_CPU_SCHED.enqueue(*task_id, *priority, 0);
+        }
+    }
+
+    count
+}
+
 /// Suspend a task (pause execution).
 ///
 /// Transitions the task from [`Ready`] to [`Suspended`], removing

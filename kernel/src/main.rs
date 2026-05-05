@@ -57,6 +57,7 @@ mod boot;
 mod cap;
 mod console;
 mod cpu;
+mod cpu_hotplug;
 mod cpu_topology;
 mod cpufreq;
 mod cputime;
@@ -817,6 +818,10 @@ extern "C" fn kmain() -> ! {
     // Now that all CPUs are online, decode APIC ID hierarchy to determine
     // package/core/SMT relationships for topology-aware scheduling.
     cpu_topology::detect();
+
+    // CPU hotplug framework initialization — marks all online CPUs.
+    cpu_hotplug::init();
+    cpu_hotplug::self_test();
 
     // Step 22b⅞: CPU frequency scaling initialization.
     // Detect HWP or EIST support and set default governor (performance).

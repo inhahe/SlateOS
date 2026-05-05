@@ -753,6 +753,19 @@ impl PerCpuScheduler {
         migrations
     }
 
+    /// Drain all tasks from a CPU's run queue.
+    ///
+    /// Used during CPU hotplug offline to move all queued tasks off
+    /// the target CPU.  Returns (task_id, priority) pairs.
+    pub fn drain_all(&self, cpu: usize) -> alloc::vec::Vec<(super::task::TaskId, u8)> {
+        if let Some(q) = self.queues.get(cpu) {
+            // Steal everything (1024 is effectively "all").
+            q.lock().steal(1024)
+        } else {
+            alloc::vec::Vec::new()
+        }
+    }
+
     /// Check if any CPU has ready tasks.
     #[must_use]
     #[allow(dead_code)] // Used by idle/wakeup decision logic.

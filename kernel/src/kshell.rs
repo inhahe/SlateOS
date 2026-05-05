@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4208,6 +4208,7 @@ fn dispatch(line: &str) {
         "compact" | "defrag" => cmd_compact(),
         "shutdown" | "poweroff" => cmd_shutdown(),
         "reboot" => cmd_reboot(),
+        "hotplug" | "cpuctl" => cmd_hotplug(args),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15182,6 +15183,63 @@ fn cmd_shutdown() {
     shell_println!("  Shutting down...");
     shell_println!("");
     crate::power::shutdown();
+}
+
+/// `hotplug` / `cpuctl` — CPU hotplug management.
+///
+/// Usage: hotplug [status|offline N|online N]
+fn cmd_hotplug(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let subcmd = parts.first().copied().unwrap_or("status");
+
+    match subcmd {
+        "status" | "" => {
+            let stats = crate::cpu_hotplug::stats();
+            shell_println!("=== CPU Hotplug Status ===");
+            shell_println!("");
+            shell_println!("  Online: {}/{} CPUs", stats.online_cpus, stats.total_cpus);
+            shell_println!("  Offline ops: {}, Online ops: {}", stats.offline_ops, stats.online_ops);
+            shell_println!("  Tasks migrated: {}", stats.tasks_migrated);
+            shell_println!("  Notifiers: {}", stats.notifiers_registered);
+            shell_println!("");
+            for i in 0..stats.total_cpus {
+                let state = crate::cpu_hotplug::cpu_state(i);
+                let marker = if crate::cpu_hotplug::is_online(i) { "●" } else { "○" };
+                shell_println!("  CPU {:2}: {} {:?}", i, marker, state);
+            }
+        }
+        "offline" => {
+            let Some(cpu_str) = parts.get(1) else {
+                shell_println!("Usage: hotplug offline <cpu>");
+                return;
+            };
+            let Ok(cpu) = cpu_str.parse::<usize>() else {
+                shell_println!("Invalid CPU number: {}", cpu_str);
+                return;
+            };
+            match crate::cpu_hotplug::offline(cpu) {
+                Ok(migrated) => shell_println!("CPU {} offlined ({} tasks migrated)", cpu, migrated),
+                Err(e) => shell_println!("Failed: {}", e),
+            }
+        }
+        "online" => {
+            let Some(cpu_str) = parts.get(1) else {
+                shell_println!("Usage: hotplug online <cpu>");
+                return;
+            };
+            let Ok(cpu) = cpu_str.parse::<usize>() else {
+                shell_println!("Invalid CPU number: {}", cpu_str);
+                return;
+            };
+            match crate::cpu_hotplug::online(cpu) {
+                Ok(()) => shell_println!("CPU {} is now online", cpu),
+                Err(e) => shell_println!("Failed: {}", e),
+            }
+        }
+        _ => {
+            shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
+        }
+    }
 }
 
 /// `thermal` — display CPU thermal monitoring status.

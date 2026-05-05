@@ -883,6 +883,10 @@ extern "C" fn kmain() -> ! {
     // Verifies refcount API and COW PTE flag manipulation.
     mm::cow::self_test();
 
+    // Step 22e½: Huge page (2 MiB) self-test.
+    // Verifies alloc/map/read/write/unmap/free of 2 MiB huge pages.
+    mm::hugepage::self_test();
+
     // Step 22f: Initialize the soft lockup detector (watchdog).
     // Must be after SMP bootstrap so cpu_count() is accurate.
     // Monitors per-CPU heartbeats and warns if any CPU stops responding.

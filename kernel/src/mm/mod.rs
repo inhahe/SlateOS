@@ -33,6 +33,7 @@ pub mod dma;
 pub mod fault;
 pub mod frame;
 pub mod heap;
+pub mod hugepage;
 pub mod kstack;
 pub mod kswapd;
 pub mod mempool;

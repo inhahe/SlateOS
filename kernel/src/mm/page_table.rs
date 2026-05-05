@@ -603,7 +603,7 @@ pub(crate) unsafe fn write_entry(
 /// - `table_phys` must be a valid page table.
 /// - `index` must be < 512.
 #[allow(clippy::arithmetic_side_effects)]
-unsafe fn walk_or_create(
+pub(crate) unsafe fn walk_or_create(
     table_phys: u64,
     index: usize,
     create: bool,

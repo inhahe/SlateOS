@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4211,6 +4211,7 @@ fn dispatch(line: &str) {
         "hotplug" | "cpuctl" => cmd_hotplug(args),
         "irqbalance" | "irqbal" => cmd_irqbalance(args),
         "msi" => cmd_msi(),
+        "hugepage" | "hugepages" | "hp" => cmd_hugepage(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15247,6 +15248,18 @@ fn cmd_hotplug(args: &str) {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
         }
     }
+}
+
+/// `hugepage` — display huge page statistics.
+fn cmd_hugepage() {
+    let st = crate::mm::hugepage::stats();
+    shell_println!("=== Huge Pages (2 MiB) ===");
+    shell_println!("");
+    shell_println!("  Currently mapped: {}", st.mapped);
+    shell_println!("  Total allocated:  {}", st.allocated);
+    shell_println!("  Total freed:      {}", st.freed);
+    shell_println!("  Alloc failures:   {}", st.failures);
+    shell_println!("  Page size:        2 MiB (128 × 16 KiB frames)");
 }
 
 /// `msi` — display MSI (Message Signaled Interrupts) vector pool status.

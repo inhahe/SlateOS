@@ -1004,6 +1004,135 @@ pub fn class_stats() -> [SlabClassStats; NUM_CLASSES] {
 }
 
 // ---------------------------------------------------------------------------
+// Heap integrity audit
+// ---------------------------------------------------------------------------
+
+/// Result of a heap integrity audit.
+#[derive(Debug, Clone, Copy)]
+pub struct HeapAuditResult {
+    /// Total free slots counted across all size classes.
+    pub total_free_slots: usize,
+    /// Number of free slots with corrupted poison magic.
+    pub corrupted_slots: usize,
+    /// Number of classes where a free-list cycle was detected.
+    pub cycles_detected: usize,
+    /// Number of classes where a bad pointer was found.
+    pub bad_pointers: usize,
+    /// True if the audit passed with no issues.
+    pub ok: bool,
+}
+
+/// Audit the heap's free lists for integrity.
+///
+/// Walks every size class's global free list (under the heap lock) and
+/// checks:
+/// 1. Each pointer is in a valid HHDM virtual range.
+/// 2. No cycles exist (Floyd's tortoise/hare algorithm).
+/// 3. If poisoning is enabled, the magic signature is intact.
+///
+/// This is a diagnostic tool for use from the kshell, not the hot path.
+/// It takes the global heap lock for the duration — do not call from
+/// latency-sensitive contexts.
+#[allow(clippy::cast_ptr_alignment)]
+pub fn audit_free_lists() -> HeapAuditResult {
+    let inner = HEAP.inner.lock();
+    let poison_on = POISON_ENABLED.load(Ordering::Relaxed);
+
+    let mut total_free: usize = 0;
+    let mut corrupted: usize = 0;
+    let mut cycles: usize = 0;
+    let mut bad_ptrs: usize = 0;
+
+    // HHDM valid range: hhdm_offset to (hhdm_offset + some reasonable max).
+    // A pointer should be at minimum above hhdm_offset and not null.
+    let hhdm_base = inner.hhdm_offset;
+
+    for (class_idx, &head) in inner.free_lists.iter().enumerate() {
+        if head.is_null() {
+            continue;
+        }
+
+        let class_size = SIZE_CLASSES.get(class_idx).copied().unwrap_or(0);
+        let mut slow = head;
+        let mut fast = head;
+        let mut count: usize = 0;
+        let mut cycle_found = false;
+
+        loop {
+            // Validate slow pointer.
+            let slow_addr = slow as usize;
+            if slow_addr < hhdm_base as usize || slow.is_null() {
+                bad_ptrs += 1;
+                break;
+            }
+
+            count += 1;
+
+            // Check poison integrity on this free slot.
+            if poison_on && class_size >= 16 {
+                let ptr = slow.cast::<u8>();
+                // SAFETY: slot is in the free list, still owned by allocator,
+                // and HHDM-mapped.  Reading bytes 8..12 is safe.
+                let m0 = unsafe { core::ptr::read_volatile(ptr.add(8)) };
+                let m1 = unsafe { core::ptr::read_volatile(ptr.add(9)) };
+                let m2 = unsafe { core::ptr::read_volatile(ptr.add(10)) };
+                let m3 = unsafe { core::ptr::read_volatile(ptr.add(11)) };
+                if m0 != POISON_MAGIC[0] || m1 != POISON_MAGIC[1]
+                    || m2 != POISON_MAGIC[2] || m3 != POISON_MAGIC[3]
+                {
+                    corrupted += 1;
+                }
+            }
+
+            // Advance slow by 1.
+            // SAFETY: slow is a valid HHDM pointer (checked above).
+            slow = unsafe { (*slow).next };
+            if slow.is_null() {
+                break;
+            }
+
+            // Advance fast by 2 (for cycle detection).
+            let fast_addr = fast as usize;
+            if fast_addr < hhdm_base as usize || fast.is_null() {
+                break;
+            }
+            fast = unsafe { (*fast).next };
+            if fast.is_null() {
+                break;
+            }
+            let fast_addr2 = fast as usize;
+            if fast_addr2 < hhdm_base as usize {
+                bad_ptrs += 1;
+                break;
+            }
+            fast = unsafe { (*fast).next };
+            if fast.is_null() {
+                break;
+            }
+
+            // Cycle check: if slow == fast, we have a loop.
+            if core::ptr::eq(slow, fast) {
+                cycle_found = true;
+                cycles += 1;
+                break;
+            }
+
+            // Safety limit: don't walk more than 1M entries.
+            if count > 1_000_000 {
+                break;
+            }
+        }
+
+        if !cycle_found {
+            total_free += count;
+        }
+    }
+
+    let ok = corrupted == 0 && cycles == 0 && bad_ptrs == 0;
+    HeapAuditResult { total_free_slots: total_free, corrupted_slots: corrupted, cycles_detected: cycles, bad_pointers: bad_ptrs, ok }
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 

@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "slabinfo", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
+    "slabinfo", "heapaudit", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
@@ -4170,6 +4170,7 @@ fn dispatch(line: &str) {
         "taskset" => cmd_taskset(args),
         "schedstat" => cmd_schedstat(),
         "slabinfo" => cmd_slabinfo(),
+        "heapaudit" => cmd_heapaudit(),
         "stack" => cmd_stack(),
         "wq" | "workqueue" => cmd_workqueue(),
         "ktimer" | "timers" => cmd_ktimer(),
@@ -13280,6 +13281,26 @@ fn cmd_slabinfo() {
         if overall.poison_enabled { "ON" } else { "off" },
         overall.poison_violations, overall.double_free_violations,
     );
+}
+
+/// Audit the kernel heap free lists for corruption.
+///
+/// Walks every size class's free list checking pointer validity,
+/// cycle detection (Floyd's algorithm), and poison integrity.
+fn cmd_heapaudit() {
+    shell_println!("Auditing kernel heap free lists...");
+    let result = crate::mm::heap::audit_free_lists();
+    shell_println!("");
+    shell_println!("  Free slots counted: {}", result.total_free_slots);
+    shell_println!("  Corrupted slots:    {}", result.corrupted_slots);
+    shell_println!("  Cycles detected:    {}", result.cycles_detected);
+    shell_println!("  Bad pointers:       {}", result.bad_pointers);
+    shell_println!("");
+    if result.ok {
+        shell_println!("  Result: PASS (no corruption detected)");
+    } else {
+        shell_println!("  Result: FAIL — heap corruption detected!");
+    }
 }
 
 fn cmd_workqueue() {

@@ -891,6 +891,10 @@ extern "C" fn kmain() -> ! {
     // Verifies virtual-contiguous allocations backed by discontiguous frames.
     mm::vmalloc::self_test();
 
+    // Step 22e⅞: Reverse mapping (rmap) self-test.
+    // Verifies add/remove/lookup of physical frame → virtual address mappings.
+    mm::rmap::self_test();
+
     // Step 22f: Initialize the soft lockup detector (watchdog).
     // Must be after SMP bootstrap so cpu_count() is accurate.
     // Monitors per-CPU heartbeats and warns if any CPU stops responding.

@@ -43,6 +43,7 @@ pub mod page_table;
 pub mod pressure;
 pub mod protect;
 pub mod rlimits;
+pub mod rmap;
 pub mod swap;
 pub mod user;
 pub mod vmalloc;

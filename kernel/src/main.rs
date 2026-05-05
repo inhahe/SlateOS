@@ -72,6 +72,7 @@ mod kshell;
 mod ktimer;
 mod ktrace;
 mod limine;
+mod lockdep;
 mod mm;
 mod net;
 mod pci;
@@ -792,6 +793,12 @@ extern "C" fn kmain() -> ! {
     // Verifies frame pointer chain walking works (requires -C force-frame-pointers=yes).
     // Gracefully skips if frame pointers are missing (e.g., optimized-out in release).
     backtrace::self_test();
+
+    // Step 22f3: Initialize lock order validator (lockdep).
+    // Detects potential deadlocks via dependency graph cycle detection.
+    // Must be after SMP init so current_cpu_index() works on all CPUs.
+    lockdep::init();
+    lockdep::self_test();
 
     console::boot_step_update(console::BootStatus::Ok, "Keyboard & multi-core");
 

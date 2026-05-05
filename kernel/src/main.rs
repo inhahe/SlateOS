@@ -955,6 +955,10 @@ extern "C" fn kmain() -> ! {
     // Per-syscall invocation count and latency tracking.
     syscall::profile::self_test();
 
+    // Step 22e⅞++++l: Allocation checkpoint self-test.
+    // Memory state checkpoints for leak detection (save/diff).
+    mm::alloc_checkpoint::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

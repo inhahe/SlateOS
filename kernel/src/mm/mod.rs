@@ -26,6 +26,7 @@
 //! for kernel heap objects mitigates this for small objects.
 
 pub mod accounting;
+pub mod alloc_checkpoint;
 pub mod alloc_lat;
 pub mod alloc_trace;
 pub mod compact;

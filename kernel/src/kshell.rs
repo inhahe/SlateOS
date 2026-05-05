@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4230,6 +4230,7 @@ fn dispatch(line: &str) {
         "heapprofile" | "hprof" => cmd_heap_profile(args),
         "syscallprof" | "sprof" => cmd_syscall_prof(args),
         "capaudit" | "capa" => cmd_cap_audit(args),
+        "checkpoint" | "ckpt" => cmd_checkpoint(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15696,6 +15697,145 @@ fn cmd_cap_audit(args: &str) {
                 shell_println!("");
                 shell_println!("  ⚠ {} access denial(s) recorded", s.total_denials);
             }
+        }
+    }
+}
+
+/// `checkpoint` — memory allocation checkpoints for leak detection.
+///
+/// Usage:
+///   checkpoint save A      — save checkpoint with label A (A-D)
+///   checkpoint diff A B    — diff two checkpoints
+///   checkpoint list        — list stored checkpoints
+///   checkpoint clear       — clear all checkpoints
+///   checkpoint show A      — show details of checkpoint A
+fn cmd_checkpoint(args: &str) {
+    use crate::mm::alloc_checkpoint;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "save" => {
+            if let Some(&label_str) = parts.get(1) {
+                let label = label_str.as_bytes().first().copied().unwrap_or(b'A');
+                if !label.is_ascii_uppercase() {
+                    shell_println!("Error: label must be A-D");
+                    return;
+                }
+                let slot = alloc_checkpoint::save(label);
+                shell_println!("Checkpoint '{}' saved in slot {}", label as char, slot);
+            } else {
+                shell_println!("Usage: checkpoint save <A-D>");
+            }
+        }
+        "diff" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: checkpoint diff <A-D> <A-D>");
+                return;
+            }
+            let from = parts[1].as_bytes().first().copied().unwrap_or(b'A');
+            let to = parts[2].as_bytes().first().copied().unwrap_or(b'B');
+
+            match alloc_checkpoint::diff(from, to) {
+                Some(d) => {
+                    shell_println!("=== Checkpoint Diff: {} → {} ===",
+                        d.from_label as char, d.to_label as char);
+                    shell_println!("");
+                    shell_println!("  Free frames delta: {:+}", d.free_delta);
+                    if d.free_delta < 0 {
+                        shell_println!("    ({} more frames allocated)", -d.free_delta);
+                    } else if d.free_delta > 0 {
+                        shell_println!("    ({} frames freed)", d.free_delta);
+                    }
+                    shell_println!("  Heap slab delta:   {:+} net objects", d.heap_slab_delta);
+                    shell_println!("  Heap large delta:  {:+} allocations", d.heap_large_delta);
+                    shell_println!("  Time elapsed:      {} ticks", d.tick_delta);
+
+                    // Show per-owner deltas (only non-zero).
+                    let mut any_owner_change = false;
+                    for i in 0..d.owner_deltas.len() {
+                        if d.owner_deltas[i] != 0 {
+                            if !any_owner_change {
+                                shell_println!("");
+                                shell_println!("  Per-owner frame changes:");
+                                any_owner_change = true;
+                            }
+                            let owner = crate::mm::frame_owner::Owner::from_u8(i as u8);
+                            shell_println!("    {:?}: {:+}", owner, d.owner_deltas[i]);
+                        }
+                    }
+
+                    if d.free_delta < 0 && d.heap_slab_delta > 0 {
+                        shell_println!("");
+                        shell_println!("  ⚠ Possible leak: frames consumed, heap objects grew");
+                    }
+                }
+                None => {
+                    shell_println!("Error: one or both checkpoints not found");
+                    shell_println!("  Use 'checkpoint list' to see stored checkpoints");
+                }
+            }
+        }
+        "list" => {
+            let ls = alloc_checkpoint::list();
+            shell_println!("=== Stored Checkpoints ===");
+            shell_println!("");
+            let mut count = 0;
+            for (label, valid) in &ls {
+                if *valid {
+                    if let Some(cp) = alloc_checkpoint::get(*label) {
+                        shell_println!("  [{}] '{}': free={}, total={}, tick={}",
+                            count, *label as char, cp.free_frames, cp.total_frames, cp.tick);
+                    }
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                shell_println!("  (none — use 'checkpoint save A' to create one)");
+            }
+        }
+        "show" => {
+            if let Some(&label_str) = parts.get(1) {
+                let label = label_str.as_bytes().first().copied().unwrap_or(b'A');
+                match alloc_checkpoint::get(label) {
+                    Some(cp) => {
+                        shell_println!("=== Checkpoint '{}' ===", label as char);
+                        shell_println!("");
+                        shell_println!("  Free frames:     {}", cp.free_frames);
+                        shell_println!("  Total frames:    {}", cp.total_frames);
+                        shell_println!("  Heap slab allocs: {}", cp.heap_slab_allocs);
+                        shell_println!("  Heap slab frees:  {}", cp.heap_slab_frees);
+                        shell_println!("  Heap large allocs: {}", cp.heap_large_allocs);
+                        shell_println!("  Tick:            {}", cp.tick);
+                        shell_println!("");
+                        shell_println!("  Per-owner frame counts:");
+                        for i in 0..cp.owner_counts.len() {
+                            if cp.owner_counts[i] > 0 {
+                                let owner = crate::mm::frame_owner::Owner::from_u8(i as u8);
+                                shell_println!("    {:?}: {}", owner, cp.owner_counts[i]);
+                            }
+                        }
+                    }
+                    None => {
+                        shell_println!("Error: checkpoint '{}' not found", label as char);
+                    }
+                }
+            } else {
+                shell_println!("Usage: checkpoint show <A-D>");
+            }
+        }
+        "clear" => {
+            alloc_checkpoint::clear();
+            shell_println!("All checkpoints cleared");
+        }
+        _ => {
+            shell_println!("Usage: checkpoint <save|diff|list|show|clear>");
+            shell_println!("");
+            shell_println!("  checkpoint save A      — save checkpoint A");
+            shell_println!("  checkpoint diff A B    — diff two checkpoints");
+            shell_println!("  checkpoint list        — list stored checkpoints");
+            shell_println!("  checkpoint show A      — show checkpoint details");
+            shell_println!("  checkpoint clear       — clear all");
         }
     }
 }

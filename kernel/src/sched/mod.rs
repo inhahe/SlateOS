@@ -2313,6 +2313,54 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
         .collect()
 }
 
+/// Result of a stack canary scan.
+#[derive(Debug, Clone)]
+pub struct CanaryScanResult {
+    /// Total tasks scanned.
+    pub scanned: usize,
+    /// Tasks with intact canaries.
+    pub ok: usize,
+    /// Tasks skipped (no stack_bottom, e.g., idle tasks).
+    pub skipped: usize,
+    /// Tasks with corrupted canaries (task_id, task_name).
+    pub corrupted: alloc::vec::Vec<(TaskId, [u8; 32], usize)>,
+}
+
+/// Scan all task stack canaries and report any corruption.
+///
+/// Acquires the SCHED lock and reads the canary u64 at each task's
+/// `stack_bottom`.  Returns the scan result.  Safe to call from kshell.
+#[must_use]
+pub fn check_all_canaries() -> CanaryScanResult {
+    let state = SCHED.lock();
+    let mut result = CanaryScanResult {
+        scanned: 0,
+        ok: 0,
+        skipped: 0,
+        corrupted: alloc::vec::Vec::new(),
+    };
+
+    for (&id, task_item) in state.tasks.iter() {
+        let bottom = task_item.stack_bottom;
+        if bottom == 0 {
+            result.skipped += 1;
+            continue;
+        }
+        result.scanned += 1;
+
+        // SAFETY: stack_bottom is a valid kernel virtual address set during
+        // task creation.  The canary is a u64 at that address.
+        let canary = unsafe { core::ptr::read_volatile(bottom as *const u64) };
+        if canary == task::STACK_CANARY {
+            result.ok += 1;
+        } else {
+            result.corrupted.push((id, task_item.name, task_item.name_len));
+        }
+    }
+
+    result
+}
+
 /// Summary of scheduler state for the panic handler.
 ///
 /// All fields are gathered via `try_lock` so the panic handler never

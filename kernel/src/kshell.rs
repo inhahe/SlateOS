@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "cpuid", "exceptions", "exclog", "faults", "memmap", "pgfault", "sysinfo", "tlb", "vectors",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "memmap", "pgfault", "stackcheck", "sysinfo", "tlb", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4187,6 +4187,7 @@ fn dispatch(line: &str) {
         "exclog" => cmd_exclog(),
         "sysinfo" | "cpuid" => cmd_sysinfo(),
         "boottime" | "boottiming" => cmd_boottime(),
+        "canary" | "stackcheck" => cmd_canary(),
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
         "memmap" => cmd_memmap(),
@@ -4462,6 +4463,7 @@ fn cmd_help() {
     crate::console_println!("  exclog     Show recent exception event log");
     crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
     crate::console_println!("  boottime   Show boot milestone timing");
+    crate::console_println!("  canary     Scan all task stack canaries for corruption");
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
     crate::console_println!("  memmap     Show virtual address space layout");
@@ -13919,6 +13921,28 @@ fn cmd_boottime() {
         let total = last_tick.saturating_sub(first_tick);
         shell_println!("  Total timed boot: {} ticks ({} ms)",
             total, total.saturating_mul(10));
+    }
+}
+
+fn cmd_canary() {
+    let result = crate::sched::check_all_canaries();
+
+    shell_println!("=== Stack Canary Scan ===");
+    shell_println!("");
+    shell_println!("  Scanned:   {} tasks", result.scanned);
+    shell_println!("  OK:        {} (canary intact)", result.ok);
+    shell_println!("  Skipped:   {} (idle/no stack)", result.skipped);
+
+    if result.corrupted.is_empty() {
+        shell_println!("");
+        shell_println!("  Result: ALL CANARIES INTACT");
+    } else {
+        shell_println!("  CORRUPTED: {} *** STACK OVERFLOW DETECTED ***", result.corrupted.len());
+        shell_println!("");
+        for &(tid, ref name, name_len) in &result.corrupted {
+            let name_str = core::str::from_utf8(&name[..name_len]).unwrap_or("?");
+            shell_println!("    Task {} ({:?}) — canary destroyed!", tid, name_str);
+        }
     }
 }
 

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "cpuid", "exceptions", "faults", "pgfault", "sysinfo", "tlb", "vectors",
+    "cpuid", "exceptions", "faults", "memmap", "pgfault", "sysinfo", "tlb", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4187,6 +4187,7 @@ fn dispatch(line: &str) {
         "sysinfo" | "cpuid" => cmd_sysinfo(),
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
+        "memmap" => cmd_memmap(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4459,6 +4460,7 @@ fn cmd_help() {
     crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
+    crate::console_println!("  memmap     Show virtual address space layout");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -13949,6 +13951,50 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+fn cmd_memmap() {
+    use crate::mm::page_table;
+    use crate::mm::frame::FRAME_SIZE;
+
+    shell_println!("=== Virtual Address Space Layout ===");
+    shell_println!("");
+
+    // User-space regions.
+    shell_println!("  User Space [0x0000_0000_0000_0000 .. 0x0000_7FFF_FFFF_FFFF]");
+    shell_println!("    Code/Data:   0x0000_0000_0040_0000  (ELF load base)");
+    shell_println!("    Mmap region: 0x0000_0060_0000_0000  (SYS_MMAP allocations)");
+    shell_println!("    Stack top:   0x0000_7FFF_FFFF_0000  (grows downward)");
+    shell_println!("");
+
+    // Canonical hole.
+    shell_println!("  --- Non-canonical hole [0x0000_8000_0000_0000 .. 0xFFFF_7FFF_FFFF_FFFF] ---");
+    shell_println!("");
+
+    // Kernel-space regions.
+    shell_println!("  Kernel Space [0xFFFF_8000_0000_0000 .. 0xFFFF_FFFF_FFFF_FFFF]");
+
+    // HHDM (Higher-Half Direct Map) — linear map of all physical memory.
+    if let Some(hhdm) = page_table::hhdm() {
+        let mem = crate::mm::memory_info();
+        let phys_size = (mem.total_frames as u64).saturating_mul(FRAME_SIZE as u64);
+        shell_println!("    HHDM:        {:#018x}  ({} MiB phys mapped)",
+            hhdm, phys_size / (1024 * 1024));
+    }
+
+    // Kernel stack region.
+    shell_println!("    Kstack:      0xFFFF_C100_0000_0000  (task kernel stacks)");
+
+    // Kernel test map and demand-page test areas.
+    shell_println!("    Test maps:   0xFFFF_C900_0000_0000  (page table self-tests)");
+    shell_println!("    Demand test: 0xFFFF_CA00_0000_0000  (fault subsystem test)");
+
+    // Kernel text/data (Limine loads kernel at the HHDM + its physical addr,
+    // so it's somewhere in the HHDM region typically).
+    shell_println!("");
+    shell_println!("  Page size:     {} KiB (logical frame)", FRAME_SIZE / 1024);
+    shell_println!("  HW page size:  4 KiB (x86_64 PTE granularity)");
+    shell_println!("  PML4 entries:  kernel uses 256-511, user uses 0-255");
 }
 
 fn cmd_lockdep(args: &str) {

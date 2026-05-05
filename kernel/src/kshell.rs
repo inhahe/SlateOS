@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4222,6 +4222,7 @@ fn dispatch(line: &str) {
         "migratetype" | "mtype" => cmd_migrate_type(),
         "pageage" | "aging" => cmd_page_age(),
         "ptwalk" | "pagetables" => cmd_pt_walk(),
+        "scrub" | "memscrub" => cmd_scrub(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15366,6 +15367,20 @@ fn cmd_migrate_type() {
     }
     shell_println!("");
     shell_println!("  Pageblock steals:  {}", s.pageblock_steals);
+}
+
+/// `scrub` — display memory scrubber status and statistics.
+fn cmd_scrub() {
+    let s = crate::mm::scrub::stats();
+    shell_println!("=== Memory Scrubber ===");
+    shell_println!("");
+    shell_println!("  Status:          {}", if s.enabled { "enabled" } else { "disabled" });
+    shell_println!("  Range:           0..{:#x} ({} MiB)", s.range_end, s.range_end / (1024 * 1024));
+    shell_println!("  Progress:        {}%", s.progress_pct);
+    shell_println!("  Cycles complete: {}", s.cycles);
+    shell_println!("  Steps executed:  {}", s.steps);
+    shell_println!("  Total scrubbed:  {} MiB", s.total_bytes / (1024 * 1024));
+    shell_println!("  Errors detected: {}", s.errors);
 }
 
 /// `ptwalk` — walk and summarize current kernel page tables.

@@ -924,6 +924,10 @@ extern "C" fn kmain() -> ! {
     // Generic page table iteration for RSS counting, fork, etc.
     mm::pt_walk::self_test();
 
+    // Step 22e⅞++++d: Memory scrubber self-test.
+    // Proactive ECC error detection via background memory reads.
+    mm::scrub::self_test();
+
     // Step 22e⅞++++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();

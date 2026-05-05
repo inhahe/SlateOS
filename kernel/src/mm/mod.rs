@@ -50,6 +50,7 @@ pub mod pressure;
 pub mod protect;
 pub mod rlimits;
 pub mod rmap;
+pub mod scrub;
 pub mod swap;
 pub mod tlb_gather;
 pub mod user;

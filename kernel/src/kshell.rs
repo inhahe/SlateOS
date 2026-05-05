@@ -3102,6 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "vmalloc", "vm",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4212,6 +4213,7 @@ fn dispatch(line: &str) {
         "irqbalance" | "irqbal" => cmd_irqbalance(args),
         "msi" => cmd_msi(),
         "hugepage" | "hugepages" | "hp" => cmd_hugepage(),
+        "vmalloc" | "vm" => cmd_vmalloc(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -4518,6 +4520,7 @@ fn cmd_help() {
     crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
     crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
     crate::console_println!("  memmap     Show virtual address space layout");
+    crate::console_println!("  vmalloc    Show vmalloc (virtual kernel memory) statistics");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -15260,6 +15263,19 @@ fn cmd_hugepage() {
     shell_println!("  Total freed:      {}", st.freed);
     shell_println!("  Alloc failures:   {}", st.failures);
     shell_println!("  Page size:        2 MiB (128 × 16 KiB frames)");
+}
+
+/// `vmalloc` — display vmalloc (virtual kernel memory) statistics.
+fn cmd_vmalloc() {
+    let st = crate::mm::vmalloc::stats();
+    shell_println!("=== vmalloc (Virtual Kernel Memory) ===");
+    shell_println!("");
+    shell_println!("  Active allocations: {}", st.active);
+    shell_println!("  Bytes mapped:       {} KiB", st.bytes_allocated / 1024);
+    shell_println!("  Region size:        {} MiB", st.region_size / (1024 * 1024));
+    shell_println!("  Total allocs:       {}", st.alloc_count);
+    shell_println!("  Total frees:        {}", st.free_count);
+    shell_println!("  Alloc failures:     {}", st.alloc_failures);
 }
 
 /// `msi` — display MSI (Message Signaled Interrupts) vector pool status.

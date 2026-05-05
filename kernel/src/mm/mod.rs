@@ -45,6 +45,7 @@ pub mod protect;
 pub mod rlimits;
 pub mod swap;
 pub mod user;
+pub mod vmalloc;
 pub mod vma;
 
 // ---------------------------------------------------------------------------

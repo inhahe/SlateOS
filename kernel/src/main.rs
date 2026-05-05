@@ -887,6 +887,10 @@ extern "C" fn kmain() -> ! {
     // Verifies alloc/map/read/write/unmap/free of 2 MiB huge pages.
     mm::hugepage::self_test();
 
+    // Step 22e¾: vmalloc self-test.
+    // Verifies virtual-contiguous allocations backed by discontiguous frames.
+    mm::vmalloc::self_test();
+
     // Step 22f: Initialize the soft lockup detector (watchdog).
     // Must be after SMP bootstrap so cpu_count() is accurate.
     // Monitors per-CPU heartbeats and warns if any CPU stops responding.

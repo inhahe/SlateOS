@@ -151,6 +151,23 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] `apply_profile()` on PriorityRoundRobin, `apply_workload_profile()` / `current_workload_profile()` on sched module
   - [x] SYS_SCHED_SET_PROFILE (53), SYS_SCHED_GET_PROFILE (54) syscalls
   - [x] Self-test: all 4 profiles, invalid IDs rejected, manual tuning detected
+- [x] Kernel synchronization primitives:
+  - [x] WaitQueue (fundamental blocking, 32 waiter slots)
+  - [x] KMutex (sleeping mutex, adaptive spin + WaitQueue blocking, RAII guard)
+  - [x] KRwLock (sleeping reader-writer lock, writer preference, concurrent readers)
+  - [x] Semaphore (counting, AtomicI64 + WaitQueue)
+  - [x] CondVar (condition variable, integrates with KMutex, wait_while/wait_until)
+  - [x] Barrier (reusable multi-task rendezvous, generation counter)
+  - [x] OnceEvent (one-shot latch, signal once + unblock all forever)
+  - [x] KChannel (bounded MPMC typed channel, backpressure, close semantics)
+- [x] Task supervisor (automatic restart of crashed kernel tasks)
+  - [x] RestartPolicy: Always/OnFailure/Never, exponential backoff, max restarts
+  - [x] Exit hook integration, deferred restart via ktimer → workqueue → spawn
+- [x] Kernel trace buffer (ktrace)
+  - [x] 512-entry lock-free ring buffer, ~20ns per event recording
+  - [x] 12 categories, per-category filter, global enable/disable
+  - [x] Trace points: task spawn, task exit
+  - [x] Kshell 'trace' command for inspection
 
 ### 1.4 IPC and syscalls
 - [x] Syscall dispatch (many specialized syscalls, not few generic ones)

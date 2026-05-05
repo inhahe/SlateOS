@@ -70,6 +70,7 @@ mod keyboard;
 mod klog;
 mod kshell;
 mod boot_timing;
+mod kprofile;
 mod ktimer;
 mod ktrace;
 mod limine;

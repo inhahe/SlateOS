@@ -2885,12 +2885,24 @@ fn schedule_inner(requeue: bool) {
                             ctr.fetch_add(1, Ordering::Relaxed);
                         }
 
+                        // Profile the actual context switch (save/restore/CR3).
+                        let _prof_t = crate::kprofile::begin(crate::kprofile::Slot::ContextSwitch);
+
                         // SAFETY: Both context and FPU pointers valid (from
                         // task table under lock).  old is &mut (exclusive),
                         // new is & (shared), pointing to different tasks.
                         // FPU pointers are 16-byte aligned (FpuState has
                         // repr(align(16))).
                         unsafe { switch_context(&mut *old_p, &*new_p, old_fpu, new_fpu); }
+
+                        // NOTE: After switch_context returns, we're now
+                        // running as the OLD task (resumed later).  The
+                        // profiling end() measures the full switch-out +
+                        // switch-back-in cycle for this task, which is
+                        // informative but not a single context switch cost.
+                        // The actual one-way switch cost is half this value
+                        // (or use the ISR measurement for precise one-way).
+                        crate::kprofile::end(crate::kprofile::Slot::ContextSwitch, _prof_t);
 
                         // Resumed: this task was unblocked and switched
                         // back to.  (For Dead tasks, this line is

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4191,6 +4191,7 @@ fn dispatch(line: &str) {
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
         "irqrate" => cmd_irqrate(),
+        "kprofile" => cmd_kprofile(args),
         "latency" | "lathist" => cmd_latency(),
         "pressure" | "mempressure" => cmd_pressure(),
         "jitter" | "tickjitter" => cmd_jitter(),
@@ -4472,6 +4473,7 @@ fn cmd_help() {
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
     crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
+    crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
     crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
@@ -14074,6 +14076,63 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+/// `kprofile` — display kernel code profiling results.
+///
+/// Shows TSC cycle counts for instrumented kernel code regions.
+/// Subcommands:
+///   `kprofile`        — show all active measurements
+///   `kprofile reset`  — reset all counters
+///   `kprofile on`     — enable profiling
+///   `kprofile off`    — disable profiling
+fn cmd_kprofile(args: &str) {
+    let arg = args.trim();
+
+    match arg {
+        "reset" | "clear" => {
+            crate::kprofile::reset();
+            shell_println!("Profiling counters reset.");
+            return;
+        }
+        "on" | "enable" => {
+            crate::kprofile::set_enabled(true);
+            shell_println!("Profiling enabled.");
+            return;
+        }
+        "off" | "disable" => {
+            crate::kprofile::set_enabled(false);
+            shell_println!("Profiling disabled.");
+            return;
+        }
+        _ => {}
+    }
+
+    let enabled = if crate::kprofile::is_enabled() { "ON" } else { "OFF" };
+    shell_println!("=== Kernel Code Profiler [{}] ===", enabled);
+    shell_println!("");
+
+    let snapshots = crate::kprofile::snapshots();
+    let mut any = false;
+
+    shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+        "Region", "Count", "Min", "Mean", "Max");
+    shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+        "------", "-----", "---", "----", "---");
+
+    for snap in &snapshots {
+        if let Some(s) = snap {
+            any = true;
+            shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+                s.name, s.count, s.min_cycles, s.mean_cycles, s.max_cycles);
+        }
+    }
+
+    if !any {
+        shell_println!("  (no measurements recorded yet)");
+        shell_println!("");
+        shell_println!("  Profiling is {}. Instrumented paths will auto-record.", enabled);
+    }
 }
 
 /// `pressure` — display memory pressure score and breakdown.

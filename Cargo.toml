@@ -20,3 +20,8 @@ expect_used = "warn"
 panic = "warn"
 indexing_slicing = "warn"
 arithmetic_side_effects = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

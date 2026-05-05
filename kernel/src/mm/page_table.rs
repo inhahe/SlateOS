@@ -526,6 +526,7 @@ impl PtPagePool {
     fn refill(&mut self) -> KernelResult<()> {
         let frame = frame::alloc_frame()?;
         let base = frame.addr();
+        super::memtype::charge(super::memtype::MemType::PageTable, 1);
 
         // Split into 4 × 4 KiB pages.  Push in reverse order so the
         // lowest address ends up at the head (first to be allocated).

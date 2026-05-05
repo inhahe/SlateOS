@@ -277,6 +277,7 @@ pub fn alloc() -> KernelResult<KstackInfo> {
             return Err(e);
         }
     };
+    super::memtype::charge(super::memtype::MemType::KernelStack, 1u64 << order);
     let stack_phys = phys_frame.addr();
 
     // Step 5: Map the stack frames into the kernel page table.
@@ -308,6 +309,7 @@ pub fn alloc() -> KernelResult<KstackInfo> {
             }
             // SAFETY: We just allocated this frame.
             unsafe { let _ = frame::free_order(phys_frame, order); }
+            super::memtype::uncharge(super::memtype::MemType::KernelStack, 1u64 << order);
             fault::remove_kernel_vma(guard_start);
             ALLOCATOR.lock().free_slot(slot);
             return Err(e);
@@ -375,6 +377,7 @@ pub unsafe fn free(info: KstackInfo) -> KernelResult<()> {
     if let Some(frame) = PhysFrame::from_addr(info.stack_phys) {
         // SAFETY: Caller guarantees no CPU is using this stack.
         unsafe { frame::free_order(frame, order)?; }
+        super::memtype::uncharge(super::memtype::MemType::KernelStack, 1u64 << order);
     }
 
     // Remove the guard VMA.

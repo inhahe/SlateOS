@@ -34,6 +34,7 @@ pub mod frame;
 pub mod heap;
 pub mod kstack;
 pub mod kswapd;
+pub mod memtype;
 pub mod oom;
 pub mod page_table;
 pub mod pressure;

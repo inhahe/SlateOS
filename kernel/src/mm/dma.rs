@@ -187,6 +187,8 @@ pub fn alloc(size: usize, constraint: DmaConstraint) -> KernelResult<DmaBuffer> 
         core::ptr::write_bytes(virt, 0, alloc_size);
     }
 
+    super::memtype::charge(super::memtype::MemType::DmaBuf, 1u64 << order);
+
     Ok(DmaBuffer {
         frame: phys_frame,
         order,
@@ -204,7 +206,11 @@ pub fn alloc(size: usize, constraint: DmaConstraint) -> KernelResult<DmaBuffer> 
 pub unsafe fn free(buf: DmaBuffer) -> KernelResult<()> {
     // SAFETY: Caller guarantees the buffer was validly allocated
     // and is no longer in use by any device or CPU.
-    unsafe { frame::free_order(buf.frame, buf.order) }
+    let result = unsafe { frame::free_order(buf.frame, buf.order) };
+    if result.is_ok() {
+        super::memtype::uncharge(super::memtype::MemType::DmaBuf, 1u64 << buf.order);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

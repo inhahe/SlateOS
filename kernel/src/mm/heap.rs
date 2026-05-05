@@ -446,6 +446,7 @@ impl HeapInner {
         let Ok(frame) = frame::alloc_frame() else {
             return false;
         };
+        super::memtype::charge(super::memtype::MemType::SlabHeap, 1);
 
         let virt_base = frame.to_virt(self.hhdm_offset) as *mut u8;
         let slots = FRAME_SIZE / class_size;
@@ -542,7 +543,13 @@ impl HeapInner {
     fn large_alloc(&self, layout: &Layout) -> *mut u8 {
         let order = Self::large_order(layout);
         match frame::alloc_order(order) {
-            Ok(f) => f.to_virt(self.hhdm_offset) as *mut u8,
+            Ok(f) => {
+                super::memtype::charge(
+                    super::memtype::MemType::LargeHeap,
+                    1u64 << order,
+                );
+                f.to_virt(self.hhdm_offset) as *mut u8
+            }
             Err(_) => ptr::null_mut(),
         }
     }
@@ -567,6 +574,10 @@ impl HeapInner {
             // (which is better than corrupting the allocator).  In practice,
             // this cannot fail if the caller upholds the safety contract.
             let _ = unsafe { frame::free_order(frame, order) };
+            super::memtype::uncharge(
+                super::memtype::MemType::LargeHeap,
+                1u64 << order,
+            );
         }
     }
 }

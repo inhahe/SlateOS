@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4198,6 +4198,7 @@ fn dispatch(line: &str) {
         "kstat" | "history" => cmd_kstat(args),
         "kwarn" | "warnings" => cmd_kwarn(args),
         "loadavg" => cmd_loadavg(),
+        "memtype" | "memacct" => cmd_memtype(),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -4486,6 +4487,8 @@ fn cmd_help() {
     crate::console_println!("  idle       Show CPU idle state statistics (MWAIT/HLT)");
     crate::console_println!("  kstat      Show system metrics history (1-min time series)");
     crate::console_println!("  kwarn      Show kernel warnings (kwarn clear to reset)");
+    crate::console_println!("  loadavg    Show 1/5/15 minute system load averages");
+    crate::console_println!("  memtype    Show physical memory usage by type");
     crate::console_println!("  irqoff     Show interrupt-disabled duration tracking");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
@@ -14653,6 +14656,49 @@ fn cmd_kwarn(args: &str) {
             i + 1, msg, file, w.line, age_str);
     }
     shell_println!("");
+}
+
+/// `memtype` — show memory type breakdown.
+///
+/// Displays how physical memory is distributed across usage categories
+/// (page tables, stacks, slab, DMA, etc.) — like `/proc/meminfo`.
+fn cmd_memtype() {
+    let s = crate::mm::memtype::stats();
+    let names = crate::mm::memtype::all_type_names();
+    let total_accounted = crate::mm::memtype::total_accounted();
+    let frame_size = crate::mm::frame::FRAME_SIZE;
+
+    shell_println!("=== Memory Type Breakdown ===");
+    shell_println!("");
+    shell_println!("  {:<12} {:>8} {:>8} {:>8}", "Type", "Current", "Peak", "KiB");
+    shell_println!("  {}", "-".repeat(44));
+
+    for i in 0..names.len() {
+        if s.current[i] == 0 && s.peak[i] == 0 {
+            continue;
+        }
+        let kib = s.current[i].saturating_mul(frame_size as u64) / 1024;
+        shell_println!("  {:<12} {:>6} fr {:>6} fr {:>6}",
+            names[i],
+            s.current[i],
+            s.peak[i],
+            kib,
+        );
+    }
+
+    let total_kib = total_accounted.saturating_mul(frame_size as u64) / 1024;
+    shell_println!("  {}", "-".repeat(44));
+    shell_println!("  {:<12} {:>6} fr {:>14}", "TOTAL", total_accounted, alloc::format!("{} KiB", total_kib));
+    shell_println!("");
+
+    // Also show how much of total physical memory is accounted for.
+    if let Some(phys) = crate::mm::frame::try_stats() {
+        let used = phys.total_frames.saturating_sub(phys.free_frames) as u64;
+        if used > 0 {
+            let pct = total_accounted.saturating_mul(100) / used.max(1);
+            shell_println!("  Used frames: {} (accounted: {}%)", used, pct);
+        }
+    }
 }
 
 /// `loadavg` — show system load averages.

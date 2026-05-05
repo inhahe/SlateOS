@@ -375,6 +375,13 @@ const fn build_v1_table() -> SyscallTable {
 /// A [`SyscallResult`] with the return values for `rax` and `rdx`.
 #[allow(clippy::cast_possible_truncation)]
 pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
+    crate::ktrace::record(
+        crate::ktrace::Category::Syscall,
+        crate::ktrace::event::SYSCALL_ENTER,
+        nr,
+        args.arg0,
+    );
+
     // Bounds check.
     let idx = nr as usize;
     if idx >= MAX_SYSCALL_NR {

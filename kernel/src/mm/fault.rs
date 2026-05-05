@@ -144,6 +144,13 @@ pub fn init() {
 /// resolvable (no VMA, guard page, protection violation, reserved
 /// bit, etc.).
 pub fn resolve(fault_addr: u64, error_code: u64) -> KernelResult<()> {
+    crate::ktrace::record(
+        crate::ktrace::Category::Mm,
+        crate::ktrace::event::PAGE_FAULT,
+        fault_addr,
+        error_code,
+    );
+
     let error = PageFaultError::new(error_code);
 
     // Reserved-bit violations are hardware/software bugs, never

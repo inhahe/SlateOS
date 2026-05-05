@@ -381,8 +381,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let cpu = crate::smp::current_cpu_index();
 
     // Test 1: raise sets pending bits.
+    // Disable interrupts so a timer ISR can't process the bits between
+    // raise() and the check (the timer ISR calls process_pending which
+    // would clear the bits, causing a false failure).
+    unsafe { core::arch::asm!("cli", options(nomem, nostack, preserves_flags)); }
     raise(TIMER_SOFTIRQ | IRQ_POLL_SOFTIRQ);
     let bits = PENDING.get(cpu).map_or(0, |p| p.load(Ordering::Acquire));
+    unsafe { core::arch::asm!("sti", options(nomem, nostack, preserves_flags)); }
     if bits & TIMER_SOFTIRQ == 0 || bits & IRQ_POLL_SOFTIRQ == 0 {
         serial_println!("[softirq]   FAIL: raise did not set expected bits (got {:#x})", bits);
         return Err(crate::error::KernelError::InternalError);

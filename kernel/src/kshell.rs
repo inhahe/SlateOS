@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4233,6 +4233,7 @@ fn dispatch(line: &str) {
         "checkpoint" | "ckpt" => cmd_checkpoint(args),
         "strace" | "sctrace" => cmd_strace(args),
         "ipcstat" | "ipc" => cmd_ipc_stat(args),
+        "kobjects" | "kobj" => cmd_kobjects(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15927,6 +15928,57 @@ fn cmd_strace(args: &str) {
                         e.args[0], result_str, e.duration_cycles);
                 }
             }
+        }
+    }
+}
+
+/// `kobjects` — show kernel object lifecycle stats.
+///
+/// Usage:
+///   kobjects        — show all object type counts
+///   kobjects leaks  — show types with active objects (potential leaks)
+///   kobjects reset  — reset all counters
+fn cmd_kobjects(args: &str) {
+    use crate::kobject;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "reset" => {
+            kobject::reset();
+            shell_println!("Kernel object counters reset");
+        }
+        "leaks" => {
+            let leaks = kobject::potential_leaks();
+            if leaks.is_empty() {
+                shell_println!("No active objects (no potential leaks)");
+            } else {
+                shell_println!("=== Objects with active instances ===");
+                shell_println!("");
+                shell_println!("  {:12}  {:>8}  {:>8}  {:>6}  {:>8}",
+                    "TYPE", "CREATED", "DESTROY", "ACTIVE", "PEAK");
+                for s in &leaks {
+                    shell_println!("  {:12}  {:>8}  {:>8}  {:>6}  {:>8}",
+                        s.obj_type.name(), s.created, s.destroyed,
+                        s.active, s.high_water);
+                }
+                shell_println!("");
+                shell_println!("  Total active: {}", kobject::total_active());
+            }
+        }
+        _ => {
+            let all = kobject::all_stats();
+            shell_println!("=== Kernel Object Tracking ===");
+            shell_println!("");
+            shell_println!("  {:12}  {:>8}  {:>8}  {:>6}  {:>8}",
+                "TYPE", "CREATED", "DESTROY", "ACTIVE", "PEAK");
+            for s in &all {
+                shell_println!("  {:12}  {:>8}  {:>8}  {:>6}  {:>8}",
+                    s.obj_type.name(), s.created, s.destroyed,
+                    s.active, s.high_water);
+            }
+            shell_println!("");
+            shell_println!("  Total active objects: {}", kobject::total_active());
         }
     }
 }

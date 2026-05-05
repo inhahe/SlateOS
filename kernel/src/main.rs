@@ -76,6 +76,7 @@ mod ipc;
 mod kcounters;
 mod kevent;
 mod keyboard;
+mod kobject;
 mod klog;
 mod kshell;
 mod ksyms;
@@ -966,6 +967,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++n: IPC statistics self-test.
     // Per-mechanism usage and performance counters.
     ipc::stats::self_test();
+
+    // Step 22e⅞++++o: Kernel object tracking self-test.
+    // Lifecycle counters for all kernel object types.
+    kobject::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

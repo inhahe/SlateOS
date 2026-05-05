@@ -282,6 +282,94 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
 }
 
 // ---------------------------------------------------------------------------
+// PMC-aware benchmark variant
+// ---------------------------------------------------------------------------
+
+/// Run a micro-benchmark with optional PMC measurement.
+///
+/// If PMC hardware is available, measures LLC misses alongside cycle
+/// counts.  This provides insight into whether a function is cache-bound
+/// or compute-bound.
+///
+/// Falls back to plain `run()` if PMU is unavailable.
+pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
+    use crate::pmc;
+
+    let has_pmc = pmc::is_available();
+
+    // Configure LLC miss counter if available.
+    if has_pmc {
+        pmc::configure(0, pmc::Event::LlcMisses);
+        pmc::configure(1, pmc::Event::InstructionsRetired);
+    }
+
+    // Warmup: 10% of iterations, minimum 5.
+    let warmup = core::cmp::max(iterations / 10, 5);
+    for _ in 0..warmup {
+        f();
+    }
+
+    let mut min = u64::MAX;
+    let mut max = 0u64;
+    let mut total = 0u64;
+
+    // Start PMC counters for the measurement phase.
+    if has_pmc {
+        pmc::reset(0);
+        pmc::reset(1);
+        pmc::start(0);
+        pmc::start(1);
+    }
+
+    for _ in 0..iterations {
+        let start = rdtsc_serialized();
+        f();
+        let end = rdtsc();
+        let elapsed = end.saturating_sub(start);
+        if elapsed < min { min = elapsed; }
+        if elapsed > max { max = elapsed; }
+        total = total.saturating_add(elapsed);
+    }
+
+    if has_pmc {
+        pmc::stop(0);
+        pmc::stop(1);
+    }
+
+    let mean = total.checked_div(iterations as u64).unwrap_or(0);
+    let min_ns = cycles_to_ns(min);
+    let mean_ns = cycles_to_ns(mean);
+
+    serial_println!(
+        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        name, min, min_ns, mean, mean_ns, max, iterations
+    );
+
+    // Report PMC data if available.
+    if has_pmc {
+        let llc_misses = pmc::read(0);
+        let insns = pmc::read(1);
+        let misses_per_iter = llc_misses.checked_div(iterations as u64).unwrap_or(0);
+        let insns_per_iter = insns.checked_div(iterations as u64).unwrap_or(0);
+        serial_println!(
+            "[bench]   └─ PMC: {} LLC misses/iter, {} insns/iter, {:.2} IPC",
+            misses_per_iter, insns_per_iter,
+            if mean > 0 { insns_per_iter as f64 / mean as f64 } else { 0.0 }
+        );
+    }
+
+    BenchResult {
+        name: String::from(name),
+        iterations,
+        min_cycles: min,
+        mean_cycles: mean,
+        max_cycles: max,
+        min_ns,
+        mean_ns,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Standard kernel benchmarks
 // ---------------------------------------------------------------------------
 

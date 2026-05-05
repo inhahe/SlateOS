@@ -163,6 +163,20 @@ pub fn config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
     ((dword >> shift) & 0xFFFF) as u16
 }
 
+/// Write a 16-bit value to PCI configuration space.
+///
+/// Performs a read-modify-write of the containing 32-bit dword to
+/// preserve the adjacent 16-bit half.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    let aligned = offset & 0xFC;
+    let dword = config_read32(bus, device, function, aligned);
+    let shift = ((offset & 2) * 8) as u32;
+    let mask = !(0xFFFF_u32 << shift);
+    let new_dword = (dword & mask) | (u32::from(value) << shift);
+    config_write32(bus, device, function, aligned, new_dword);
+}
+
 /// Read an 8-bit value from PCI configuration space.
 // Same as config_read16 but for single byte.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]

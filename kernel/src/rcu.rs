@@ -120,6 +120,20 @@ static READ_NESTING: [AtomicU64; MAX_CPUS] = {
     [ZERO; MAX_CPUS]
 };
 
+/// Per-CPU idle flag.
+///
+/// Set when a CPU enters its idle loop (tickless HLT).  An idle CPU
+/// is inherently quiescent — it cannot be in an RCU read-side
+/// critical section.  `synchronize()` skips idle CPUs instead of
+/// waiting for their QS counters to advance (which would never happen
+/// since the APIC timer is stopped in tickless idle mode).
+///
+/// Based on Linux's `rcu_idle_enter()` / `rcu_idle_exit()`.
+static CPU_IDLE: [AtomicBool; MAX_CPUS] = {
+    const FALSE: AtomicBool = AtomicBool::new(false);
+    [FALSE; MAX_CPUS]
+};
+
 // ---------------------------------------------------------------------------
 // Deferred callbacks
 // ---------------------------------------------------------------------------
@@ -272,6 +286,16 @@ pub fn synchronize() {
                 continue;
             }
 
+            // An idle CPU is inherently quiescent — it's in HLT/MWAIT
+            // with no RCU read-side critical section active.  Skip it.
+            // Without this, tickless idle CPUs (whose APIC timer is
+            // stopped) would prevent grace periods from completing.
+            let idle = CPU_IDLE.get(i)
+                .map_or(false, |f| f.load(Ordering::Acquire));
+            if idle {
+                continue;
+            }
+
             // A CPU in an RCU read-side critical section is not quiescent.
             let nesting = READ_NESTING.get(i)
                 .map_or(0, |n| n.load(Ordering::Relaxed));
@@ -343,6 +367,34 @@ pub fn quiescent_state() {
     let cpu = smp::current_cpu_index();
     if let Some(counter) = QS_COUNTERS.get(cpu) {
         counter.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Mark the current CPU as entering idle.
+///
+/// Call this from the idle loop before HLT/MWAIT.  An idle CPU is
+/// inherently quiescent (it cannot be in an RCU read-side critical
+/// section), so `synchronize()` will skip it instead of waiting for
+/// its QS counter to advance.
+///
+/// Based on Linux `rcu_idle_enter()`.
+pub fn mark_idle() {
+    let cpu = smp::current_cpu_index();
+    if let Some(flag) = CPU_IDLE.get(cpu) {
+        flag.store(true, Ordering::Release);
+    }
+}
+
+/// Mark the current CPU as leaving idle.
+///
+/// Call this from the idle loop after waking from HLT/MWAIT, before
+/// executing any RCU-protected code.
+///
+/// Based on Linux `rcu_idle_exit()`.
+pub fn mark_active() {
+    let cpu = smp::current_cpu_index();
+    if let Some(flag) = CPU_IDLE.get(cpu) {
+        flag.store(false, Ordering::Release);
     }
 }
 

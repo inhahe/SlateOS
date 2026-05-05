@@ -89,6 +89,7 @@ mod ktrace;
 mod limine;
 mod lockdep;
 mod mm;
+mod msi;
 mod net;
 mod numa;
 mod pci;
@@ -848,6 +849,11 @@ extern "C" fn kmain() -> ! {
     // Must be after scheduler (needs yield_now for synchronize).
     rcu::self_test();
 
+    // MSI (Message Signaled Interrupts) self-test.
+    // Vector allocation pool and address/data formatting.
+    // Must be after PCI init (uses config space accessors).
+    msi::self_test();
+
     // IRQ balancer initialization — distributes interrupts across CPUs.
     // Requires IOAPIC, SMP, and cpu_hotplug to be initialized.
     irqbalance::init();
@@ -1249,10 +1255,20 @@ extern "C" fn deferred_bench_task(_arg: u64) {
 fn idle_loop() -> ! {
     let mut tick_counter = 0u32;
     loop {
+        // Notify RCU that this CPU is entering idle.  An idle CPU is
+        // inherently quiescent — no RCU read-side critical section can
+        // be active.  This lets rcu::synchronize() skip this CPU
+        // instead of waiting for a timer-tick-driven quiescent state.
+        rcu::mark_idle();
+
         // Sleep until next interrupt or MWAIT cache-line wake.
         // Uses MWAIT (power-efficient C-state idle) if supported,
         // falls back to HLT otherwise.
         idle::idle_once();
+
+        // Mark this CPU as active before executing any code that might
+        // enter an RCU read-side critical section.
+        rcu::mark_active();
 
         tick_counter = tick_counter.wrapping_add(1);
 

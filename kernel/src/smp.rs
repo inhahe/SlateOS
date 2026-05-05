@@ -836,7 +836,18 @@ extern "C" fn ap_entry() -> ! {
         // stop_timer and HLT, it's harmless (just a spurious wake).
         unsafe { crate::apic::stop_timer(); }
 
+        // Notify RCU that this CPU is entering idle.  An idle CPU is
+        // inherently quiescent (no RCU read-side critical sections).
+        // Without this, rcu::synchronize() would wait forever for this
+        // CPU's QS counter to advance — but the APIC timer is stopped,
+        // so timer_tick() (which reports quiescent state) never fires.
+        crate::rcu::mark_idle();
+
         crate::cpu::hlt(); // Sleep until reschedule IPI.
+
+        // Mark this CPU as active before executing any RCU-protected
+        // code path.
+        crate::rcu::mark_active();
 
         // Woke up — restart the timer for preemptive time-slicing.
         // The task we're about to switch to needs the timer for its

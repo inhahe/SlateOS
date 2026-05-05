@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "ktimer", "timers", "xattr", "xxd", "zip",
+    "ktimer", "rng", "timers", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4173,6 +4173,7 @@ fn dispatch(line: &str) {
         "stack" => cmd_stack(),
         "wq" | "workqueue" => cmd_workqueue(),
         "ktimer" | "timers" => cmd_ktimer(),
+        "rng" | "random" => cmd_rng(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4432,6 +4433,7 @@ fn cmd_help() {
     crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
     crate::console_println!("  wq        Show kernel workqueue status and statistics");
     crate::console_println!("  ktimer    Show kernel timer statistics");
+    crate::console_println!("  rng       Show kernel CSPRNG statistics");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -11943,7 +11945,7 @@ fn is_builtin(name: &str) -> bool {
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
         | "taskset" | "schedstat" | "slabinfo" | "stack" | "profile" | "top"
-        | "wq" | "workqueue" | "ktimer" | "timers"
+        | "wq" | "workqueue" | "ktimer" | "timers" | "rng" | "random"
     )
 }
 
@@ -13302,6 +13304,24 @@ fn cmd_ktimer() {
     shell_println!("  Scheduled:    {} (total since boot)", scheduled);
     shell_println!("  Fired:        {}", fired);
     shell_println!("  Cancelled:    {}", cancelled);
+}
+
+fn cmd_rng() {
+    let init = crate::rng::is_initialized();
+    let bytes = crate::rng::total_bytes_generated();
+    let reseeds = crate::rng::reseed_count();
+    let entropy = crate::rng::entropy_contributions();
+
+    shell_println!("Kernel CSPRNG (ChaCha20)");
+    shell_println!("");
+    shell_println!("  Initialized:  {}", if init { "yes" } else { "no" });
+    shell_println!("  Generated:    {} bytes", bytes);
+    shell_println!("  Reseeds:      {}", reseeds);
+    shell_println!("  Entropy in:   {} contributions (ISR timing)", entropy);
+
+    // Show a sample random value.
+    let sample = crate::rng::next_u64();
+    shell_println!("  Sample:       {:#018x}", sample);
 }
 
 #[allow(clippy::arithmetic_side_effects)]

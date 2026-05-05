@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "cpuid", "exceptions", "sysinfo", "vectors",
+    "cpuid", "exceptions", "sysinfo", "tlb", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4185,6 +4185,7 @@ fn dispatch(line: &str) {
         "diag" | "health" => cmd_diag(),
         "exceptions" | "vectors" => cmd_exceptions(),
         "sysinfo" | "cpuid" => cmd_sysinfo(),
+        "tlb" => cmd_tlb(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4455,6 +4456,7 @@ fn cmd_help() {
     crate::console_println!("  diag      One-stop system health diagnostic summary");
     crate::console_println!("  exceptions Show per-vector exception/interrupt counts");
     crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
+    crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -13903,6 +13905,25 @@ fn cmd_sysinfo() {
     // CPU count.
     shell_println!("");
     shell_println!("  Logical CPUs: {}", crate::smp::cpu_count());
+}
+
+fn cmd_tlb() {
+    let s = crate::tlb::stats();
+    shell_println!("=== TLB Shootdown Statistics ===");
+    shell_println!("");
+    shell_println!("  Range flushes (invlpg):    {}", s.range_flushes);
+    shell_println!("  Full flushes (CR3 reload): {}", s.full_flushes);
+    shell_println!("  Total pages invalidated:   {}", s.total_pages_flushed);
+    shell_println!("");
+    shell_println!("  IPI-based (multi-CPU):     {}", s.ipi_flushes);
+    shell_println!("  Local-only (single-CPU):   {}", s.local_only);
+
+    let total_ops = s.range_flushes.saturating_add(s.full_flushes);
+    if total_ops > 0 && s.range_flushes > 0 {
+        let avg_pages = s.total_pages_flushed / s.range_flushes;
+        shell_println!("");
+        shell_println!("  Avg pages per range flush: {}", avg_pages);
+    }
 }
 
 fn cmd_lockdep(args: &str) {

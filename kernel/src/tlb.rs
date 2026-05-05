@@ -31,6 +31,52 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
 
+// ---------------------------------------------------------------------------
+// TLB shootdown statistics
+// ---------------------------------------------------------------------------
+
+/// Total number of flush_range() calls (partial TLB flushes).
+static RANGE_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of flush_all() calls (full TLB flushes).
+static FULL_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of 4 KiB pages invalidated across all flush_range() calls.
+static TOTAL_PAGES_FLUSHED: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of IPI-based remote flushes (only counted when >1 CPU online).
+static IPI_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of local-only flushes (skipped IPI because single CPU).
+static LOCAL_ONLY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// TLB shootdown statistics snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct TlbStats {
+    /// Number of partial range flushes.
+    pub range_flushes: u64,
+    /// Number of full TLB flushes (CR3 reload all CPUs).
+    pub full_flushes: u64,
+    /// Total 4 KiB pages invalidated via range flushes.
+    pub total_pages_flushed: u64,
+    /// Number of flushes that required IPI (SMP active).
+    pub ipi_flushes: u64,
+    /// Number of flushes that were local-only (single CPU / pre-SMP).
+    pub local_only: u64,
+}
+
+/// Get current TLB statistics.
+#[must_use]
+pub fn stats() -> TlbStats {
+    TlbStats {
+        range_flushes: RANGE_FLUSH_COUNT.load(Ordering::Relaxed),
+        full_flushes: FULL_FLUSH_COUNT.load(Ordering::Relaxed),
+        total_pages_flushed: TOTAL_PAGES_FLUSHED.load(Ordering::Relaxed),
+        ipi_flushes: IPI_FLUSH_COUNT.load(Ordering::Relaxed),
+        local_only: LOCAL_ONLY_COUNT.load(Ordering::Relaxed),
+    }
+}
+
 /// IPI vector for TLB shootdown requests.
 ///
 /// We use vector 251, which is in the high range (above device IRQs
@@ -76,12 +122,16 @@ static SHOOTDOWN_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 ///
 /// For single-CPU systems (or before SMP init), this just flushes locally.
 pub fn flush_range(vaddr: u64, page_count: u32) {
+    RANGE_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
+    TOTAL_PAGES_FLUSHED.fetch_add(u64::from(page_count), Ordering::Relaxed);
+
     // Local flush first.
     local_flush_range(vaddr, page_count);
 
     // If only one CPU is online, no IPI needed.
     let online = crate::smp::cpu_count();
     if online <= 1 {
+        LOCAL_ONLY_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -97,6 +147,8 @@ pub fn flush_range(vaddr: u64, page_count: u32) {
     // target_acks = online - 1 (exclude self).
     #[allow(clippy::cast_possible_truncation)]
     let target_acks = (online - 1) as u32;
+
+    IPI_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // SAFETY: APIC is initialized, the vector has a valid ISR.
     unsafe {
@@ -115,11 +167,14 @@ pub fn flush_range(vaddr: u64, page_count: u32) {
 /// Use this for large-scale changes (e.g., process exit, address space
 /// switch) where individual `invlpg` would be more expensive.
 pub fn flush_all() {
+    FULL_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
+
     // Local full flush.
     local_flush_all();
 
     let online = crate::smp::cpu_count();
     if online <= 1 {
+        LOCAL_ONLY_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -131,6 +186,8 @@ pub fn flush_all() {
 
     #[allow(clippy::cast_possible_truncation)]
     let target_acks = (online - 1) as u32;
+
+    IPI_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // SAFETY: APIC is initialized, the vector has a valid ISR.
     unsafe {

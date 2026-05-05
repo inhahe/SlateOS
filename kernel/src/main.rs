@@ -254,6 +254,11 @@ extern "C" fn kmain() -> ! {
     // This tests the fxsave64/fxrstor64 path that the context switch uses.
     sched::fpu::self_test();
 
+    // Multi-task stress test: verify XMM state isolation across context switches.
+    // Spawns 4 tasks writing unique patterns to XMM1, yields 50 times each,
+    // verifies no cross-task XMM leakage.
+    sched::fpu::stress_test();
+
     // Step 9b: Initialize sysctl parameter registry.
     // Registers tunable kernel parameters for memory management,
     // scheduling, and other subsystems.

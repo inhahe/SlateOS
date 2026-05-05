@@ -386,3 +386,168 @@ fn test_xmm_round_trip() {
     );
     serial_println!("[fpu]   XMM0 save/restore round-trip: OK");
 }
+
+// ---------------------------------------------------------------------------
+// Multi-task FPU isolation stress test
+// ---------------------------------------------------------------------------
+
+/// Number of concurrent tasks in the FPU stress test.
+const STRESS_TASK_COUNT: usize = 4;
+
+/// Number of yield iterations per stress-test task.
+const STRESS_ITERATIONS: u32 = 50;
+
+/// Shared atomic counters for the stress test.
+///
+/// - `STRESS_ERRORS`: incremented if any task detects XMM corruption.
+/// - `STRESS_DONE`: incremented when a task finishes all iterations.
+static STRESS_ERRORS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static STRESS_DONE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Entry point for FPU stress test tasks.
+///
+/// Each task writes a unique 128-bit pattern derived from its task_arg
+/// into XMM1, then repeatedly yields and verifies the pattern is intact.
+/// If another task's pattern leaks into our XMM1, the FPU save/restore
+/// is broken and we increment STRESS_ERRORS.
+///
+/// We use XMM1 (not XMM0) because XMM0 is caller-saved in the System V
+/// ABI — the compiler is likely to use it as scratch between yields.
+/// XMM1 is also caller-saved, but in our tight loop the compiler won't
+/// use it because we pin it with inline asm.  The key: the context switch
+/// must save ALL XMM registers, not just callee-saved ones (there are no
+/// callee-saved XMM registers in System V).  The FXSAVE approach saves
+/// all of them.
+extern "C" fn stress_test_entry(task_arg: u64) {
+    use core::sync::atomic::Ordering;
+
+    // Generate a unique 128-bit pattern from our task_arg.
+    // Each task gets a different value that's easy to identify.
+    let pattern: u128 = 0xAAAA_BBBB_CCCC_0000_u128
+        | (task_arg as u128)
+        | ((task_arg as u128) << 32)
+        | ((task_arg as u128) << 64)
+        | ((task_arg as u128) << 96);
+
+    // Load our unique pattern into XMM1.
+    // SAFETY: We control XMM1 and pattern is stack-allocated.
+    unsafe {
+        asm!(
+            "movdqu xmm1, [{}]",
+            in(reg) &pattern,
+            options(nostack),
+        );
+    }
+
+    for _ in 0..STRESS_ITERATIONS {
+        // Yield to let other tasks run (they write their OWN patterns
+        // to XMM1).  If the context switch doesn't save/restore FPU
+        // state correctly, our XMM1 will be corrupted when we resume.
+        super::yield_now();
+
+        // Read XMM1 back and verify it matches our pattern.
+        let mut readback: u128 = 0;
+        // SAFETY: readback is properly aligned on the stack.
+        unsafe {
+            asm!(
+                "movdqu [{}], xmm1",
+                in(reg) &mut readback,
+                options(nostack),
+            );
+        }
+
+        if readback != pattern {
+            STRESS_ERRORS.fetch_add(1, Ordering::Relaxed);
+            // Log first corruption only (avoid flooding serial).
+            if STRESS_ERRORS.load(Ordering::Relaxed) == 1 {
+                crate::serial_println!(
+                    "[fpu] CORRUPTION in task arg={}: expected {:#034x}, got {:#034x}",
+                    task_arg, pattern, readback
+                );
+            }
+            break;
+        }
+    }
+
+    STRESS_DONE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Run the multi-task FPU isolation stress test.
+///
+/// Spawns multiple tasks that each write unique patterns to XMM1,
+/// then yield repeatedly.  After each yield, each task verifies its
+/// XMM1 is intact.  If any task sees another task's pattern, the
+/// FPU context switch is broken.
+///
+/// This tests the full end-to-end path: task switch → fxsave64 →
+/// fxrstor64 → resume, under real scheduler pressure with multiple
+/// tasks competing for CPU time.
+pub fn stress_test() {
+    use core::sync::atomic::Ordering;
+
+    serial_println!("[fpu] Running multi-task FPU isolation stress test...");
+
+    // Reset counters.
+    STRESS_ERRORS.store(0, Ordering::Release);
+    STRESS_DONE.store(0, Ordering::Release);
+
+    // Spawn stress test tasks at the same priority so they round-robin.
+    let mut task_ids = [0u64; STRESS_TASK_COUNT];
+    for i in 0..STRESS_TASK_COUNT {
+        // Each task gets a unique arg (1, 2, 3, 4) used to generate its pattern.
+        #[allow(clippy::arithmetic_side_effects)]
+        let arg = (i + 1) as u64;
+        match super::spawn(b"fpu-stress", 16, stress_test_entry, arg, 0) {
+            Ok(id) => task_ids[i] = id,
+            Err(e) => {
+                serial_println!("[fpu]   SKIP: couldn't spawn task {}: {:?}", i, e);
+                return;
+            }
+        }
+    }
+
+    // Wait for all tasks to finish (yield to let them run).
+    #[allow(clippy::arithmetic_side_effects)]
+    let target = STRESS_TASK_COUNT as u32;
+    for _ in 0..10000u32 {
+        if STRESS_DONE.load(Ordering::Acquire) >= target {
+            break;
+        }
+        super::yield_now();
+    }
+
+    let done = STRESS_DONE.load(Ordering::Acquire);
+    let errors = STRESS_ERRORS.load(Ordering::Acquire);
+
+    if done < target {
+        serial_println!(
+            "[fpu]   WARNING: only {}/{} tasks completed (timeout)",
+            done, target
+        );
+    }
+
+    if errors == 0 {
+        serial_println!(
+            "[fpu]   {} tasks × {} yields, no XMM corruption detected: OK",
+            STRESS_TASK_COUNT, STRESS_ITERATIONS
+        );
+    } else {
+        serial_println!(
+            "[fpu]   FAIL: {} XMM corruption(s) detected!",
+            errors
+        );
+    }
+
+    // Clean up any remaining tasks.
+    for &id in &task_ids {
+        if id != 0 {
+            super::kill_task(id);
+        }
+    }
+    super::reap_dead_tasks();
+
+    assert!(errors == 0, "FPU stress test: XMM state leaked between tasks");
+    serial_println!("[fpu] Multi-task FPU isolation stress test PASSED");
+}

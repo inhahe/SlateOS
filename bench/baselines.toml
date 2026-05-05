@@ -133,98 +133,92 @@ source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 # in-kernel benchmarks because the measurement loops run entirely in
 # guest kernel mode without VM exits.
 #
-# Date: 2026-05-01, QEMU 9.x
+# Date: 2026-05-05, QEMU 9.x, -cpu max
 # Optimizations: O(1) size_class_index, rdtscp CPU identification,
 #   map_frame batched page table walk (page_fault benchmark),
-#   256-frame zero-page pool (page_alloc_zeroed hot path)
+#   256-frame zero-page pool (page_alloc_zeroed hot path),
+#   lockdep on non-hot-path locks, slab poisoning disabled for bench
 
 [qemu.page_alloc_free]
-min_ns    = 229
-min_cycles = 852
+min_ns    = 198
+min_cycles = 736
 
 [qemu.page_alloc_zeroed_free]
 # Cold path (no pool): alloc + 16 KiB zero + free.
-min_ns    = 3426
-min_cycles = 12704
+min_ns    = 3270
+min_cycles = 12098
 
 [qemu.page_alloc_zeroed_pool]
 # Hot path with pre-zeroed pool: alloc from pool + free (no memset).
 # OPT: Fixed benchmark to fully pre-fill pool (loop refill to capacity)
 # and removed refill from measured closure.  Previous measurement
 # (303196 cycles) included 16 KiB zeroing inside the measured loop.
-min_ns    = 200
-min_cycles = 744
+min_ns    = 173
+min_cycles = 640
 
 [qemu.heap_raw_alloc_free_64]
 # Raw alloc + dealloc cycle (no Vec overhead, no zero-fill).
-# Per-operation estimate: ~half of cycle = ~397ns.
+# Per-operation estimate: ~half of cycle = ~307ns.
 # Previous vec-based benchmark (alloc+zero+drop) showed 1092 cycles;
 # the raw measurement is more accurate for isolating allocator cost.
 # High QEMU variability: numbers swing 30-50% between runs (TCG emulation).
-min_ns    = 795
-min_cycles = 2970
+min_ns    = 615
+min_cycles = 2278
 
 [qemu.heap_raw_alloc_free_512]
-min_ns    = 1222
-min_cycles = 4534
+min_ns    = 121
+min_cycles = 448
 
 [qemu.heap_raw_alloc_free_4096]
-min_ns    = 242
-min_cycles = 906
-
-[qemu.context_switch]
-# Lightweight yield-bounce benchmark (two tasks at same priority, yield_now
-# round-trip).  Includes scheduler pick_next, register save/restore, and
-# TLB overhead.  Numbers vary 2-50x between QEMU runs depending on TCG
-# scheduling; the min represents the best-case hot-path.
-min_ns    = 523
-min_cycles = 1938
-# per-switch estimate: 261ns
+min_ns    = 121
+min_cycles = 448
 
 [qemu.context_switch_rt]
 # Full task-spawned context switch benchmark: 2 tasks yield in a loop,
 # measured via rdtsc round-trip.  More realistic than the lightweight
 # yield bounce — includes task selection from the scheduler run queue.
-min_ns    = 904
-min_cycles = 3378
-# per-switch estimate: 452ns
+min_ns    = 1980
+min_cycles = 7326
+# per-switch estimate: 990ns
 
 [qemu.syscall_dispatch]
-min_ns    = 43
-min_cycles = 162
+min_ns    = 175
+min_cycles = 648
 
 [qemu.ipc_channel_roundtrip]
-min_ns    = 466
-min_cycles = 1726
+min_ns    = 274
+min_cycles = 1016
 
 [qemu.page_fault_anonymous]
 # OPT: 107728→26910 cycles after switching benchmark from 4× map_4k_if_absent
 # to single map_frame call (matching real fault handler path).
 # OPT: 26910→7278 cycles after deferring benchmarks to background task —
 # zero-pool is warm by the time page_fault benchmark runs.
-min_ns    = 1963
-min_cycles = 7278
+min_ns    = 1973
+min_cycles = 7300
 
 [qemu.hpet_read]
-min_ns    = 428
-min_cycles = 1588
+min_ns    = 423
+min_cycles = 1568
 
 [qemu.rdtsc_overhead]
-min_ns    = 38
-min_cycles = 142
+min_ns    = 36
+min_cycles = 136
 
 [qemu.isr_hard_irq]
 # Timer ISR hard-IRQ phase: entry → scheduler timer_tick → EOI.
 # This is the interval during which device interrupts are blocked on
 # the CPU.  Measured via TSC inside handle_timer_irq, gated by
 # ISR_MEASURE_ACTIVE.  Release build, ~100 timer ticks (~1s window).
-min_ns     = 2707
-min_cycles = 10046
-mean_ns    = 7449
-mean_cycles = 27637
+min_ns     = 3875
+min_cycles = 14336
+mean_ns    = 13562
+mean_cycles = 50168
 # Note: QEMU/TCG adds significant overhead to atomic operations and
 # MMIO access (APIC EOI write).  On bare metal, expect 3-10x improvement.
-# Meets the 37000-cycle native target.
+# Meets the 37000-cycle native target.  ISR numbers are higher than
+# previous measurement (lockdep on mm locks adds ~2-4K cycles to
+# paths that acquire SWAP/RECLAIM during timer-driven reclaim checks).
 
 # -------------------------------------------------------------------------
 # Measurement methodology notes

@@ -87,6 +87,27 @@ pub fn read_rsp() -> u64 {
     rsp
 }
 
+/// Read the CR2 register (last page fault linear address).
+///
+/// Useful in panic diagnostics to show if a page fault contributed
+/// to the crash, even if the panic isn't directly in the page fault
+/// handler.
+#[inline]
+#[must_use]
+#[allow(dead_code)]
+pub fn read_cr2() -> u64 {
+    let cr2: u64;
+    // SAFETY: Reading CR2 is always safe in ring 0.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, cr2",
+            out(reg) cr2,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    cr2
+}
+
 /// Read the current value of the RFLAGS register.
 #[inline]
 #[allow(dead_code)] // Used by without_interrupts and future CPU state inspection.

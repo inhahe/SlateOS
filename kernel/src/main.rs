@@ -1192,6 +1192,7 @@ fn idle_loop() -> ! {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // Capture volatile state before disabling interrupts.
     let rsp = cpu::read_rsp();
+    let cr2 = cpu::read_cr2();
     let interrupts_were_enabled = cpu::interrupts_enabled();
 
     // Disable interrupts immediately — we don't want an interrupt
@@ -1239,6 +1240,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         "  Interrupts were {}",
         if interrupts_were_enabled { "enabled" } else { "disabled" },
     );
+    // CR2 holds the last page fault address — useful if the panic
+    // was triggered by a page fault handler or UAF in paged memory.
+    if cr2 != 0 {
+        serial_println!("  CR2 (last page fault addr): {:#018x}", cr2);
+    }
 
     // --- Scheduler summary ---
     if sched_info.lock_acquired {
@@ -1274,6 +1280,18 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         heap.large_allocs, heap.large_frees,
         heap.slab_refills, heap.alloc_failures,
     );
+
+    // --- Stack backtrace ---
+    serial_println!("  Backtrace:");
+    let bt = backtrace::capture();
+    if bt.count == 0 {
+        serial_println!("    <no frames captured (frame pointers may be absent)>");
+    } else {
+        for i in 0..bt.count {
+            let f = &bt.frames[i];
+            serial_println!("    #{:2}: {:#018x} (rbp={:#018x})", i, f.return_addr, f.frame_ptr);
+        }
+    }
 
     serial_println!("--- end panic ---");
 

@@ -38,6 +38,7 @@ pub mod fault_inject;
 pub mod frame;
 pub mod frame_owner;
 pub mod heap;
+pub mod heap_profile;
 pub mod hugepage;
 pub mod kstack;
 pub mod kvspace;

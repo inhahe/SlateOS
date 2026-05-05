@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4227,6 +4227,7 @@ fn dispatch(line: &str) {
         "frameowner" | "fowner" => cmd_frame_owner(),
         "alloctrace" | "atrace" => cmd_alloc_trace(args),
         "alloclat" | "alat" => cmd_alloc_lat(args),
+        "heapprofile" | "hprof" => cmd_heap_profile(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15570,6 +15571,64 @@ fn cmd_alloc_lat(args: &str) {
 
             shell_println!("");
             shell_println!("  Status: {}", if alloc_lat::is_enabled() { "enabled" } else { "disabled" });
+        }
+    }
+}
+
+/// `heapprofile` — show heap allocation size distribution.
+///
+/// Usage:
+///   heapprofile        — show full profile
+///   heapprofile reset  — reset counters
+///   heapprofile on|off — enable/disable
+fn cmd_heap_profile(args: &str) {
+    use crate::mm::heap_profile;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "reset" => {
+            heap_profile::reset();
+            shell_println!("Heap profile reset");
+        }
+        "on" => {
+            heap_profile::enable();
+            shell_println!("Heap profiling enabled");
+        }
+        "off" => {
+            heap_profile::disable();
+            shell_println!("Heap profiling disabled");
+        }
+        _ => {
+            let p = heap_profile::profile();
+            let frag = heap_profile::fragmentation_estimate();
+            let (hot_size, hot_count) = heap_profile::hottest_bucket();
+
+            shell_println!("=== Heap Allocation Profile ===");
+            shell_println!("");
+            shell_println!("  Total: {} allocs, {} frees, {} active",
+                p.total_allocs, p.total_frees,
+                p.total_allocs.saturating_sub(p.total_frees));
+            shell_println!("  Bytes: {} KiB requested, max single = {} B",
+                p.total_bytes / 1024, p.max_alloc);
+            shell_println!("  Fragmentation: ~{}%", frag);
+            shell_println!("  Hottest class: ≤{} B ({} allocs)", hot_size, hot_count);
+            shell_println!("");
+            shell_println!("  {:>5}  {:>8}  {:>8}  {:>6}  {:>6}  {:>6}",
+                "CLASS", "ALLOCS", "FREES", "ACTIVE", "PEAK", "AVG");
+
+            for (i, b) in p.buckets.iter().enumerate() {
+                if b.allocs == 0 && b.frees == 0 {
+                    continue;
+                }
+                shell_println!("  {:>5}  {:>8}  {:>8}  {:>6}  {:>6}  {:>6}",
+                    heap_profile::bucket_label(i),
+                    b.allocs, b.frees, b.active, b.peak, b.avg_size);
+            }
+
+            shell_println!("");
+            shell_println!("  Status: {}",
+                if p.enabled { "enabled" } else { "disabled" });
         }
     }
 }

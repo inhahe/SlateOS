@@ -944,6 +944,10 @@ extern "C" fn kmain() -> ! {
     // Measures and profiles alloc/free timing for performance analysis.
     mm::alloc_lat::self_test();
 
+    // Step 22e⅞++++j: Heap allocation profiler self-test.
+    // Tracks allocation size distribution for slab tuning.
+    mm::heap_profile::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

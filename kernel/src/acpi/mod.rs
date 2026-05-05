@@ -50,6 +50,41 @@ static HPET_TABLE_PHYS: Mutex<Option<u64>> = Mutex::new(None);
 /// Physical address of the FADT table, if found.
 static FADT_TABLE_PHYS: Mutex<Option<u64>> = Mutex::new(None);
 
+/// General table registry: maps 4-byte signature to physical address.
+/// Allows any subsystem to find a table by signature after init.
+const MAX_ACPI_TABLES: usize = 32;
+static TABLE_REGISTRY: Mutex<TableRegistry> = Mutex::new(TableRegistry::new());
+
+struct TableRegistry {
+    entries: [([u8; 4], u64); MAX_ACPI_TABLES],
+    count: usize,
+}
+
+impl TableRegistry {
+    const fn new() -> Self {
+        Self {
+            entries: [([0; 4], 0); MAX_ACPI_TABLES],
+            count: 0,
+        }
+    }
+
+    fn insert(&mut self, sig: [u8; 4], phys: u64) {
+        if self.count < MAX_ACPI_TABLES {
+            self.entries[self.count] = (sig, phys);
+            self.count += 1;
+        }
+    }
+
+    fn find(&self, sig: &[u8; 4]) -> Option<u64> {
+        for i in 0..self.count {
+            if &self.entries[i].0 == sig {
+                return Some(self.entries[i].1);
+            }
+        }
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -396,6 +431,9 @@ pub unsafe fn init(
         serial_println!("[acpi]   Table: \"{}\" at phys={:#x}", sig_str, phys);
         table_count += 1;
 
+        // Register in general table registry for find_table() API.
+        TABLE_REGISTRY.lock().insert(sig, phys);
+
         if &sig == b"APIC" {
             madt_phys = Some(phys);
         } else if &sig == b"HPET" {
@@ -568,6 +606,17 @@ pub fn has_legacy_pic() -> bool {
 /// discover the HPET's MMIO base address.
 pub fn hpet_table_phys() -> Option<u64> {
     *HPET_TABLE_PHYS.lock()
+}
+
+/// Find an ACPI table by its 4-byte signature.
+///
+/// Returns the physical address of the table, or `None` if not found.
+/// Call this after `acpi::init()` has completed.
+///
+/// Common signatures: b"SRAT" (NUMA), b"SLIT" (NUMA distances),
+/// b"APIC" (MADT), b"FACP" (FADT), b"HPET", b"MCFG" (PCIe).
+pub fn find_table(signature: &[u8; 4]) -> Option<u64> {
+    TABLE_REGISTRY.lock().find(signature)
 }
 
 /// Get the number of enabled processors discovered in the MADT.

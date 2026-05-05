@@ -88,6 +88,7 @@ mod limine;
 mod lockdep;
 mod mm;
 mod net;
+mod numa;
 mod pci;
 mod pacct;
 mod pmc;
@@ -823,6 +824,11 @@ extern "C" fn kmain() -> ! {
     // CPU hotplug framework initialization — marks all online CPUs.
     cpu_hotplug::init();
     cpu_hotplug::self_test();
+
+    // NUMA topology detection — parse SRAT or default to UMA.
+    // Requires ACPI tables and SMP to be initialized.
+    numa::init();
+    numa::self_test();
 
     // IRQ balancer initialization — distributes interrupts across CPUs.
     // Requires IOAPIC, SMP, and cpu_hotplug to be initialized.

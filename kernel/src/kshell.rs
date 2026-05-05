@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "pacct", "pgfault", "pools", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4211,6 +4211,7 @@ fn dispatch(line: &str) {
         "hotplug" | "cpuctl" => cmd_hotplug(args),
         "irqbalance" | "irqbal" => cmd_irqbalance(args),
         "mempool" | "pools" => cmd_mempool(),
+        "numa" => cmd_numa(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15240,6 +15241,49 @@ fn cmd_hotplug(args: &str) {
         }
         _ => {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
+        }
+    }
+}
+
+/// `numa` — display NUMA topology information.
+fn cmd_numa() {
+    let info = crate::numa::topology_info();
+
+    shell_println!("=== NUMA Topology ===");
+    shell_println!("");
+    shell_println!("  Nodes: {}", info.node_count);
+    shell_println!("  NUMA detected: {}", if info.is_numa { "yes (SRAT)" } else { "no (UMA)" });
+    shell_println!("");
+
+    for i in 0..info.node_count {
+        let node = &info.nodes[i];
+        if !node.present {
+            continue;
+        }
+        let mem_mb = node.total_memory / (1024 * 1024);
+        shell_println!("  Node {}:", i);
+        shell_println!("    CPUs: {} (mask={:#06x})", node.cpu_count, node.cpu_mask);
+        shell_println!("    Memory: {} MiB ({} region{})",
+            mem_mb, node.region_count,
+            if node.region_count == 1 { "" } else { "s" });
+    }
+
+    shell_println!("");
+
+    // Distance matrix.
+    if info.node_count > 1 {
+        shell_println!("  Distance matrix:");
+        shell_print!("       ");
+        for j in 0..info.node_count {
+            shell_print!("{:>4}", j);
+        }
+        shell_println!("");
+        for i in 0..info.node_count {
+            shell_print!("    {:>2}:", i);
+            for j in 0..info.node_count {
+                shell_print!("{:>4}", crate::numa::distance(i, j));
+            }
+            shell_println!("");
         }
     }
 }

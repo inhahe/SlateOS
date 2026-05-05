@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4223,6 +4223,7 @@ fn dispatch(line: &str) {
         "pageage" | "aging" => cmd_page_age(),
         "ptwalk" | "pagetables" => cmd_pt_walk(),
         "scrub" | "memscrub" => cmd_scrub(),
+        "faultinject" | "finject" => cmd_fault_inject(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15381,6 +15382,57 @@ fn cmd_scrub() {
     shell_println!("  Steps executed:  {}", s.steps);
     shell_println!("  Total scrubbed:  {} MiB", s.total_bytes / (1024 * 1024));
     shell_println!("  Errors detected: {}", s.errors);
+}
+
+/// `faultinject` — display/control memory fault injection.
+///
+/// Usage:
+///   faultinject              — show current injection status
+///   faultinject fail <N>     — arm: fail next N allocations
+///   faultinject after <N>    — arm: fail after N successful allocs
+///   faultinject prob <N>     — arm: fail every Nth allocation
+///   faultinject off          — disarm all injection
+fn cmd_fault_inject(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    if parts.is_empty() {
+        // Show status.
+        let s = crate::mm::fault_inject::stats();
+        shell_println!("=== Memory Fault Injection ===");
+        shell_println!("");
+        shell_println!("  Active:          {}", if s.active { "YES" } else { "no" });
+        shell_println!("  Mode:            {:?}", s.mode);
+        shell_println!("  Counter:         {}", s.counter);
+        shell_println!("  Total calls:     {}", s.total_calls);
+        shell_println!("  Total injected:  {}", s.total_injected);
+        shell_println!("  Sessions:        {}", s.sessions);
+        return;
+    }
+
+    match parts[0] {
+        "fail" => {
+            let count = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            crate::mm::fault_inject::arm_fail_next(count);
+            shell_println!("Armed: fail next {} allocation(s)", count);
+        }
+        "after" => {
+            let count = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            crate::mm::fault_inject::arm_fail_after(count);
+            shell_println!("Armed: fail after {} successful alloc(s)", count);
+        }
+        "prob" => {
+            let denom = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10);
+            crate::mm::fault_inject::arm_probabilistic(denom);
+            shell_println!("Armed: fail every ~1/{} allocations", denom);
+        }
+        "off" | "disarm" => {
+            crate::mm::fault_inject::disarm();
+            shell_println!("Disarmed — normal allocation restored");
+        }
+        _ => {
+            shell_println!("Usage: faultinject [fail <N> | after <N> | prob <N> | off]");
+        }
+    }
 }
 
 /// `ptwalk` — walk and summarize current kernel page tables.

@@ -32,6 +32,7 @@ pub mod compress;
 pub mod cow;
 pub mod dma;
 pub mod fault;
+pub mod fault_inject;
 pub mod frame;
 pub mod heap;
 pub mod hugepage;

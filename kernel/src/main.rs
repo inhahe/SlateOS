@@ -928,7 +928,11 @@ extern "C" fn kmain() -> ! {
     // Proactive ECC error detection via background memory reads.
     mm::scrub::self_test();
 
-    // Step 22e⅞++++e: Memory subsystem integration tests.
+    // Step 22e⅞++++e: Memory fault injection self-test.
+    // Verifies controlled allocation failure simulation for testing error paths.
+    mm::fault_inject::self_test();
+
+    // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();
 

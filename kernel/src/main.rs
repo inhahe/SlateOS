@@ -1187,9 +1187,36 @@ fn idle_loop() -> ! {
 ///
 /// In a kernel, panics are always fatal — there is no higher-level
 /// runtime to catch them.
+/// Guard against re-entrant panics (panic inside panic handler).
+///
+/// If a panic occurs while we're already in the panic handler (e.g., from
+/// formatting code, lock poisoning, or a bug in the diagnostics), we must
+/// not recurse infinitely.  This counter tracks nesting depth:
+/// - 0: normal code, first panic is fine
+/// - 1: inside panic handler, another panic is a double-panic
+/// - 2+: triple-panic — halt immediately with minimal output
+static PANIC_NESTING: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 #[panic_handler]
 #[allow(clippy::unwrap_used)] // Panic handler uses unwrap_or for best-effort diagnostics.
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Double-panic guard: detect re-entrant panics and short-circuit.
+    let nesting = PANIC_NESTING.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    if nesting >= 2 {
+        // Triple+ panic: absolutely nothing is safe. Halt immediately.
+        unsafe { cpu::cli(); }
+        cpu::halt_loop();
+    }
+    if nesting == 1 {
+        // Double panic: we're panicking inside the panic handler.
+        // Print a minimal message and halt — don't attempt full diagnostics
+        // since they may trigger yet another panic.
+        unsafe { cpu::cli(); }
+        serial_println!("!!! DOUBLE PANIC (panic inside panic handler) !!!");
+        serial_println!("{}", info);
+        cpu::halt_loop();
+    }
+
     // Capture volatile state before disabling interrupts.
     let rsp = cpu::read_rsp();
     let cr2 = cpu::read_cr2();

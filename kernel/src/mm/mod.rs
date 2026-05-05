@@ -41,6 +41,7 @@ pub mod memtype;
 pub mod oom;
 pub mod page_table;
 pub mod pcid;
+pub mod poison;
 pub mod pressure;
 pub mod protect;
 pub mod rlimits;

@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid",
+    "vmalloc", "vm", "rmap", "pcid", "poison",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4216,6 +4216,7 @@ fn dispatch(line: &str) {
         "vmalloc" | "vm" => cmd_vmalloc(),
         "rmap" => cmd_rmap(),
         "pcid" => cmd_pcid(),
+        "poison" => cmd_poison(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15306,6 +15307,20 @@ fn cmd_pcid() {
     shell_println!("  No-flush switches: {}", st.noflush_switches);
     shell_println!("  Generation flushes:{}", st.generation_flushes);
     shell_println!("  INVPCID singles:   {}", st.invpcid_singles);
+}
+
+/// `poison` — display memory poison statistics.
+fn cmd_poison() {
+    let st = crate::mm::poison::stats();
+    shell_println!("=== Memory Poisoning ===");
+    shell_println!("");
+    shell_println!("  Enabled:         {}", st.enabled);
+    shell_println!("  Alloc poison:    {}", st.alloc_poison);
+    shell_println!("  Free bytes:      {} KiB", st.free_bytes / 1024);
+    shell_println!("  Alloc bytes:     {} KiB", st.alloc_bytes / 1024);
+    shell_println!("  Violations:      {}", st.violations);
+    shell_println!("");
+    shell_println!("  Patterns: FREE=0xDE  ALLOC=0xCD  REDZONE=0xFD  STACK=0x6B");
 }
 
 /// `msi` — display MSI (Message Signaled Interrupts) vector pool status.

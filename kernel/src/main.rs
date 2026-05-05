@@ -895,7 +895,11 @@ extern "C" fn kmain() -> ! {
     // Verifies add/remove/lookup of physical frame → virtual address mappings.
     mm::rmap::self_test();
 
-    // Step 22e⅞+: PCID (Process Context Identifiers) initialization.
+    // Step 22e⅞+: Memory poison self-test.
+    // Verifies poison fill/verify for use-after-free and overflow detection.
+    mm::poison::self_test();
+
+    // Step 22e⅞++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();
     mm::pcid::enable_on_this_cpu();

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4200,6 +4200,7 @@ fn dispatch(line: &str) {
         "loadavg" => cmd_loadavg(),
         "cputime" | "cpuacct" => cmd_cputime(),
         "irqstorm" => cmd_irqstorm(args),
+        "pacct" | "acct" => cmd_pacct(args),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -14938,6 +14939,56 @@ fn cmd_irqstorm(args: &str) {
                 }
             }
         }
+    }
+}
+
+/// `pacct` — show process accounting (recent task exits).
+///
+/// Usage:
+///   `pacct`      — show last 20 exited tasks
+///   `pacct N`    — show last N exited tasks
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_pacct(args: &str) {
+    let count: usize = args.trim().parse().unwrap_or(20);
+    let records = crate::pacct::recent(count);
+    let total = crate::pacct::total_recorded();
+
+    shell_println!("Process Accounting ({} total exits recorded)", total);
+    shell_println!("");
+
+    if records.is_empty() {
+        shell_println!("(no task exits recorded yet)");
+        return;
+    }
+
+    let freq = crate::bench::tsc_freq();
+
+    shell_println!(
+        "{:<5} {:<12} {:>3} {:>8} {:>6} {:>6} {:>4}",
+        "TID", "NAME", "PRI", "CPU_MS", "SCHED", "WAIT", "CPU"
+    );
+    shell_println!("------------------------------------------------------");
+
+    for rec in &records {
+        let name = core::str::from_utf8(&rec.name[..rec.name_len as usize]).unwrap_or("?");
+
+        // CPU time in milliseconds (from TSC cycles).
+        let cpu_ms = if freq > 0 {
+            crate::bench::cycles_to_ns(rec.total_cycles) / 1_000_000
+        } else {
+            rec.total_ticks * 10
+        };
+
+        // Wait time in 10ths of a second.
+        let wait_tenths = rec.total_wait_ticks / 10;
+
+        shell_println!(
+            "{:<5} {:<12} {:>3} {:>6}ms {:>6} {:>4}.{}  {:>2}",
+            rec.task_id, name, rec.priority,
+            cpu_ms, rec.schedule_count,
+            wait_tenths / 10, wait_tenths % 10,
+            rec.last_cpu,
+        );
     }
 }
 

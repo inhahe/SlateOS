@@ -84,6 +84,7 @@ mod lockdep;
 mod mm;
 mod net;
 mod pci;
+mod pacct;
 mod pmc;
 mod port;
 mod proc;
@@ -292,6 +293,9 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Scheduler self-test failed: {}", e);
         cpu::halt_loop();
     }
+
+    // Process accounting (after self-test, which fills/empties the hook table).
+    pacct::init();
 
     // Verify FPU/SSE state save/restore works correctly.
     // This tests the fxsave64/fxrstor64 path that the context switch uses.

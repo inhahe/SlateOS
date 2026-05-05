@@ -1191,6 +1191,8 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
                     // Re-register the restored page as reclaimable so it
                     // can be swapped out again if memory pressure returns.
                     mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
+                    mm::fault::record_swap_in();
+                    mm::fault::record_user_resolved();
                     return; // Swap-in successful — retry the instruction.
                 }
                 // If swap-in fails (OOM, etc.), fall through to other
@@ -1203,6 +1205,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         let task_id = sched::current_task_id();
         let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
         if pid != 0 && crate::proc::pcb::try_resolve_fault(pid, cr2, error) {
+            mm::fault::record_user_resolved();
             return; // Demand-paged successfully — retry the instruction.
         }
 
@@ -1210,10 +1213,13 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         // because they pre-date the per-process VMA system and have
         // their own growth logic with guard page detection).
         if try_grow_user_stack(cr2, error) {
+            mm::fault::record_stack_growth();
+            mm::fault::record_user_resolved();
             return; // Stack grew successfully — retry the instruction.
         }
 
         // Unresolvable user fault — try SEH handler, then kill.
+        mm::fault::record_fatal();
         let present = if error & 1 != 0 { "present" } else { "not-present" };
         let write = if error & 2 != 0 { "write" } else { "read" };
         serial_println!(
@@ -1228,6 +1234,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     }
 
     // Unresolvable kernel page fault — halt.
+    mm::fault::record_fatal();
     serial_println!(
         "EXCEPTION: Page Fault (#PF) at {:#x}, address={:#x}, error={:#x}",
         frame.rip,

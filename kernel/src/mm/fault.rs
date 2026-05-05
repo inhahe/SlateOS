@@ -36,6 +36,90 @@ use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::mm::vma::{AddressSpace, Vma, VmaKind};
 use crate::serial_println;
 use crate::sync::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+// ---------------------------------------------------------------------------
+// Page fault statistics
+// ---------------------------------------------------------------------------
+
+/// Kernel-space page faults resolved successfully (demand page).
+static KERNEL_FAULTS_RESOLVED: AtomicU64 = AtomicU64::new(0);
+
+/// User-space page faults resolved successfully (demand page, stack growth,
+/// swap-in, CoW).
+static USER_FAULTS_RESOLVED: AtomicU64 = AtomicU64::new(0);
+
+/// Page faults that were unresolvable (fatal — led to task kill or halt).
+static FAULTS_FATAL: AtomicU64 = AtomicU64::new(0);
+
+/// Copy-on-Write faults resolved.
+static COW_FAULTS: AtomicU64 = AtomicU64::new(0);
+
+/// Swap-in faults (page restored from swap).
+static SWAP_IN_FAULTS: AtomicU64 = AtomicU64::new(0);
+
+/// Stack growth faults (guard page triggered new stack mapping).
+static STACK_GROWTH_FAULTS: AtomicU64 = AtomicU64::new(0);
+
+/// Page fault statistics snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct PageFaultStats {
+    /// Kernel-mode faults resolved via demand paging.
+    pub kernel_resolved: u64,
+    /// User-mode faults resolved (any mechanism).
+    pub user_resolved: u64,
+    /// Unresolvable faults (fatal).
+    pub fatal: u64,
+    /// Copy-on-Write resolutions.
+    pub cow: u64,
+    /// Swap-in resolutions.
+    pub swap_in: u64,
+    /// Stack growth resolutions.
+    pub stack_growth: u64,
+}
+
+/// Get current page fault statistics.
+#[must_use]
+pub fn fault_stats() -> PageFaultStats {
+    PageFaultStats {
+        kernel_resolved: KERNEL_FAULTS_RESOLVED.load(Ordering::Relaxed),
+        user_resolved: USER_FAULTS_RESOLVED.load(Ordering::Relaxed),
+        fatal: FAULTS_FATAL.load(Ordering::Relaxed),
+        cow: COW_FAULTS.load(Ordering::Relaxed),
+        swap_in: SWAP_IN_FAULTS.load(Ordering::Relaxed),
+        stack_growth: STACK_GROWTH_FAULTS.load(Ordering::Relaxed),
+    }
+}
+
+/// Record a successful kernel-space fault resolution.
+pub(crate) fn record_kernel_resolved() {
+    KERNEL_FAULTS_RESOLVED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a successful user-space fault resolution.
+pub(crate) fn record_user_resolved() {
+    USER_FAULTS_RESOLVED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record an unresolvable (fatal) page fault.
+pub(crate) fn record_fatal() {
+    FAULTS_FATAL.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a Copy-on-Write fault resolution.
+pub(crate) fn record_cow() {
+    COW_FAULTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a swap-in page fault resolution.
+pub(crate) fn record_swap_in() {
+    SWAP_IN_FAULTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a stack growth fault resolution.
+pub(crate) fn record_stack_growth() {
+    STACK_GROWTH_FAULTS.fetch_add(1, Ordering::Relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // Page fault error code
@@ -173,12 +257,18 @@ pub fn resolve(fault_addr: u64, error_code: u64) -> KernelResult<()> {
     let guard = KERNEL_AS.try_lock().ok_or(KernelError::PageFault)?;
     let kas = guard.as_ref().ok_or(KernelError::PageFault)?;
 
-    kas.resolve_fault(
+    let result = kas.resolve_fault(
         fault_addr,
         error.is_present(),
         error.is_write(),
         error.is_instruction_fetch(),
-    )
+    );
+
+    if result.is_ok() {
+        record_kernel_resolved();
+    }
+
+    result
 }
 
 /// Add a VMA to the kernel address space.

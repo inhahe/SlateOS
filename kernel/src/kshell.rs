@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "cpuid", "exceptions", "sysinfo", "tlb", "vectors",
+    "cpuid", "exceptions", "faults", "pgfault", "sysinfo", "tlb", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4186,6 +4186,7 @@ fn dispatch(line: &str) {
         "exceptions" | "vectors" => cmd_exceptions(),
         "sysinfo" | "cpuid" => cmd_sysinfo(),
         "tlb" => cmd_tlb(),
+        "pgfault" | "faults" => cmd_pgfault(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4457,6 +4458,7 @@ fn cmd_help() {
     crate::console_println!("  exceptions Show per-vector exception/interrupt counts");
     crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
     crate::console_println!("  tlb        Show TLB shootdown statistics");
+    crate::console_println!("  pgfault    Show page fault statistics by type");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -13924,6 +13926,29 @@ fn cmd_tlb() {
         shell_println!("");
         shell_println!("  Avg pages per range flush: {}", avg_pages);
     }
+}
+
+fn cmd_pgfault() {
+    let s = crate::mm::fault::fault_stats();
+    let total_vector = crate::idt::vector_count(14);
+
+    shell_println!("=== Page Fault Statistics ===");
+    shell_println!("");
+    shell_println!("  Total PF exceptions (vector 14): {}", total_vector);
+    shell_println!("");
+    shell_println!("  Kernel-mode resolved:  {}", s.kernel_resolved);
+    shell_println!("  User-mode resolved:    {}", s.user_resolved);
+    shell_println!("  Fatal (unresolvable):  {}", s.fatal);
+    shell_println!("");
+    shell_println!("  By type:");
+    shell_println!("    Copy-on-Write:       {}", s.cow);
+    shell_println!("    Swap-in:             {}", s.swap_in);
+    shell_println!("    Stack growth:        {}", s.stack_growth);
+    let demand = s.kernel_resolved.saturating_add(s.user_resolved)
+        .saturating_sub(s.cow)
+        .saturating_sub(s.swap_in)
+        .saturating_sub(s.stack_growth);
+    shell_println!("    Demand page (other): {}", demand);
 }
 
 fn cmd_lockdep(args: &str) {

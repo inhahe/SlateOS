@@ -126,6 +126,7 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
         // Flush TLB for the entire frame group (4 pages).
         crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 
+        super::fault::record_cow();
         return Ok(());
     }
 
@@ -209,6 +210,7 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
     // Flush TLB for the entire frame group.
     crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 
+    super::fault::record_cow();
     Ok(())
 }
 

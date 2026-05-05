@@ -182,13 +182,58 @@ fn gen_meminfo() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// `/proc/cpuinfo` — CPU topology.
+/// `/proc/cpuinfo` — CPU topology and features.
 fn gen_cpuinfo() -> Vec<u8> {
     let count = crate::acpi::processor_count();
     let processors = crate::acpi::processors();
 
-    let mut s = String::with_capacity(256);
-    s.push_str(&format!("processors: {count}\n\n"));
+    let mut s = String::with_capacity(512);
+    s.push_str(&format!("processors: {count}\n"));
+
+    // CPU feature flags (from centralized CPUID detection).
+    if let Some(f) = crate::cpu::features() {
+        s.push_str("flags      :");
+        if f.sse       { s.push_str(" sse"); }
+        if f.sse2      { s.push_str(" sse2"); }
+        if f.sse3      { s.push_str(" sse3"); }
+        if f.ssse3     { s.push_str(" ssse3"); }
+        if f.sse4_1    { s.push_str(" sse4_1"); }
+        if f.sse4_2    { s.push_str(" sse4_2"); }
+        if f.popcnt    { s.push_str(" popcnt"); }
+        if f.avx       { s.push_str(" avx"); }
+        if f.avx2      { s.push_str(" avx2"); }
+        if f.avx512f   { s.push_str(" avx512f"); }
+        if f.xsave     { s.push_str(" xsave"); }
+        if f.aes_ni    { s.push_str(" aes"); }
+        if f.sha       { s.push_str(" sha_ni"); }
+        if f.rdrand    { s.push_str(" rdrand"); }
+        if f.rdseed    { s.push_str(" rdseed"); }
+        if f.rdtscp    { s.push_str(" rdtscp"); }
+        if f.rdpid     { s.push_str(" rdpid"); }
+        if f.fxsr      { s.push_str(" fxsr"); }
+        if f.tsc       { s.push_str(" tsc"); }
+        if f.f16c      { s.push_str(" f16c"); }
+        if f.bmi1      { s.push_str(" bmi1"); }
+        if f.bmi2      { s.push_str(" bmi2"); }
+        if f.vaes      { s.push_str(" vaes"); }
+        if f.page_1g   { s.push_str(" pdpe1gb"); }
+        s.push('\n');
+
+        if f.pmu_version > 0 {
+            s.push_str(&format!(
+                "pmu        : v{}, {} counters, {}-bit\n",
+                f.pmu_version, f.pmu_counters, f.pmu_counter_width
+            ));
+        }
+    }
+
+    // TSC frequency.
+    let tsc_freq = crate::bench::tsc_freq();
+    if tsc_freq > 0 {
+        s.push_str(&format!("tsc_freq   : {} Hz\n", tsc_freq));
+    }
+
+    s.push('\n');
 
     for (i, p) in processors.iter().enumerate() {
         s.push_str(&format!("processor  : {i}\n"));

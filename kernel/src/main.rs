@@ -846,6 +846,13 @@ extern "C" fn kmain() -> ! {
     // page fault hot path.
     mm::frame::enable_zero_pool();
 
+    // Step 22f-3: Enable slab poisoning and run its self-test.
+    // Fills freed heap memory with a poison pattern and checks integrity
+    // on reallocation — catches use-after-free bugs automatically.
+    // Enabled during boot self-tests, disabled before benchmarks for speed.
+    mm::heap::enable_poison();
+    mm::heap::poison_self_test();
+
     // Step 22g: I/O scheduler self-test.
     // BFQ-style budget fair queueing with per-process queues,
     // priority classes, elevator ordering, and request merging.
@@ -1098,7 +1105,13 @@ extern "C" fn kmain() -> ! {
 /// `BOOT_OK` is printed synchronously by `kmain()` before this task
 /// starts, so the boot test script sees success within seconds.
 extern "C" fn deferred_bench_task(_arg: u64) {
+    // Disable slab poisoning during benchmarks — the memset/memcmp overhead
+    // would skew heap allocator measurements by ~10-50ns per operation.
+    mm::heap::disable_poison();
     bench::run_all();
+    // Re-enable poisoning after benchmarks for continued UAF detection
+    // during normal kernel operation.
+    mm::heap::enable_poison();
     serial_println!("BENCH_OK");
 }
 

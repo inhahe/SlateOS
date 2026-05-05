@@ -38,8 +38,165 @@ use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::serial_println;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
+
+// ---------------------------------------------------------------------------
+// Slab poisoning (use-after-free / double-free detection)
+// ---------------------------------------------------------------------------
+
+/// Poison byte written to freed slab memory (0xFE = "Free Entry").
+///
+/// On dealloc, bytes 8..class_size are filled with this pattern.
+/// On alloc, those bytes are checked — if they've been modified, a
+/// use-after-free write was made to the freed memory.
+const FREE_POISON: u8 = 0xFE;
+
+/// Poison byte written to freshly allocated memory before handing to caller.
+/// Helps catch reads of uninitialized memory (will produce obviously-wrong
+/// values rather than seemingly-valid zeros or stale data).
+const ALLOC_POISON: u8 = 0xCD;
+
+/// Whether slab poisoning is active.  Adds ~5-20ns per alloc/dealloc
+/// (memset + memcmp over the slot body).  Enable during development
+/// and testing; disable for production or benchmarks.
+static POISON_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Count of detected use-after-free corruptions.
+static POISON_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
+/// Enable slab poisoning (use-after-free detection).
+pub fn enable_poison() {
+    POISON_ENABLED.store(true, Ordering::Release);
+    serial_println!("[heap] Slab poisoning enabled (UAF detection active)");
+}
+
+/// Disable slab poisoning.
+#[allow(dead_code)]
+pub fn disable_poison() {
+    POISON_ENABLED.store(false, Ordering::Release);
+}
+
+/// Return the number of poison violations detected.
+#[allow(dead_code)]
+pub fn poison_violations() -> u32 {
+    POISON_VIOLATIONS.load(Ordering::Relaxed)
+}
+
+/// 4-byte magic signature written at bytes 8..12 of poisoned slots.
+///
+/// `check_poison` looks for this first — if absent, the slot was never
+/// freed through the poison path (e.g., carved from a fresh frame) and
+/// the check is skipped.  This eliminates false positives from the
+/// "cold start" period after poisoning is enabled.
+const POISON_MAGIC: [u8; 4] = [0xFE, 0xED, 0xFA, 0xCE];
+
+/// Fill bytes 8..class_size with FREE_POISON, prefixed by POISON_MAGIC.
+///
+/// Skips the first 8 bytes (used by the FreeSlot::next pointer).
+/// For slots < 16 bytes, there's not enough room for the magic + poison.
+///
+/// Both `#[inline(never)]` and `write_volatile` are required here.
+/// Under thin LTO + O3, the compiler can constant-propagate through the
+/// dealloc→alloc boundary and dead-store-eliminate regular writes to
+/// freed memory.  Volatile stores create a compiler memory barrier that
+/// prevents this optimization, and `#[inline(never)]` prevents the
+/// function body from being visible to the caller's optimization context.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid slab slot of `class_size` bytes.
+#[inline(never)]
+unsafe fn poison_free(ptr: *mut u8, class_size: usize) {
+    if class_size < 16 {
+        return; // Need at least 8 (next ptr) + 4 (magic) + some poison.
+    }
+    // Write the magic signature at bytes 8..12 using volatile stores.
+    // Volatile prevents the optimizer from dead-store-eliminating these
+    // writes even with full LTO visibility.
+    // SAFETY: ptr is valid for class_size bytes (>= 16).
+    unsafe {
+        core::ptr::write_volatile(ptr.add(8), POISON_MAGIC[0]);
+        core::ptr::write_volatile(ptr.add(9), POISON_MAGIC[1]);
+        core::ptr::write_volatile(ptr.add(10), POISON_MAGIC[2]);
+        core::ptr::write_volatile(ptr.add(11), POISON_MAGIC[3]);
+    }
+    // Fill bytes 12..class_size with FREE_POISON.
+    for i in 12..class_size {
+        unsafe {
+            core::ptr::write_volatile(ptr.add(i), FREE_POISON);
+        }
+    }
+}
+
+/// Fill bytes 0..class_size with ALLOC_POISON.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid slab slot of `class_size` bytes.
+#[inline]
+unsafe fn poison_alloc(ptr: *mut u8, class_size: usize) {
+    // SAFETY: ptr is valid for class_size bytes.
+    unsafe {
+        ptr.write_bytes(ALLOC_POISON, class_size);
+    }
+}
+
+/// Check poison integrity on a slot being allocated.
+///
+/// First verifies the POISON_MAGIC signature at bytes 8..12.  If not
+/// present, this slot was never freed through the poison path (e.g.,
+/// carved from a fresh frame during refill) — skip the check silently.
+///
+/// If the magic IS present, checks bytes 12..class_size for FREE_POISON.
+/// Any modification indicates a use-after-free write.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid slab slot of `class_size` bytes.
+///
+/// NOTE: `#[inline(never)]` is required here.  With `#[inline]` + thin LTO,
+/// the compiler inlines check_poison into pcpu_slab_alloc and then
+/// constant-propagates through the dealloc→alloc boundary, "knowing"
+/// what bytes poison_free wrote and skipping the actual memory reads.
+/// Preventing inlining forces an actual function call with a real
+/// memory read that can't be elided.
+#[inline(never)]
+unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
+    if class_size < 16 {
+        return;
+    }
+    // Check the magic signature using volatile reads.  This prevents
+    // the optimizer from constant-propagating through dealloc→alloc
+    // boundaries (it can't assume it knows what's at ptr+8 even with
+    // full LTO visibility into poison_free).
+    let m0 = unsafe { core::ptr::read_volatile(ptr.add(8)) };
+    let m1 = unsafe { core::ptr::read_volatile(ptr.add(9)) };
+    let m2 = unsafe { core::ptr::read_volatile(ptr.add(10)) };
+    let m3 = unsafe { core::ptr::read_volatile(ptr.add(11)) };
+    if m0 != POISON_MAGIC[0] || m1 != POISON_MAGIC[1]
+        || m2 != POISON_MAGIC[2] || m3 != POISON_MAGIC[3]
+    {
+        return; // Virgin slot — never been through poison_free.
+    }
+
+    // Magic is intact.  Now check the poison zone (bytes 12..class_size).
+    if class_size <= 12 {
+        return;
+    }
+    for i in 12..class_size {
+        let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        if byte != FREE_POISON {
+            POISON_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+            serial_println!(
+                "[heap] USE-AFTER-FREE detected! slot={:#x}, offset={}, expected=0x{:02X}, found=0x{:02X}, class={}",
+                ptr as usize, i, FREE_POISON, byte, class_size
+            );
+            // Only report the first corrupted byte per slot.
+            return;
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Allocation statistics (lock-free, atomic counters)
@@ -229,7 +386,16 @@ impl HeapInner {
         // SAFETY: slot is non-null (we just refilled or it was already non-null).
         // It points to a valid FreeSlot in HHDM-mapped frame memory.
         self.free_lists[class_idx] = unsafe { (*slot).next };
-        slot.cast::<u8>()
+        let ptr = slot.cast::<u8>();
+
+        // Slab poisoning: check free-poison integrity, then alloc-poison.
+        if POISON_ENABLED.load(Ordering::Relaxed) {
+            let class_size = SIZE_CLASSES[class_idx];
+            // SAFETY: ptr is a valid slab slot of class_size bytes.
+            unsafe { check_poison(ptr, class_size); }
+            unsafe { poison_alloc(ptr, class_size); }
+        }
+        ptr
     }
 
     /// Return a slot to its size class's free list.
@@ -237,6 +403,13 @@ impl HeapInner {
     // the class size (>= 8 bytes).
     #[allow(clippy::indexing_slicing, clippy::cast_ptr_alignment)]
     fn slab_dealloc(&mut self, ptr: *mut u8, class_idx: usize) {
+        // Slab poisoning: fill freed memory with FREE_POISON pattern.
+        if POISON_ENABLED.load(Ordering::Relaxed) {
+            let class_size = SIZE_CLASSES[class_idx];
+            // SAFETY: ptr is a valid slab slot of class_size bytes.
+            unsafe { poison_free(ptr, class_size); }
+        }
+
         let slot = ptr.cast::<FreeSlot>();
         // SAFETY: ptr was returned by slab_alloc, so it points to a valid
         // slot in HHDM-mapped memory.  The slot is large enough for
@@ -441,7 +614,15 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // OPT: Per-CPU counter — plain increment, no `lock` prefix.
         cache.slab_allocs += 1;
         cache.active = false;
-        return slot_ptr.cast::<u8>();
+        let ptr = slot_ptr.cast::<u8>();
+        // Slab poisoning: verify free-poison integrity (UAF detection),
+        // then fill with alloc-poison (uninitialized-read detection).
+        if POISON_ENABLED.load(Ordering::Relaxed) {
+            let class_size = SIZE_CLASSES[class_idx];
+            unsafe { check_poison(ptr, class_size); }
+            unsafe { poison_alloc(ptr, class_size); }
+        }
+        return ptr;
     }
 
     // Slow path: batch refill from global allocator.
@@ -478,7 +659,13 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // OPT: Per-CPU counter (slow path but still per-CPU).
         cache.slab_allocs += 1;
         cache.active = false;
-        slot_ptr.cast::<u8>()
+        let ptr = slot_ptr.cast::<u8>();
+        if POISON_ENABLED.load(Ordering::Relaxed) {
+            let class_size = SIZE_CLASSES[class_idx];
+            unsafe { check_poison(ptr, class_size); }
+            unsafe { poison_alloc(ptr, class_size); }
+        }
+        ptr
     } else {
         // Couldn't get any slots (OOM).
         cache.active = false;
@@ -509,6 +696,13 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
         return false;
     }
     cache.active = true;
+
+    // Slab poisoning: fill freed slot with FREE_POISON before linking
+    // into the free list.  Must happen before writing the next pointer.
+    if POISON_ENABLED.load(Ordering::Relaxed) {
+        let class_size = SIZE_CLASSES[class_idx];
+        unsafe { poison_free(ptr, class_size); }
+    }
 
     if cache.counts[class_idx] < PCPU_SLAB_MAX as u16 {
         // Fast path: push to local cache.
@@ -859,4 +1053,113 @@ pub fn self_test() -> KernelResult<()> {
 
     serial_println!("[heap] Heap allocator self-test PASSED");
     Ok(())
+}
+
+/// Self-test for slab poisoning (use-after-free detection).
+///
+/// Tests:
+/// 1. Normal alloc/free cycle with poison enabled — no violations.
+/// 2. Simulated use-after-free (write to freed memory) — detected.
+/// 3. Verify violation counter increments.
+///
+/// Helper: corrupt a freed slot and re-allocate to trigger detection.
+///
+/// Isolated in a separate function to prevent thin LTO from optimizing
+/// across the full dealloc→corrupt→alloc sequence.  When the entire
+/// sequence is visible to the optimizer, it can prove that check_poison's
+/// read_volatile calls will return the values written by poison_free
+/// (ignoring the corruption write through a provenance-less pointer).
+#[inline(never)]
+fn corrupt_and_realloc(slot_addr: usize, layout: Layout) -> *mut u8 {
+    // SAFETY: slot_addr points to a 64-byte slab slot that was just freed
+    // with interrupts disabled (no reuse possible).  The inline asm write
+    // is the only reliable way to corrupt memory under full LTO — LLVM
+    // cannot see through it or reason about its effects.
+    unsafe {
+        core::arch::asm!(
+            "mov byte ptr [{ptr} + 16], 0xBA",
+            ptr = in(reg) slot_addr,
+        );
+    }
+    // Allocate — LIFO guarantees we get the same slot back.
+    unsafe { alloc::alloc::alloc(layout) }
+}
+
+pub fn poison_self_test() {
+    serial_println!("[heap] Running slab poison self-test...");
+
+    // Enable poisoning for the test.
+    let was_enabled = POISON_ENABLED.load(Ordering::Relaxed);
+    POISON_ENABLED.store(true, Ordering::Relaxed);
+    let violations_before = POISON_VIOLATIONS.load(Ordering::Relaxed);
+
+    // Both tests run with interrupts disabled to ensure LIFO slot reuse.
+    // The per-CPU cache returns the most-recently-freed slot on the next
+    // alloc of the same size class — but only if no ISR steals it first.
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    unsafe { crate::cpu::cli(); }
+
+    // --- Test 1: Normal cycle (no false positives) ---
+    //
+    // "Warmup" cycle: prime a slot with the poison magic.  The first
+    // alloc from the per-CPU cache may grab a virgin slot (from batch
+    // refill) that was never freed through the poison path.
+    let warmup = unsafe { alloc::alloc::alloc(layout) };
+    assert!(!warmup.is_null(), "poison test: warmup alloc failed");
+    unsafe { alloc::alloc::dealloc(warmup, layout); }
+    let violations_after_warmup = POISON_VIOLATIONS.load(Ordering::Relaxed);
+
+    // Now alloc → write → dealloc → realloc.  The realloc should NOT
+    // trigger a violation (poison was written on free and not disturbed).
+    let p1 = unsafe { alloc::alloc::alloc(layout) };
+    assert!(!p1.is_null(), "poison test: alloc failed");
+    unsafe { p1.write_bytes(0x42, 64); }
+    unsafe { alloc::alloc::dealloc(p1, layout); }
+    let p2 = unsafe { alloc::alloc::alloc(layout) };
+    assert!(!p2.is_null(), "poison test: realloc failed");
+    let violations_after_normal = POISON_VIOLATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        violations_after_normal, violations_after_warmup,
+        "poison test: unexpected violation on clean alloc/free cycle"
+    );
+    serial_println!("[heap]   Clean alloc/free/realloc: OK (no false positives)");
+
+    // --- Test 2: UAF detection ---
+    //
+    // Free p2 (primes it with poison magic), then corrupt it, then
+    // realloc — the corruption should be detected.  p2 is guaranteed
+    // to have been through poison_free (just happened above in Test 1).
+    //
+    // Save the address as usize BEFORE freeing — after dealloc, the
+    // pointer's provenance is invalid and LLVM may optimize writes
+    // through it even with write_volatile.  The usize round-trip
+    // breaks provenance tracking so the store is guaranteed.
+    let p2_addr = p2 as usize;
+    unsafe { alloc::alloc::dealloc(p2, layout); }
+    let violations_pre_uaf = POISON_VIOLATIONS.load(Ordering::Relaxed);
+    // BAD: simulate use-after-free by writing to the freed slot.
+    // Offset 16 is inside the poison zone (bytes 12..class_size).
+    // The usize→ptr cast + write_volatile ensures the compiler cannot
+    // eliminate this store regardless of optimization level.
+    // Delegate corruption + re-alloc to a separate non-inlined function.
+    // This isolates the UAF simulation from the dealloc above, preventing
+    // thin LTO from performing whole-sequence optimization across the
+    // dealloc→corrupt→alloc boundary.
+    let p4 = corrupt_and_realloc(p2_addr, layout);
+    assert!(!p4.is_null(), "poison test: realloc for UAF test failed");
+    let violations_after_uaf = POISON_VIOLATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        violations_after_uaf,
+        violations_pre_uaf + 1,
+        "poison test: UAF not detected (violations didn't increment)"
+    );
+    unsafe { alloc::alloc::dealloc(p4, layout); }
+    serial_println!("[heap]   Use-after-free detection: OK (violation caught)");
+
+    unsafe { crate::cpu::sti(); }
+
+    // Restore previous state.
+    POISON_ENABLED.store(was_enabled, Ordering::Relaxed);
+
+    serial_println!("[heap] Slab poison self-test PASSED");
 }

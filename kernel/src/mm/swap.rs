@@ -51,7 +51,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use spin::Mutex;
+use crate::sync::Mutex;
 use super::frame::{self, FRAME_SIZE};
 use super::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 
@@ -744,7 +744,7 @@ impl SwapState {
 }
 
 /// Lock ordering: SWAP → RECLAIM → page table → frame allocator.
-static SWAP: Mutex<SwapState> = Mutex::new(SwapState::uninit());
+static SWAP: Mutex<SwapState> = Mutex::named(SwapState::uninit(), b"SWAP");
 
 // ---------------------------------------------------------------------------
 // Reclaimable page tracking (Clock algorithm)
@@ -789,7 +789,7 @@ impl ReclaimState {
     }
 }
 
-static RECLAIM: Mutex<ReclaimState> = Mutex::new(ReclaimState::new());
+static RECLAIM: Mutex<ReclaimState> = Mutex::named(ReclaimState::new(), b"RECLAIM");
 
 /// Register a user-space page as reclaimable (eligible for swap-out).
 ///

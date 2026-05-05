@@ -53,7 +53,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use crate::serial_println;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Priority classes
@@ -478,7 +478,7 @@ impl IoSchedulerInner {
 // Global instance
 // ---------------------------------------------------------------------------
 
-static IO_SCHEDULER: Mutex<IoSchedulerInner> = Mutex::new(IoSchedulerInner::new());
+static IO_SCHEDULER: Mutex<IoSchedulerInner> = Mutex::named(IoSchedulerInner::new(), b"IOSCHED");
 
 // ---------------------------------------------------------------------------
 // Public API

@@ -42,7 +42,7 @@ use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::mm::vma::{Vma, VmaKind};
 use crate::serial_println;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -86,7 +86,7 @@ const BITMAP_WORDS: usize = (MAX_STACKS + 63) / 64;
 // ---------------------------------------------------------------------------
 
 /// Bitmap tracking which stack slots are allocated (1 = in use).
-static ALLOCATOR: Mutex<KstackAllocator> = Mutex::new(KstackAllocator::new());
+static ALLOCATOR: Mutex<KstackAllocator> = Mutex::named(KstackAllocator::new(), b"KSTACK");
 
 /// Whether the kstack subsystem has been initialized.
 static INITIALIZED: spin::Once<()> = spin::Once::new();

@@ -35,7 +35,7 @@ use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::mm::vma::{AddressSpace, Vma, VmaKind};
 use crate::serial_println;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Page fault error code
@@ -104,7 +104,7 @@ impl PageFaultError {
 /// Lock ordering: this lock is acquired BEFORE `PT_PAGE_POOL` and
 /// the frame allocator lock (the demand-page path acquires those
 /// while holding this lock).
-static KERNEL_AS: Mutex<Option<AddressSpace>> = Mutex::new(None);
+static KERNEL_AS: Mutex<Option<AddressSpace>> = Mutex::named(None, b"KERNEL_AS");
 
 /// Virtual address used for the demand-paging self-test.
 ///

@@ -41,7 +41,7 @@
 //! If process counts grow beyond 256, migrate to a hash table or BTreeMap.
 
 use crate::serial_println;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -99,7 +99,7 @@ impl AccountingEntry {
 
 /// The accounting table.  Protected by a spinlock.
 static ACCOUNTING: Mutex<[AccountingEntry; MAX_ADDRESS_SPACES]> =
-    Mutex::new([AccountingEntry::EMPTY; MAX_ADDRESS_SPACES]);
+    Mutex::named([AccountingEntry::EMPTY; MAX_ADDRESS_SPACES], b"ACCT");
 
 /// The PML4 physical address of the kernel's own address space.
 ///

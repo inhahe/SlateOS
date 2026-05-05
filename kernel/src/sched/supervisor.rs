@@ -45,7 +45,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
+use crate::sync::Mutex;
 
 use crate::error::KernelResult;
 use crate::serial_println;
@@ -181,7 +181,7 @@ extern "C" fn dummy_entry(_: u64) {}
 
 /// Table of supervised tasks.
 static SUPERVISED: Mutex<[SupervisedTask; MAX_SUPERVISED]> =
-    Mutex::new([SupervisedTask::empty(); MAX_SUPERVISED]);
+    Mutex::named([SupervisedTask::empty(); MAX_SUPERVISED], b"SUPERV");
 
 /// Whether the supervisor's exit hook is registered.
 static HOOK_REGISTERED: AtomicU64 = AtomicU64::new(0);
@@ -418,7 +418,7 @@ struct RestartInfo {
 /// Pending restart slots.  The ktimer callback uses the slot_idx
 /// encoded in the argument to find the restart info.
 static PENDING_RESTARTS: Mutex<[Option<RestartInfo>; MAX_SUPERVISED]> =
-    Mutex::new([None; MAX_SUPERVISED]);
+    Mutex::named([None; MAX_SUPERVISED], b"RESTART");
 
 /// Schedule a deferred restart via ktimer.
 fn schedule_restart(info: RestartInfo, delay_ticks: u64) {

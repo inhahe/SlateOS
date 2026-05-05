@@ -58,7 +58,7 @@
 
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Pressure levels
@@ -160,8 +160,8 @@ impl Shrinker {
 ///
 /// Protected by a spinlock.  Only modified during init (register) and
 /// queried during reclaim (notify).  The lock is held briefly.
-static SHRINKERS: Mutex<[Shrinker; MAX_SHRINKERS]> = Mutex::new(
-    [Shrinker::EMPTY; MAX_SHRINKERS]
+static SHRINKERS: Mutex<[Shrinker; MAX_SHRINKERS]> = Mutex::named(
+    [Shrinker::EMPTY; MAX_SHRINKERS], b"SHRINK"
 );
 
 // ---------------------------------------------------------------------------

@@ -331,8 +331,8 @@ struct DmaMappingInfo {
 /// Protected by a spinlock.  The table is small (DMA allocations are
 /// infrequent) so a simple Vec is fine.  A BTreeMap keyed by
 /// (pml4_phys, user_virt) would be better for large systems.
-static DMA_MAPPINGS: spin::Mutex<alloc::vec::Vec<DmaMappingInfo>> =
-    spin::Mutex::new(alloc::vec::Vec::new());
+static DMA_MAPPINGS: crate::sync::Mutex<alloc::vec::Vec<DmaMappingInfo>> =
+    crate::sync::Mutex::named(alloc::vec::Vec::new(), b"DMA_MAP");
 
 fn track_dma_mapping(pml4_phys: u64, user_virt: u64, phys: u64, order: usize, size: usize) {
     let mut mappings = DMA_MAPPINGS.lock();

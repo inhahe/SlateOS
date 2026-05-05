@@ -40,7 +40,7 @@
 //! - design.txt: "set resource limits at process launch, kernel-enforced"
 
 use crate::serial_println;
-use spin::Mutex;
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Resource limits struct
@@ -182,8 +182,8 @@ impl LimitEntry {
 ///
 /// Uses a fixed-size array to avoid heap allocation.  Protected by a
 /// spinlock (lock ordering: RLIMITS < SCHED < `frame_allocator`).
-static RLIMITS: Mutex<[LimitEntry; MAX_PROCESSES]> = Mutex::new(
-    [LimitEntry::EMPTY; MAX_PROCESSES]
+static RLIMITS: Mutex<[LimitEntry; MAX_PROCESSES]> = Mutex::named(
+    [LimitEntry::EMPTY; MAX_PROCESSES], b"RLIMITS"
 );
 
 // ---------------------------------------------------------------------------

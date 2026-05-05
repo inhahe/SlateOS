@@ -316,6 +316,16 @@ static IDLE_TICK_COUNTS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
 /// (which gives a ~64-sample / 64-second half-life).
 static LOAD_AVG_X100: AtomicU64 = AtomicU64::new(0);
 
+/// Per-CPU TSC timestamp of the last context switch-in.
+///
+/// Updated at each context switch.  The delta `current_tsc - last_switch_tsc[cpu]`
+/// gives the CPU cycles consumed by the outgoing task.  This enables
+/// nanosecond-precision per-task CPU time accounting.
+static LAST_SWITCH_TSC: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
 /// Global work steal counter (any CPU stealing from another).
 static WORK_STEALS: AtomicU64 = AtomicU64::new(0);
 
@@ -2375,6 +2385,8 @@ pub struct TaskInfo {
     pub priority: u8,
     /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz).
     pub total_ticks: u64,
+    /// Total CPU cycles consumed (TSC-based, nanosecond precision).
+    pub total_cycles: u64,
     /// Number of times this task was scheduled.
     pub schedule_count: u64,
     /// CPU this task last ran on.
@@ -2408,6 +2420,7 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             state: task.state,
             priority: task.priority,
             total_ticks: task.total_ticks,
+            total_cycles: task.total_cycles,
             schedule_count: task.schedule_count,
             last_cpu: task.last_cpu,
             cpu_quota_pct: task.cpu_quota_pct,
@@ -2667,6 +2680,27 @@ pub fn process_sleep_wakeups() {
 // Core scheduling logic
 // ---------------------------------------------------------------------------
 
+/// Account CPU cycles to the outgoing task at context switch time.
+///
+/// Reads the current TSC, computes the delta since the task was last
+/// switched-in on this CPU, and adds it to the task's `total_cycles`.
+/// Then updates the per-CPU `LAST_SWITCH_TSC` for the incoming task.
+///
+/// This gives nanosecond-precision per-task CPU time (vs the 10ms
+/// granularity of tick-based `total_ticks`).
+fn account_cycles(state: &mut SchedState, outgoing_id: TaskId, cpu: usize) {
+    let now = crate::bench::rdtsc();
+    if let Some(last_tsc_slot) = LAST_SWITCH_TSC.get(cpu) {
+        let prev = last_tsc_slot.swap(now, Ordering::Relaxed);
+        if prev != 0 {
+            let delta = now.saturating_sub(prev);
+            if let Some(task) = state.tasks.get_mut(&outgoing_id) {
+                task.total_cycles = task.total_cycles.saturating_add(delta);
+            }
+        }
+    }
+}
+
 /// The inner scheduling function.
 ///
 /// If `requeue` is true, the current task is placed back in its
@@ -2846,6 +2880,8 @@ fn schedule_inner(requeue: bool) {
                     if let (Some((old_p, old_fpu, o_pml4)), Some((new_p, new_fpu, n_pml4, n_sb))) =
                         (old_data, new_data)
                     {
+                        // Account CPU cycles to the outgoing task (idle fallback path).
+                        account_cycles(&mut s, current_id, cpu);
                         drop(s);
 
                         // Clear idle flag BEFORE the switch so the new
@@ -2988,6 +3024,10 @@ fn schedule_inner(requeue: bool) {
             );
             return;
         }
+
+        // Account CPU cycles to the outgoing task (TSC-based).
+        account_cycles(&mut state, current_id, cpu);
+
         // Lock is dropped here before the context switch.
     }
 

@@ -334,6 +334,16 @@ pub struct Task {
     /// commands and resource accounting.
     pub total_ticks: u64,
 
+    /// Total CPU cycles consumed by this task (TSC-based).
+    ///
+    /// Updated at each context switch: the delta between the time this
+    /// task was switched-in and switched-out is added.  Provides
+    /// nanosecond-precision CPU time accounting (unlike `total_ticks`
+    /// which has 10ms granularity).
+    ///
+    /// Convert to nanoseconds via `bench::cycles_to_ns(total_cycles)`.
+    pub total_cycles: u64,
+
     /// Total number of times this task has been scheduled (context
     /// switched into).
     ///
@@ -599,6 +609,7 @@ impl Task {
             last_cpu: 0,
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
+            total_cycles: 0,
             schedule_count: 0,
             ready_since_tick: 0,
             total_wait_ticks: 0,
@@ -665,6 +676,7 @@ impl Task {
             last_cpu: cpu_index,
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
+            total_cycles: 0,
             schedule_count: 0,
             ready_since_tick: 0,
             total_wait_ticks: 0,
@@ -780,6 +792,7 @@ impl Task {
             last_cpu: 0,
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
+            total_cycles: 0,
             schedule_count: 0,
             ready_since_tick: 0,
             total_wait_ticks: 0,

@@ -4802,33 +4802,44 @@ fn cmd_top() {
         shell_println!("");
     }
 
-    // --- Top tasks (sorted by CPU time, descending) ---
+    // --- Top tasks (sorted by CPU cycles, descending) ---
     shell_println!("");
     let mut task_list = crate::sched::task_list();
-    task_list.sort_by(|a, b| b.total_ticks.cmp(&a.total_ticks));
+    // Sort by TSC cycles (more precise than ticks).
+    task_list.sort_by(|a, b| b.total_cycles.cmp(&a.total_cycles));
 
+    let freq = crate::bench::tsc_freq();
     shell_println!(
-        "{:<5} {:<12} {:<8} {:>3} {:>8} {:>6}",
-        "TID", "NAME", "STATE", "PRI", "TIME", "WAIT"
+        "{:<5} {:<12} {:<8} {:>3} {:>10} {:>6}",
+        "TID", "NAME", "STATE", "PRI", "CPU_TIME", "WAIT"
     );
-    shell_println!("-----------------------------------------------------");
+    shell_println!("-----------------------------------------------------------");
     // Show top 10 (or all if fewer).
     let show_count = task_list.len().min(10);
     for info in task_list.iter().take(show_count) {
         let name = core::str::from_utf8(
             info.name.get(..info.name_len).unwrap_or(&info.name)
         ).unwrap_or("?");
-        let total_secs = info.total_ticks / 100;
-        let frac = (info.total_ticks % 100) / 10;
-        let mins = total_secs / 60;
-        let secs = total_secs % 60;
+
+        // TSC-based time (nanosecond precision).
+        let cpu_ms = if freq > 0 {
+            crate::bench::cycles_to_ns(info.total_cycles) / 1_000_000
+        } else {
+            // Fallback to tick-based
+            info.total_ticks * 10
+        };
+        let cpu_secs = cpu_ms / 1000;
+        let cpu_frac = (cpu_ms % 1000) / 10;
+        let cpu_mins = cpu_secs / 60;
+        let cpu_s = cpu_secs % 60;
+
         // Wait time as seconds.tenths
         let wait_secs = info.total_wait_ticks / 100;
         let wait_frac = (info.total_wait_ticks % 100) / 10;
         shell_println!(
-            "{:<5} {:<12} {:<8} {:>3} {:>4}:{:02}.{} {:>3}.{}",
+            "{:<5} {:<12} {:<8} {:>3} {:>4}:{:02}.{:02} {:>3}.{}",
             info.id, name, info.state, info.priority,
-            mins, secs, frac,
+            cpu_mins, cpu_s, cpu_frac,
             wait_secs, wait_frac,
         );
     }

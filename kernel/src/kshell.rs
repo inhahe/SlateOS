@@ -14378,16 +14378,36 @@ fn cmd_kprofile(args: &str) {
     let snapshots = crate::kprofile::snapshots();
     let mut any = false;
 
-    shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
-        "Region", "Count", "Min", "Mean", "Max");
-    shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
-        "------", "-----", "---", "----", "---");
+    let freq = crate::bench::tsc_freq();
+    if freq > 0 {
+        shell_println!("  TSC frequency: {} MHz", freq / 1_000_000);
+        shell_println!("");
+        shell_println!("  {:<14} {:>8} {:>8} {:>8} {:>8}  {:>7} {:>7} {:>7}",
+            "Region", "Count", "Min cy", "Mean cy", "Max cy", "Min ns", "Mean ns", "Max ns");
+        shell_println!("  {:<14} {:>8} {:>8} {:>8} {:>8}  {:>7} {:>7} {:>7}",
+            "------", "-----", "------", "-------", "------", "------", "-------", "------");
+    } else {
+        shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+            "Region", "Count", "Min", "Mean", "Max");
+        shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+            "------", "-----", "---", "----", "---");
+    }
 
     for snap in &snapshots {
         if let Some(s) = snap {
             any = true;
-            shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
-                s.name, s.count, s.min_cycles, s.mean_cycles, s.max_cycles);
+            if freq > 0 {
+                let min_ns = crate::bench::cycles_to_ns(s.min_cycles);
+                let mean_ns = crate::bench::cycles_to_ns(s.mean_cycles);
+                let max_ns = crate::bench::cycles_to_ns(s.max_cycles);
+                shell_println!("  {:<14} {:>8} {:>8} {:>8} {:>8}  {:>7} {:>7} {:>7}",
+                    s.name, s.count,
+                    s.min_cycles, s.mean_cycles, s.max_cycles,
+                    min_ns, mean_ns, max_ns);
+            } else {
+                shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+                    s.name, s.count, s.min_cycles, s.mean_cycles, s.max_cycles);
+            }
         }
     }
 
@@ -14575,9 +14595,20 @@ fn cmd_jitter() {
             shell_println!("  Samples:  {} intervals", j.count);
             shell_println!("  Expected: {} cycles/tick (from mean)", j.expected_cycles);
             shell_println!("");
-            shell_println!("  Min:  {} cycles", j.min_cycles);
-            shell_println!("  Mean: {} cycles", j.mean_cycles);
-            shell_println!("  Max:  {} cycles", j.max_cycles);
+
+            let freq = crate::bench::tsc_freq();
+            if freq > 0 {
+                let min_us = crate::bench::cycles_to_ns(j.min_cycles) / 1000;
+                let mean_us = crate::bench::cycles_to_ns(j.mean_cycles) / 1000;
+                let max_us = crate::bench::cycles_to_ns(j.max_cycles) / 1000;
+                shell_println!("  Min:  {} cycles ({} us)", j.min_cycles, min_us);
+                shell_println!("  Mean: {} cycles ({} us)", j.mean_cycles, mean_us);
+                shell_println!("  Max:  {} cycles ({} us)", j.max_cycles, max_us);
+            } else {
+                shell_println!("  Min:  {} cycles", j.min_cycles);
+                shell_println!("  Mean: {} cycles", j.mean_cycles);
+                shell_println!("  Max:  {} cycles", j.max_cycles);
+            }
             shell_println!("");
 
             // Compute jitter as percentage deviation from mean.

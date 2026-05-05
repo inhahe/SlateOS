@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4196,6 +4196,7 @@ fn dispatch(line: &str) {
         "irqoff" => cmd_irqoff(args),
         "idle" => cmd_idle(),
         "kstat" | "history" => cmd_kstat(args),
+        "kwarn" | "warnings" => cmd_kwarn(args),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -4483,6 +4484,7 @@ fn cmd_help() {
     crate::console_println!("  lockstats  Show spinlock contention statistics");
     crate::console_println!("  idle       Show CPU idle state statistics (MWAIT/HLT)");
     crate::console_println!("  kstat      Show system metrics history (1-min time series)");
+    crate::console_println!("  kwarn      Show kernel warnings (kwarn clear to reset)");
     crate::console_println!("  irqoff     Show interrupt-disabled duration tracking");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
@@ -14600,6 +14602,54 @@ fn cmd_idle() {
         };
         shell_println!("  MWAIT usage:   {}%", mwait_pct);
     }
+}
+
+/// `kwarn` — show kernel warnings.
+///
+/// Displays all recorded non-fatal kernel warnings from the ring buffer.
+/// Use `kwarn clear` to reset.
+fn cmd_kwarn(args: &str) {
+    if args.trim() == "clear" {
+        crate::kwarn::clear();
+        shell_println!("Kernel warnings cleared.");
+        return;
+    }
+
+    let warnings = crate::kwarn::all_warnings();
+    let total = crate::kwarn::total_count();
+
+    if warnings.is_empty() {
+        shell_println!("No kernel warnings recorded.");
+        return;
+    }
+
+    shell_println!("=== Kernel Warnings ({} total since boot) ===", total);
+    shell_println!("");
+
+    let tsc_freq = crate::bench::tsc_freq();
+
+    for (i, w) in warnings.iter().enumerate() {
+        let file = core::str::from_utf8(&w.file[..w.file_len as usize]).unwrap_or("?");
+        let msg = core::str::from_utf8(&w.msg[..w.msg_len as usize]).unwrap_or("?");
+
+        // Convert timestamp to relative age if TSC freq is known.
+        let age_str = if tsc_freq > 0 {
+            let now = crate::bench::rdtsc();
+            let elapsed_cycles = now.saturating_sub(w.timestamp);
+            let elapsed_ms = elapsed_cycles / (tsc_freq / 1000).max(1);
+            if elapsed_ms < 1000 {
+                alloc::format!("{}ms ago", elapsed_ms)
+            } else {
+                alloc::format!("{}s ago", elapsed_ms / 1000)
+            }
+        } else {
+            alloc::format!("tsc={}", w.timestamp)
+        };
+
+        shell_println!("  [{}] {} ({}:{}) [{}]",
+            i + 1, msg, file, w.line, age_str);
+    }
+    shell_println!("");
 }
 
 /// `irqoff` — show interrupt-disabled duration statistics.

@@ -3101,6 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
+    "exceptions", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4182,6 +4183,7 @@ fn dispatch(line: &str) {
         "lockdep" => cmd_lockdep(args),
         "bt" | "backtrace" => cmd_backtrace(),
         "diag" | "health" => cmd_diag(),
+        "exceptions" | "vectors" => cmd_exceptions(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4450,6 +4452,7 @@ fn cmd_help() {
     crate::console_println!("  lockdep [sub] Lock order validator (classes/edges/held/all)");
     crate::console_println!("  bt        Show current kernel call stack (backtrace)");
     crate::console_println!("  diag      One-stop system health diagnostic summary");
+    crate::console_println!("  exceptions Show per-vector exception/interrupt counts");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -13788,6 +13791,38 @@ fn cmd_diag() {
     } else {
         shell_println!("  Overall: {} issue(s) detected — investigate above warnings", issues);
     }
+}
+
+fn cmd_exceptions() {
+    use crate::idt;
+
+    let counts = idt::vector_counts();
+    let any_nonzero = counts.iter().any(|&c| c > 0);
+
+    if !any_nonzero {
+        shell_println!("No exceptions or interrupts recorded.");
+        return;
+    }
+
+    shell_println!("{:<6} {:<32} {:>12}", "VEC", "NAME", "COUNT");
+    shell_println!("{}", "-".repeat(52));
+
+    for (i, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let name = if i < 32 {
+            idt::EXCEPTION_NAMES[i]
+        } else {
+            "IRQ"
+        };
+        shell_println!("{:<6} {:<32} {:>12}", i, name, count);
+    }
+
+    // Summary line.
+    let total: u64 = counts.iter().sum();
+    shell_println!("{}", "-".repeat(52));
+    shell_println!("{:<6} {:<32} {:>12}", "", "TOTAL", total);
 }
 
 fn cmd_lockdep(args: &str) {

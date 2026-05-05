@@ -28,6 +28,84 @@ use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::proc::spawn::{USER_STACK_TOP, USER_STACK_GUARD, MAX_STACK_FRAMES};
 use crate::sched;
 use crate::serial_println;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+// ---------------------------------------------------------------------------
+// Exception / interrupt statistics
+// ---------------------------------------------------------------------------
+
+/// Per-vector exception/interrupt counts since boot.
+///
+/// Index = vector number (0–31 for CPU exceptions, 32+ for IRQs).
+/// We only track the first 48 vectors (32 exceptions + 16 device IRQs)
+/// to keep the array manageable.
+const VECTOR_STATS_SIZE: usize = 48;
+
+/// Counts of exception/interrupt firings per vector.
+static VECTOR_COUNTS: [AtomicU64; VECTOR_STATS_SIZE] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; VECTOR_STATS_SIZE]
+};
+
+/// Increment the counter for a given vector.
+#[inline]
+fn count_vector(vector: usize) {
+    if let Some(c) = VECTOR_COUNTS.get(vector) {
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Get the count for a specific vector.
+#[must_use]
+pub fn vector_count(vector: usize) -> u64 {
+    VECTOR_COUNTS.get(vector).map_or(0, |c| c.load(Ordering::Relaxed))
+}
+
+/// Get all vector counts as an array snapshot.
+#[must_use]
+pub fn vector_counts() -> [u64; VECTOR_STATS_SIZE] {
+    let mut result = [0u64; VECTOR_STATS_SIZE];
+    for (i, c) in VECTOR_COUNTS.iter().enumerate() {
+        result[i] = c.load(Ordering::Relaxed);
+    }
+    result
+}
+
+/// Names for CPU exception vectors 0–31.
+pub const EXCEPTION_NAMES: [&str; 32] = [
+    "#DE Divide Error",
+    "#DB Debug",
+    "NMI",
+    "#BP Breakpoint",
+    "#OF Overflow",
+    "#BR Bound Range",
+    "#UD Invalid Opcode",
+    "#NM Device N/A",
+    "#DF Double Fault",
+    "Coprocessor Overrun",
+    "#TS Invalid TSS",
+    "#NP Segment N/P",
+    "#SS Stack Segment",
+    "#GP General Protection",
+    "#PF Page Fault",
+    "(Reserved 15)",
+    "#MF x87 FP",
+    "#AC Alignment Check",
+    "#MC Machine Check",
+    "#XM SIMD FP",
+    "#VE Virtualization",
+    "#CP Control Protection",
+    "(Reserved 22)",
+    "(Reserved 23)",
+    "(Reserved 24)",
+    "(Reserved 25)",
+    "(Reserved 26)",
+    "(Reserved 27)",
+    "(Reserved 28)",
+    "(Reserved 29)",
+    "#SX Security",
+    "(Reserved 31)",
+];
 
 // ---------------------------------------------------------------------------
 // IDT entry
@@ -720,6 +798,7 @@ fn dispatch_or_kill_userspace(
 /// Ring 3: dispatch to SEH handler or kill task.  Ring 0: halt (kernel bug).
 #[unsafe(no_mangle)]
 extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(0);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Divide Error (#DE)", frame, ExceptionCode::DivideError, 0);
@@ -732,6 +811,7 @@ extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
 /// Handle #DB (Debug, vector 1).  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(1);
     serial_println!("EXCEPTION: Debug (#DB) at {:#x}", frame.rip);
 }
 
@@ -748,6 +828,7 @@ extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
 /// Non-fatal unless memory parity indicates hardware failure.
 #[unsafe(no_mangle)]
 extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(2);
     // Read System Control Port B (port 0x61) to identify NMI source.
     // SAFETY: port 0x61 is always readable on PC-compatible hardware.
     let port_b: u8 = unsafe { crate::port::inb(0x61) };
@@ -777,6 +858,7 @@ extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
 /// Handle #BP (Breakpoint, vector 3).  Logged but non-fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(3);
     serial_println!("EXCEPTION: Breakpoint (#BP) at {:#x}", frame.rip);
 }
 
@@ -785,6 +867,7 @@ extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_overflow(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(4);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Overflow (#OF)", frame, ExceptionCode::Overflow, 0);
@@ -799,6 +882,7 @@ extern "C" fn handle_overflow(frame: &InterruptStackFrame, _error: u64) {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(5);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Bound Range Exceeded (#BR)", frame, ExceptionCode::BoundRangeExceeded, 0);
@@ -813,6 +897,7 @@ extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(6);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Invalid Opcode (#UD)", frame, ExceptionCode::InvalidOpcode, 0);
@@ -865,6 +950,7 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
 /// Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(7);
     if is_userspace_exception(frame) {
         // #NM typically means the FPU context isn't available.
         // Dispatch as invalid opcode (closest match).
@@ -883,6 +969,7 @@ extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) 
 /// (task, memory) using non-blocking lock acquisition.
 #[unsafe(no_mangle)]
 extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
+    count_vector(8);
     // Double faults are always unrecoverable — even from ring 3.
     // By the time we get a #DF, the CPU has already failed to handle
     // the original exception AND the secondary fault.
@@ -933,6 +1020,7 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
 /// Handle #TS (Invalid TSS, vector 10).  Always fatal — broken task state.
 #[unsafe(no_mangle)]
 extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
+    count_vector(10);
     serial_println!(
         "EXCEPTION: Invalid TSS (#TS) at {:#x}, error={:#x}",
         frame.rip, error
@@ -945,6 +1033,7 @@ extern "C" fn handle_invalid_tss(frame: &InterruptStackFrame, error: u64) {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
+    count_vector(11);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Segment Not Present (#NP)", frame, ExceptionCode::SegmentNotPresent, error);
@@ -963,6 +1052,7 @@ extern "C" fn handle_seg_not_present(frame: &InterruptStackFrame, error: u64) {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
+    count_vector(12);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Stack-Segment Fault (#SS)", frame, ExceptionCode::StackSegmentFault, error);
@@ -982,6 +1072,7 @@ extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64) {
+    count_vector(13);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("General Protection Fault (#GP)", frame, ExceptionCode::GeneralProtectionFault, error);
@@ -1056,6 +1147,8 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
 /// stack growth, SEH dispatch.  Ring 0 faults halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
+    count_vector(14);
+
     // CR2 contains the faulting virtual address.
     let cr2: u64;
     // SAFETY: Reading CR2 is safe in a page fault handler — it contains
@@ -1268,6 +1361,7 @@ fn try_grow_user_stack(cr2: u64, error: u64) -> bool {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(16);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("x87 Floating-Point (#MF)", frame, ExceptionCode::FloatingPointError, 0);
@@ -1280,6 +1374,7 @@ extern "C" fn handle_x87_fp(frame: &InterruptStackFrame, _error: u64) {
 /// Handle #AC (Alignment Check, vector 17).  Only triggers from ring 3.
 #[unsafe(no_mangle)]
 extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
+    count_vector(17);
     // #AC can only occur in ring 3 (when CR0.AM and RFLAGS.AC are set).
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
@@ -1297,6 +1392,7 @@ extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
 /// Handle #MC (Machine Check, vector 18).  Hardware error — always fatal.
 #[unsafe(no_mangle)]
 extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(18);
     // Machine check is a hardware error — always fatal.
     // Read MCE bank MSRs for diagnostic information about what failed.
     serial_println!("EXCEPTION: Machine Check (#MC) at {:#x}", frame.rip);
@@ -1351,6 +1447,7 @@ extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
 /// Ring 3: SEH dispatch.  Ring 0: halt.
 #[unsafe(no_mangle)]
 extern "C" fn handle_simd_fp(frame: &InterruptStackFrame, _error: u64) {
+    count_vector(19);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("SIMD Floating-Point (#XM)", frame, ExceptionCode::SimdFloatingPoint, 0);

@@ -1954,9 +1954,19 @@ pub fn sys_process_exec_with_frame(
 pub fn sys_clock_monotonic(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
 
-    let ticks = crate::apic::tick_count();
-    // 100 Hz → 10 ms per tick → 10_000_000 ns per tick.
-    let ns = ticks.saturating_mul(10_000_000);
+    // Use TSC for nanosecond precision when calibrated, falling back
+    // to APIC tick count (10ms resolution) if TSC freq is unknown.
+    let freq = crate::bench::tsc_freq();
+    let ns = if freq > 0 {
+        // TSC-based: read current TSC and convert to nanoseconds.
+        // This gives sub-microsecond precision.
+        let tsc = crate::bench::rdtsc();
+        crate::bench::cycles_to_ns(tsc)
+    } else {
+        // Fallback: APIC tick count at 100 Hz → 10ms granularity.
+        let ticks = crate::apic::tick_count();
+        ticks.saturating_mul(10_000_000)
+    };
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(ns as i64)

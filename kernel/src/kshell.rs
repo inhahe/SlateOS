@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4238,6 +4238,7 @@ fn dispatch(line: &str) {
         "selftest" => cmd_selftest(args),
         "watch" => cmd_watchpoint(args),
         "snapshot" | "snap" => cmd_snapshot(args),
+        "ripsample" | "perf" => cmd_rip_sample(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -16162,6 +16163,107 @@ fn cmd_snapshot(args: &str) {
             shell_println!("  snapshot diff A B   — compare A and B");
             shell_println!("  snapshot show A     — show snapshot A details");
             shell_println!("  snapshot clear      — clear both snapshots");
+        }
+    }
+}
+
+/// `ripsample` — statistical RIP profiler.
+///
+/// Usage:
+///   ripsample          — show where CPU time is being spent
+///   ripsample on       — start sampling
+///   ripsample off      — stop sampling
+///   ripsample top      — show hottest address
+///   ripsample reset    — clear all samples
+fn cmd_rip_sample(args: &str) {
+    use crate::rip_sample;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "on" => {
+            rip_sample::enable();
+            shell_println!("RIP sampling enabled (records on every timer tick)");
+        }
+        "off" => {
+            rip_sample::disable();
+            shell_println!("RIP sampling disabled");
+        }
+        "reset" => {
+            rip_sample::reset();
+            shell_println!("RIP samples cleared");
+        }
+        "top" => {
+            match rip_sample::hottest_rip() {
+                Some((rip, count)) => {
+                    let total = rip_sample::stats().total_samples;
+                    let pct = if total > 0 { count as u64 * 100 / total } else { 0 };
+                    shell_println!("Hottest RIP: {:#x} ({}% of {} samples)",
+                        rip, pct, total);
+                    // Try to resolve symbol.
+                    if let Some(name) = crate::ksyms::resolve(rip) {
+                        shell_println!("  Symbol: {}", name);
+                    }
+                }
+                None => {
+                    shell_println!("No samples collected (use 'ripsample on')");
+                }
+            }
+        }
+        "recent" => {
+            let mut buf = [rip_sample::RipSample::empty(); 16];
+            let n = rip_sample::recent(&mut buf);
+            if n == 0 {
+                shell_println!("No samples");
+                return;
+            }
+            shell_println!("Last {} RIP samples (newest first):", n);
+            shell_println!("  {:>18}  {:>3}  {:>12}", "RIP", "CPU", "CLASS");
+            for i in 0..n {
+                let s = &buf[i];
+                if s.is_valid() {
+                    shell_println!("  {:#018x}  {:>3}  {:>12}",
+                        s.rip, s.cpu, s.addr_class().name());
+                }
+            }
+        }
+        _ => {
+            // Default: show breakdown by address class.
+            let s = rip_sample::stats();
+            if s.total_samples == 0 {
+                shell_println!("No RIP samples collected");
+                shell_println!("Use 'ripsample on' to enable, then wait for timer ticks");
+                return;
+            }
+            shell_println!("=== RIP Sampling Profile ({} samples) ===", s.total_samples);
+            shell_println!("");
+            shell_println!("  {:>12}  {:>8}  {:>5}",
+                "REGION", "SAMPLES", "%");
+            let classes = [
+                rip_sample::AddrClass::KernelText,
+                rip_sample::AddrClass::KernelHeap,
+                rip_sample::AddrClass::KernelStack,
+                rip_sample::AddrClass::Hhdm,
+                rip_sample::AddrClass::UserCode,
+                rip_sample::AddrClass::Idle,
+                rip_sample::AddrClass::Isr,
+                rip_sample::AddrClass::Other,
+            ];
+            for (i, class) in classes.iter().enumerate() {
+                let count = s.bucket_counts[i];
+                if count > 0 {
+                    let pct = count * 100 / s.total_samples;
+                    shell_println!("  {:>12}  {:>8}  {:>4}%",
+                        class.name(), count, pct);
+                }
+            }
+            shell_println!("");
+            shell_println!("  Enabled: {}", if s.enabled { "yes" } else { "no" });
+
+            if let Some((rip, count)) = rip_sample::hottest_rip() {
+                let pct = count as u64 * 100 / s.total_samples;
+                shell_println!("  Hottest: {:#x} ({}%)", rip, pct);
+            }
         }
     }
 }

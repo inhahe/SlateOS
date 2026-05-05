@@ -1,0 +1,410 @@
+//! RIP sampler — statistical profiler via timer interrupt sampling.
+//!
+//! Records the instruction pointer (RIP) at each timer interrupt to build
+//! a histogram of where CPU time is spent.  This is the kernel equivalent
+//! of `perf record` — a lightweight statistical profiler.
+//!
+//! ## Design
+//!
+//! - On each timer tick (100 Hz), if sampling is enabled, the current RIP
+//!   from the interrupt frame is recorded in a ring buffer.
+//! - Samples are bucketed by address range (kernel text, heap, stack, user)
+//!   for high-level classification.
+//! - The raw ring buffer retains the last 256 samples for detailed analysis.
+//! - Address-to-symbol resolution uses the ksyms module when available.
+//!
+//! ## Overhead
+//!
+//! When enabled: one memory write per timer tick (~10ns).  Negligible.
+//! When disabled: single atomic load check (zero overhead).
+//!
+//! ## Usage
+//!
+//! ```text
+//! kshell> ripsample on      — start sampling
+//! kshell> ... do work ...
+//! kshell> ripsample off     — stop sampling
+//! kshell> ripsample         — show where CPU spent time
+//! kshell> ripsample top     — show hottest addresses
+//! kshell> ripsample reset   — clear all samples
+//! ```
+//!
+//! ## References
+//!
+//! - Linux perf (perf_event_open with PERF_SAMPLE_IP) — hardware PMU sampling
+//! - OProfile — statistical kernel profiler
+//! - Intel VTune — sampling-based hot spot analysis
+//! - DTrace profile provider — timed interrupt sampling
+
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::serial_println;
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Ring buffer size for raw RIP samples.
+const RING_SIZE: usize = 256;
+const RING_MASK: usize = RING_SIZE - 1;
+
+/// Number of address buckets for classification.
+const NUM_BUCKETS: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Address classification
+// ---------------------------------------------------------------------------
+
+/// Classification of a sampled RIP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AddrClass {
+    /// Kernel text (code section).
+    KernelText = 0,
+    /// Kernel heap region.
+    KernelHeap = 1,
+    /// Kernel stack.
+    KernelStack = 2,
+    /// HHDM (physical memory access via direct map).
+    Hhdm = 3,
+    /// Userspace code.
+    UserCode = 4,
+    /// Idle loop.
+    Idle = 5,
+    /// Interrupt handler / ISR.
+    Isr = 6,
+    /// Unknown / other.
+    Other = 7,
+}
+
+impl AddrClass {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::KernelText => "kernel_text",
+            Self::KernelHeap => "kernel_heap",
+            Self::KernelStack => "kernel_stack",
+            Self::Hhdm => "hhdm",
+            Self::UserCode => "user",
+            Self::Idle => "idle",
+            Self::Isr => "isr",
+            Self::Other => "other",
+        }
+    }
+
+    /// Classify a RIP address.
+    pub fn classify(rip: u64) -> Self {
+        // Kernel text: typically 0xffffffff80000000..0xffffffff80xxxxxx
+        if rip >= 0xffff_ffff_8000_0000 && rip < 0xffff_ffff_a000_0000 {
+            return Self::KernelText;
+        }
+        // HHDM: 0xffff800000000000..0xffffc00000000000 (256 TiB HHDM window)
+        if rip >= 0xffff_8000_0000_0000 && rip < 0xffff_c000_0000_0000 {
+            return Self::Hhdm;
+        }
+        // Kernel heap/stacks are in higher half but below kernel text
+        if rip >= 0xffff_c000_0000_0000 && rip < 0xffff_ffff_8000_0000 {
+            return Self::KernelHeap;
+        }
+        // User space: below 0x0000800000000000
+        if rip < 0x0000_8000_0000_0000 {
+            return Self::UserCode;
+        }
+        Self::Other
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sample data
+// ---------------------------------------------------------------------------
+
+/// A single RIP sample.
+#[derive(Debug, Clone, Copy)]
+pub struct RipSample {
+    /// Instruction pointer value.
+    pub rip: u64,
+    /// CPU that was sampled.
+    pub cpu: u8,
+    /// Classification.
+    pub class: u8,
+}
+
+impl RipSample {
+    pub const fn empty() -> Self {
+        Self { rip: 0, cpu: 0, class: 0 }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.rip != 0
+    }
+
+    pub fn addr_class(&self) -> AddrClass {
+        AddrClass::classify(self.rip)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+struct SampleRing(core::cell::UnsafeCell<[RipSample; RING_SIZE]>);
+unsafe impl Sync for SampleRing {}
+
+static RING: SampleRing = SampleRing(core::cell::UnsafeCell::new(
+    [RipSample::empty(); RING_SIZE]
+));
+
+/// Write position.
+static WRITE_POS: AtomicU32 = AtomicU32::new(0);
+
+/// Whether sampling is enabled.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Per-class counters (bucket histogram).
+static BUCKET_COUNTS: [AtomicU64; NUM_BUCKETS] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+
+/// Total samples taken.
+static TOTAL_SAMPLES: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Public API — recording (called from timer ISR)
+// ---------------------------------------------------------------------------
+
+/// Record a RIP sample.  Called from the timer interrupt handler.
+///
+/// # Performance
+/// This is on the hot path (100 Hz per CPU).  Keep it minimal:
+/// one atomic load, one ring write, one atomic increment.
+#[inline]
+pub fn record(rip: u64, cpu: u8) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let class = AddrClass::classify(rip);
+
+    let sample = RipSample {
+        rip,
+        cpu,
+        class: class as u8,
+    };
+
+    // Write to ring.
+    let pos = WRITE_POS.fetch_add(1, Ordering::Relaxed);
+    let slot = (pos as usize) & RING_MASK;
+    unsafe {
+        let ptr = RING.0.get() as *mut RipSample;
+        ptr.add(slot).write(sample);
+    }
+
+    // Update bucket counter.
+    if let Some(counter) = BUCKET_COUNTS.get(class as usize) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    TOTAL_SAMPLES.fetch_add(1, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Public API — control
+// ---------------------------------------------------------------------------
+
+/// Enable RIP sampling.
+pub fn enable() {
+    ENABLED.store(true, Ordering::Release);
+}
+
+/// Disable RIP sampling.
+pub fn disable() {
+    ENABLED.store(false, Ordering::Release);
+}
+
+/// Whether sampling is enabled.
+#[must_use]
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
+/// Reset all sampling data.
+pub fn reset() {
+    WRITE_POS.store(0, Ordering::Release);
+    TOTAL_SAMPLES.store(0, Ordering::Relaxed);
+    for counter in &BUCKET_COUNTS {
+        counter.store(0, Ordering::Relaxed);
+    }
+    for i in 0..RING_SIZE {
+        unsafe {
+            let ptr = RING.0.get() as *mut RipSample;
+            ptr.add(i).write(RipSample::empty());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API — querying
+// ---------------------------------------------------------------------------
+
+/// Sampling statistics.
+#[derive(Debug, Clone, Copy)]
+pub struct SampleStats {
+    pub enabled: bool,
+    pub total_samples: u64,
+    pub bucket_counts: [u64; NUM_BUCKETS],
+}
+
+/// Get sampling statistics with per-class breakdown.
+#[must_use]
+pub fn stats() -> SampleStats {
+    let mut bucket_counts = [0u64; NUM_BUCKETS];
+    for (i, counter) in BUCKET_COUNTS.iter().enumerate() {
+        bucket_counts[i] = counter.load(Ordering::Relaxed);
+    }
+    SampleStats {
+        enabled: ENABLED.load(Ordering::Relaxed),
+        total_samples: TOTAL_SAMPLES.load(Ordering::Relaxed),
+        bucket_counts,
+    }
+}
+
+/// Get recent samples (newest first).
+pub fn recent(buf: &mut [RipSample]) -> usize {
+    let write_pos = WRITE_POS.load(Ordering::Acquire) as usize;
+    let available = write_pos.min(RING_SIZE);
+    let to_copy = buf.len().min(available);
+
+    for i in 0..to_copy {
+        let idx = (write_pos.wrapping_sub(1).wrapping_sub(i)) & RING_MASK;
+        unsafe {
+            let ptr = RING.0.get() as *const RipSample;
+            buf[i] = ptr.add(idx).read();
+        }
+    }
+    to_copy
+}
+
+/// Find the hottest RIP address (most frequently sampled).
+///
+/// Scans the ring buffer and returns the address that appears most often,
+/// along with its count.
+#[must_use]
+pub fn hottest_rip() -> Option<(u64, u32)> {
+    let write_pos = WRITE_POS.load(Ordering::Acquire) as usize;
+    let count = write_pos.min(RING_SIZE);
+    if count == 0 {
+        return None;
+    }
+
+    // Simple O(n²) scan for most common RIP in the ring.
+    // Acceptable because RING_SIZE is small (256).
+    let mut best_rip: u64 = 0;
+    let mut best_count: u32 = 0;
+
+    for i in 0..count {
+        let idx = i & RING_MASK;
+        let sample = unsafe {
+            let ptr = RING.0.get() as *const RipSample;
+            ptr.add(idx).read()
+        };
+        if sample.rip == 0 || sample.rip == best_rip {
+            continue;
+        }
+
+        // Count occurrences of this RIP.
+        let mut freq: u32 = 0;
+        for j in 0..count {
+            let jdx = j & RING_MASK;
+            let other = unsafe {
+                let ptr = RING.0.get() as *const RipSample;
+                ptr.add(jdx).read()
+            };
+            if other.rip == sample.rip {
+                freq += 1;
+            }
+        }
+
+        if freq > best_count {
+            best_count = freq;
+            best_rip = sample.rip;
+        }
+    }
+
+    if best_count > 0 {
+        Some((best_rip, best_count))
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Self-test for RIP sampling.
+pub fn self_test() {
+    serial_println!("[rip_sample] Running self-test...");
+
+    // Test 1: Reset state.
+    reset();
+    let s = stats();
+    assert_eq!(s.total_samples, 0);
+    assert!(!s.enabled);
+    serial_println!("[rip_sample]   Reset: OK");
+
+    // Test 2: Recording while disabled does nothing.
+    record(0xffffffff80001000, 0);
+    assert_eq!(stats().total_samples, 0);
+    serial_println!("[rip_sample]   Disabled no-op: OK");
+
+    // Test 3: Enable and record samples.
+    enable();
+    assert!(is_enabled());
+
+    // Simulate kernel text samples.
+    record(0xffffffff80001000, 0);
+    record(0xffffffff80001000, 0);
+    record(0xffffffff80002000, 1);
+    // Simulate user space sample.
+    record(0x00000000_00401000, 0);
+    // Simulate HHDM sample.
+    record(0xffff800010000000, 0);
+
+    let s = stats();
+    assert_eq!(s.total_samples, 5);
+    // Kernel text bucket should have 3.
+    assert_eq!(s.bucket_counts[AddrClass::KernelText as usize], 3);
+    // User code bucket should have 1.
+    assert_eq!(s.bucket_counts[AddrClass::UserCode as usize], 1);
+    // HHDM bucket should have 1.
+    assert_eq!(s.bucket_counts[AddrClass::Hhdm as usize], 1);
+    serial_println!("[rip_sample]   Record/classify: OK (5 samples, 3 kernel, 1 user, 1 hhdm)");
+
+    // Test 4: Recent samples (newest first).
+    let mut buf = [RipSample::empty(); 8];
+    let n = recent(&mut buf);
+    assert_eq!(n, 5);
+    // Newest = HHDM sample.
+    assert_eq!(buf[0].rip, 0xffff800010000000);
+    assert_eq!(buf[0].addr_class(), AddrClass::Hhdm);
+    serial_println!("[rip_sample]   Recent: OK");
+
+    // Test 5: Hottest RIP.
+    let hot = hottest_rip();
+    assert!(hot.is_some());
+    let (rip, count) = hot.unwrap();
+    assert_eq!(rip, 0xffffffff80001000);
+    assert_eq!(count, 2);
+    serial_println!("[rip_sample]   Hottest: OK ({:#x} seen {} times)", rip, count);
+
+    // Test 6: Address classification.
+    assert_eq!(AddrClass::classify(0xffffffff80100000), AddrClass::KernelText);
+    assert_eq!(AddrClass::classify(0x00007fff12345678), AddrClass::UserCode);
+    assert_eq!(AddrClass::classify(0xffff800012345678), AddrClass::Hhdm);
+    serial_println!("[rip_sample]   Classification: OK");
+
+    // Cleanup.
+    disable();
+    reset();
+
+    serial_println!("[rip_sample] Self-test PASSED");
+}

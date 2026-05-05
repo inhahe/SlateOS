@@ -102,6 +102,7 @@ mod power;
 mod proc;
 mod ratelimit;
 mod rcu;
+mod rip_sample;
 mod rng;
 mod rtc;
 mod sched;
@@ -990,6 +991,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++s: Kernel snapshot self-test.
     // Comprehensive system state capture for before/after comparison.
     ksnapshot::self_test();
+
+    // Step 22e⅞++++t: RIP sampler self-test.
+    // Statistical profiler — samples instruction pointer on timer ticks.
+    rip_sample::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

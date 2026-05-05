@@ -65,6 +65,9 @@ static POISON_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Count of detected use-after-free corruptions.
 static POISON_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
+/// Count of detected double-free attempts.
+static DOUBLE_FREE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
 /// Enable slab poisoning (use-after-free detection).
 pub fn enable_poison() {
     POISON_ENABLED.store(true, Ordering::Release);
@@ -111,10 +114,27 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) {
     if class_size < 16 {
         return; // Need at least 8 (next ptr) + 4 (magic) + some poison.
     }
+    // Double-free detection: if the magic signature is already present,
+    // this slot was freed before without being re-allocated in between.
+    // Check using volatile reads (same reason as check_poison).
+    // SAFETY: ptr is valid for class_size bytes (>= 16).
+    let m0 = unsafe { core::ptr::read_volatile(ptr.add(8)) };
+    let m1 = unsafe { core::ptr::read_volatile(ptr.add(9)) };
+    let m2 = unsafe { core::ptr::read_volatile(ptr.add(10)) };
+    let m3 = unsafe { core::ptr::read_volatile(ptr.add(11)) };
+    if m0 == POISON_MAGIC[0] && m1 == POISON_MAGIC[1]
+        && m2 == POISON_MAGIC[2] && m3 == POISON_MAGIC[3]
+    {
+        DOUBLE_FREE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+        serial_println!(
+            "[heap] DOUBLE-FREE detected! slot={:#x}, class={}",
+            ptr as usize, class_size
+        );
+    }
+
     // Write the magic signature at bytes 8..12 using volatile stores.
     // Volatile prevents the optimizer from dead-store-eliminating these
     // writes even with full LTO visibility.
-    // SAFETY: ptr is valid for class_size bytes (>= 16).
     unsafe {
         core::ptr::write_volatile(ptr.add(8), POISON_MAGIC[0]);
         core::ptr::write_volatile(ptr.add(9), POISON_MAGIC[1]);
@@ -1069,6 +1089,17 @@ pub fn self_test() -> KernelResult<()> {
 /// sequence is visible to the optimizer, it can prove that check_poison's
 /// read_volatile calls will return the values written by poison_free
 /// (ignoring the corruption write through a provenance-less pointer).
+/// Helper: perform a double-free on a slot (already freed by caller).
+///
+/// Isolated to prevent LTO from optimizing across the pair of dealloc
+/// calls.  Without this, LLVM constant-propagates through both calls
+/// and sees that poison_free's volatile reads will match the magic
+/// it itself wrote — eliminating the double-free detection branch.
+#[inline(never)]
+fn double_free_slot(ptr: *mut u8, layout: Layout) {
+    unsafe { alloc::alloc::dealloc(ptr, layout); }
+}
+
 #[inline(never)]
 fn corrupt_and_realloc(slot_addr: usize, layout: Layout) -> *mut u8 {
     // SAFETY: slot_addr points to a 64-byte slab slot that was just freed
@@ -1155,6 +1186,29 @@ pub fn poison_self_test() {
     );
     unsafe { alloc::alloc::dealloc(p4, layout); }
     serial_println!("[heap]   Use-after-free detection: OK (violation caught)");
+
+    // --- Test 3: Double-free detection ---
+    //
+    // Allocate, free, then free again.  The second free should detect
+    // that the slot already has the poison magic (from the first free).
+    let p5 = unsafe { alloc::alloc::alloc(layout) };
+    assert!(!p5.is_null(), "poison test: alloc for double-free test failed");
+    unsafe { alloc::alloc::dealloc(p5, layout); }
+    let df_pre = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
+    // Second free via isolated #[inline(never)] helper — prevents LTO
+    // from optimizing across both dealloc calls.
+    double_free_slot(p5, layout);
+    let df_post = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        df_post,
+        df_pre + 1,
+        "poison test: double-free not detected"
+    );
+    // Clean up: alloc twice to consume the duplicate free-list entry,
+    // preventing corruption of the free list.
+    let _cleanup1 = unsafe { alloc::alloc::alloc(layout) };
+    let _cleanup2 = unsafe { alloc::alloc::alloc(layout) };
+    serial_println!("[heap]   Double-free detection: OK (violation caught)");
 
     unsafe { crate::cpu::sti(); }
 

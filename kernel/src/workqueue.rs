@@ -33,6 +33,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::error::KernelResult;
+use crate::sched::waitqueue::WaitQueue;
 use crate::serial_println;
 use spin::Mutex;
 
@@ -129,8 +130,15 @@ static QUEUE: Mutex<WorkQueue> = Mutex::new(WorkQueue::new());
 /// Whether the worker task has been spawned.
 static SPAWNED: AtomicBool = AtomicBool::new(false);
 
-/// Worker task ID (for waking).
+/// Worker task ID (for waking via sleep_until_tick fallback).
 static WORKER_TID: AtomicU64 = AtomicU64::new(0);
+
+/// Wait queue for the worker task.
+///
+/// The worker blocks on this queue when the work queue is empty.
+/// `submit()` calls `wake_one()` to instantly wake the worker when
+/// new work arrives, eliminating the poll-interval latency.
+static WORKER_WQ: WaitQueue = WaitQueue::new();
 
 /// Total work items executed since boot.
 static ITEMS_EXECUTED: AtomicU64 = AtomicU64::new(0);
@@ -161,11 +169,9 @@ pub fn submit(func: fn(u64), arg: u64) -> bool {
 
     if enqueued {
         ITEMS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
-        // Wake the worker task if it's sleeping.
-        let tid = WORKER_TID.load(Ordering::Relaxed);
-        if tid != 0 {
-            crate::sched::try_wake(tid);
-        }
+        // Wake the worker task via its wait queue.
+        // try_wake_one is ISR-safe (uses try_lock internally).
+        WORKER_WQ.try_wake_one();
     } else {
         ITEMS_DROPPED.fetch_add(1, Ordering::Relaxed);
     }
@@ -242,9 +248,13 @@ extern "C" fn worker_entry(_arg: u64) {
             }
         }
 
-        // Sleep until woken (by submit()) or until the poll interval.
-        let now = crate::apic::tick_count();
-        crate::sched::sleep_until_tick(now.saturating_add(POLL_INTERVAL_TICKS));
+        // Block on the wait queue until submit() wakes us.
+        // Use wait_timeout as a fallback in case a wake is missed
+        // (defense in depth — shouldn't happen but costs nothing).
+        WORKER_WQ.wait_timeout(
+            || QUEUE.lock().len() > 0,
+            POLL_INTERVAL_TICKS,
+        );
     }
 }
 

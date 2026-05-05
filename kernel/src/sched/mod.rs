@@ -325,6 +325,109 @@ static TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
 /// Global task exit counter (both natural exits and kills).
 static TASKS_EXITED: AtomicU64 = AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// Scheduling latency histogram (system-wide)
+// ---------------------------------------------------------------------------
+
+/// Histogram bucket boundaries (in ticks).  With 100 Hz timer:
+/// - Bucket 0: 0 ticks (immediate dispatch, waited < 10ms)
+/// - Bucket 1: 1 tick (10-20 ms)
+/// - Bucket 2: 2-4 ticks (20-50 ms)
+/// - Bucket 3: 5-9 ticks (50-100 ms)
+/// - Bucket 4: 10-19 ticks (100-200 ms)
+/// - Bucket 5: 20-49 ticks (200-500 ms)
+/// - Bucket 6: 50-99 ticks (500ms - 1s)
+/// - Bucket 7: 100+ ticks (1s+)
+const LATENCY_HIST_BUCKETS: usize = 8;
+
+/// Scheduling latency histogram counters.
+///
+/// Each bucket counts the number of dispatch events where the task's
+/// queue wait time fell within that bucket's range.  Incremented in
+/// `record_dispatch_latency()` from the context switch path.
+static LATENCY_HIST: [AtomicU64; LATENCY_HIST_BUCKETS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; LATENCY_HIST_BUCKETS]
+};
+
+/// Maximum scheduling latency observed (in ticks) since boot.
+static LATENCY_MAX_EVER: AtomicU64 = AtomicU64::new(0);
+
+/// Total wait ticks accumulated system-wide (for computing mean).
+static LATENCY_TOTAL_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Total dispatch events (for computing mean).
+static LATENCY_TOTAL_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Classify a wait time (in ticks) into a histogram bucket index.
+#[inline]
+fn latency_bucket(wait_ticks: u64) -> usize {
+    match wait_ticks {
+        0 => 0,
+        1 => 1,
+        2..=4 => 2,
+        5..=9 => 3,
+        10..=19 => 4,
+        20..=49 => 5,
+        50..=99 => 6,
+        _ => 7,
+    }
+}
+
+/// Record a scheduling latency observation.
+///
+/// Called from the context switch path whenever a task transitions
+/// from Ready → Running.  `wait_ticks` is `current_tick - ready_since_tick`.
+#[inline]
+pub(crate) fn record_dispatch_latency(wait_ticks: u64) {
+    let bucket = latency_bucket(wait_ticks);
+    if let Some(c) = LATENCY_HIST.get(bucket) {
+        c.fetch_add(1, Ordering::Relaxed);
+    }
+    LATENCY_TOTAL_TICKS.fetch_add(wait_ticks, Ordering::Relaxed);
+    LATENCY_TOTAL_EVENTS.fetch_add(1, Ordering::Relaxed);
+    // Update max (CAS loop).
+    let _ = LATENCY_MAX_EVER.fetch_update(
+        Ordering::Relaxed, Ordering::Relaxed,
+        |cur| if wait_ticks > cur { Some(wait_ticks) } else { None },
+    );
+}
+
+/// Scheduling latency histogram snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct LatencyHistogram {
+    /// Bucket counts (indexed by `latency_bucket()` logic).
+    pub buckets: [u64; LATENCY_HIST_BUCKETS],
+    /// Maximum single wait time observed (ticks).
+    pub max_ticks: u64,
+    /// Mean wait time (ticks × 100, fixed-point for precision).
+    pub mean_ticks_x100: u64,
+    /// Total dispatch events.
+    pub total_events: u64,
+}
+
+/// Read the scheduling latency histogram.
+#[must_use]
+pub fn latency_histogram() -> LatencyHistogram {
+    let mut buckets = [0u64; LATENCY_HIST_BUCKETS];
+    for (i, c) in LATENCY_HIST.iter().enumerate() {
+        buckets[i] = c.load(Ordering::Relaxed);
+    }
+    let total_events = LATENCY_TOTAL_EVENTS.load(Ordering::Relaxed);
+    let total_ticks = LATENCY_TOTAL_TICKS.load(Ordering::Relaxed);
+    let mean_x100 = if total_events > 0 {
+        total_ticks.saturating_mul(100).checked_div(total_events).unwrap_or(0)
+    } else {
+        0
+    };
+    LatencyHistogram {
+        buckets,
+        max_ticks: LATENCY_MAX_EVER.load(Ordering::Relaxed),
+        mean_ticks_x100: mean_x100,
+        total_events,
+    }
+}
+
 /// Snapshot of per-CPU and global scheduler statistics.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Public API for procfs /proc/stat.

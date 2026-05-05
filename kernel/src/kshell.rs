@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "memmap", "pgfault", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "latency", "lathist", "memmap", "pgfault", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4191,6 +4191,7 @@ fn dispatch(line: &str) {
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
         "irqrate" => cmd_irqrate(),
+        "latency" | "lathist" => cmd_latency(),
         "jitter" | "tickjitter" => cmd_jitter(),
         "heapwm" | "watermark" => cmd_heapwm(),
         "memmap" => cmd_memmap(),
@@ -4470,6 +4471,7 @@ fn cmd_help() {
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
     crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
+    crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
     crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
     crate::console_println!("  memmap     Show virtual address space layout");
@@ -14070,6 +14072,77 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+/// `latency` — display system-wide scheduling latency histogram.
+///
+/// Shows the distribution of how long tasks wait in the run queue
+/// before being dispatched.  Useful for detecting scheduling stalls
+/// and verifying real-time responsiveness.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_latency() {
+    let h = crate::sched::latency_histogram();
+
+    if h.total_events == 0 {
+        shell_println!("No scheduling events recorded.");
+        return;
+    }
+
+    shell_println!("=== Scheduling Latency Histogram ===");
+    shell_println!("");
+    shell_println!("  Total dispatches: {}", h.total_events);
+
+    let mean_whole = h.mean_ticks_x100 / 100;
+    let mean_frac = h.mean_ticks_x100 % 100;
+    shell_println!("  Mean wait: {}.{:02} ticks ({} ms)",
+        mean_whole, mean_frac, mean_whole * 10 + mean_frac / 10);
+    shell_println!("  Max wait:  {} ticks ({} ms)", h.max_ticks, h.max_ticks * 10);
+    shell_println!("");
+
+    // Bucket labels (matching the classification in sched/mod.rs).
+    const LABELS: [&str; 8] = [
+        "    0 ticks (< 10ms) ",
+        "    1 tick  (10-20ms)",
+        "  2-4 ticks (20-50ms)",
+        " 5-9  ticks (50-100ms)",
+        "10-19 ticks (0.1-0.2s)",
+        "20-49 ticks (0.2-0.5s)",
+        "50-99 ticks (0.5-1.0s)",
+        " 100+ ticks (> 1s)   ",
+    ];
+
+    shell_println!("  Bucket                    Count       %    Bar");
+    shell_println!("  ------                    -----       -    ---");
+
+    for i in 0..8 {
+        let count = h.buckets[i];
+        let pct = count.saturating_mul(100) / h.total_events;
+        // ASCII bar (max 20 chars wide).
+        let bar_len = (count.saturating_mul(20) / h.total_events) as usize;
+        let bar_len = bar_len.min(20);
+
+        let mut bar = [b' '; 20];
+        for b in bar.iter_mut().take(bar_len) {
+            *b = b'#';
+        }
+        let bar_str = core::str::from_utf8(&bar).unwrap_or("");
+
+        shell_println!("  {} {:>8}  {:>3}%  |{}|",
+            LABELS[i], count, pct, bar_str);
+    }
+
+    // Warnings for concerning latency patterns.
+    let high_latency = h.buckets[5].saturating_add(h.buckets[6]).saturating_add(h.buckets[7]);
+    if high_latency > 0 {
+        let high_pct = high_latency.saturating_mul(100) / h.total_events;
+        shell_println!("");
+        shell_println!("  NOTE: {} dispatches ({}%) waited >200ms",
+            high_latency, high_pct);
+        if high_pct > 5 {
+            shell_println!("  WARNING: Significant scheduling delays detected.");
+            shell_println!("  Possible causes: lock contention, CPU saturation, priority inversion.");
+        }
+    }
 }
 
 /// `irqrate` — display interrupt rates (IRQs/sec per vector).

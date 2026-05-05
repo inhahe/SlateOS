@@ -501,6 +501,8 @@ impl Task {
             if waited > self.max_wait_ticks {
                 self.max_wait_ticks = waited;
             }
+            // Feed the system-wide latency histogram.
+            super::record_dispatch_latency(waited);
         }
         self.ready_since_tick = 0; // No longer waiting.
         self.schedule_count = self.schedule_count.saturating_add(1);

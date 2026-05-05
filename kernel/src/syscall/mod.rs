@@ -28,6 +28,7 @@ pub mod dispatch;
 pub mod entry;
 mod handlers;
 pub mod number;
+pub mod profile;
 
 pub use dispatch::{dispatch, self_test, SyscallArgs, SyscallResult};
 

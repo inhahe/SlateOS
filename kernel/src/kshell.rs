@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4228,6 +4228,7 @@ fn dispatch(line: &str) {
         "alloctrace" | "atrace" => cmd_alloc_trace(args),
         "alloclat" | "alat" => cmd_alloc_lat(args),
         "heapprofile" | "hprof" => cmd_heap_profile(args),
+        "syscallprof" | "sprof" => cmd_syscall_prof(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15629,6 +15630,66 @@ fn cmd_heap_profile(args: &str) {
             shell_println!("");
             shell_println!("  Status: {}",
                 if p.enabled { "enabled" } else { "disabled" });
+        }
+    }
+}
+
+/// `syscallprof` — show syscall invocation profile.
+///
+/// Usage:
+///   syscallprof        — show top syscalls by count
+///   syscallprof reset  — reset counters
+///   syscallprof on|off — enable/disable
+fn cmd_syscall_prof(args: &str) {
+    use crate::syscall::profile;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "reset" => {
+            profile::reset();
+            shell_println!("Syscall profile reset");
+        }
+        "on" => {
+            profile::enable();
+            shell_println!("Syscall profiling enabled");
+        }
+        "off" => {
+            profile::disable();
+            shell_println!("Syscall profiling disabled");
+        }
+        _ => {
+            let o = profile::overall();
+            shell_println!("=== Syscall Profile ===");
+            shell_println!("");
+            shell_println!("  Total calls:   {}", o.total_calls);
+            shell_println!("  Total errors:  {}", o.total_errors);
+            shell_println!("  Distinct:      {} syscalls", o.distinct_syscalls);
+            shell_println!("  Status:        {}", if o.enabled { "enabled" } else { "disabled" });
+            shell_println!("");
+
+            // Top 16 by count.
+            let empty = profile::SyscallStat {
+                nr: 0, count: 0, total_cycles: 0, avg_cycles: 0, max_cycles: 0, errors: 0,
+            };
+            let mut top = [empty; 16];
+            let n = profile::top_by_count(&mut top);
+
+            if n > 0 {
+                shell_println!("  {:>4}  {:>12}  {:>8}  {:>8}  {:>8}  {:>4}",
+                    "NR", "NAME", "COUNT", "AVG_NS", "MAX_NS", "ERR");
+                for i in 0..n {
+                    let s = &top[i];
+                    shell_println!("  {:>4}  {:>12}  {:>8}  {:>8}  {:>8}  {:>4}",
+                        s.nr, profile::syscall_name(s.nr),
+                        s.count,
+                        profile::cycles_to_ns(s.avg_cycles),
+                        profile::cycles_to_ns(s.max_cycles),
+                        s.errors);
+                }
+            } else {
+                shell_println!("  (no syscalls recorded)");
+            }
         }
     }
 }

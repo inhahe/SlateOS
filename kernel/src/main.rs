@@ -948,6 +948,10 @@ extern "C" fn kmain() -> ! {
     // Tracks allocation size distribution for slab tuning.
     mm::heap_profile::self_test();
 
+    // Step 22e⅞++++k: Syscall profiler self-test.
+    // Per-syscall invocation count and latency tracking.
+    syscall::profile::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

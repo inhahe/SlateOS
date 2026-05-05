@@ -50,6 +50,7 @@ extern crate alloc;
 // Module declarations.
 mod acpi;
 mod apic;
+mod backtrace;
 mod bench;
 mod blkdev;
 mod boot;
@@ -786,6 +787,11 @@ extern "C" fn kmain() -> ! {
     // Monitors per-CPU heartbeats and warns if any CPU stops responding.
     watchdog::init();
     watchdog::self_test();
+
+    // Step 22f2: Stack backtrace self-test.
+    // Verifies frame pointer chain walking works (requires -C force-frame-pointers=yes).
+    // Gracefully skips if frame pointers are missing (e.g., optimized-out in release).
+    backtrace::self_test();
 
     console::boot_step_update(console::BootStatus::Ok, "Keyboard & multi-core");
 

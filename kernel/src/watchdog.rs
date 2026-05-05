@@ -257,6 +257,9 @@ pub fn self_test() {
 
     // Test 3: Simulated stale detection.
     // Freeze the heartbeat (don't call heartbeat()) and run multiple checks.
+    // Disable interrupts so the timer ISR doesn't advance the heartbeat
+    // between setting up the test state and calling check().
+    unsafe { crate::cpu::cli(); }
     let frozen = HEARTBEATS.get(cpu)
         .map_or(0, |h| h.load(Ordering::Relaxed));
     if let Some(ls) = LAST_SEEN.get(cpu) {
@@ -269,6 +272,7 @@ pub fn self_test() {
     check();
     let stale_after = STALE_COUNT.get(cpu)
         .map_or(0, |sc| sc.load(Ordering::Relaxed));
+    unsafe { crate::cpu::sti(); }
     assert_eq!(stale_after, 1, "stale count should be 1 after one stale check");
     serial_println!("[watchdog]   Stale detection: OK");
 

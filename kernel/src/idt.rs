@@ -853,6 +853,9 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
         }
     }
 
+    // Print stack backtrace for crash diagnostics.
+    crate::backtrace::print_current();
+
     serial_println!("FATAL: Double fault is unrecoverable. Halting.");
     cpu::halt_loop();
 }
@@ -935,6 +938,9 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
         sched_info.priority,
         sched::current_cpu_id(),
     );
+
+    // Print stack backtrace for crash diagnostics.
+    crate::backtrace::print_current();
 
     serial_println!("FATAL: Unrecoverable kernel #GP. Halting.");
     cpu::halt_loop();
@@ -1052,6 +1058,9 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         sched_info.priority,
         sched::current_cpu_id(),
     );
+
+    // Print stack backtrace for crash diagnostics.
+    crate::backtrace::print_current();
 
     serial_println!("FATAL: Unrecoverable kernel page fault. Halting.");
     cpu::halt_loop();

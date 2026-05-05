@@ -6,7 +6,12 @@ Set-Location $cwd
 Remove-Item serial.log -ErrorAction SilentlyContinue
 
 # Copy freshly built kernel to ESP so QEMU picks up the latest binary.
-$kernelBin = "$cwd\target\x86_64-unknown-none\debug\kernel"
+# Prefer release build (smaller, faster boot, per CLAUDE.md workaround for
+# debug binary being too large for Limine at lower memory sizes).
+$kernelBin = "$cwd\target\x86_64-unknown-none\release\kernel"
+if (-not (Test-Path $kernelBin)) {
+    $kernelBin = "$cwd\target\x86_64-unknown-none\debug\kernel"
+}
 if (Test-Path $kernelBin) {
     Copy-Item $kernelBin "$cwd\esp\boot\kernel" -Force
 }

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4206,6 +4206,8 @@ fn dispatch(line: &str) {
         "cpufreq" | "freq" => cmd_cpufreq(args),
         "thermal" | "temp" => cmd_thermal(),
         "compact" | "defrag" => cmd_compact(),
+        "shutdown" | "poweroff" => cmd_shutdown(),
+        "reboot" => cmd_reboot(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -9840,21 +9842,12 @@ fn cmd_irq() {
 }
 
 fn cmd_reboot() {
+    let caps = crate::power::capabilities();
     crate::console_println!("Rebooting...");
-
-    // Triple-fault reboot: load a null IDT and trigger an interrupt.
-    // The CPU will triple-fault, and the chipset will reset.
-    //
-    // SAFETY: We're intentionally crashing the system to reboot.
-    unsafe {
-        // Load a zero-length IDT.
-        let null_idt: [u8; 10] = [0; 10];
-        core::arch::asm!(
-            "lidt [{}]",
-            in(reg) null_idt.as_ptr(),
-            options(noreturn)
-        );
+    if caps.acpi_reboot {
+        crate::console_println!("  Using ACPI reset register.");
     }
+    crate::power::reboot();
 }
 
 fn cmd_version() {
@@ -15174,6 +15167,21 @@ fn cmd_compact() {
     shell_println!("");
     shell_println!("  History:");
     shell_println!("    Total requests: {}", stats.total_requests);
+}
+
+/// `shutdown` — power off the system.
+fn cmd_shutdown() {
+    let caps = crate::power::capabilities();
+    shell_println!("=== System Shutdown ===");
+    shell_println!("");
+    if caps.acpi_shutdown {
+        shell_println!("  Using ACPI S5 (PM1a={:#x}, SLP_TYP={})", caps.pm1a_port, caps.slp_typ_s5);
+    } else {
+        shell_println!("  ACPI shutdown not available, will try fallback methods.");
+    }
+    shell_println!("  Shutting down...");
+    shell_println!("");
+    crate::power::shutdown();
 }
 
 /// `thermal` — display CPU thermal monitoring status.

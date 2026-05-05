@@ -24,6 +24,7 @@
 //! - Based on Linux `drivers/acpi/` and Fuchsia `zircon/kernel/platform/`
 //!   table parsing patterns.
 
+pub mod fadt;
 mod madt;
 mod tables;
 
@@ -45,6 +46,9 @@ static MADT_DATA: Mutex<Option<MadtInfo>> = Mutex::new(None);
 /// Stored during `init()` so that `hpet::init()` can read the table
 /// without re-scanning the RSDT/XSDT.
 static HPET_TABLE_PHYS: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Physical address of the FADT table, if found.
+static FADT_TABLE_PHYS: Mutex<Option<u64>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -371,6 +375,7 @@ pub unsafe fn init(
     // Enumerate all SDT entries and find tables we care about.
     let mut madt_phys: Option<u64> = None;
     let mut hpet_phys: Option<u64> = None;
+    let mut fadt_phys: Option<u64> = None;
     let mut table_count: usize = 0;
 
     let process_entry = |phys: u64| {
@@ -395,6 +400,8 @@ pub unsafe fn init(
             madt_phys = Some(phys);
         } else if &sig == b"HPET" {
             hpet_phys = Some(phys);
+        } else if &sig == b"FACP" {
+            fadt_phys = Some(phys);
         }
     };
 
@@ -436,6 +443,50 @@ pub unsafe fn init(
     // Store HPET table address for hpet::init().
     if let Some(phys) = hpet_phys {
         *HPET_TABLE_PHYS.lock() = Some(phys);
+    }
+
+    // Parse the FADT for power management info.
+    if let Some(phys) = fadt_phys {
+        // SAFETY: phys is from the RSDT/XSDT.
+        let virt = match unsafe { ensure_sdt_mapped(phys, hhdm_offset) } {
+            Some(v) => v,
+            None => {
+                serial_println!("[acpi] ERROR: FADT at phys={:#x} has invalid header", phys);
+                serial_println!("[acpi] ACPI table parsing complete");
+                return;
+            }
+        };
+        // Validate FADT checksum.
+        // SAFETY: ensure_sdt_mapped guarantees the full table is mapped.
+        if !unsafe { tables::validate_sdt(virt) } {
+            serial_println!("[acpi] WARNING: FADT checksum failed, skipping power management");
+        } else {
+            serial_println!("[acpi] Parsing FADT for power management...");
+            // SAFETY: FADT is validated and fully mapped.
+            let mut power_info = unsafe { fadt::parse_fadt(virt) };
+
+            // Try to extract S5 sleep type from DSDT.
+            if power_info.dsdt_phys != 0 {
+                // SAFETY: dsdt_phys from a validated FADT.
+                if let Some(dsdt_virt) = unsafe { ensure_sdt_mapped(power_info.dsdt_phys, hhdm_offset) } {
+                    if unsafe { tables::validate_sdt(dsdt_virt) } {
+                        if let Some(slp_typ) = unsafe { fadt::scan_dsdt_for_s5(dsdt_virt) } {
+                            power_info.slp_typ_s5 = slp_typ;
+                        } else {
+                            serial_println!("[acpi]   DSDT: \\_S5_ not found, using default SLP_TYP=5");
+                        }
+                    } else {
+                        serial_println!("[acpi]   DSDT checksum failed, using default SLP_TYP");
+                    }
+                }
+            }
+
+            // Store for power module.
+            crate::power::set_power_info(&power_info);
+        }
+        *FADT_TABLE_PHYS.lock() = Some(phys);
+    } else {
+        serial_println!("[acpi] WARNING: No FADT found — power management unavailable");
     }
 
     serial_println!("[acpi] ACPI table parsing complete");

@@ -90,6 +90,7 @@ mod pci;
 mod pacct;
 mod pmc;
 mod port;
+mod power;
 mod proc;
 mod ratelimit;
 mod rng;
@@ -824,6 +825,10 @@ extern "C" fn kmain() -> ! {
     // Step 22b⅞+: Thermal monitoring initialization.
     // Detect DTS support, read Tj_max, take initial temperature reading.
     thermal::init();
+
+    // Step 22b⅞++: Power management self-test.
+    // Verifies ACPI shutdown/reboot capability reporting (FADT parsed in acpi::init).
+    power::self_test();
 
     // Step 22c: TLB shootdown self-test.
     // Now that all CPUs are online, verify the TLB shootdown IPI works.

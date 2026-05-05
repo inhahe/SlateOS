@@ -3097,11 +3097,11 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "slabinfo", "heapaudit", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
+    "slabinfo", "heapaudit", "fraginfo", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "ktimer", "ktrace", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
+    "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4171,12 +4171,14 @@ fn dispatch(line: &str) {
         "schedstat" => cmd_schedstat(),
         "slabinfo" => cmd_slabinfo(),
         "heapaudit" => cmd_heapaudit(),
+        "fraginfo" => cmd_fraginfo(),
         "memtest" => cmd_memtest(args),
         "stack" => cmd_stack(),
         "wq" | "workqueue" => cmd_workqueue(),
         "ktimer" | "timers" => cmd_ktimer(),
         "rng" | "random" => cmd_rng(),
         "trace" | "ktrace" => cmd_trace(args),
+        "lockdep" => cmd_lockdep(args),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4434,12 +4436,14 @@ fn cmd_help() {
     crate::console_println!("  throttle TID [%] Set/query CPU bandwidth quota");
     crate::console_println!("  taskset TID [0xMASK] Set/query CPU affinity");
     crate::console_println!("  slabinfo  Show per-size-class heap allocator statistics");
+    crate::console_println!("  fraginfo  Show heap internal fragmentation per size class");
     crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
     crate::console_println!("  wq        Show kernel workqueue status and statistics");
     crate::console_println!("  ktimer    Show kernel timer statistics");
     crate::console_println!("  rng       Show kernel CSPRNG statistics");
     crate::console_println!("  supervisor Show task supervisor status");
     crate::console_println!("  trace [N] Show last N kernel trace events (default 20)");
+    crate::console_println!("  lockdep [sub] Lock order validator (classes/edges/held/all)");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -13305,6 +13309,54 @@ fn cmd_heapaudit() {
     }
 }
 
+/// Show per-size-class internal fragmentation metrics.
+///
+/// Internal fragmentation occurs when the allocator rounds up a request
+/// to the next power-of-2 class.  A 33-byte alloc uses a 64-byte slot,
+/// wasting 31 bytes (48% frag).  This command shows cumulative waste
+/// per class since boot.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_fraginfo() {
+    let frag = crate::mm::heap::fragmentation_stats();
+
+    shell_println!("Heap internal fragmentation (per size class):");
+    shell_println!("");
+    shell_println!("  {:>6}  {:>12}  {:>12}  {:>12}  {:>5}",
+        "CLASS", "REQUESTED", "CONSUMED", "WASTED", "FRAG%");
+    shell_println!("  {:->6}  {:->12}  {:->12}  {:->12}  {:->5}",
+        "", "", "", "", "");
+
+    let mut total_requested: u64 = 0;
+    let mut total_consumed: u64 = 0;
+
+    for entry in &frag {
+        if entry.bytes_consumed == 0 {
+            continue; // Skip unused classes.
+        }
+        total_requested += entry.bytes_requested;
+        total_consumed += entry.bytes_consumed;
+
+        shell_println!("  {:>6}  {:>12}  {:>12}  {:>12}  {:>4}%",
+            entry.class_size,
+            entry.bytes_requested,
+            entry.bytes_consumed,
+            entry.bytes_wasted,
+            entry.frag_pct);
+    }
+
+    shell_println!("  {:->6}  {:->12}  {:->12}  {:->12}  {:->5}",
+        "", "", "", "", "");
+
+    let total_wasted = total_consumed.saturating_sub(total_requested);
+    let total_pct = if total_consumed > 0 {
+        (total_wasted * 100) / total_consumed
+    } else {
+        0
+    };
+    shell_println!("  {:>6}  {:>12}  {:>12}  {:>12}  {:>4}%",
+        "TOTAL", total_requested, total_consumed, total_wasted, total_pct);
+}
+
 /// Quick physical memory test: allocate N frames, write patterns,
 /// read back and verify.  Catches stuck bits, addressing faults,
 /// and memory controller issues.
@@ -13522,6 +13574,72 @@ fn cmd_trace(args: &str) {
             e.arg0,
             e.arg1,
         );
+    }
+}
+
+fn cmd_lockdep(args: &str) {
+    let snap = crate::lockdep::snapshot();
+
+    shell_println!("Lock dependency validator (lockdep)");
+    shell_println!("  Status:     {}", if snap.enabled { "enabled" } else { "disabled" });
+    shell_println!("  Classes:    {}", snap.classes.len());
+    shell_println!("  Edges:      {}", snap.edges.len());
+    shell_println!("  Violations: {}", snap.violations);
+    shell_println!("");
+
+    let subcmd = args.trim();
+
+    if subcmd == "classes" || subcmd == "all" {
+        shell_println!("  Registered lock classes:");
+        shell_println!("  {:>4}  {:>16}  {}", "IDX", "ADDRESS", "NAME");
+        shell_println!("  {:->4}  {:->16}  {:->16}", "", "", "");
+        for c in &snap.classes {
+            let name = core::str::from_utf8(&c.name[..c.name_len as usize]).unwrap_or("?");
+            shell_println!("  {:>4}  {:#016x}  {}", c.index, c.id, name);
+        }
+        shell_println!("");
+    }
+
+    if subcmd == "edges" || subcmd == "graph" || subcmd == "all" {
+        shell_println!("  Dependency edges (held → acquired):");
+        shell_println!("  {:>16}  -->  {:>16}", "HELD", "ACQUIRED");
+        shell_println!("  {:->16}  ---  {:->16}", "", "");
+        for e in &snap.edges {
+            let from_name = snap.classes.get(e.from as usize)
+                .map(|c| core::str::from_utf8(&c.name[..c.name_len as usize]).unwrap_or("?"))
+                .unwrap_or("?");
+            let to_name = snap.classes.get(e.to as usize)
+                .map(|c| core::str::from_utf8(&c.name[..c.name_len as usize]).unwrap_or("?"))
+                .unwrap_or("?");
+            shell_println!("  {:>16}  -->  {:>16}", from_name, to_name);
+        }
+        shell_println!("");
+    }
+
+    if subcmd == "held" || subcmd == "all" {
+        let online = crate::smp::cpu_count().max(1);
+        shell_println!("  Per-CPU held lock depth:");
+        for cpu in 0..online {
+            let depth = crate::lockdep::held_depth(cpu);
+            if depth > 0 {
+                shell_println!("    CPU {}: {} locks held", cpu, depth);
+            }
+        }
+        let total_held: u8 = (0..online)
+            .map(|cpu| crate::lockdep::held_depth(cpu))
+            .fold(0u8, |a, b| a.saturating_add(b));
+        if total_held == 0 {
+            shell_println!("    (no locks held on any CPU)");
+        }
+        shell_println!("");
+    }
+
+    if subcmd.is_empty() {
+        shell_println!("  Usage: lockdep [classes|edges|held|all]");
+        shell_println!("    classes — show registered lock classes");
+        shell_println!("    edges   — show dependency graph edges");
+        shell_println!("    held    — show per-CPU held lock depth");
+        shell_println!("    all     — show everything");
     }
 }
 

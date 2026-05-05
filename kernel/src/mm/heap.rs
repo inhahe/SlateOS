@@ -301,6 +301,18 @@ static CLASS_FREES: [AtomicU64; 11] = {
     [ZERO; 11]
 };
 
+/// Per-size-class cumulative bytes requested by callers.
+///
+/// `CLASS_BYTES_REQUESTED[i]` accumulates the actual `layout.size()`
+/// values for allocations served by class `i`.  Combined with
+/// `CLASS_ALLOCS[i] * SIZE_CLASSES[i]` (bytes consumed), this measures
+/// internal fragmentation — memory wasted by rounding up to the next
+/// power-of-2 class.
+static CLASS_BYTES_REQUESTED: [AtomicU64; 11] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 11]
+};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -847,6 +859,10 @@ unsafe impl GlobalAlloc for KernelHeap {
                 // heap is initialized (PCPU_SLAB_ENABLED is set after init).
                 let ptr = unsafe { pcpu_slab_alloc(idx) };
                 if !ptr.is_null() {
+                    // Track bytes requested for fragmentation analysis.
+                    if let Some(counter) = CLASS_BYTES_REQUESTED.get(idx) {
+                        counter.fetch_add(layout.size() as u64, Ordering::Relaxed);
+                    }
                     return ptr;
                 }
                 // Per-CPU path failed (OOM) — fall through to global.
@@ -870,6 +886,10 @@ unsafe impl GlobalAlloc for KernelHeap {
             SLAB_ALLOCS.fetch_add(1, Ordering::Relaxed);
             if let Some(counter) = CLASS_ALLOCS.get(idx) {
                 counter.fetch_add(1, Ordering::Relaxed);
+            }
+            // Track bytes requested for fragmentation analysis.
+            if let Some(counter) = CLASS_BYTES_REQUESTED.get(idx) {
+                counter.fetch_add(layout.size() as u64, Ordering::Relaxed);
             }
         } else {
             LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);
@@ -1055,6 +1075,71 @@ pub fn class_stats() -> [SlabClassStats; NUM_CLASSES] {
         entry.allocs = allocs;
         entry.frees = frees;
         entry.active = allocs.saturating_sub(frees);
+    }
+
+    result
+}
+
+/// Per-size-class internal fragmentation statistics.
+///
+/// Internal fragmentation = bytes consumed by the allocator (class_size * count)
+/// minus bytes actually requested by callers.  This is "wasted" memory due to
+/// rounding up to the next power-of-2 class.  E.g., a 33-byte allocation uses
+/// a 64-byte slot, wasting 31 bytes (48% fragmentation for that allocation).
+#[derive(Debug, Clone, Copy)]
+pub struct ClassFragStats {
+    /// Size of objects in this class (bytes).
+    pub class_size: usize,
+    /// Total bytes requested by callers served by this class.
+    pub bytes_requested: u64,
+    /// Total bytes consumed (allocs * class_size).
+    pub bytes_consumed: u64,
+    /// Bytes wasted = consumed - requested.
+    pub bytes_wasted: u64,
+    /// Fragmentation percentage (0-100).  0 = no waste, 50 = half wasted.
+    pub frag_pct: u8,
+}
+
+/// Read per-size-class internal fragmentation statistics.
+///
+/// Shows how much memory is wasted by rounding allocations up to the
+/// nearest power-of-2 size class.  High fragmentation in a class
+/// suggests many allocations just above the previous class boundary
+/// (e.g., lots of 33-byte allocations landing in the 64-byte class).
+///
+/// Returns an array of 11 entries (one per size class, from 8B to 8192B).
+#[must_use]
+#[allow(dead_code)]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn fragmentation_stats() -> [ClassFragStats; NUM_CLASSES] {
+    let mut result = [ClassFragStats {
+        class_size: 0,
+        bytes_requested: 0,
+        bytes_consumed: 0,
+        bytes_wasted: 0,
+        frag_pct: 0,
+    }; NUM_CLASSES];
+
+    for (i, entry) in result.iter_mut().enumerate() {
+        let allocs = CLASS_ALLOCS.get(i)
+            .map_or(0u64, |c| c.load(Ordering::Relaxed));
+        let requested = CLASS_BYTES_REQUESTED.get(i)
+            .map_or(0u64, |c| c.load(Ordering::Relaxed));
+        let class_size = SIZE_CLASSES.get(i).copied().unwrap_or(0);
+        let consumed = allocs.saturating_mul(class_size as u64);
+        let wasted = consumed.saturating_sub(requested);
+
+        let pct = if consumed > 0 {
+            ((wasted * 100) / consumed).min(100) as u8
+        } else {
+            0
+        };
+
+        entry.class_size = class_size;
+        entry.bytes_requested = requested;
+        entry.bytes_consumed = consumed;
+        entry.bytes_wasted = wasted;
+        entry.frag_pct = pct;
     }
 
     result

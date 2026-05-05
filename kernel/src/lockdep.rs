@@ -294,6 +294,121 @@ pub fn violation_count() -> u32 {
     VIOLATIONS.load(Ordering::Relaxed)
 }
 
+/// Whether lockdep is currently enabled.
+#[allow(dead_code)]
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
+/// Number of registered lock classes.
+#[allow(dead_code)]
+pub fn class_count() -> u32 {
+    CLASS_COUNT.load(Ordering::Relaxed)
+}
+
+/// Number of recorded dependency edges.
+#[allow(dead_code)]
+pub fn edge_count() -> u32 {
+    EDGE_COUNT.load(Ordering::Relaxed)
+}
+
+/// Information about a single lock class (for diagnostics).
+#[derive(Debug, Clone, Copy)]
+pub struct LockClassInfo {
+    /// Slot index in the class table.
+    pub index: u16,
+    /// Address used to identify this lock class.
+    pub id: usize,
+    /// Human-readable name.
+    pub name: [u8; 16],
+    /// Length of the name.
+    pub name_len: u8,
+}
+
+/// Information about a dependency edge (for diagnostics).
+#[derive(Debug, Clone, Copy)]
+pub struct DepEdgeInfo {
+    /// Class index of the lock that was held.
+    pub from: u16,
+    /// Class index of the lock that was acquired.
+    pub to: u16,
+}
+
+/// Snapshot of the lockdep dependency graph.
+///
+/// Contains all registered lock classes and edges at the time of the call.
+/// Used by diagnostic tools (kshell `lockdep` command) to display the
+/// lock ordering graph and detect potential issues.
+#[derive(Debug)]
+pub struct LockdepSnapshot {
+    /// Registered lock classes.
+    pub classes: alloc::vec::Vec<LockClassInfo>,
+    /// Dependency edges (from → to).
+    pub edges: alloc::vec::Vec<DepEdgeInfo>,
+    /// Total violations detected.
+    pub violations: u32,
+    /// Whether lockdep is enabled.
+    pub enabled: bool,
+}
+
+/// Take a snapshot of the current lockdep state for diagnostics.
+///
+/// Reads the class table and edge table (append-only, so no lock needed)
+/// and returns a heap-allocated snapshot.  The snapshot is consistent
+/// up to races with concurrent lock_acquire calls (new entries may
+/// appear between reading classes and edges).
+#[allow(dead_code)]
+pub fn snapshot() -> LockdepSnapshot {
+    let num_classes = CLASS_COUNT.load(Ordering::Relaxed) as usize;
+    let num_edges = EDGE_COUNT.load(Ordering::Relaxed) as usize;
+
+    let mut classes = alloc::vec::Vec::with_capacity(num_classes.min(MAX_CLASSES));
+    for i in 0..num_classes.min(MAX_CLASSES) {
+        // SAFETY: Reading from append-only array within bounds.
+        let c = unsafe { &CLASSES[i] };
+        classes.push(LockClassInfo {
+            index: i as u16,
+            id: c.id,
+            name: c.name,
+            name_len: c.name_len,
+        });
+    }
+
+    let mut edges = alloc::vec::Vec::with_capacity(num_edges.min(MAX_EDGES));
+    for i in 0..num_edges.min(MAX_EDGES) {
+        // SAFETY: Reading from append-only array within bounds.
+        let e = unsafe { EDGES[i] };
+        edges.push(DepEdgeInfo {
+            from: e.from,
+            to: e.to,
+        });
+    }
+
+    LockdepSnapshot {
+        classes,
+        edges,
+        violations: VIOLATIONS.load(Ordering::Relaxed),
+        enabled: ENABLED.load(Ordering::Relaxed),
+    }
+}
+
+/// Get the current nesting depth for a given CPU.
+///
+/// Returns the number of locks currently held on that CPU according
+/// to lockdep's tracking.  Useful for diagnosing potential issues
+/// where a code path holds too many locks simultaneously.
+#[allow(dead_code)]
+pub fn held_depth(cpu: usize) -> u8 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    // SAFETY: Reading a plain u8 from the per-CPU held stack.
+    // Races are benign (we might see a slightly stale value if
+    // another CPU is modifying its own stack — but we only read
+    // the depth for a given CPU from diagnostic contexts).
+    unsafe { HELD[cpu].depth }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

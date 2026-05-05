@@ -314,3 +314,119 @@ fn compute_fragmentation(order_counts: &[usize; frame::BUDDY_MAX_ORDER + 1]) -> 
     // Clamp to u8 (always in 0..=100).
     frag.min(100) as u8
 }
+
+// ---------------------------------------------------------------------------
+// Memory pressure scoring
+// ---------------------------------------------------------------------------
+
+/// Memory pressure level (severity classification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressureLevel {
+    /// Normal operation — plenty of headroom.
+    Low,
+    /// Moderate pressure — allocations still succeeding but headroom shrinking.
+    Moderate,
+    /// High pressure — approaching OOM, kswapd should be active.
+    High,
+    /// Critical — OOM imminent or already occurring.
+    Critical,
+}
+
+/// Aggregated memory pressure assessment.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryPressure {
+    /// Overall pressure score (0 = idle, 100 = OOM).
+    pub score: u8,
+    /// Classified pressure level.
+    pub level: PressureLevel,
+    /// Component scores (for detailed breakdown):
+    /// - Physical memory usage (0-100).
+    pub phys_score: u8,
+    /// - Fragmentation severity (0-100).
+    pub frag_score: u8,
+    /// - Heap pressure (failures relative to allocs).
+    pub heap_score: u8,
+    /// - Swap usage (0-100, 0 if no swap configured).
+    pub swap_score: u8,
+}
+
+/// Compute the current memory pressure assessment.
+///
+/// Combines multiple signals into a single score:
+/// - Physical memory usage (weight: 40%)
+/// - Fragmentation (weight: 20%)
+/// - Heap OOM failures (weight: 25%)
+/// - Swap usage (weight: 15%)
+///
+/// The score is 0 (no pressure) to 100 (critical/OOM).
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn memory_pressure() -> MemoryPressure {
+    let info = memory_info();
+
+    // --- Physical memory usage score (0-100) ---
+    // 0% used → score 0; 100% used → score 100.
+    // Non-linear: >90% used counts heavily.
+    let phys_pct = if info.total_bytes > 0 {
+        (info.used_bytes.saturating_mul(100) / info.total_bytes) as u8
+    } else {
+        0
+    };
+    // Apply non-linear curve: below 70% = mild, 70-90% = moderate, >90% = severe.
+    let phys_score = match phys_pct {
+        0..=70 => phys_pct / 2,        // 0-35 range
+        71..=90 => 35 + (phys_pct - 70) * 2, // 35-75 range
+        _ => 75 + (phys_pct - 90) * 2, // 75-95+ range
+    };
+    let phys_score = phys_score.min(100);
+
+    // --- Fragmentation score (directly from compute_fragmentation) ---
+    let frag_score = info.fragmentation_pct;
+
+    // --- Heap failure pressure ---
+    // If heap allocation failures are occurring, that's serious pressure.
+    let total_heap_allocs = info.heap_slab_allocs
+        .saturating_add(info.heap_large_allocs);
+    let heap_score = if total_heap_allocs > 0 {
+        // Failure rate: failures / total_allocs × 100.
+        let failure_rate = info.heap_alloc_failures
+            .saturating_mul(1000)
+            .checked_div(total_heap_allocs)
+            .unwrap_or(0);
+        // Even 0.1% failures is serious.
+        (failure_rate.min(100)) as u8
+    } else {
+        0
+    };
+
+    // --- Swap usage score ---
+    let swap_score = if info.swap_total_bytes > 0 {
+        ((info.swap_used_bytes.saturating_mul(100)) / info.swap_total_bytes) as u8
+    } else {
+        0 // No swap configured — don't penalize.
+    };
+
+    // --- Weighted combination ---
+    // Phys: 40%, Frag: 20%, Heap: 25%, Swap: 15%.
+    let weighted = (u16::from(phys_score) * 40
+        + u16::from(frag_score) * 20
+        + u16::from(heap_score) * 25
+        + u16::from(swap_score) * 15) / 100;
+    let score = (weighted as u8).min(100);
+
+    let level = match score {
+        0..=25 => PressureLevel::Low,
+        26..=50 => PressureLevel::Moderate,
+        51..=75 => PressureLevel::High,
+        _ => PressureLevel::Critical,
+    };
+
+    MemoryPressure {
+        score,
+        level,
+        phys_score,
+        frag_score,
+        heap_score,
+        swap_score,
+    }
+}

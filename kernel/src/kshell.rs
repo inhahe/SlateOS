@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "latency", "lathist", "memmap", "pgfault", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4192,6 +4192,7 @@ fn dispatch(line: &str) {
         "pgfault" | "faults" => cmd_pgfault(),
         "irqrate" => cmd_irqrate(),
         "latency" | "lathist" => cmd_latency(),
+        "pressure" | "mempressure" => cmd_pressure(),
         "jitter" | "tickjitter" => cmd_jitter(),
         "heapwm" | "watermark" => cmd_heapwm(),
         "memmap" => cmd_memmap(),
@@ -4472,6 +4473,7 @@ fn cmd_help() {
     crate::console_println!("  pgfault    Show page fault statistics by type");
     crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
     crate::console_println!("  latency    Show scheduling latency histogram");
+    crate::console_println!("  pressure   Show memory pressure score (0-100)");
     crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
     crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
     crate::console_println!("  memmap     Show virtual address space layout");
@@ -14072,6 +14074,44 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+/// `pressure` — display memory pressure score and breakdown.
+///
+/// Shows a 0-100 composite score indicating how stressed the memory
+/// subsystem is, broken down into physical usage, fragmentation,
+/// heap failures, and swap usage components.
+fn cmd_pressure() {
+    let p = crate::mm::memory_pressure();
+
+    let level_str = match p.level {
+        crate::mm::PressureLevel::Low => "LOW (healthy)",
+        crate::mm::PressureLevel::Moderate => "MODERATE",
+        crate::mm::PressureLevel::High => "HIGH (watch closely)",
+        crate::mm::PressureLevel::Critical => "CRITICAL (OOM risk!)",
+    };
+
+    shell_println!("=== Memory Pressure ===");
+    shell_println!("");
+    shell_println!("  Overall score: {}/100  [{}]", p.score, level_str);
+    shell_println!("");
+    shell_println!("  Component breakdown:");
+    shell_println!("    Physical usage:   {:>3}/100  (weight: 40%)", p.phys_score);
+    shell_println!("    Fragmentation:    {:>3}/100  (weight: 20%)", p.frag_score);
+    shell_println!("    Heap failures:    {:>3}/100  (weight: 25%)", p.heap_score);
+    shell_println!("    Swap usage:       {:>3}/100  (weight: 15%)", p.swap_score);
+    shell_println!("");
+
+    // Visual bar for overall score.
+    let bar_filled = (p.score as usize) / 5; // 0-20 chars
+    let bar_empty = 20 - bar_filled.min(20);
+    let mut bar = [b' '; 20];
+    for b in bar.iter_mut().take(bar_filled) {
+        *b = if p.score > 75 { b'!' } else if p.score > 50 { b'#' } else { b'=' };
+    }
+    let _ = bar_empty; // suppress unused
+    let bar_str = core::str::from_utf8(&bar).unwrap_or("");
+    shell_println!("  [{}] {}/100", bar_str, p.score);
 }
 
 /// `latency` — display system-wide scheduling latency histogram.

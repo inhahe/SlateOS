@@ -158,6 +158,11 @@ extern "C" fn kmain() -> ! {
     }
     serial_println!("[idt] IDT initialized");
 
+    // Step 4a: Detect CPU features via CPUID and cache them globally.
+    // Must be done before FPU init so subsystems can query feature flags.
+    cpu::detect_features();
+    cpu::log_features();
+
     // Step 4b: Initialize FPU/SSE hardware on the BSP.
     //
     // Ensures CR0 and CR4 are configured for SSE operation (clear EM/TS,

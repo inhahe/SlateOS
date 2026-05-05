@@ -1563,6 +1563,136 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
 // Self-test
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Committed range mapping (atomically alloc + map + rollback)
+// ---------------------------------------------------------------------------
+
+/// Allocate and map a contiguous range of zeroed frames into a virtual
+/// address range.  Provides all-or-nothing semantics: if any frame
+/// allocation or mapping fails partway through, all previously mapped
+/// frames are unmapped and freed before returning the error.
+///
+/// This is the "committed allocation" path for `mmap` — physical frames
+/// are reserved immediately (no demand paging).  All frames are zeroed
+/// before mapping.
+///
+/// # Arguments
+///
+/// - `pml4_phys`: The root page table (physical address).
+/// - `base_virt`: Starting virtual address (must be 16 KiB aligned).
+/// - `num_frames`: Number of 16 KiB frames to map.
+/// - `flags`: Page flags (e.g., USER | WRITABLE | PRESENT).
+///
+/// # Returns
+///
+/// `Ok(())` if all frames were allocated and mapped successfully.
+/// `Err(...)` if allocation or mapping failed (all partial work undone).
+///
+/// # Safety
+///
+/// - `pml4_phys` must be a valid PML4 table.
+/// - The virtual address range `[base_virt, base_virt + num_frames * 16K)`
+///   must not already be mapped.
+/// - The caller must flush the TLB for mapped addresses on success.
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe fn map_committed_range(
+    pml4_phys: u64,
+    base_virt: VirtAddr,
+    num_frames: usize,
+    flags: PageFlags,
+) -> KernelResult<()> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+
+    for i in 0..num_frames {
+        let va = VirtAddr::new(base_virt.as_u64() + (i as u64) * (FRAME_SIZE as u64));
+
+        // Allocate a physical frame.
+        let phys = match frame::alloc_frame() {
+            Ok(f) => f,
+            Err(e) => {
+                // Rollback: unmap and free all frames mapped so far.
+                // SAFETY: we just mapped these frames successfully.
+                unsafe { rollback_range(pml4_phys, base_virt, i); }
+                return Err(e);
+            }
+        };
+
+        // Zero the frame via HHDM.
+        let frame_virt = phys.to_virt(hhdm);
+        // SAFETY: frame_virt is the HHDM mapping of a freshly allocated
+        // frame that we exclusively own.
+        unsafe {
+            core::ptr::write_bytes(frame_virt as *mut u8, 0, FRAME_SIZE);
+        }
+
+        // Map the frame at the target virtual address.
+        // SAFETY: pml4_phys is valid, phys is freshly allocated.
+        if let Err(e) = unsafe { map_frame(pml4_phys, va, phys, flags) } {
+            // Free the frame we just allocated but couldn't map.
+            // SAFETY: phys is freshly allocated and not yet referenced.
+            let _ = unsafe { frame::free_frame(phys) };
+            // Rollback all previously mapped frames.
+            // SAFETY: frames 0..i were mapped successfully.
+            unsafe { rollback_range(pml4_phys, base_virt, i); }
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Unmap and free a contiguous range of frames.
+///
+/// The counterpart to [`map_committed_range`].  Unmaps `num_frames`
+/// frames starting at `base_virt` and returns each physical frame to
+/// the allocator.  Silently skips frames that are not mapped (allows
+/// partial cleanup).
+///
+/// # Safety
+///
+/// - `pml4_phys` must be a valid PML4 table.
+/// - The caller must flush the TLB for the unmapped range afterward.
+/// - Any user-visible data in the frames is lost.
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe fn unmap_committed_range(
+    pml4_phys: u64,
+    base_virt: VirtAddr,
+    num_frames: usize,
+) {
+    for i in 0..num_frames {
+        let va = VirtAddr::new(base_virt.as_u64() + (i as u64) * (FRAME_SIZE as u64));
+        // SAFETY: pml4_phys is valid.  If not mapped, unmap_frame returns Err.
+        if let Ok(phys) = unsafe { unmap_frame(pml4_phys, va) } {
+            // SAFETY: frame was exclusively mapped and is now unreferenced.
+            let _ = unsafe { frame::free_frame(phys) };
+        }
+    }
+}
+
+/// Rollback helper: unmap and free `count` frames starting at `base_virt`.
+///
+/// Used internally by [`map_committed_range`] to undo partial mappings.
+///
+/// # Safety
+///
+/// All frames at `base_virt + 0..count * FRAME_SIZE` must be validly
+/// mapped in `pml4_phys`.
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn rollback_range(pml4_phys: u64, base_virt: VirtAddr, count: usize) {
+    for j in 0..count {
+        let va = VirtAddr::new(base_virt.as_u64() + (j as u64) * (FRAME_SIZE as u64));
+        // SAFETY: we mapped this frame successfully in a prior iteration.
+        if let Ok(phys) = unsafe { unmap_frame(pml4_phys, va) } {
+            // SAFETY: frame was allocated by us and is no longer mapped.
+            let _ = unsafe { frame::free_frame(phys) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
 /// Run a boot-time self-test of the page table subsystem.
 ///
 /// Tests:

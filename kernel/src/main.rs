@@ -71,6 +71,7 @@ mod idt;
 mod idle;
 mod ioapic;
 mod irq_storm;
+mod irqbalance;
 mod ipc;
 mod kcounters;
 mod keyboard;
@@ -822,6 +823,11 @@ extern "C" fn kmain() -> ! {
     // CPU hotplug framework initialization — marks all online CPUs.
     cpu_hotplug::init();
     cpu_hotplug::self_test();
+
+    // IRQ balancer initialization — distributes interrupts across CPUs.
+    // Requires IOAPIC, SMP, and cpu_hotplug to be initialized.
+    irqbalance::init();
+    irqbalance::self_test();
 
     // Step 22b⅞: CPU frequency scaling initialization.
     // Detect HWP or EIST support and set default governor (performance).

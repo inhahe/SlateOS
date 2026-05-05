@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "pacct", "pgfault", "pools", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "pacct", "pgfault", "pools", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4209,6 +4209,7 @@ fn dispatch(line: &str) {
         "shutdown" | "poweroff" => cmd_shutdown(),
         "reboot" => cmd_reboot(),
         "hotplug" | "cpuctl" => cmd_hotplug(args),
+        "irqbalance" | "irqbal" => cmd_irqbalance(args),
         "mempool" | "pools" => cmd_mempool(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
@@ -15239,6 +15240,83 @@ fn cmd_hotplug(args: &str) {
         }
         _ => {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
+        }
+    }
+}
+
+/// `irqbalance` — display and control IRQ balancer.
+fn cmd_irqbalance(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let subcmd = parts.first().copied().unwrap_or("status");
+
+    match subcmd {
+        "status" | "" => {
+            let st = crate::irqbalance::stats();
+            shell_println!("=== IRQ Balancer ===");
+            shell_println!("");
+            shell_println!("  Status: {}", if st.enabled { "enabled" } else { "disabled" });
+            shell_println!("  CPUs: {}", st.cpu_count);
+            shell_println!("  Balance ops: {}", st.balance_ops);
+            shell_println!("  Migrations: {}", st.migrations);
+            shell_println!("");
+
+            let irqs = crate::irqbalance::irq_info();
+            if irqs.is_empty() {
+                shell_println!("  No active IRQs tracked.");
+            } else {
+                shell_println!("  {:>4} {:>4} {:>6} {:>5} {:>8}", "IRQ", "CPU", "PINNED", "HINT", "RATE");
+                shell_println!("  {:>4} {:>4} {:>6} {:>5} {:>8}", "---", "---", "------", "----", "----");
+                for info in &irqs {
+                    let hint_str = if info.hint == 0xFF {
+                        alloc::string::String::from("-")
+                    } else {
+                        alloc::format!("{}", info.hint)
+                    };
+                    shell_println!("  {:>4} {:>4} {:>6} {:>5} {:>8}",
+                        info.irq, info.cpu,
+                        if info.pinned { "yes" } else { "no" },
+                        hint_str, info.rate);
+                }
+            }
+        }
+        "enable" => {
+            crate::irqbalance::set_enabled(true);
+            shell_println!("IRQ balancer enabled.");
+        }
+        "disable" => {
+            crate::irqbalance::set_enabled(false);
+            shell_println!("IRQ balancer disabled.");
+        }
+        "pin" => {
+            let (Some(irq_str), Some(cpu_str)) = (parts.get(1), parts.get(2)) else {
+                shell_println!("Usage: irqbalance pin <irq> <cpu>");
+                return;
+            };
+            let Ok(irq) = irq_str.parse::<u8>() else {
+                shell_println!("Invalid IRQ: {}", irq_str);
+                return;
+            };
+            let Ok(cpu) = cpu_str.parse::<usize>() else {
+                shell_println!("Invalid CPU: {}", cpu_str);
+                return;
+            };
+            crate::irqbalance::pin_irq(irq, cpu);
+            shell_println!("IRQ {} pinned to CPU {}", irq, cpu);
+        }
+        "unpin" => {
+            let Some(irq_str) = parts.get(1) else {
+                shell_println!("Usage: irqbalance unpin <irq>");
+                return;
+            };
+            let Ok(irq) = irq_str.parse::<u8>() else {
+                shell_println!("Invalid IRQ: {}", irq_str);
+                return;
+            };
+            crate::irqbalance::unpin_irq(irq);
+            shell_println!("IRQ {} unpinned", irq);
+        }
+        _ => {
+            shell_println!("Usage: irqbalance [status|enable|disable|pin <irq> <cpu>|unpin <irq>]");
         }
     }
 }

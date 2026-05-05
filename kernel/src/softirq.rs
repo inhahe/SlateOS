@@ -382,6 +382,12 @@ fn handle_timer() {
         crate::irq_storm::periodic_check();
     }
 
+    // IRQ balancer: redistributes interrupts across CPUs periodically.
+    // The tick() function internally gates on BALANCE_INTERVAL_TICKS.
+    if crate::smp::current_cpu_index() == 0 {
+        crate::irqbalance::tick();
+    }
+
     // CPU frequency governor: ondemand mode samples load periodically.
     if crate::smp::current_cpu_index() == 0 {
         crate::cpufreq::ondemand_tick();

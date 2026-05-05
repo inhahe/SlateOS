@@ -1146,6 +1146,125 @@ pub fn fragmentation_stats() -> [ClassFragStats; NUM_CLASSES] {
 }
 
 // ---------------------------------------------------------------------------
+// Leak detection
+// ---------------------------------------------------------------------------
+
+/// Per-class active-object counts from the previous leak check snapshot.
+///
+/// Updated each time `check_leaks()` is called.  If a class's active
+/// count grows monotonically across N consecutive checks, it's flagged
+/// as a potential leak.
+static PREV_ACTIVE: [AtomicU64; 11] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; 11]
+};
+
+/// Per-class consecutive growth counter.
+///
+/// Incremented when a class's active count is higher than the previous
+/// snapshot; reset to zero when it stays the same or decreases.
+static GROWTH_STREAK: [AtomicU32; 11] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; 11]
+};
+
+/// Result of a leak check.
+#[derive(Debug, Clone, Copy)]
+pub struct LeakCheckResult {
+    /// Number of classes that show monotonic growth.
+    pub suspect_classes: u8,
+    /// Per-class details (class_size, active_objects, growth_streak).
+    pub classes: [LeakClassInfo; NUM_CLASSES],
+}
+
+/// Leak status for a single size class.
+#[derive(Debug, Clone, Copy)]
+pub struct LeakClassInfo {
+    /// Size class in bytes.
+    pub class_size: usize,
+    /// Current active objects (allocs - frees).
+    pub active: u64,
+    /// Net change since last check (positive = growth).
+    pub delta: i64,
+    /// Consecutive checks where active count has grown.
+    pub growth_streak: u32,
+}
+
+/// Check for potential memory leaks.
+///
+/// Compares the current active-object count per size class against the
+/// previous snapshot.  Classes where active counts grow monotonically
+/// across multiple checks are flagged as potential leaks.
+///
+/// This is a heuristic, not definitive — transient growth (e.g., during
+/// boot or workload ramp-up) will trigger false positives.  A class is
+/// only "suspect" after growing for many consecutive checks (typically
+/// called once per second from kswapd or a periodic timer).
+///
+/// Returns a summary with per-class growth streaks.
+#[allow(dead_code)]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn check_leaks() -> LeakCheckResult {
+    let mut result = LeakCheckResult {
+        suspect_classes: 0,
+        classes: [LeakClassInfo {
+            class_size: 0,
+            active: 0,
+            delta: 0,
+            growth_streak: 0,
+        }; NUM_CLASSES],
+    };
+
+    for i in 0..NUM_CLASSES {
+        let allocs = CLASS_ALLOCS.get(i).map_or(0, |c| c.load(Ordering::Relaxed));
+        let frees = CLASS_FREES.get(i).map_or(0, |c| c.load(Ordering::Relaxed));
+        let active = allocs.saturating_sub(frees);
+        let prev = PREV_ACTIVE.get(i).map_or(0, |c| c.load(Ordering::Relaxed));
+
+        // Compute signed delta.
+        let delta = if active >= prev {
+            (active - prev) as i64
+        } else {
+            -((prev - active) as i64)
+        };
+
+        // Update growth streak.
+        let streak = if active > prev && prev > 0 {
+            // Growing — increment streak.
+            GROWTH_STREAK.get(i).map_or(0, |c| c.fetch_add(1, Ordering::Relaxed) + 1)
+        } else {
+            // Stable or shrinking — reset streak.
+            if let Some(c) = GROWTH_STREAK.get(i) {
+                c.store(0, Ordering::Relaxed);
+            }
+            0
+        };
+
+        // Save current as the new "previous" for next check.
+        if let Some(c) = PREV_ACTIVE.get(i) {
+            c.store(active, Ordering::Relaxed);
+        }
+
+        let class_size = SIZE_CLASSES.get(i).copied().unwrap_or(0);
+
+        result.classes[i] = LeakClassInfo {
+            class_size,
+            active,
+            delta,
+            growth_streak: streak,
+        };
+
+        // Flag as suspect if growth streak exceeds threshold.
+        // 10 consecutive checks = ~10 seconds of monotonic growth.
+        if streak >= 10 {
+            result.suspect_classes += 1;
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Heap integrity audit
 // ---------------------------------------------------------------------------
 

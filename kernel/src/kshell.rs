@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "slabinfo", "heapaudit", "fraginfo", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
+    "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
@@ -4172,6 +4172,7 @@ fn dispatch(line: &str) {
         "slabinfo" => cmd_slabinfo(),
         "heapaudit" => cmd_heapaudit(),
         "fraginfo" => cmd_fraginfo(),
+        "leakcheck" => cmd_leakcheck(),
         "memtest" => cmd_memtest(args),
         "stack" => cmd_stack(),
         "wq" | "workqueue" => cmd_workqueue(),
@@ -4438,6 +4439,7 @@ fn cmd_help() {
     crate::console_println!("  taskset TID [0xMASK] Set/query CPU affinity");
     crate::console_println!("  slabinfo  Show per-size-class heap allocator statistics");
     crate::console_println!("  fraginfo  Show heap internal fragmentation per size class");
+    crate::console_println!("  leakcheck Snapshot heap active counts for leak detection");
     crate::console_println!("  stack     Show per-task kernel stack usage (high water mark)");
     crate::console_println!("  wq        Show kernel workqueue status and statistics");
     crate::console_println!("  ktimer    Show kernel timer statistics");
@@ -13413,6 +13415,51 @@ fn cmd_fraginfo() {
     };
     shell_println!("  {:>6}  {:>12}  {:>12}  {:>12}  {:>4}%",
         "TOTAL", total_requested, total_consumed, total_wasted, total_pct);
+}
+
+/// Run a heap leak check snapshot.
+///
+/// Compares current active-object counts per size class against the
+/// previous snapshot.  Classes where active counts grow monotonically
+/// across many consecutive checks are flagged as potential leaks.
+///
+/// Run this periodically (e.g., every few seconds) to detect leaks.
+/// The first invocation establishes a baseline; subsequent invocations
+/// show deltas and growth streaks.
+fn cmd_leakcheck() {
+    let result = crate::mm::heap::check_leaks();
+
+    shell_println!("Heap leak check (snapshot comparison):");
+    shell_println!("");
+    shell_println!("  {:>6}  {:>10}  {:>8}  {:>7}  {}", "CLASS", "ACTIVE", "DELTA", "STREAK", "STATUS");
+    shell_println!("  {:->6}  {:->10}  {:->8}  {:->7}  {:->10}", "", "", "", "", "");
+
+    for entry in &result.classes {
+        if entry.active == 0 && entry.delta == 0 {
+            continue; // Skip idle classes.
+        }
+        let status = if entry.growth_streak >= 10 {
+            "SUSPECT"
+        } else if entry.growth_streak >= 5 {
+            "growing"
+        } else {
+            "ok"
+        };
+        let delta_str = if entry.delta > 0 {
+            alloc::format!("+{}", entry.delta)
+        } else {
+            alloc::format!("{}", entry.delta)
+        };
+        shell_println!("  {:>6}  {:>10}  {:>8}  {:>7}  {}",
+            entry.class_size, entry.active, delta_str, entry.growth_streak, status);
+    }
+
+    shell_println!("");
+    if result.suspect_classes > 0 {
+        shell_println!("  WARNING: {} class(es) showing sustained growth (possible leak)", result.suspect_classes);
+    } else {
+        shell_println!("  No sustained leaks detected (run periodically for best results)");
+    }
 }
 
 /// Quick physical memory test: allocate N frames, write patterns,

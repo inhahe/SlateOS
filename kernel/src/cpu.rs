@@ -364,6 +364,14 @@ pub struct CpuFeatures {
     pub xsave_area_size: u32,
     /// XCR0 supported feature bits (low 32 bits).
     pub xcr0_supported: u64,
+
+    // --- CPUID leaf 0x0A (Architectural Performance Monitoring) ---
+    /// Performance monitoring version (0 = unsupported).
+    pub pmu_version: u8,
+    /// Number of general-purpose PMC registers per logical processor.
+    pub pmu_counters: u8,
+    /// Bit width of general-purpose PMC registers.
+    pub pmu_counter_width: u8,
 }
 
 impl CpuFeatures {
@@ -378,6 +386,7 @@ impl CpuFeatures {
             sha: false, rdseed: false, vaes: false, rdpid: false,
             rdtscp: false, page_1g: false,
             xsave_area_size: 0, xcr0_supported: 0,
+            pmu_version: 0, pmu_counters: 0, pmu_counter_width: 0,
         }
     }
 }
@@ -446,6 +455,17 @@ pub fn detect_features() {
         f.xsave_area_size = ecx_d; // Maximum size for all features.
     }
 
+    // --- Leaf 0x0A: Architectural Performance Monitoring ---
+    if max_leaf >= 0x0A {
+        let eax_a = cpuid_leaf_a_eax();
+        // EAX[7:0]  = version ID
+        // EAX[15:8] = number of GP PMC registers per CPU
+        // EAX[23:16]= bit width of GP PMC registers
+        f.pmu_version = (eax_a & 0xFF) as u8;
+        f.pmu_counters = ((eax_a >> 8) & 0xFF) as u8;
+        f.pmu_counter_width = ((eax_a >> 16) & 0xFF) as u8;
+    }
+
     // SAFETY: We're the only writer (single-threaded boot), and readers
     // won't access until FEATURES_DETECTED is set (Acquire/Release).
     unsafe {
@@ -497,6 +517,12 @@ pub fn log_features() {
         "[cpu]   RDTSCP={} 1GiB pages={} TSC={}",
         f.rdtscp, f.page_1g, f.tsc
     );
+    if f.pmu_version > 0 {
+        crate::serial_println!(
+            "[cpu]   PMU v{}: {} counters × {}-bit",
+            f.pmu_version, f.pmu_counters, f.pmu_counter_width
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +627,27 @@ fn cpuid_extended_leaf1_edx() -> u32 {
         );
     }
     edx
+}
+
+/// CPUID leaf 0x0A: Architectural Performance Monitoring info.
+///
+/// Returns EAX which encodes version, counter count, and bit width.
+fn cpuid_leaf_a_eax() -> u32 {
+    let eax: u32;
+    // SAFETY: Caller verified max_leaf >= 0x0A.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0x0A",
+            "cpuid",
+            "pop rbx",
+            out("eax") eax,
+            out("ecx") _,
+            out("edx") _,
+            options(nomem, nostack),
+        );
+    }
+    eax
 }
 
 /// CPUID leaf 0xD, subleaf 0: XSAVE area information.

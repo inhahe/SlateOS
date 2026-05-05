@@ -74,6 +74,7 @@ mod limine;
 mod mm;
 mod net;
 mod pci;
+mod pmc;
 mod port;
 mod proc;
 mod rng;
@@ -874,6 +875,12 @@ extern "C" fn kmain() -> ! {
     // background kernel task so init can start immediately.  This shaves
     // ~15-20s off the time-to-usable under QEMU TCG.
     bench::self_test();
+
+    // Self-test hardware performance counters (PMU).
+    // Must be after CPU feature detection (uses pmu_version/counters from
+    // cpu::features()).  If PMU is unavailable (QEMU without -cpu host),
+    // the test gracefully skips.
+    pmc::self_test();
 
     // Print a boot-time memory summary via the unified MemoryInfo API.
     {

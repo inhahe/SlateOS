@@ -531,6 +531,67 @@ pub unsafe fn set_level_triggered(irq: u8) {
     }
 }
 
+/// Set the CPU affinity for an IRQ — route it to a specific LAPIC.
+///
+/// This modifies the destination field (bits 63:56) of the redirection
+/// table entry to route the interrupt to the specified LAPIC ID.  The
+/// IRQ's mask/trigger/polarity settings are preserved.
+///
+/// Use this to:
+/// - Spread interrupt load across CPUs (network, storage).
+/// - Pin a device interrupt to the same CPU as its driver thread
+///   (improved cache locality for ISR → driver wake path).
+///
+/// # Arguments
+///
+/// - `irq`: The IOAPIC input pin number (0..MAX_IRQ).
+/// - `lapic_id`: The target Local APIC ID.  Use
+///   [`crate::smp::cpu_apic_id(cpu_index)`] to convert a CPU index.
+///
+/// # Safety
+///
+/// The target LAPIC must be valid and online.  Routing to an offline
+/// CPU causes lost interrupts.  IOAPIC must be initialized.
+pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
+    let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
+    if u64::from(irq) >= num {
+        serial_println!("[ioapic] WARNING: set_irq_affinity({}) out of range", irq);
+        return;
+    }
+
+    // SAFETY: IOAPIC is initialized, irq < num_entries.
+    // Destination LAPIC ID occupies bits 63:56 of the 64-bit entry.
+    unsafe {
+        let entry = read_redir_entry(irq);
+        // Clear old destination (bits 63:56), set new one.
+        let entry = (entry & 0x00FF_FFFF_FFFF_FFFF) | (u64::from(lapic_id) << 56);
+        write_redir_entry(irq, entry);
+    }
+
+    serial_println!(
+        "[ioapic] IRQ {} affinity → LAPIC ID {}",
+        irq, lapic_id,
+    );
+}
+
+/// Get the current CPU target (LAPIC ID) for an IRQ.
+///
+/// Returns the destination LAPIC ID from the redirection table entry,
+/// or `None` if the IRQ is out of range.
+#[must_use]
+pub fn get_irq_affinity(irq: u8) -> Option<u8> {
+    let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
+    if u64::from(irq) >= num {
+        return None;
+    }
+
+    // SAFETY: IOAPIC is initialized, irq < num_entries.
+    let entry = unsafe { read_redir_entry(irq) };
+    // Destination LAPIC ID is in bits 63:56.
+    #[allow(clippy::cast_possible_truncation)]
+    Some((entry >> 56) as u8)
+}
+
 // ---------------------------------------------------------------------------
 // IRQ notification — lock-free, safe from ISR context
 // ---------------------------------------------------------------------------

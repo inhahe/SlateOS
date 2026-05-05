@@ -48,6 +48,7 @@ _The minimum kernel that can run a single userspace process._
   - [x] TLB shootdown via IPI (vector 251, broadcast + ack protocol)
   - [x] Tickless idle on APs: stop periodic timer when idle, wake only on reschedule IPI
   - [x] Tested with 1, 2, and 4 CPUs under QEMU
+  - [x] CPU feature detection: centralized CPUID caching (SSE3-4.2, AVX/AVX2/AVX-512, XSAVE, AES-NI, SHA, RDRAND, RDSEED, RDTSCP, 1GiB pages)
 
 ### 1.2 Memory manager
 - [x] Physical page allocator (buddy allocator for 16 KiB pages)

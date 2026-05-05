@@ -5424,15 +5424,16 @@ fn cmd_clear() {
     crate::console::clear();
 }
 
+#[allow(clippy::arithmetic_side_effects)]
 fn cmd_uptime() {
-    let ticks = crate::apic::tick_count();
-    // Timer runs at 100 Hz, so ticks / 100 = seconds.
-    #[allow(clippy::arithmetic_side_effects)]
-    let seconds = ticks / 100;
-    #[allow(clippy::arithmetic_side_effects)]
+    // Use TSC-based timekeeping for precise uptime.
+    let (up_secs, up_ms) = crate::timekeeping::uptime_ms();
+    let seconds = up_secs;
     let minutes = seconds / 60;
-    #[allow(clippy::arithmetic_side_effects)]
     let hours = minutes / 60;
+
+    // Current wall-clock time.
+    let now = crate::timekeeping::now();
 
     // Load averages (1/5/15 minute EWMA).
     let (l1, l5, l15) = crate::loadavg::get();
@@ -5446,10 +5447,12 @@ fn cmd_uptime() {
     let nr_run = crate::loadavg::nr_running();
 
     shell_println!(
-        "up {:02}:{:02}:{:02}, load average: {}.{:02}, {}.{:02}, {}.{:02}, {}/{} tasks",
+        " {:02}:{:02}:{:02} up {:02}:{:02}:{:02}.{:03}, load: {}.{:02}, {}.{:02}, {}.{:02}, {}/{} tasks",
+        now.hour, now.minute, now.second,
         hours,
         minutes % 60,
         seconds % 60,
+        up_ms,
         l1_w, l1_f,
         l5_w, l5_f,
         l15_w, l15_f,
@@ -5830,7 +5833,8 @@ fn cmd_printf(args: &str) {
 /// - `%s` epoch seconds
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn cmd_date(args: &str) {
-    let dt = crate::rtc::read_datetime();
+    // Use timekeeping (TSC-based) instead of slow CMOS I/O reads.
+    let dt = crate::timekeeping::now();
 
     if args.is_empty() {
         // Default output: YYYY-MM-DD HH:MM:SS

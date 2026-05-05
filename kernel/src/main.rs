@@ -98,6 +98,7 @@ mod softirq;
 mod sync;
 mod syscall;
 mod sysctl;
+mod timekeeping;
 mod tlb;
 mod virtio;
 mod watchdog;
@@ -233,6 +234,7 @@ extern "C" fn kmain() -> ! {
     // PIT channel 2 is always available on x86_64 hardware.
     bench::calibrate_tsc();
     cputime::init();
+    timekeeping::init();
 
     console::boot_step(console::BootStatus::Running, "Virtual memory");
 

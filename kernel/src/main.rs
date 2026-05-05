@@ -806,7 +806,10 @@ extern "C" fn kmain() -> ! {
     // Step 22j: Counting semaphore self-test.
     sched::semaphore::self_test();
 
-    // Step 22k: Task supervisor self-test.
+    // Step 22k: Reader-writer lock self-test.
+    sched::krwlock::self_test();
+
+    // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();
 
     // Step 22b: Enable interrupt-driven I/O for virtio devices.

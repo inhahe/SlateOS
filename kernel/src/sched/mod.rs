@@ -49,6 +49,7 @@
 pub mod context;
 pub mod io_sched;
 pub mod kmutex;
+pub mod krwlock;
 pub mod priority_rr;
 pub mod semaphore;
 pub mod supervisor;

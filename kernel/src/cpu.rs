@@ -701,3 +701,118 @@ fn cpuid_leaf_d_sub0() -> (u32, u32, u32, u32) {
     }
     (eax, ebx, ecx, edx)
 }
+
+// ---------------------------------------------------------------------------
+// CPU identification strings (vendor + brand)
+// ---------------------------------------------------------------------------
+
+/// CPU vendor string (12 ASCII bytes from CPUID leaf 0).
+///
+/// Returns the vendor ID like "GenuineIntel" or "AuthenticAMD".
+#[must_use]
+pub fn vendor_string() -> [u8; 12] {
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: CPUID leaf 0 is always valid on x86_64.
+    // EBX:EDX:ECX contain the 12-byte vendor string.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "xor eax, eax",
+            "cpuid",
+            "mov {ebx_out:e}, ebx",
+            "pop rbx",
+            ebx_out = out(reg) ebx,
+            out("eax") _,
+            out("ecx") ecx,
+            out("edx") edx,
+            options(nomem, nostack),
+        );
+    }
+    let mut result = [0u8; 12];
+    result[0..4].copy_from_slice(&ebx.to_le_bytes());
+    result[4..8].copy_from_slice(&edx.to_le_bytes());
+    result[8..12].copy_from_slice(&ecx.to_le_bytes());
+    result
+}
+
+/// CPU brand string (48 ASCII bytes from CPUID leaves 0x80000002–0x80000004).
+///
+/// Returns the full processor name string like "Intel(R) Core(TM) i7-...".
+/// If extended leaves aren't available, returns all zeros.
+#[must_use]
+pub fn brand_string() -> [u8; 48] {
+    let mut result = [0u8; 48];
+    let max_ext = cpuid_max_extended_leaf();
+    if max_ext < 0x8000_0004 {
+        return result;
+    }
+
+    // Leaves 0x80000002, 0x80000003, 0x80000004 each return 16 bytes
+    // in EAX:EBX:ECX:EDX.
+    for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
+        let eax: u32;
+        let ebx: u32;
+        let ecx: u32;
+        let edx: u32;
+        // SAFETY: We verified max_ext >= 0x80000004.
+        unsafe {
+            core::arch::asm!(
+                "push rbx",
+                "mov eax, {leaf:e}",
+                "cpuid",
+                "mov {ebx_out:e}, ebx",
+                "pop rbx",
+                leaf = in(reg) *leaf,
+                ebx_out = out(reg) ebx,
+                out("eax") eax,
+                out("ecx") ecx,
+                out("edx") edx,
+                options(nomem, nostack),
+            );
+        }
+        let base = i * 16;
+        result[base..base + 4].copy_from_slice(&eax.to_le_bytes());
+        result[base + 4..base + 8].copy_from_slice(&ebx.to_le_bytes());
+        result[base + 8..base + 12].copy_from_slice(&ecx.to_le_bytes());
+        result[base + 12..base + 16].copy_from_slice(&edx.to_le_bytes());
+    }
+    result
+}
+
+/// CPU family, model, and stepping from CPUID leaf 1 EAX.
+///
+/// Returns (family, model, stepping) with extended model/family applied.
+#[must_use]
+pub fn cpu_family_model_stepping() -> (u32, u32, u32) {
+    let eax: u32;
+    // SAFETY: CPUID leaf 1 is always valid on x86_64.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 1",
+            "cpuid",
+            "pop rbx",
+            out("eax") eax,
+            out("ecx") _,
+            out("edx") _,
+            options(nomem, nostack),
+        );
+    }
+    let stepping = eax & 0xF;
+    let mut model = (eax >> 4) & 0xF;
+    let mut family = (eax >> 8) & 0xF;
+    let ext_model = (eax >> 16) & 0xF;
+    let ext_family = (eax >> 20) & 0xFF;
+
+    // Intel/AMD extended model/family encoding.
+    if family == 0xF {
+        family = family.wrapping_add(ext_family);
+    }
+    if family == 0x6 || family == 0xF {
+        model = model.wrapping_add(ext_model << 4);
+    }
+
+    (family, model, stepping)
+}

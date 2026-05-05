@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "exceptions", "vectors",
+    "cpuid", "exceptions", "sysinfo", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4184,6 +4184,7 @@ fn dispatch(line: &str) {
         "bt" | "backtrace" => cmd_backtrace(),
         "diag" | "health" => cmd_diag(),
         "exceptions" | "vectors" => cmd_exceptions(),
+        "sysinfo" | "cpuid" => cmd_sysinfo(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4453,6 +4454,7 @@ fn cmd_help() {
     crate::console_println!("  bt        Show current kernel call stack (backtrace)");
     crate::console_println!("  diag      One-stop system health diagnostic summary");
     crate::console_println!("  exceptions Show per-vector exception/interrupt counts");
+    crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -13823,6 +13825,84 @@ fn cmd_exceptions() {
     let total: u64 = counts.iter().sum();
     shell_println!("{}", "-".repeat(52));
     shell_println!("{:<6} {:<32} {:>12}", "", "TOTAL", total);
+}
+
+fn cmd_sysinfo() {
+    use crate::cpu;
+
+    shell_println!("=== CPU Information ===");
+    shell_println!("");
+
+    // Vendor string.
+    let vendor_bytes = cpu::vendor_string();
+    let vendor = core::str::from_utf8(&vendor_bytes).unwrap_or("<unknown>");
+    shell_println!("  Vendor:    {}", vendor);
+
+    // Brand string.
+    let brand_bytes = cpu::brand_string();
+    // Trim trailing nulls and whitespace.
+    let brand_len = brand_bytes.iter().rposition(|&b| b != 0 && b != b' ')
+        .map_or(0, |i| i + 1);
+    let brand = core::str::from_utf8(&brand_bytes[..brand_len]).unwrap_or("<unknown>");
+    shell_println!("  Brand:     {}", brand);
+
+    // Family/model/stepping.
+    let (family, model, stepping) = cpu::cpu_family_model_stepping();
+    shell_println!("  Family:    {:#x}  Model: {:#x}  Stepping: {}", family, model, stepping);
+
+    shell_println!("");
+    shell_println!("=== Feature Flags ===");
+    shell_println!("");
+
+    let Some(f) = cpu::features() else {
+        shell_println!("  (features not yet detected)");
+        return;
+    };
+
+    // Group features by category for readability.
+    shell_println!("  Base SIMD:");
+    shell_println!("    SSE={} SSE2={} SSE3={} SSSE3={} SSE4.1={} SSE4.2={}",
+        f.sse, f.sse2, f.sse3, f.ssse3, f.sse4_1, f.sse4_2);
+
+    shell_println!("  Advanced SIMD:");
+    shell_println!("    AVX={} AVX2={} AVX-512F={} F16C={}",
+        f.avx, f.avx2, f.avx512f, f.f16c);
+
+    shell_println!("  Bit manipulation:");
+    shell_println!("    POPCNT={} BMI1={} BMI2={}",
+        f.popcnt, f.bmi1, f.bmi2);
+
+    shell_println!("  Crypto:");
+    shell_println!("    AES-NI={} SHA={} VAES={}",
+        f.aes_ni, f.sha, f.vaes);
+
+    shell_println!("  Random:");
+    shell_println!("    RDRAND={} RDSEED={}",
+        f.rdrand, f.rdseed);
+
+    shell_println!("  System:");
+    shell_println!("    TSC={} RDTSCP={} RDPID={} APIC={} FXSR={} XSAVE={}",
+        f.tsc, f.rdtscp, f.rdpid, f.apic, f.fxsr, f.xsave);
+
+    shell_println!("  Memory:");
+    shell_println!("    1GiB pages={}",
+        f.page_1g);
+
+    if f.xsave {
+        shell_println!("  XSAVE:");
+        shell_println!("    area size={} bytes, XCR0={:#x}",
+            f.xsave_area_size, f.xcr0_supported);
+    }
+
+    if f.pmu_version > 0 {
+        shell_println!("  Performance Monitoring:");
+        shell_println!("    version={}, counters={}, width={} bits",
+            f.pmu_version, f.pmu_counters, f.pmu_counter_width);
+    }
+
+    // CPU count.
+    shell_println!("");
+    shell_println!("  Logical CPUs: {}", crate::smp::cpu_count());
 }
 
 fn cmd_lockdep(args: &str) {

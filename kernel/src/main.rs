@@ -806,6 +806,9 @@ extern "C" fn kmain() -> ! {
     // Step 22j: Counting semaphore self-test.
     sched::semaphore::self_test();
 
+    // Step 22k: Task supervisor self-test.
+    sched::supervisor::self_test();
+
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-

@@ -51,6 +51,7 @@ pub mod io_sched;
 pub mod kmutex;
 pub mod priority_rr;
 pub mod semaphore;
+pub mod supervisor;
 pub mod task;
 pub mod waitqueue;
 

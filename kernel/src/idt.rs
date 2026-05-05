@@ -819,6 +819,43 @@ extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
         return;
     }
     serial_println!("EXCEPTION: Invalid Opcode (#UD) at {:#x}", frame.rip);
+    serial_println!(
+        "  CS={:#x} RFLAGS={:#x} RSP={:#x}",
+        frame.cs, frame.rflags, frame.rsp
+    );
+
+    // Dump the bytes at the faulting instruction for post-mortem decode.
+    if frame.rip >= 0xFFFF_8000_0000_0000 {
+        let ptr = frame.rip as *const u8;
+        let mut bytes = [0u8; 16];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            // SAFETY: kernel text address, always mapped.
+            *byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        }
+        serial_println!(
+            "  Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        );
+        // Common causes: 0x0F 0x0B = `ud2` (intentional trap, e.g., unreachable),
+        //                 0x0F 0x1F = nop variants that older CPUs reject.
+        if bytes[0] == 0x0F && bytes[1] == 0x0B {
+            serial_println!("  Likely cause: UD2 instruction (intentional trap / unreachable code)");
+        }
+    }
+
+    let sched_info = sched::panic_diagnostics();
+    let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);
+    let task_name = core::str::from_utf8(name_slice).unwrap_or("?");
+    serial_println!(
+        "  Task: {} ({:?}), cpu {}",
+        sched_info.current_task_id, task_name, sched::current_cpu_id()
+    );
+
+    crate::backtrace::print_current();
+    serial_println!("FATAL: Unrecoverable kernel #UD. Halting.");
     cpu::halt_loop();
 }
 
@@ -959,6 +996,40 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
+
+    // Decode the error code: for #GP, it's a selector index.
+    // Bits [15:3] = selector index, bit [2] = TI (0=GDT, 1=LDT/IDT),
+    // bit [1] = IDT flag, bit [0] = EXT (external event).
+    if error != 0 {
+        #[allow(clippy::arithmetic_side_effects)]
+        let selector_idx = (error >> 3) & 0x1FFF;
+        let is_idt = error & 0x2 != 0;
+        let is_ext = error & 0x1 != 0;
+        let table = if is_idt { "IDT" } else if error & 0x4 != 0 { "LDT" } else { "GDT" };
+        serial_println!(
+            "  Error decode: {} index={}, ext={}",
+            table, selector_idx, is_ext
+        );
+    } else {
+        serial_println!("  Error decode: no selector (likely non-canonical address or privilege violation)");
+    }
+
+    // Try to read the faulting instruction bytes for diagnosis.
+    // SAFETY: RIP points to kernel text (we checked this isn't userspace).
+    // Reading a few bytes from kernel text is safe if the address is canonical.
+    if frame.rip >= 0xFFFF_8000_0000_0000 {
+        let ptr = frame.rip as *const u8;
+        let mut bytes = [0u8; 8];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            // SAFETY: kernel text is always mapped and readable.
+            *byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        }
+        serial_println!(
+            "  Instruction bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7]
+        );
+    }
 
     // Print task context for debugging (uses try_lock).
     let sched_info = sched::panic_diagnostics();

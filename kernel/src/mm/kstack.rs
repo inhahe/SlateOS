@@ -321,6 +321,10 @@ pub fn alloc() -> KernelResult<KstackInfo> {
         core::ptr::write_bytes(stack_bottom as *mut u8, 0, STACK_SIZE as usize);
     }
 
+    // Note: The stack canary and watermark sentinel pattern are written
+    // by the task creation code (sched/task.rs) after it receives the
+    // KstackInfo.  We only zero here to provide a clean slate.
+
     Ok(KstackInfo {
         stack_bottom,
         stack_top,

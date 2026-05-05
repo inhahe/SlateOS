@@ -51,6 +51,7 @@ use crate::serial_println;
 /// Represents the valid combinations of read/write/execute permissions.
 /// W^X is enforced structurally: there is no variant for write+execute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Some variants are reserved for future mprotect support.
 pub enum MemProt {
     /// No access.  Any access will fault.
     None,
@@ -241,6 +242,7 @@ pub struct WxAuditResult {
 impl WxAuditResult {
     /// Total violations across both categories.
     #[must_use]
+    #[allow(dead_code)] // API convenience; used once W^X enforcement has full test coverage.
     pub const fn total(&self) -> usize {
         self.hhdm_violations + self.kernel_violations
     }

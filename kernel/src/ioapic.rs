@@ -552,6 +552,7 @@ pub unsafe fn set_level_triggered(irq: u8) {
 ///
 /// The target LAPIC must be valid and online.  Routing to an offline
 /// CPU causes lost interrupts.  IOAPIC must be initialized.
+#[allow(dead_code)] // API for drivers zone; used when IRQ balancing is implemented.
 pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
     if u64::from(irq) >= num {
@@ -579,6 +580,7 @@ pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
 /// Returns the destination LAPIC ID from the redirection table entry,
 /// or `None` if the IRQ is out of range.
 #[must_use]
+#[allow(dead_code)] // API for drivers zone; paired with set_irq_affinity.
 pub fn get_irq_affinity(irq: u8) -> Option<u8> {
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
     if u64::from(irq) >= num {

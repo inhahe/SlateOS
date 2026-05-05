@@ -502,6 +502,7 @@ impl PerCpuScheduler {
 
     /// Number of online CPUs.
     #[must_use]
+    #[allow(dead_code)] // Public API for diagnostics and load balancing queries.
     pub fn num_cpus(&self) -> usize {
         self.num_cpus.load(Ordering::Acquire)
     }
@@ -550,12 +551,14 @@ impl PerCpuScheduler {
 
     /// Get the remaining ticks for the currently running task on a CPU.
     #[must_use]
+    #[allow(dead_code)] // Used by preemption accounting once implemented.
     pub fn current_remaining(&self, cpu: usize) -> u32 {
         self.queues.get(cpu)
             .map_or(0, |q| q.lock().current_remaining)
     }
 
     /// Set the remaining ticks for the currently running task on a CPU.
+    #[allow(dead_code)] // Paired with current_remaining.
     pub fn set_current_remaining(&self, cpu: usize, ticks: u32) {
         if let Some(q) = self.queues.get(cpu) {
             q.lock().current_remaining = ticks;
@@ -752,6 +755,7 @@ impl PerCpuScheduler {
 
     /// Check if any CPU has ready tasks.
     #[must_use]
+    #[allow(dead_code)] // Used by idle/wakeup decision logic.
     pub fn has_ready(&self) -> bool {
         let n = self.num_cpus.load(Ordering::Relaxed);
         self.queues.iter()

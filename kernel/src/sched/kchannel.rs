@@ -314,6 +314,7 @@ impl<T: Copy, const N: usize> KChannel<T, N> {
 
     /// Channel capacity.
     #[must_use]
+    #[allow(dead_code)] // Diagnostics API.
     pub const fn capacity(&self) -> usize {
         N
     }

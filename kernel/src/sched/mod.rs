@@ -3028,6 +3028,7 @@ pub fn self_test() -> KernelResult<()> {
 
 /// Test 0: Stack canary — verify canary is planted and survives execution.
 fn test_stack_canary() -> KernelResult<()> {
+    #[allow(unused_imports)]
     use crate::mm::page_table;
 
     // Spawn a task, let it run (just increments a counter and exits),
@@ -3802,6 +3803,7 @@ fn test_smp_idle_task_safety() -> KernelResult<()> {
 /// 4. Chain walk stops at depth limit
 /// 5. Chain walk stops on cycle detection
 fn test_transitive_pi_infrastructure() -> KernelResult<()> {
+    #[allow(unused_imports)]
     use crate::mm::page_table;
 
     // --- Setup: create 3 blocked tasks (A, B, C) ---
@@ -4095,7 +4097,7 @@ fn test_exit_hooks() -> KernelResult<()> {
     let slot = slot.unwrap_or(0); // Safe: checked above.
 
     // -- 2. Normal task exit fires the hook --
-    let id = spawn(b"test-hook-exit", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
+    let _id = spawn(b"test-hook-exit", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
     // Let the task run and exit naturally.
     yield_now();
     yield_now();
@@ -4139,7 +4141,7 @@ fn test_exit_hooks() -> KernelResult<()> {
     }
 
     let before_unreg = EXIT_HOOK_TEST_COUNTER.load(Ordering::SeqCst);
-    let id3 = spawn(b"test-hook-unreg", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
+    let _id3 = spawn(b"test-hook-unreg", task::DEFAULT_PRIORITY, test_task_incr, 1, 0)?;
     yield_now();
     yield_now();
     yield_now();

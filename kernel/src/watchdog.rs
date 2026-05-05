@@ -188,17 +188,20 @@ pub fn check() {
 
 /// Return whether the watchdog is currently enabled.
 #[must_use]
+#[allow(dead_code)] // Diagnostics API; exposed for kshell/status queries.
 pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Acquire) != 0
 }
 
 /// Disable the watchdog (e.g., before entering a known long operation
 /// that disables interrupts, like firmware calls).
+#[allow(dead_code)] // API for subsystems needing long interrupt-disabled windows.
 pub fn disable() {
     ENABLED.store(0, Ordering::Release);
 }
 
 /// Re-enable the watchdog after a known long operation.
+#[allow(dead_code)] // Paired with disable().
 pub fn enable() {
     // Reset all state to avoid false positive from the disabled period.
     let cpus = smp::cpu_count();

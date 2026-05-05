@@ -113,6 +113,7 @@ impl OnceEvent {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the one-shot event.
+#[allow(unused_variables)] // Test statics used for multi-task coordination.
 pub fn self_test() {
     use crate::serial_println;
 

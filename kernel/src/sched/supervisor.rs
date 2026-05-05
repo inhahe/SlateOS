@@ -64,6 +64,7 @@ const MAX_SUPERVISED: usize = 32;
 
 /// How to handle task exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // OnFailure reserved for when exit codes are wired in.
 pub enum RestartMode {
     /// Always restart (regardless of exit reason).
     Always,
@@ -105,6 +106,7 @@ impl RestartPolicy {
 
     /// Create a "restart on failure" policy.
     #[must_use]
+    #[allow(dead_code)] // Reserved for when exit codes are wired in.
     pub const fn on_failure(max_restarts: u32, base_delay_ticks: u64, max_delay_ticks: u64) -> Self {
         Self {
             mode: RestartMode::OnFailure,

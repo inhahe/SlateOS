@@ -955,6 +955,7 @@ pub fn stats() -> HeapStats {
 ///
 /// Since the stats are atomic counters (no lock needed), this always
 /// succeeds.  Provided for API consistency with [`frame::try_stats`].
+#[allow(dead_code)] // API for diagnostics consumers; used once vmstat goes full-featured.
 pub fn try_stats() -> Option<HeapStats> {
     Some(stats())
 }
@@ -1150,7 +1151,6 @@ pub fn poison_self_test() {
     // Enable poisoning for the test.
     let was_enabled = POISON_ENABLED.load(Ordering::Relaxed);
     POISON_ENABLED.store(true, Ordering::Relaxed);
-    let violations_before = POISON_VIOLATIONS.load(Ordering::Relaxed);
 
     // Both tests run with interrupts disabled to ensure LIFO slot reuse.
     // The per-CPU cache returns the most-recently-freed slot on the next

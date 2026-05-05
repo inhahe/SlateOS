@@ -160,6 +160,7 @@ impl KstackAllocator {
         }
     }
 
+    #[allow(dead_code)] // Used by allocated_count() public API.
     fn count(&self) -> usize {
         self.count
     }
@@ -411,6 +412,7 @@ pub fn is_guard_page(addr: u64) -> bool {
 
 /// Return the number of currently allocated kernel stacks.
 #[must_use]
+#[allow(dead_code)] // Diagnostics API; used by kshell/vmstat when stack reporting is added.
 pub fn allocated_count() -> usize {
     ALLOCATOR.lock().count()
 }

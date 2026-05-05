@@ -1595,6 +1595,7 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
 ///   must not already be mapped.
 /// - The caller must flush the TLB for mapped addresses on success.
 #[allow(clippy::arithmetic_side_effects)]
+#[allow(dead_code)] // API for kernel-ipc zone; used when mmap partial-failure fix is wired in.
 pub unsafe fn map_committed_range(
     pml4_phys: u64,
     base_virt: VirtAddr,
@@ -1654,6 +1655,7 @@ pub unsafe fn map_committed_range(
 /// - The caller must flush the TLB for the unmapped range afterward.
 /// - Any user-visible data in the frames is lost.
 #[allow(clippy::arithmetic_side_effects)]
+#[allow(dead_code)] // API for kernel-ipc zone; used when mmap cleanup is wired in.
 pub unsafe fn unmap_committed_range(
     pml4_phys: u64,
     base_virt: VirtAddr,
@@ -1677,7 +1679,7 @@ pub unsafe fn unmap_committed_range(
 ///
 /// All frames at `base_virt + 0..count * FRAME_SIZE` must be validly
 /// mapped in `pml4_phys`.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, dead_code)]
 unsafe fn rollback_range(pml4_phys: u64, base_virt: VirtAddr, count: usize) {
     for j in 0..count {
         let va = VirtAddr::new(base_virt.as_u64() + (j as u64) * (FRAME_SIZE as u64));

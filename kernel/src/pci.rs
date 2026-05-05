@@ -246,6 +246,27 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
     devices.into_iter().find(|d| d.vendor_id == vendor && d.device_id == device)
 }
 
+/// Find all PCI devices matching a vendor/device ID pair.
+///
+/// Returns every matching device on bus 0.  Useful for discovering
+/// multiple instances of the same device type (e.g., multiple
+/// virtio-blk controllers).
+#[allow(dead_code)] // API for drivers zone; unused until multi-device support.
+pub fn find_all_devices(vendor: u16, device: u16) -> Vec<PciDevice> {
+    let devices = scan_bus0();
+    devices.into_iter().filter(|d| d.vendor_id == vendor && d.device_id == device).collect()
+}
+
+/// Find all PCI devices matching a class/subclass pair.
+///
+/// Useful for discovering all devices of a category regardless of
+/// vendor (e.g., all mass-storage controllers: class=0x01).
+#[allow(dead_code)] // API for drivers zone; unused until driver framework.
+pub fn find_devices_by_class(class: u8, subclass: u8) -> Vec<PciDevice> {
+    let devices = scan_bus0();
+    devices.into_iter().filter(|d| d.class == class && d.subclass == subclass).collect()
+}
+
 /// Enable bus mastering (DMA) for a PCI device.
 ///
 /// Also enables I/O space and memory space access.

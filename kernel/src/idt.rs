@@ -1194,8 +1194,51 @@ extern "C" fn handle_alignment_check(frame: &InterruptStackFrame, error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
     // Machine check is a hardware error — always fatal.
+    // Read MCE bank MSRs for diagnostic information about what failed.
     serial_println!("EXCEPTION: Machine Check (#MC) at {:#x}", frame.rip);
+    serial_println!("--- MCE Bank Status ---");
+
+    // IA32_MCG_STATUS (MSR 0x17A): global MCE status.
+    // SAFETY: Valid MSR on all x86_64 CPUs with MCE support.
+    let mcg_status = unsafe { cpu::rdmsr(0x17A) };
+    serial_println!("  MCG_STATUS: {:#018x}", mcg_status);
+    if mcg_status & 1 != 0 {
+        serial_println!("    RIPV: restart IP valid");
+    }
+    if mcg_status & 2 != 0 {
+        serial_println!("    EIPV: error IP valid");
+    }
+    if mcg_status & 4 != 0 {
+        serial_println!("    MCIP: machine check in progress");
+    }
+
+    // IA32_MCG_CAP (MSR 0x179): number of error-reporting banks.
+    let mcg_cap = unsafe { cpu::rdmsr(0x179) };
+    let bank_count = (mcg_cap & 0xFF) as u32;
+    let count = bank_count.min(8); // Limit to 8 banks to avoid huge output.
+
+    for bank in 0..count {
+        // Each bank has: STATUS at 0x401 + bank*4, ADDR at 0x402 + bank*4.
+        let status_msr = 0x401u32.saturating_add(bank.saturating_mul(4));
+        let addr_msr = 0x402u32.saturating_add(bank.saturating_mul(4));
+
+        // SAFETY: MSR addresses are valid for x86_64 with MCE.
+        let status = unsafe { cpu::rdmsr(status_msr) };
+        if status & (1u64 << 63) != 0 {
+            // VAL bit set — this bank has a logged error.
+            let addr = unsafe { cpu::rdmsr(addr_msr) };
+            serial_println!("  Bank {}: STATUS={:#018x} ADDR={:#018x}", bank, status, addr);
+            if status & (1u64 << 61) != 0 {
+                serial_println!("    UC: uncorrected error");
+            }
+            if status & (1u64 << 57) != 0 {
+                serial_println!("    PCC: processor context corrupt");
+            }
+        }
+    }
+
     serial_println!("FATAL: Machine check is unrecoverable. Halting.");
+    crate::klog!(Error, "hw.mce", "Machine check exception at {:#x}, MCG_STATUS={:#x}", frame.rip, mcg_status);
     cpu::halt_loop();
 }
 

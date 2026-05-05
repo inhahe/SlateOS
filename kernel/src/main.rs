@@ -972,6 +972,10 @@ extern "C" fn kmain() -> ! {
     // Lifecycle counters for all kernel object types.
     kobject::self_test();
 
+    // Step 22e⅞++++p: Fragmentation history self-test.
+    // Tracks memory fragmentation over time for trend analysis.
+    mm::frag_history::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

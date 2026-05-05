@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4234,6 +4234,7 @@ fn dispatch(line: &str) {
         "strace" | "sctrace" => cmd_strace(args),
         "ipcstat" | "ipc" => cmd_ipc_stat(args),
         "kobjects" | "kobj" => cmd_kobjects(args),
+        "fraghist" | "fragtrend" => cmd_frag_history(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15979,6 +15980,79 @@ fn cmd_kobjects(args: &str) {
             }
             shell_println!("");
             shell_println!("  Total active objects: {}", kobject::total_active());
+        }
+    }
+}
+
+/// `fraghist` — show memory fragmentation history and trend.
+///
+/// Usage:
+///   fraghist          — show latest snapshot and trend
+///   fraghist sample   — take a snapshot now
+///   fraghist detail   — show all stored snapshots
+///   fraghist clear    — reset history
+fn cmd_frag_history(args: &str) {
+    use crate::mm::frag_history;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "sample" => {
+            frag_history::sample();
+            let snap = frag_history::latest().expect("just sampled");
+            shell_println!("Fragmentation sample taken: {}% (free={}, max_order={})",
+                snap.frag_pct, snap.free_frames, snap.max_avail_order);
+        }
+        "clear" => {
+            frag_history::clear();
+            shell_println!("Fragmentation history cleared");
+        }
+        "detail" => {
+            let mut buf = [frag_history::FragSnapshot::empty(); 32];
+            let n = frag_history::recent(&mut buf);
+            if n == 0 {
+                shell_println!("No fragmentation history (use 'fraghist sample')");
+                return;
+            }
+            shell_println!("=== Fragmentation History ({} samples) ===", n);
+            shell_println!("");
+            shell_println!("  {:>8}  {:>5}  {:>8}  {:>5}  {:>5}  {:>5}",
+                "TICK", "FRAG%", "FREE", "MAXOR", "ORD0", "MAXBL");
+            for i in 0..n {
+                let s = &buf[i];
+                if s.is_valid() {
+                    shell_println!("  {:>8}  {:>5}  {:>8}  {:>5}  {:>5}  {:>5}",
+                        s.tick, s.frag_pct, s.free_frames,
+                        s.max_avail_order, s.order0_blocks, s.max_order_blocks);
+                }
+            }
+            shell_println!("");
+            shell_println!("  Trend: {}", frag_history::trend().name());
+        }
+        _ => {
+            // Default: show latest and trend.
+            match frag_history::latest() {
+                Some(snap) => {
+                    shell_println!("=== Memory Fragmentation ===");
+                    shell_println!("");
+                    shell_println!("  Current:     {}%", snap.frag_pct);
+                    shell_println!("  Free frames: {}/{}", snap.free_frames, snap.total_frames);
+                    shell_println!("  Max order:   {}", snap.max_avail_order);
+                    shell_println!("  Order-0 blk: {} (singles)", snap.order0_blocks);
+                    shell_println!("  Max-ord blk: {} (largest)", snap.max_order_blocks);
+                    shell_println!("  Trend:       {}", frag_history::trend().name());
+                    shell_println!("  Samples:     {}", frag_history::sample_count());
+
+                    if snap.frag_pct > 70 {
+                        shell_println!("");
+                        shell_println!("  ⚠ High fragmentation — consider running compaction");
+                    }
+                }
+                None => {
+                    shell_println!("No fragmentation data yet");
+                    shell_println!("Use 'fraghist sample' to take a snapshot");
+                }
+            }
         }
     }
 }

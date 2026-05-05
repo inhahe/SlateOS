@@ -36,6 +36,7 @@ pub mod cow;
 pub mod dma;
 pub mod fault;
 pub mod fault_inject;
+pub mod frag_history;
 pub mod frame;
 pub mod frame_owner;
 pub mod heap;

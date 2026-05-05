@@ -963,6 +963,10 @@ extern "C" fn kmain() -> ! {
     // Per-event syscall capture for strace-like debugging.
     syscall::trace::self_test();
 
+    // Step 22e⅞++++n: IPC statistics self-test.
+    // Per-mechanism usage and performance counters.
+    ipc::stats::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

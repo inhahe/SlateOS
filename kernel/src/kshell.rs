@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4232,6 +4232,7 @@ fn dispatch(line: &str) {
         "capaudit" | "capa" => cmd_cap_audit(args),
         "checkpoint" | "ckpt" => cmd_checkpoint(args),
         "strace" | "sctrace" => cmd_strace(args),
+        "ipcstat" | "ipc" => cmd_ipc_stat(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15926,6 +15927,95 @@ fn cmd_strace(args: &str) {
                         e.args[0], result_str, e.duration_cycles);
                 }
             }
+        }
+    }
+}
+
+/// `ipcstat` — show IPC statistics.
+///
+/// Usage:
+///   ipcstat        — show all IPC mechanism stats
+///   ipcstat reset  — reset all counters
+///   ipcstat chan    — show only channel stats
+///   ipcstat pipe   — show only pipe stats
+///   ipcstat futex  — show only futex stats
+fn cmd_ipc_stat(args: &str) {
+    use crate::ipc::stats;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "reset" => {
+            stats::reset();
+            shell_println!("IPC statistics reset");
+        }
+        "chan" | "channel" => {
+            let s = stats::snapshot();
+            shell_println!("=== Channel IPC ===");
+            shell_println!("");
+            shell_println!("  Messages sent:    {}", s.channel_sends);
+            shell_println!("  Messages recv:    {}", s.channel_recvs);
+            shell_println!("  Bytes sent:       {}", s.channel_bytes);
+            shell_println!("  Avg msg size:     {} B", stats::avg_channel_msg_size());
+            shell_println!("  Send blocks:      {}", s.channel_send_blocks);
+            shell_println!("  Recv blocks:      {}", s.channel_recv_blocks);
+            shell_println!("  Created:          {}", s.channels_created);
+            shell_println!("  Destroyed:        {}", s.channels_destroyed);
+        }
+        "pipe" => {
+            let s = stats::snapshot();
+            shell_println!("=== Pipe IPC ===");
+            shell_println!("");
+            shell_println!("  Writes:           {}", s.pipe_writes);
+            shell_println!("  Reads:            {}", s.pipe_reads);
+            shell_println!("  Bytes written:    {}", s.pipe_bytes_written);
+            shell_println!("  Bytes read:       {}", s.pipe_bytes_read);
+            shell_println!("  Write blocks:     {}", s.pipe_write_blocks);
+            shell_println!("  Read blocks:      {}", s.pipe_read_blocks);
+            shell_println!("  Pipes created:    {}", s.pipes_created);
+        }
+        "futex" => {
+            let s = stats::snapshot();
+            shell_println!("=== Futex ===");
+            shell_println!("");
+            shell_println!("  Waits:            {}", s.futex_waits);
+            shell_println!("  Wakes:            {}", s.futex_wakes);
+            shell_println!("  Threads woken:    {}", s.futex_threads_woken);
+            shell_println!("  Spurious waits:   {}", s.futex_spurious);
+        }
+        _ => {
+            let s = stats::snapshot();
+            let total = stats::total_operations();
+            shell_println!("=== IPC Statistics ===");
+            shell_println!("");
+            shell_println!("  Total operations: {}", total);
+            shell_println!("");
+            shell_println!("  Channels:");
+            shell_println!("    sends={} recvs={} bytes={} blocks={}+{}",
+                s.channel_sends, s.channel_recvs, s.channel_bytes,
+                s.channel_send_blocks, s.channel_recv_blocks);
+            shell_println!("    created={} destroyed={}", s.channels_created, s.channels_destroyed);
+            shell_println!("");
+            shell_println!("  Pipes:");
+            shell_println!("    writes={} reads={} bytes_w={} bytes_r={}",
+                s.pipe_writes, s.pipe_reads, s.pipe_bytes_written, s.pipe_bytes_read);
+            shell_println!("    blocks={}+{} created={}", s.pipe_write_blocks, s.pipe_read_blocks, s.pipes_created);
+            shell_println!("");
+            shell_println!("  Shared Memory:");
+            shell_println!("    created={} destroyed={} mapped={}",
+                s.shm_regions_created, s.shm_regions_destroyed, s.shm_bytes_mapped);
+            shell_println!("");
+            shell_println!("  Eventfd:");
+            shell_println!("    signals={} reads={} wakeups={} created={}",
+                s.eventfd_signals, s.eventfd_reads, s.eventfd_wakeups, s.eventfd_created);
+            shell_println!("");
+            shell_println!("  Completion Ports:");
+            shell_println!("    posts={} waits={} blocks={} created={}",
+                s.completion_posts, s.completion_waits, s.completion_wait_blocks, s.completion_created);
+            shell_println!("");
+            shell_println!("  Futex:");
+            shell_println!("    waits={} wakes={} woken={} spurious={}",
+                s.futex_waits, s.futex_wakes, s.futex_threads_woken, s.futex_spurious);
         }
     }
 }

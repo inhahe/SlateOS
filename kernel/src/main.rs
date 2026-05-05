@@ -928,6 +928,10 @@ extern "C" fn kmain() -> ! {
     // Proactive ECC error detection via background memory reads.
     mm::scrub::self_test();
 
+    // Step 22e⅞++++e: Memory subsystem integration tests.
+    // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
+    mm::integ_test::self_test();
+
     // Step 22e⅞++++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();

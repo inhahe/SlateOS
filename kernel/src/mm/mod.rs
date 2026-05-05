@@ -27,6 +27,7 @@
 
 pub mod accounting;
 pub mod compact;
+pub mod integ_test;
 pub mod compress;
 pub mod cow;
 pub mod dma;

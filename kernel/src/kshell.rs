@@ -3082,7 +3082,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "awk", "basename", "blkdev", "blkinfo", "blkread", "cal", "cat",
+    "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "base64", "bunzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
@@ -4179,6 +4179,7 @@ fn dispatch(line: &str) {
         "rng" | "random" => cmd_rng(),
         "trace" | "ktrace" => cmd_trace(args),
         "lockdep" => cmd_lockdep(args),
+        "bt" | "backtrace" => cmd_backtrace(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4444,6 +4445,7 @@ fn cmd_help() {
     crate::console_println!("  supervisor Show task supervisor status");
     crate::console_println!("  trace [N] Show last N kernel trace events (default 20)");
     crate::console_println!("  lockdep [sub] Lock order validator (classes/edges/held/all)");
+    crate::console_println!("  bt        Show current kernel call stack (backtrace)");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -5404,20 +5406,51 @@ fn cmd_uptime() {
 ///
 /// Reads the structured log ring buffer and displays entries in a
 /// human-readable format: `[timestamp] level/module: message`.
-/// Use `-n COUNT` to limit output to the last COUNT entries.
+///
+/// Options:
+///   `-n COUNT` — limit output to the last COUNT entries
+///   `-l LEVEL` — filter by minimum level (trace/debug/info/warn/error)
+///   `-m MODULE` — filter by module name (substring match)
 fn cmd_dmesg(args: &str) {
     let mut limit: usize = usize::MAX;
+    let mut min_level: &str = "";
+    let mut module_filter: &str = "";
     let words: Vec<&str> = args.split_whitespace().collect();
     let mut i = 0;
     while i < words.len() {
-        if words[i] == "-n" {
-            i = i.saturating_add(1);
-            if let Some(n) = words.get(i).and_then(|s| s.parse::<usize>().ok()) {
-                limit = n;
+        match words[i] {
+            "-n" => {
+                i = i.saturating_add(1);
+                if let Some(n) = words.get(i).and_then(|s| s.parse::<usize>().ok()) {
+                    limit = n;
+                }
             }
+            "-l" => {
+                i = i.saturating_add(1);
+                if let Some(&lvl) = words.get(i) {
+                    min_level = lvl;
+                }
+            }
+            "-m" => {
+                i = i.saturating_add(1);
+                if let Some(&m) = words.get(i) {
+                    module_filter = m;
+                }
+            }
+            _ => {}
         }
         i = i.saturating_add(1);
     }
+
+    // Map level string to numeric priority for filtering.
+    let min_prio = match min_level {
+        "trace" => 0u8,
+        "debug" => 1,
+        "info" => 2,
+        "warn" => 3,
+        "error" => 4,
+        _ => 0, // No filter (show all).
+    };
 
     // Read all log entries from the ring buffer.
     // The buffer is JSON-lines format; we'll read raw bytes and parse
@@ -5427,8 +5460,33 @@ fn cmd_dmesg(args: &str) {
     let text = core::str::from_utf8(buf.get(..written).unwrap_or(&[]))
         .unwrap_or("");
 
-    // Collect lines, then take the last `limit` entries.
-    let lines: alloc::vec::Vec<&str> = text.lines().collect();
+    // Collect lines, apply filters, then take the last `limit` entries.
+    let lines: alloc::vec::Vec<&str> = text.lines().filter(|line| {
+        // Level filter.
+        if min_prio > 0 {
+            let level = extract_json_str(line, "\"l\":\"");
+            let prio = match level {
+                "trace" => 0u8,
+                "debug" => 1,
+                "info" => 2,
+                "warn" => 3,
+                "error" => 4,
+                _ => 0,
+            };
+            if prio < min_prio {
+                return false;
+            }
+        }
+        // Module filter.
+        if !module_filter.is_empty() {
+            let module = extract_json_str(line, "\"m\":\"");
+            if !module.contains(module_filter) {
+                return false;
+            }
+        }
+        true
+    }).collect();
+
     let start = lines.len().saturating_sub(limit);
 
     for line in lines.get(start..).unwrap_or(&[]) {
@@ -13574,6 +13632,29 @@ fn cmd_trace(args: &str) {
             e.arg0,
             e.arg1,
         );
+    }
+}
+
+/// Show the current kernel call stack via frame-pointer walking.
+///
+/// This captures the backtrace from the point of the kshell command
+/// handler, showing the call chain up through the shell loop to the
+/// kernel entry point.  Useful for verifying that frame pointers are
+/// working and for debugging where control flow is.
+#[inline(never)] // Ensure this function has its own stack frame for the backtrace.
+fn cmd_backtrace() {
+    let bt = crate::backtrace::capture();
+    if bt.count == 0 {
+        shell_println!("No backtrace available (frame pointers may be absent).");
+        return;
+    }
+    shell_println!("Backtrace ({} frames):", bt.count);
+    shell_println!("");
+    shell_println!("  {:>3}  {:>18}  {:>18}", "#", "RETURN ADDR", "FRAME PTR");
+    shell_println!("  {:->3}  {:->18}  {:->18}", "", "", "");
+    for i in 0..bt.count {
+        let f = &bt.frames[i];
+        shell_println!("  {:>3}  {:#018x}  {:#018x}", i, f.return_addr, f.frame_ptr);
     }
 }
 

@@ -58,6 +58,7 @@ mod cap;
 mod console;
 mod cpu;
 mod cpu_topology;
+mod cpufreq;
 mod cputime;
 mod crypto;
 mod error;
@@ -102,6 +103,7 @@ mod softirq;
 mod sync;
 mod syscall;
 mod sysctl;
+mod thermal;
 mod timekeeping;
 mod tlb;
 mod virtio;
@@ -814,6 +816,14 @@ extern "C" fn kmain() -> ! {
     // Now that all CPUs are online, decode APIC ID hierarchy to determine
     // package/core/SMT relationships for topology-aware scheduling.
     cpu_topology::detect();
+
+    // Step 22b⅞: CPU frequency scaling initialization.
+    // Detect HWP or EIST support and set default governor (performance).
+    cpufreq::init();
+
+    // Step 22b⅞+: Thermal monitoring initialization.
+    // Detect DTS support, read Tj_max, take initial temperature reading.
+    thermal::init();
 
     // Step 22c: TLB shootdown self-test.
     // Now that all CPUs are online, verify the TLB shootdown IPI works.

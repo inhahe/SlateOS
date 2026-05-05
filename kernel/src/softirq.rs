@@ -381,6 +381,16 @@ fn handle_timer() {
     if u64::from(ticks) % 100 == 0 && crate::smp::current_cpu_index() == 0 {
         crate::irq_storm::periodic_check();
     }
+
+    // CPU frequency governor: ondemand mode samples load periodically.
+    if crate::smp::current_cpu_index() == 0 {
+        crate::cpufreq::ondemand_tick();
+    }
+
+    // Thermal monitoring: periodic temperature sampling on BSP.
+    if crate::smp::current_cpu_index() == 0 {
+        crate::thermal::periodic_check();
+    }
 }
 
 /// Scheduler softirq handler — proactive push-based load balancing.

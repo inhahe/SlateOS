@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "counters", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "counters", "cpuacct", "cpufreq", "cpuid", "cputime", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4203,6 +4203,8 @@ fn dispatch(line: &str) {
         "pacct" | "acct" => cmd_pacct(args),
         "counters" | "kcounters" => cmd_counters(args),
         "topology" | "topo" => cmd_topology(),
+        "cpufreq" | "freq" => cmd_cpufreq(args),
+        "thermal" | "temp" => cmd_thermal(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15086,6 +15088,90 @@ fn cmd_topology() {
                 topo.apic_id, sib_str
             );
         }
+    }
+}
+
+/// `cpufreq` — CPU frequency scaling control.
+///
+///   `cpufreq`             — show current frequency info
+///   `cpufreq performance` — set performance governor
+///   `cpufreq powersave`   — set powersave governor
+///   `cpufreq ondemand`    — set ondemand governor
+fn cmd_cpufreq(args: &str) {
+    match args.trim() {
+        "performance" => {
+            crate::cpufreq::set_governor(crate::cpufreq::Governor::Performance);
+            shell_println!("Governor set to: performance");
+            return;
+        }
+        "powersave" => {
+            crate::cpufreq::set_governor(crate::cpufreq::Governor::Powersave);
+            shell_println!("Governor set to: powersave");
+            return;
+        }
+        "ondemand" => {
+            crate::cpufreq::set_governor(crate::cpufreq::Governor::Ondemand);
+            shell_println!("Governor set to: ondemand");
+            return;
+        }
+        _ => {}
+    }
+
+    let info = crate::cpufreq::info();
+
+    shell_println!("=== CPU Frequency Scaling ===");
+    shell_println!("");
+    shell_println!("  Interface:    {}", if info.hwp_active {
+        "HWP (Hardware-managed P-states)"
+    } else if info.eist_available {
+        "EIST (Enhanced SpeedStep)"
+    } else {
+        "none (fixed frequency)"
+    });
+    shell_println!("  Governor:     {}", info.governor.name());
+    shell_println!("  Base freq:    {} MHz", info.base_mhz);
+    shell_println!("  Current:      {} MHz (est.)", crate::cpufreq::current_freq_mhz());
+    shell_println!("");
+    shell_println!("  Perf levels:  min={} guaranteed={} max={}",
+        info.min_perf, info.guaranteed_perf, info.max_perf);
+    shell_println!("  Current perf: {}", info.current_perf);
+    shell_println!("  Transitions:  {}", info.transitions);
+}
+
+/// `thermal` — display CPU thermal monitoring status.
+fn cmd_thermal() {
+    let info = crate::thermal::info();
+
+    shell_println!("=== CPU Thermal Monitoring ===");
+    shell_println!("");
+
+    if !info.supported {
+        shell_println!("  Thermal monitoring not supported on this CPU.");
+        return;
+    }
+
+    shell_println!("  Current temp:   {}°C", info.current_temp);
+    shell_println!("  Tj_max:         {}°C", info.tj_max);
+    shell_println!("  Range:          {}°C .. {}°C (min .. max since boot)", info.min_temp, info.max_temp);
+    shell_println!("  Mean:           {}°C ({} samples)", info.mean_temp, info.sample_count);
+    shell_println!("  Throttled:      {}", if info.throttled { "YES" } else { "no" });
+    shell_println!("");
+    shell_println!("  Events:");
+    shell_println!("    Throttle events:  {}", info.throttle_count);
+    shell_println!("    Warnings (>=85°C): {}", info.warn_count);
+    shell_println!("    Critical (>=95°C): {}", info.critical_count);
+
+    // Show recent temperature history as a simple sparkline.
+    let hist = crate::thermal::history(32);
+    if !hist.is_empty() {
+        shell_println!("");
+        shell_println!("  Recent history (newest first):");
+        let mut line = alloc::string::String::from("    ");
+        for temp in &hist {
+            use core::fmt::Write;
+            let _ = write!(line, "{}  ", temp);
+        }
+        shell_println!("{}", line);
     }
 }
 

@@ -735,10 +735,43 @@ extern "C" fn handle_debug(frame: &InterruptStackFrame, _error: u64) {
     serial_println!("EXCEPTION: Debug (#DB) at {:#x}", frame.rip);
 }
 
-/// Handle NMI (Non-Maskable Interrupt, vector 2).  Logged but non-fatal.
+/// Handle NMI (Non-Maskable Interrupt, vector 2).
+///
+/// NMIs can be caused by:
+/// - Memory parity error (System Control Port B, bit 7)
+/// - I/O channel check (System Control Port B, bit 6)
+/// - Watchdog hardware timeout
+/// - Performance counter overflow (profiling)
+/// - External debugger break (e.g., GDB connecting via QEMU)
+///
+/// We read port 0x61 (System Control Port B) to identify the source.
+/// Non-fatal unless memory parity indicates hardware failure.
 #[unsafe(no_mangle)]
 extern "C" fn handle_nmi(frame: &InterruptStackFrame, _error: u64) {
-    serial_println!("EXCEPTION: NMI at {:#x}", frame.rip);
+    // Read System Control Port B (port 0x61) to identify NMI source.
+    // SAFETY: port 0x61 is always readable on PC-compatible hardware.
+    let port_b: u8 = unsafe { crate::port::inb(0x61) };
+
+    let parity_error = port_b & 0x80 != 0;
+    let iochan_check = port_b & 0x40 != 0;
+
+    if parity_error || iochan_check {
+        serial_println!("EXCEPTION: NMI at {:#x} — hardware error", frame.rip);
+        if parity_error {
+            serial_println!("  Memory parity error (possible bad RAM)");
+        }
+        if iochan_check {
+            serial_println!("  I/O channel check error");
+        }
+        crate::klog!(Error, "hw.nmi",
+            "NMI hardware error at {:#x}: parity={}, iochan={}",
+            frame.rip, parity_error, iochan_check
+        );
+    } else {
+        // No hardware error bits — likely a software NMI (debugger,
+        // watchdog, or performance monitoring).  Just log it.
+        serial_println!("EXCEPTION: NMI at {:#x} (software/external)", frame.rip);
+    }
 }
 
 /// Handle #BP (Breakpoint, vector 3).  Logged but non-fatal.

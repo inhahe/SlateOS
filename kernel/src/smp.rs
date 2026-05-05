@@ -1087,51 +1087,21 @@ fn register_bsp(bsp_apic_id: u8) {
 
 /// Detect rdtscp instruction support via CPUID.
 ///
-/// Returns `true` if CPUID.80000001H:EDX bit 27 is set.
+/// Returns `true` if RDTSCP is supported.
+///
+/// Uses the centralized CPU feature cache from [`crate::cpu::features()`].
 fn detect_rdtscp() -> bool {
-    let edx: u32;
-    // SAFETY: CPUID is always safe to execute in ring 0.
-    // Note: CPUID clobbers EBX but LLVM reserves RBX, so we must
-    // save/restore it manually via xchg with a spare register.
-    unsafe {
-        core::arch::asm!(
-            "xchg rbx, {tmp}",   // save RBX
-            "mov eax, 0x80000001",
-            "cpuid",
-            "xchg rbx, {tmp}",   // restore RBX
-            tmp = out(reg) _,
-            out("edx") edx,
-            out("eax") _,
-            out("ecx") _,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    edx & (1 << 27) != 0
+    crate::cpu::features().map_or(false, |f| f.rdtscp)
 }
 
-/// Detect RDPID instruction support via CPUID.
+/// Detect RDPID instruction support.
 ///
-/// Returns `true` if CPUID.07H.0H:ECX bit 22 is set.
 /// RDPID reads IA32_TSC_AUX into a GP register without touching the TSC.
 /// Available on Intel Coffee Lake+, Goldmont Plus+, and AMD Zen2+.
+///
+/// Uses the centralized CPU feature cache from [`crate::cpu::features()`].
 fn detect_rdpid() -> bool {
-    let ecx: u32;
-    // SAFETY: CPUID is always safe to execute in ring 0.
-    unsafe {
-        core::arch::asm!(
-            "xchg rbx, {tmp}",   // save RBX
-            "mov eax, 7",        // leaf 7
-            "xor ecx, ecx",     // subleaf 0
-            "cpuid",
-            "xchg rbx, {tmp}",   // restore RBX
-            tmp = out(reg) _,
-            out("ecx") ecx,
-            out("eax") _,
-            out("edx") _,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    ecx & (1 << 22) != 0
+    crate::cpu::features().map_or(false, |f| f.rdpid)
 }
 
 // ---------------------------------------------------------------------------

@@ -349,6 +349,8 @@ pub struct CpuFeatures {
     // --- CPUID leaf 7, subleaf 0, ECX ---
     /// VAES (vectorized AES).
     pub vaes: bool,
+    /// RDPID (read processor ID without TSC).
+    pub rdpid: bool,
 
     // --- CPUID leaf 0x80000001, EDX ---
     /// RDTSCP (read TSC + processor ID atomically).
@@ -373,7 +375,7 @@ impl CpuFeatures {
             aes_ni: false, rdrand: false, f16c: false,
             fxsr: false, sse: false, sse2: false, tsc: false, apic: false,
             avx2: false, bmi1: false, bmi2: false, avx512f: false,
-            sha: false, rdseed: false, vaes: false,
+            sha: false, rdseed: false, vaes: false, rdpid: false,
             rdtscp: false, page_1g: false,
             xsave_area_size: 0, xcr0_supported: 0,
         }
@@ -426,6 +428,7 @@ pub fn detect_features() {
         f.sha = ebx7 & (1 << 29) != 0;
         f.rdseed = ebx7 & (1 << 18) != 0;
         f.vaes = ecx7 & (1 << 9) != 0;
+        f.rdpid = ecx7 & (1 << 22) != 0;
     }
 
     // --- Leaf 0x80000001: extended features ---

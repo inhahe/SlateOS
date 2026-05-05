@@ -155,8 +155,9 @@ const _: () = {
 pub fn init_bsp() {
     configure_fpu_cr_bits();
 
-    // Verify FXSAVE support via CPUID.
-    let has_fxsr = cpuid_has_fxsr();
+    // Verify FXSAVE support via cached CPU features.
+    let has_fxsr = crate::cpu::features()
+        .map_or(false, |f| f.fxsr);
     assert!(has_fxsr, "CPU does not support FXSAVE/FXRSTOR (impossible on x86_64)");
 
     // Initialize x87 FPU to known state.
@@ -223,30 +224,8 @@ fn configure_fpu_cr_bits() {
     }
 }
 
-/// Check CPUID for FXSAVE/FXRSTOR support (leaf 1, EDX bit 24).
-///
-/// On x86_64, this is always true (SSE2 is mandatory), but we
-/// verify defensively.
-fn cpuid_has_fxsr() -> bool {
-    let edx: u32;
-    // SAFETY: CPUID leaf 1 is always valid on x86_64.
-    // We save/restore rbx manually because LLVM reserves it
-    // (rbx is the GOT pointer in position-independent code) and
-    // won't allow it as an asm operand.
-    unsafe {
-        asm!(
-            "push rbx",
-            "mov eax, 1",
-            "cpuid",
-            "pop rbx",
-            out("edx") edx,
-            out("eax") _,
-            out("ecx") _,
-            options(nomem, nostack),
-        );
-    }
-    edx & (1 << 24) != 0
-}
+// FXSAVE support is now queried via crate::cpu::features().fxsr
+// (centralized CPUID detection cached at boot time).
 
 // ---------------------------------------------------------------------------
 // Save / restore (used from context switch assembly via raw pointers)

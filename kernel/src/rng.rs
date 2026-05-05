@@ -297,27 +297,13 @@ static RESEED_COUNT: AtomicU64 = AtomicU64::new(0);
 ///
 /// Returns `Some(value)` if RDRAND is available and succeeded,
 /// `None` if RDRAND is not supported or failed after retries.
+///
+/// Uses the cached CPU feature flags from [`crate::cpu::features()`]
+/// instead of running CPUID on every call.
 fn try_rdrand() -> Option<u64> {
-    // Check CPUID for RDRAND support (ECX bit 30 of leaf 1).
-    let has_rdrand: bool;
-
-    // SAFETY: CPUID is always available on x86_64. Leaf 1 is standard.
-    unsafe {
-        let ecx: u32;
-        core::arch::asm!(
-            "push rbx",     // CPUID clobbers EBX.
-            "mov eax, 1",
-            "cpuid",
-            "pop rbx",
-            out("ecx") ecx,
-            out("eax") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-        has_rdrand = (ecx & (1 << 30)) != 0;
-    }
-
-    if !has_rdrand {
+    // Use centralized feature detection (cached at boot).
+    let features = crate::cpu::features()?;
+    if !features.rdrand {
         return None;
     }
 
@@ -327,8 +313,8 @@ fn try_rdrand() -> Option<u64> {
         let value: u64;
         let success: u8;
 
-        // SAFETY: We checked RDRAND availability above.  The CF flag
-        // indicates success (1) or failure (0).
+        // SAFETY: We verified RDRAND is supported via cpu::features().
+        // The CF flag indicates success (1) or failure (0).
         unsafe {
             core::arch::asm!(
                 "rdrand {val}",
@@ -352,31 +338,13 @@ fn try_rdrand() -> Option<u64> {
 /// RDSEED provides "true random" bits (conditioned noise source),
 /// while RDRAND provides "deterministic random" bits (CSPRNG seeded
 /// from hardware noise).  RDSEED is preferred for seeding other CSPRNGs.
+///
+/// Uses the cached CPU feature flags from [`crate::cpu::features()`]
+/// instead of running CPUID on every call.
 fn try_rdseed() -> Option<u64> {
-    // Check CPUID for RDSEED support (EBX bit 18 of leaf 7, sub-leaf 0).
-    let has_rdseed: bool;
-
-    // SAFETY: CPUID leaf 7 is available on all x86_64 processors that
-    // support structured extended feature flags.
-    unsafe {
-        let ebx: u32;
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 7",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            ebx_out = out(reg) ebx,
-            out("eax") _,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-        has_rdseed = (ebx & (1 << 18)) != 0;
-    }
-
-    if !has_rdseed {
+    // Use centralized feature detection (cached at boot).
+    let features = crate::cpu::features()?;
+    if !features.rdseed {
         return None;
     }
 
@@ -384,7 +352,7 @@ fn try_rdseed() -> Option<u64> {
         let value: u64;
         let success: u8;
 
-        // SAFETY: We checked RDSEED availability above.
+        // SAFETY: We verified RDSEED is supported via cpu::features().
         unsafe {
             core::arch::asm!(
                 "rdseed {val}",

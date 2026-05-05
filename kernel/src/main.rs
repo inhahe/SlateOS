@@ -69,6 +69,7 @@ mod idle;
 mod ioapic;
 mod irq_storm;
 mod ipc;
+mod kcounters;
 mod keyboard;
 mod klog;
 mod kshell;

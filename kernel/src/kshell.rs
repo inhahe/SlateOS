@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "counters", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4201,6 +4201,7 @@ fn dispatch(line: &str) {
         "cputime" | "cpuacct" => cmd_cputime(),
         "irqstorm" => cmd_irqstorm(args),
         "pacct" | "acct" => cmd_pacct(args),
+        "counters" | "kcounters" => cmd_counters(args),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -14990,6 +14991,56 @@ fn cmd_pacct(args: &str) {
             rec.last_cpu,
         );
     }
+}
+
+/// `counters` — display unified kernel event counters.
+///
+/// Shows all registered counters grouped by subsystem, plus built-in
+/// counters aggregated from various kernel subsystems.
+///   `counters`       — show all counters
+///   `counters <grp>` — filter by group (mm, sched, irq, softirq, syscall, pacct)
+fn cmd_counters(args: &str) {
+    let filter = args.trim();
+
+    // Get built-in counters (from existing subsystem atomics).
+    let builtin = crate::kcounters::builtin_snapshot();
+
+    // Get explicitly-registered counters.
+    let registered = crate::kcounters::snapshot();
+
+    // Merge both lists.
+    let all: alloc::vec::Vec<_> = builtin.iter().chain(registered.iter())
+        .filter(|c| filter.is_empty() || c.group == filter)
+        .collect();
+
+    if all.is_empty() {
+        if filter.is_empty() {
+            shell_println!("No counters registered.");
+        } else {
+            shell_println!("No counters in group '{}'.", filter);
+        }
+        return;
+    }
+
+    shell_println!("=== Kernel Event Counters ===");
+    shell_println!("");
+
+    // Group by subsystem.
+    let mut current_group = "";
+    for counter in &all {
+        if counter.group != current_group {
+            if !current_group.is_empty() {
+                shell_println!("");
+            }
+            shell_println!("  [{}]", counter.group);
+            current_group = counter.group;
+        }
+        shell_println!("    {:<24} {}", counter.name, counter.value);
+    }
+
+    shell_println!("");
+    shell_println!("Total: {} counters ({} registered, {} built-in)",
+        all.len(), registered.len(), builtin.len());
 }
 
 /// `irqoff` — show interrupt-disabled duration statistics.

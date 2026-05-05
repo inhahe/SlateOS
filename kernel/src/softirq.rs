@@ -181,6 +181,27 @@ pub fn any_pending() -> bool {
         .is_some_and(|p| p.load(Ordering::Acquire) != 0)
 }
 
+/// Softirq subsystem statistics snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct SoftirqStats {
+    /// Total softirq processing invocations.
+    pub total_runs: u32,
+    /// Total individual handler invocations.
+    pub total_handlers: u32,
+    /// Times re-entry was prevented.
+    pub reentry_prevented: u32,
+}
+
+/// Get a snapshot of softirq subsystem statistics.
+#[must_use]
+pub fn stats() -> SoftirqStats {
+    SoftirqStats {
+        total_runs: TOTAL_RUNS.load(Ordering::Relaxed),
+        total_handlers: TOTAL_HANDLERS.load(Ordering::Relaxed),
+        reentry_prevented: REENTRY_PREVENTED.load(Ordering::Relaxed),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API — process softirqs
 // ---------------------------------------------------------------------------

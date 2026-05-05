@@ -50,6 +50,7 @@ pub mod context;
 pub mod io_sched;
 pub mod priority_rr;
 pub mod task;
+pub mod waitqueue;
 
 use alloc::collections::BTreeMap;
 use crate::cpu;

@@ -797,6 +797,9 @@ extern "C" fn kmain() -> ! {
     // priority classes, elevator ordering, and request merging.
     sched::io_sched::self_test();
 
+    // Step 22h: Wait queue self-test.
+    sched::waitqueue::self_test();
+
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-

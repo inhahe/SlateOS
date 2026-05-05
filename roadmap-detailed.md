@@ -88,7 +88,7 @@ Every performance-critical subsystem has a measured baseline and a concrete targ
 
 ## Phase 0: Project Foundation
 
-- [ ] Choose a project name - out of ai's suggestions, so far it's Slate, Facet or Rime. My ideas: Neo
+- [ ] Choose a project name - out of ai's suggestions, so far it's Slate, Facet or Rime. My ideas: Neo (going with that so far)
 - [x] Set up git repo, CI, build system (cargo workspace)
 - [x] Set up QEMU/VirtualBox dev loop (edit on Windows, cross-compile, boot in VM)
 - [x] Set up Rust cross-compilation (`x86_64-unknown-none` target)
@@ -1233,6 +1233,7 @@ Every program using `libautomation` automatically exposes these events without a
 | `lifecycle.unfocused` | Program window loses focus | `{window_id, timestamp}` |
 | `lifecycle.minimized` | Program window is minimized | `{window_id, timestamp}` |
 | `lifecycle.restored` | Program window is restored from minimize | `{window_id, timestamp}` |
+| `lifecycle.tray_minimized` | Program window is minimized to the system tray | `{window_id, timestamp}` |
 | `lifecycle.closing` | Program is about to close (can be subscribed to for cleanup) | `{pid, reason, timestamp}` |
 | `lifecycle.idle` | No user input for configurable duration | `{idle_seconds, timestamp}` |
 | `lifecycle.active` | User input resumes after idle | `{timestamp}` |
@@ -1277,6 +1278,7 @@ All automation names use `snake_case`. Events describe what happened (past tense
 | Event | `preference.changed` | `{key, old_value, new_value}` |
 | Action | `window.focus` | Bring window to front |
 | Action | `window.minimize` | Minimize window |
+| Action | `window.minimize_to_tray` | Minimize window to the system tray |
 | Action | `window.maximize` | Maximize/restore window |
 | Action | `window.close` | Close window (may prompt to save) |
 | Action | `window.move` | `{x, y}` — move window |

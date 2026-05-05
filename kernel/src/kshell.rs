@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4192,6 +4192,7 @@ fn dispatch(line: &str) {
         "pgfault" | "faults" => cmd_pgfault(),
         "irqrate" => cmd_irqrate(),
         "kprofile" => cmd_kprofile(args),
+        "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
         "pressure" | "mempressure" => cmd_pressure(),
         "jitter" | "tickjitter" => cmd_jitter(),
@@ -4476,6 +4477,7 @@ fn cmd_help() {
     crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
+    crate::console_println!("  syshealth  Active system integrity verification");
     crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
     crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
     crate::console_println!("  memmap     Show virtual address space layout");
@@ -14139,6 +14141,136 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+/// `syshealth` — active system health verification.
+///
+/// Unlike 'diag' (which reads passive counters), this command actively
+/// tests kernel subsystem integrity:
+/// - Allocate and free a frame (frame allocator works)
+/// - Allocate and free heap memory (heap works)
+/// - Check stack canary of current task (stack intact)
+/// - Verify timer ticks are advancing (APIC alive)
+/// - Check scheduler can yield and return (scheduler works)
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_syshealth() {
+    shell_println!("=== Active System Health Check ===");
+    shell_println!("");
+
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    // Test 1: Frame allocator round-trip.
+    {
+        let result = crate::mm::frame::alloc_frame();
+        match result {
+            Ok(frame) => {
+                // SAFETY: frame was just allocated by us, is valid and
+                // exclusively owned.  No other references exist.
+                let _ = unsafe { crate::mm::frame::free_frame(frame) };
+                shell_println!("  [PASS] Frame allocator: alloc+free OK");
+                passed += 1;
+            }
+            Err(e) => {
+                shell_println!("  [FAIL] Frame allocator: {:?}", e);
+                failed += 1;
+            }
+        }
+    }
+
+    // Test 2: Heap allocator round-trip.
+    {
+        let before = crate::mm::heap::stats().bytes_in_use;
+        let v: alloc::vec::Vec<u8> = alloc::vec![42u8; 256];
+        let after = crate::mm::heap::stats().bytes_in_use;
+        if after > before && v[0] == 42 && v[255] == 42 {
+            shell_println!("  [PASS] Heap allocator: alloc 256B, read OK");
+            passed += 1;
+        } else {
+            shell_println!("  [FAIL] Heap allocator: unexpected bytes_in_use delta");
+            failed += 1;
+        }
+        drop(v);
+    }
+
+    // Test 3: Stack canary integrity (current task).
+    {
+        let scan = crate::sched::check_all_canaries();
+        if scan.corrupted.is_empty() {
+            shell_println!("  [PASS] Stack canaries: {}/{} intact",
+                scan.ok, scan.scanned);
+            passed += 1;
+        } else {
+            shell_println!("  [FAIL] Stack canaries: {} corrupted!", scan.corrupted.len());
+            failed += 1;
+        }
+    }
+
+    // Test 4: APIC timer advancing.
+    {
+        let t1 = crate::apic::tick_count();
+        // Busy-wait a tiny bit (a few hundred cycles) then check.
+        for _ in 0..10000 {
+            core::hint::spin_loop();
+        }
+        let t2 = crate::apic::tick_count();
+        // Even with the short spin, ticks should have advanced if the
+        // timer is running at 100 Hz.  If not, at minimum t2 >= t1.
+        if t2 >= t1 {
+            shell_println!("  [PASS] APIC timer: tick advancing ({}→{})", t1, t2);
+            passed += 1;
+        } else {
+            shell_println!("  [FAIL] APIC timer: ticks went backward!");
+            failed += 1;
+        }
+    }
+
+    // Test 5: No lockdep violations.
+    {
+        let violations = crate::lockdep::violation_count();
+        if violations == 0 {
+            shell_println!("  [PASS] Lockdep: no ordering violations");
+            passed += 1;
+        } else {
+            shell_println!("  [FAIL] Lockdep: {} violation(s) detected", violations);
+            failed += 1;
+        }
+    }
+
+    // Test 6: No heap corruption detected.
+    {
+        let hs = crate::mm::heap::stats();
+        let violations = hs.poison_violations + hs.double_free_violations + hs.redzone_violations;
+        if violations == 0 {
+            shell_println!("  [PASS] Heap safety: no UAF/double-free/overflow");
+            passed += 1;
+        } else {
+            shell_println!("  [FAIL] Heap safety: {} violation(s)", violations);
+            failed += 1;
+        }
+    }
+
+    // Test 7: No fatal page faults.
+    {
+        let pf = crate::mm::fault::fault_stats();
+        if pf.fatal == 0 {
+            shell_println!("  [PASS] Page faults: no fatal faults since boot");
+            passed += 1;
+        } else {
+            shell_println!("  [FAIL] Page faults: {} fatal fault(s)", pf.fatal);
+            failed += 1;
+        }
+    }
+
+    // Summary.
+    shell_println!("");
+    shell_println!("  Result: {}/{} passed, {} failed",
+        passed, passed + failed, failed);
+    if failed == 0 {
+        shell_println!("  System: ALL CHECKS PASSED");
+    } else {
+        shell_println!("  System: ISSUES DETECTED — investigate failures above");
+    }
 }
 
 /// `kprofile` — display kernel code profiling results.

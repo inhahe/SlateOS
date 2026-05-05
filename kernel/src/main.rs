@@ -118,6 +118,7 @@ mod timekeeping;
 mod tlb;
 mod virtio;
 mod watchdog;
+mod watchpoint;
 mod workqueue;
 
 // ---------------------------------------------------------------------------
@@ -980,6 +981,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.
     selftest::self_test();
+
+    // Step 22e⅞++++r: Watchpoint self-test.
+    // Software memory watchpoints for debugging value changes.
+    watchpoint::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4236,6 +4236,7 @@ fn dispatch(line: &str) {
         "kobjects" | "kobj" => cmd_kobjects(args),
         "fraghist" | "fragtrend" => cmd_frag_history(args),
         "selftest" => cmd_selftest(args),
+        "watch" => cmd_watchpoint(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -16046,6 +16047,136 @@ fn cmd_selftest(args: &str) {
                     shell_println!("=== {}/{} PASSED ===", results.passed, results.total);
                 }
             }
+        }
+    }
+}
+
+/// `watch` — software memory watchpoints.
+///
+/// Usage:
+///   watch add <addr> [label]  — add watchpoint on kernel address
+///   watch list                — show active watchpoints
+///   watch poll                — check for changes
+///   watch del <slot>          — remove watchpoint
+///   watch events              — show recent change events
+///   watch clear               — remove all watchpoints
+fn cmd_watchpoint(args: &str) {
+    use crate::watchpoint;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "add" => {
+            if let Some(&addr_str) = parts.get(1) {
+                let addr = if let Some(hex) = addr_str.strip_prefix("0x") {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    addr_str.parse::<u64>().ok()
+                };
+
+                match addr {
+                    Some(a) => {
+                        let label = parts.get(2).copied().unwrap_or("").as_bytes();
+                        match watchpoint::add(a, label) {
+                            Some(slot) => {
+                                shell_println!("Watchpoint #{} added at {:#x}", slot, a);
+                            }
+                            None => {
+                                shell_println!("Error: invalid address or all slots full");
+                                shell_println!("  Address must be kernel-space (>=0xffff800000000000)");
+                                shell_println!("  and 8-byte aligned");
+                            }
+                        }
+                    }
+                    None => shell_println!("Error: invalid address format"),
+                }
+            } else {
+                shell_println!("Usage: watch add <hex_addr> [label]");
+            }
+        }
+        "list" => {
+            let all = watchpoint::list();
+            let active: alloc::vec::Vec<_> = all.iter()
+                .filter(|(_, wp)| wp.active)
+                .collect();
+            if active.is_empty() {
+                shell_println!("No active watchpoints");
+                return;
+            }
+            shell_println!("=== Active Watchpoints ===");
+            shell_println!("");
+            shell_println!("  {:>4}  {:>18}  {:>18}  {:>6}  {:>8}",
+                "SLOT", "ADDRESS", "LAST VALUE", "CHANGE", "LABEL");
+            for (slot, wp) in &active {
+                let label = core::str::from_utf8(&wp.label)
+                    .unwrap_or("?")
+                    .trim_end_matches('\0');
+                shell_println!("  {:>4}  {:#018x}  {:#018x}  {:>6}  {:>8}",
+                    slot, wp.address, wp.last_value, wp.change_count, label);
+            }
+        }
+        "poll" => {
+            let changes = watchpoint::poll();
+            if changes == 0 {
+                shell_println!("No changes detected");
+            } else {
+                shell_println!("{} watchpoint(s) triggered!", changes);
+                // Show the most recent events.
+                let mut events = [watchpoint::WatchEvent { slot: 0, address: 0, old_value: 0, new_value: 0, tick: 0 }; 4];
+                let n = watchpoint::recent_events(&mut events);
+                for i in 0..n.min(changes) {
+                    let e = &events[i];
+                    shell_println!("  [{}] {:#x}: {:#x} → {:#x} (tick {})",
+                        e.slot, e.address, e.old_value, e.new_value, e.tick);
+                }
+            }
+        }
+        "del" => {
+            if let Some(&slot_str) = parts.get(1) {
+                if let Ok(slot) = slot_str.parse::<usize>() {
+                    if watchpoint::remove(slot) {
+                        shell_println!("Watchpoint #{} removed", slot);
+                    } else {
+                        shell_println!("Error: slot {} not active", slot);
+                    }
+                } else {
+                    shell_println!("Error: invalid slot number");
+                }
+            } else {
+                shell_println!("Usage: watch del <slot>");
+            }
+        }
+        "events" => {
+            let mut events = [watchpoint::WatchEvent { slot: 0, address: 0, old_value: 0, new_value: 0, tick: 0 }; 16];
+            let n = watchpoint::recent_events(&mut events);
+            if n == 0 {
+                shell_println!("No watchpoint events recorded");
+                return;
+            }
+            shell_println!("Last {} watchpoint events (newest first):", n);
+            shell_println!("  {:>4}  {:>18}  {:>18}  {:>18}  {:>8}",
+                "SLOT", "ADDRESS", "OLD", "NEW", "TICK");
+            for i in 0..n {
+                let e = &events[i];
+                if e.tick != 0 {
+                    shell_println!("  {:>4}  {:#018x}  {:#018x}  {:#018x}  {:>8}",
+                        e.slot, e.address, e.old_value, e.new_value, e.tick);
+                }
+            }
+        }
+        "clear" => {
+            watchpoint::clear();
+            shell_println!("All watchpoints cleared");
+        }
+        _ => {
+            shell_println!("Usage: watch <add|list|poll|del|events|clear>");
+            shell_println!("");
+            shell_println!("  watch add <addr> [label]  — monitor kernel address");
+            shell_println!("  watch list                — show active watchpoints");
+            shell_println!("  watch poll                — check for value changes");
+            shell_println!("  watch del <slot>          — remove a watchpoint");
+            shell_println!("  watch events              — show change history");
+            shell_println!("  watch clear               — remove all");
         }
     }
 }

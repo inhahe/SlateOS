@@ -775,6 +775,12 @@ pub fn spawn_with_affinity(
     signal_cpu(target_cpu);
 
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::TASK_SPAWN,
+        id,
+        prio as u64,
+    );
     serial_println!("[sched] Spawned task {} (priority {}, cpu {})", id, prio, target_cpu);
     Ok(id)
 }
@@ -799,6 +805,12 @@ pub fn yield_now() {
 pub fn task_exit() {
     let current_id = load_current_task();
     TASKS_EXITED.fetch_add(1, Ordering::Relaxed);
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::TASK_EXIT,
+        current_id,
+        0,
+    );
     serial_println!("[sched] Task {} exiting", current_id);
 
     // Notify exit hooks BEFORE marking the task Dead and before

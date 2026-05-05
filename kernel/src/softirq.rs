@@ -230,6 +230,9 @@ pub unsafe fn process_pending() {
 
     TOTAL_RUNS.fetch_add(1, Ordering::Relaxed);
 
+    // --- CPU time accounting: entering softirq context ---
+    crate::cputime::enter_softirq();
+
     // Enable interrupts so hardware IRQs can preempt softirq work.
     //
     // SAFETY: We've already sent EOI, so the LAPIC won't re-deliver
@@ -270,6 +273,9 @@ pub unsafe fn process_pending() {
             break;
         }
     }
+
+    // --- CPU time accounting: leaving softirq context ---
+    crate::cputime::exit_softirq();
 
     // Disable interrupts before returning to the assembly stub.
     //

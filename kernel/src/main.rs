@@ -57,6 +57,7 @@ mod boot;
 mod cap;
 mod console;
 mod cpu;
+mod cputime;
 mod crypto;
 mod error;
 mod font;
@@ -231,6 +232,7 @@ extern "C" fn kmain() -> ! {
     // Must be after serial (for output) and before subsystem benchmarks.
     // PIT channel 2 is always available on x86_64 hardware.
     bench::calibrate_tsc();
+    cputime::init();
 
     console::boot_step(console::BootStatus::Running, "Virtual memory");
 

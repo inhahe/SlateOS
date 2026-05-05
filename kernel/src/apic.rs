@@ -895,6 +895,9 @@ pub unsafe fn init_ap() {
 /// not acquire locks that could be held by the interrupted code.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
+    // --- CPU time accounting: entering IRQ context ---
+    crate::cputime::enter_irq();
+
     // --- ISR latency measurement: record entry TSC ---
     //
     // When benchmarking is active, capture the TSC at ISR entry and after
@@ -1034,6 +1037,9 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     unsafe {
         core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
     }
+
+    // --- CPU time accounting: leaving IRQ context ---
+    crate::cputime::exit_irq();
 
     // If the scheduler says the time slice expired, reschedule.
     //

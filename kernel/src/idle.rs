@@ -199,11 +199,17 @@ pub fn resched_pending() -> bool {
 pub fn idle_once() {
     IDLE_ENTRIES.fetch_add(1, Ordering::Relaxed);
 
+    // CPU time accounting: mark entry into idle state.
+    crate::cputime::enter_idle();
+
     if MWAIT_ENABLED.load(Ordering::Relaxed) {
         idle_mwait();
     } else {
         idle_hlt();
     }
+
+    // CPU time accounting: mark exit from idle state.
+    crate::cputime::exit_idle();
 }
 
 /// Set the target C-state for MWAIT idle.

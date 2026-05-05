@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "boottime", "boottiming", "canary", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4198,6 +4198,7 @@ fn dispatch(line: &str) {
         "kstat" | "history" => cmd_kstat(args),
         "kwarn" | "warnings" => cmd_kwarn(args),
         "loadavg" => cmd_loadavg(),
+        "cputime" | "cpuacct" => cmd_cputime(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -14817,6 +14818,58 @@ fn cmd_loadavg() {
     shell_println!("");
     shell_println!("  1-min  5-min  15-min  running  samples");
     shell_println!("  Load averages sampled every 5 seconds (EWMA, fixed-point)");
+}
+
+/// `cputime` — show per-CPU time breakdown (system/IRQ/softirq/idle).
+///
+/// Displays nanosecond-precision CPU utilization breakdown using
+/// TSC-based accounting.  Shows percentages and absolute times.
+fn cmd_cputime() {
+    let stats = crate::cputime::all_cpu_stats();
+    if stats.is_empty() {
+        shell_println!("CPU time accounting not available (TSC not calibrated)");
+        return;
+    }
+
+    shell_println!("CPU     system%  irq%  softirq%  idle%    irqs    softirqs   idle_entries");
+    shell_println!("---     -------  ----  --------  -----    ----    --------   ------------");
+
+    for &(cpu, ref s) in &stats {
+        let total = s.total_ns.max(1); // avoid div-by-zero
+
+        let sys_pct = s.system_ns.saturating_mul(100) / total;
+        let irq_pct = s.irq_ns.saturating_mul(100) / total;
+        let si_pct = s.softirq_ns.saturating_mul(100) / total;
+        let idle_pct = s.idle_ns.saturating_mul(100) / total;
+
+        shell_println!("{:<7} {:>5}%  {:>3}%    {:>4}%  {:>4}%  {:>6}  {:>10}  {:>12}",
+            cpu, sys_pct, irq_pct, si_pct, idle_pct,
+            s.irq_count, s.softirq_count, s.idle_count,
+        );
+    }
+
+    // Aggregate line
+    let agg = crate::cputime::aggregate_stats();
+    let total = agg.total_ns.max(1);
+    let sys_pct = agg.system_ns.saturating_mul(100) / total;
+    let irq_pct = agg.irq_ns.saturating_mul(100) / total;
+    let si_pct = agg.softirq_ns.saturating_mul(100) / total;
+    let idle_pct = agg.idle_ns.saturating_mul(100) / total;
+
+    shell_println!("---     -------  ----  --------  -----    ----    --------   ------------");
+    shell_println!("{:<7} {:>5}%  {:>3}%    {:>4}%  {:>4}%  {:>6}  {:>10}  {:>12}",
+        "ALL", sys_pct, irq_pct, si_pct, idle_pct,
+        agg.irq_count, agg.softirq_count, agg.idle_count,
+    );
+
+    // Time breakdown in human-readable form
+    shell_println!("");
+    shell_println!("Total uptime (per-CPU): {:.3}s",
+        agg.total_ns as f64 / 1_000_000_000.0);
+    shell_println!("  System:  {} ms", agg.system_ns / 1_000_000);
+    shell_println!("  IRQ:     {} ms", agg.irq_ns / 1_000_000);
+    shell_println!("  Softirq: {} ms", agg.softirq_ns / 1_000_000);
+    shell_println!("  Idle:    {} ms", agg.idle_ns / 1_000_000);
 }
 
 /// `irqoff` — show interrupt-disabled duration statistics.

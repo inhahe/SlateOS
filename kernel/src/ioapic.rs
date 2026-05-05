@@ -706,6 +706,9 @@ pub fn process_deferred_wakes() {
 /// to ~microseconds.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_device_irq(irq: u32) {
+    // --- CPU time accounting: entering IRQ context ---
+    crate::cputime::enter_irq();
+
     // 0. Device-specific handlers that must run in ISR context.
     //    The keyboard must read its scan code from port 0x60
     //    immediately — the data is lost after EOI.
@@ -757,6 +760,9 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     unsafe {
         crate::softirq::process_pending();
     }
+
+    // --- CPU time accounting: leaving IRQ context ---
+    crate::cputime::exit_irq();
 }
 
 // ---------------------------------------------------------------------------

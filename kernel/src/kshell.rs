@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "pacct", "pgfault", "pools", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4209,6 +4209,7 @@ fn dispatch(line: &str) {
         "shutdown" | "poweroff" => cmd_shutdown(),
         "reboot" => cmd_reboot(),
         "hotplug" | "cpuctl" => cmd_hotplug(args),
+        "mempool" | "pools" => cmd_mempool(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15240,6 +15241,32 @@ fn cmd_hotplug(args: &str) {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
         }
     }
+}
+
+/// `mempool` — display memory pool statistics.
+fn cmd_mempool() {
+    let pools = crate::mm::mempool::all_pool_stats();
+    if pools.is_empty() {
+        shell_println!("No memory pools registered.");
+        return;
+    }
+
+    shell_println!("=== Memory Pools ===");
+    shell_println!("");
+    shell_println!("  {:<12} {:>6} {:>5} {:>5} {:>5} {:>8} {:>8} {:>5} {:>4}",
+        "NAME", "OBJ_SZ", "CAP", "AVAIL", "USED", "ALLOCS", "FREES", "FAILS", "HWM");
+    shell_println!("  {:<12} {:>6} {:>5} {:>5} {:>5} {:>8} {:>8} {:>5} {:>4}",
+        "----", "------", "---", "-----", "----", "------", "-----", "-----", "---");
+
+    for st in &pools {
+        shell_println!("  {:<12} {:>6} {:>5} {:>5} {:>5} {:>8} {:>8} {:>5} {:>4}",
+            st.name, st.obj_size, st.capacity, st.available, st.in_use,
+            st.total_allocs, st.total_frees, st.alloc_failures, st.high_watermark);
+    }
+
+    shell_println!("");
+    shell_println!("  {} pool{} registered", pools.len(),
+        if pools.len() == 1 { "" } else { "s" });
 }
 
 /// `thermal` — display CPU thermal monitoring status.

@@ -1012,6 +1012,7 @@ extern "C" fn kmain() -> ! {
     mm::accounting::self_test();
     mm::rlimits::self_test();
     mm::pressure::self_test();
+    mm::mempool::self_test();
 
     // Step 22c: Spawn workqueue worker task.
     // Provides deferred work execution in full process context (can sleep,

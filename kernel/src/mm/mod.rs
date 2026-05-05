@@ -39,6 +39,7 @@ pub mod kvspace;
 pub mod kswapd;
 pub mod mempool;
 pub mod memtype;
+pub mod migrate_type;
 pub mod oom;
 pub mod page_table;
 pub mod pcid;

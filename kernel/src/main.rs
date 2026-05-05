@@ -911,6 +911,11 @@ extern "C" fn kmain() -> ! {
     // Verifies batched TLB shootdown and deferred frame free.
     mm::tlb_gather::self_test();
 
+    // Step 22e⅞++++a: Migration type system initialization and self-test.
+    // Classifies frames as unmovable/movable/reclaimable for compaction.
+    mm::migrate_type::init();
+    mm::migrate_type::self_test();
+
     // Step 22e⅞++++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();

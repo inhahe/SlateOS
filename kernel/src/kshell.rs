@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4219,6 +4219,7 @@ fn dispatch(line: &str) {
         "poison" => cmd_poison(),
         "watermark" | "wmark" => cmd_watermark(),
         "tlbgather" | "gather" => cmd_tlb_gather(),
+        "migratetype" | "mtype" => cmd_migrate_type(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15347,6 +15348,22 @@ fn cmd_watermark() {
             .unwrap_or("?");
         shell_println!("  {:<20} {:>12} {:>12}", name, s.current, s.peak);
     }
+}
+
+/// `migratetype` — display page migration type statistics.
+fn cmd_migrate_type() {
+    let s = crate::mm::migrate_type::stats();
+    shell_println!("=== Page Migration Types ===");
+    shell_println!("");
+    shell_println!("  {:<12} {:>10} {:>10} {:>10}", "Type", "Current", "Alloc", "Free");
+    shell_println!("  {:<12} {:>10} {:>10} {:>10}", "----", "-------", "-----", "----");
+    let names = ["unmovable", "movable", "reclaimable", "highatomic"];
+    for i in 0..4 {
+        shell_println!("  {:<12} {:>10} {:>10} {:>10}",
+            names[i], s.current[i], s.alloc_total[i], s.free_total[i]);
+    }
+    shell_println!("");
+    shell_println!("  Pageblock steals:  {}", s.pageblock_steals);
 }
 
 /// `tlbgather` — display TLB gather (batch flush) statistics.

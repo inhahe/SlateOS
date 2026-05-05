@@ -3085,7 +3085,7 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "base64", "bunzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
-    "cut", "date", "dd", "del", "df", "dhcp", "diff", "dir", "dirname", "dmesg", "dns", "du",
+    "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "flock", "fsck", "fsck.ext4", "fsck.fat", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "journal", "kill", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
@@ -4181,6 +4181,7 @@ fn dispatch(line: &str) {
         "trace" | "ktrace" => cmd_trace(args),
         "lockdep" => cmd_lockdep(args),
         "bt" | "backtrace" => cmd_backtrace(),
+        "diag" | "health" => cmd_diag(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
@@ -4448,6 +4449,7 @@ fn cmd_help() {
     crate::console_println!("  trace [N] Show last N kernel trace events (default 20)");
     crate::console_println!("  lockdep [sub] Lock order validator (classes/edges/held/all)");
     crate::console_println!("  bt        Show current kernel call stack (backtrace)");
+    crate::console_println!("  diag      One-stop system health diagnostic summary");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -13702,6 +13704,89 @@ fn cmd_backtrace() {
     for i in 0..bt.count {
         let f = &bt.frames[i];
         shell_println!("  {:>3}  {:#018x}  {:#018x}", i, f.return_addr, f.frame_ptr);
+    }
+}
+
+/// One-stop system health diagnostic.
+///
+/// Shows a compact summary of kernel health indicators:
+/// memory, heap, pressure, watchdog, lockdep, and detected anomalies.
+/// Designed to quickly answer "is anything wrong?" after a test run.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_diag() {
+    shell_println!("=== System Health Diagnostic ===");
+    shell_println!("");
+
+    // --- Memory ---
+    let mem = crate::mm::memory_info();
+    let used = mem.total_frames.saturating_sub(mem.free_frames);
+    let pct_used = if mem.total_frames > 0 { (used * 100) / mem.total_frames } else { 0 };
+    let status_mem = if pct_used > 90 { "CRITICAL" } else if pct_used > 75 { "WARNING" } else { "OK" };
+    shell_println!("  Memory:    {} / {} frames used ({}%)  [{}]",
+        used, mem.total_frames, pct_used, status_mem);
+
+    // --- Pressure ---
+    let pressure = crate::mm::pressure::pressure_info();
+    let status_pressure = match pressure.level {
+        crate::mm::pressure::PressureLevel::None => "OK",
+        crate::mm::pressure::PressureLevel::Low => "LOW",
+        crate::mm::pressure::PressureLevel::Medium => "MEDIUM",
+        crate::mm::pressure::PressureLevel::Critical => "CRITICAL",
+    };
+    shell_println!("  Pressure:  level={}, notifications={}, freed={}  [{}]",
+        pressure.level, pressure.total_notifications, pressure.total_freed, status_pressure);
+
+    // --- Heap ---
+    let heap = crate::mm::heap::stats();
+    let active_slab = heap.slab_allocs.saturating_sub(heap.slab_frees);
+    let active_large = heap.large_allocs.saturating_sub(heap.large_frees);
+    let status_heap = if heap.alloc_failures > 0 { "FAILURES" }
+        else if heap.poison_violations > 0 || heap.double_free_violations > 0 || heap.redzone_violations > 0 { "VIOLATIONS" }
+        else { "OK" };
+    shell_println!("  Heap:      slab_active={}, large_active={}, failures={}  [{}]",
+        active_slab, active_large, heap.alloc_failures, status_heap);
+    if heap.poison_violations > 0 || heap.double_free_violations > 0 || heap.redzone_violations > 0 {
+        shell_println!("             UAF={}, double-free={}, overflow={}",
+            heap.poison_violations, heap.double_free_violations, heap.redzone_violations);
+    }
+
+    // --- Lockdep ---
+    let violations = crate::lockdep::violation_count();
+    let lockdep_enabled = crate::lockdep::is_enabled();
+    let status_lockdep = if !lockdep_enabled { "DISABLED" }
+        else if violations > 0 { "VIOLATIONS" }
+        else { "OK" };
+    shell_println!("  Lockdep:   enabled={}, classes={}, edges={}, violations={}  [{}]",
+        lockdep_enabled, crate::lockdep::class_count(), crate::lockdep::edge_count(),
+        violations, status_lockdep);
+
+    // --- Scheduler ---
+    let sched = crate::sched::sched_stats();
+    let active_tasks = sched.total_tasks_spawned.saturating_sub(sched.total_tasks_exited);
+    shell_println!("  Scheduler: {} active tasks, {} spawned, {} exited",
+        active_tasks, sched.total_tasks_spawned, sched.total_tasks_exited);
+
+    // --- Uptime ---
+    let ticks = crate::apic::tick_count();
+    let seconds = ticks / 100;
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    shell_println!("  Uptime:    {:02}:{:02}:{:02} ({} ticks)",
+        hours, minutes % 60, seconds % 60, ticks);
+
+    // --- Overall assessment ---
+    shell_println!("");
+    let issues = (pct_used > 90) as u8
+        + (pressure.level as u8 >= 2) as u8
+        + (heap.alloc_failures > 0) as u8
+        + (heap.poison_violations > 0) as u8
+        + (heap.double_free_violations > 0) as u8
+        + (heap.redzone_violations > 0) as u8
+        + (violations > 0) as u8;
+    if issues == 0 {
+        shell_println!("  Overall: HEALTHY (no issues detected)");
+    } else {
+        shell_println!("  Overall: {} issue(s) detected — investigate above warnings", issues);
     }
 }
 

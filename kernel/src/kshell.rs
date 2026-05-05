@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "cpuid", "exceptions", "exclog", "faults", "memmap", "pgfault", "sysinfo", "tlb", "vectors",
+    "boottime", "boottiming", "cpuid", "exceptions", "exclog", "faults", "memmap", "pgfault", "sysinfo", "tlb", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4186,6 +4186,7 @@ fn dispatch(line: &str) {
         "exceptions" | "vectors" => cmd_exceptions(),
         "exclog" => cmd_exclog(),
         "sysinfo" | "cpuid" => cmd_sysinfo(),
+        "boottime" | "boottiming" => cmd_boottime(),
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
         "memmap" => cmd_memmap(),
@@ -4460,6 +4461,7 @@ fn cmd_help() {
     crate::console_println!("  exceptions Show per-vector exception/interrupt counts");
     crate::console_println!("  exclog     Show recent exception event log");
     crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
+    crate::console_println!("  boottime   Show boot milestone timing");
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
     crate::console_println!("  memmap     Show virtual address space layout");
@@ -13861,6 +13863,41 @@ fn cmd_exclog() {
         };
         shell_println!("{:<8} {:<5} {:<4} {:#018x} {:#018x}",
             entry.tick, name, entry.cpu, entry.rip, entry.aux);
+    }
+}
+
+fn cmd_boottime() {
+    let milestones = crate::boot_timing::milestones();
+
+    shell_println!("=== Boot Timing (APIC ticks @ 100 Hz = 10ms each) ===");
+    shell_println!("");
+    shell_println!("{:<20} {:>8} {:>8}", "MILESTONE", "TICK", "DELTA");
+    shell_println!("{}", "-".repeat(40));
+
+    let mut prev_tick = 0u64;
+    for &(name, tick) in &milestones {
+        if tick == 0 {
+            shell_println!("{:<20} {:>8}", name, "(pre-timer)");
+        } else {
+            let delta = tick.saturating_sub(prev_tick);
+            let delta_str = if prev_tick == 0 {
+                alloc::format!("--")
+            } else {
+                alloc::format!("+{}", delta)
+            };
+            shell_println!("{:<20} {:>8} {:>8}", name, tick, delta_str);
+            prev_tick = tick;
+        }
+    }
+
+    // Total boot time.
+    let last_tick = milestones.iter().rev().find(|(_, t)| *t > 0).map_or(0, |(_, t)| *t);
+    let first_tick = milestones.iter().find(|(_, t)| *t > 0).map_or(0, |(_, t)| *t);
+    if last_tick > first_tick {
+        shell_println!("");
+        let total = last_tick.saturating_sub(first_tick);
+        shell_println!("  Total timed boot: {} ticks ({} ms)",
+            total, total.saturating_mul(10));
     }
 }
 

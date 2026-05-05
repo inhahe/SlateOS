@@ -69,6 +69,7 @@ mod ipc;
 mod keyboard;
 mod klog;
 mod kshell;
+mod boot_timing;
 mod ktimer;
 mod ktrace;
 mod limine;
@@ -118,6 +119,7 @@ extern "C" fn kmain() -> ! {
     }
 
     serial_println!("=== Kernel booting ===");
+    boot_timing::mark(boot_timing::Milestone::KernelEntry);
 
     // Step 2: Parse boot information from Limine.
     let Some(boot_info) = boot::parse_boot_info() else {
@@ -153,6 +155,7 @@ extern "C" fn kmain() -> ! {
         gdt::init();
     }
     serial_println!("[gdt] GDT and TSS initialized");
+    boot_timing::mark(boot_timing::Milestone::GdtIdt);
 
     // Step 4: Set up the IDT with exception handlers.
     //
@@ -197,6 +200,8 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    boot_timing::mark(boot_timing::Milestone::FrameAlloc);
+
     // Step 6: Initialize the kernel heap.
     // The slab allocator uses the frame allocator for backing memory.
     mm::heap::init(boot_info.hhdm_offset);
@@ -206,6 +211,7 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Heap allocator self-test failed: {}", e);
         cpu::halt_loop();
     }
+    boot_timing::mark(boot_timing::Milestone::Heap);
     console::boot_step_update(console::BootStatus::Ok, "Memory manager");
 
     // Step 6b: Calibrate TSC frequency using PIT for benchmark timing.
@@ -253,6 +259,7 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    boot_timing::mark(boot_timing::Milestone::PageTable);
     console::boot_step_update(console::BootStatus::Ok, "Virtual memory");
 
     // Step 9: Initialize the scheduler.
@@ -291,6 +298,7 @@ extern "C" fn kmain() -> ! {
     mm::swap::self_test();
     mm::compress::self_test();
 
+    boot_timing::mark(boot_timing::Milestone::Scheduler);
     console::boot_step_update(console::BootStatus::Ok, "Scheduler");
 
     // Step 10: Initialize IPC subsystem.
@@ -368,6 +376,7 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    boot_timing::mark(boot_timing::Milestone::Ipc);
     console::boot_step_update(console::BootStatus::Ok, "IPC subsystem");
 
     // Step 17: Initialize capability system.
@@ -499,6 +508,7 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    boot_timing::mark(boot_timing::Milestone::ApicTimer);
     console::boot_step_update(console::BootStatus::Ok, "Interrupt controllers (APIC)");
 
     // Step 20c: Scan PCI bus for device discovery.
@@ -698,6 +708,8 @@ extern "C" fn kmain() -> ! {
         }
     }
 
+    boot_timing::mark(boot_timing::Milestone::Filesystem);
+
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {
         serial_println!("WARNING: SHA-256 self-test failed: {:?}", e);
@@ -771,6 +783,8 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Scheduler SMP self-test failed: {}", e);
         cpu::halt_loop();
     }
+
+    boot_timing::mark(boot_timing::Milestone::Smp);
 
     // Step 22c: TLB shootdown self-test.
     // Now that all CPUs are online, verify the TLB shootdown IPI works.
@@ -974,11 +988,14 @@ extern "C" fn kmain() -> ! {
         serial_println!("[FATAL] Zero-on-free self-test failed: {:?}", e);
     }
 
+    boot_timing::mark(boot_timing::Milestone::SelfTests);
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.
     serial_println!("=== Kernel boot complete ===");
     serial_println!("BOOT_OK");
+    boot_timing::mark(boot_timing::Milestone::ShellReady);
 
     // Show boot-complete on the framebuffer console too.
     console_println!();

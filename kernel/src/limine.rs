@@ -330,3 +330,45 @@ impl LimineRequest<RsdpResponse> {
     /// Reference: Limine Protocol v8.x, RSDP Feature.
     pub const RSDP: Self = Self::new([0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487]);
 }
+
+// ---------------------------------------------------------------------------
+// Kernel File (for symbol table access)
+// ---------------------------------------------------------------------------
+
+/// A Limine file descriptor.
+#[repr(C)]
+pub struct LimineFile {
+    pub revision: u64,
+    /// Virtual address of the file contents (in HHDM).
+    pub address: *const u8,
+    /// Size in bytes.
+    pub size: u64,
+    /// Null-terminated path string.
+    pub path: *const u8,
+    /// Null-terminated cmdline string.
+    pub cmdline: *const u8,
+    /// Media type.
+    pub media_type: u32,
+    _unused: u32,
+    /// TFTP info / partition info.
+    pub tftp_ip: u32,
+    pub tftp_port: u32,
+    pub partition_index: u32,
+    pub mbr_disk_id: u32,
+    pub gpt_disk_uuid: [u8; 16],
+    pub gpt_part_uuid: [u8; 16],
+    pub part_uuid: [u8; 16],
+}
+
+/// Kernel File response — provides access to the raw kernel ELF binary.
+#[repr(C)]
+pub struct KernelFileResponse {
+    pub revision: u64,
+    /// Pointer to the kernel file descriptor.
+    pub kernel_file: *const LimineFile,
+}
+
+impl LimineRequest<KernelFileResponse> {
+    /// Limine Kernel File feature request ID.
+    pub const KERNEL_FILE: Self = Self::new([0xad97_e90e_83f1_ed67, 0x31eb_5d10_c871_c930]);
+}

@@ -77,6 +77,7 @@ mod kcounters;
 mod keyboard;
 mod klog;
 mod kshell;
+mod ksyms;
 mod boot_timing;
 mod kprofile;
 mod kstat;
@@ -236,6 +237,11 @@ extern "C" fn kmain() -> ! {
     }
     boot_timing::mark(boot_timing::Milestone::Heap);
     console::boot_step_update(console::BootStatus::Ok, "Memory manager");
+
+    // Load kernel symbol table from ELF .symtab for backtrace resolution.
+    // Needs heap (Vec allocation).  Best done early so symbols are available
+    // for any crash during the rest of boot.
+    ksyms::init();
 
     // Log cache topology (deferred from early boot — needs heap for formatting).
     cpu::log_cache_topology();
@@ -831,6 +837,9 @@ extern "C" fn kmain() -> ! {
     numa::init();
     numa::self_test();
 
+    // Kernel symbol table self-test.
+    ksyms::self_test();
+
     // RCU (Read-Copy-Update) self-test.
     // Must be after scheduler (needs yield_now for synchronize).
     rcu::self_test();
@@ -1400,7 +1409,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         heap.slab_refills, heap.alloc_failures,
     );
 
-    // --- Stack backtrace ---
+    // --- Stack backtrace (with symbol resolution) ---
     serial_println!("  Backtrace:");
     let bt = backtrace::capture();
     if bt.count == 0 {
@@ -1408,7 +1417,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     } else {
         for i in 0..bt.count {
             let f = &bt.frames[i];
-            serial_println!("    #{:2}: {:#018x} (rbp={:#018x})", i, f.return_addr, f.frame_ptr);
+            if ksyms::is_loaded() {
+                let sym = ksyms::format_addr(f.return_addr);
+                serial_println!("    #{:2}: {} (rbp={:#018x})", i, sym, f.frame_ptr);
+            } else {
+                serial_println!("    #{:2}: {:#018x} (rbp={:#018x})", i, f.return_addr, f.frame_ptr);
+            }
         }
     }
 

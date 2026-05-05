@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4213,6 +4213,7 @@ fn dispatch(line: &str) {
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
+        "ksyms" | "symbols" => cmd_ksyms(args),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15244,6 +15245,37 @@ fn cmd_hotplug(args: &str) {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
         }
     }
+}
+
+/// `ksyms` — kernel symbol table inspection and address resolution.
+fn cmd_ksyms(args: &str) {
+    if !crate::ksyms::is_loaded() {
+        shell_println!("Kernel symbols not loaded (kernel ELF may be stripped).");
+        return;
+    }
+
+    let arg = args.trim();
+    if arg.is_empty() {
+        // Show summary.
+        shell_println!("=== Kernel Symbols ===");
+        shell_println!("");
+        shell_println!("  Loaded: {} symbols", crate::ksyms::count());
+        shell_println!("");
+        shell_println!("  Usage: ksyms <address>  — resolve an address to a symbol");
+        shell_println!("  Example: ksyms 0xffffffff80100000");
+        return;
+    }
+
+    // Try to parse as a hex address.
+    let addr_str = arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X")).unwrap_or(arg);
+    let Ok(addr) = u64::from_str_radix(addr_str, 16) else {
+        shell_println!("Invalid address: {}", arg);
+        shell_println!("Usage: ksyms <hex_address>");
+        return;
+    };
+
+    let formatted = crate::ksyms::format_addr(addr);
+    shell_println!("  {:#018x} → {}", addr, formatted);
 }
 
 /// `rcu` — display RCU (Read-Copy-Update) statistics.

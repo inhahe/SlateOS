@@ -22,8 +22,9 @@
 //! - Limine protocol spec: <https://github.com/limine-bootloader/limine/blob/trunk/PROTOCOL.md>
 
 use crate::limine::{
-    BaseRevision, FramebufferResponse, HhdmResponse, LimineRequest, MemmapEntry,
-    MemmapResponse, RequestsEndMarker, RequestsStartMarker, RsdpResponse, memmap_type,
+    BaseRevision, FramebufferResponse, HhdmResponse, KernelFileResponse, LimineRequest,
+    MemmapEntry, MemmapResponse, RequestsEndMarker, RequestsStartMarker, RsdpResponse,
+    memmap_type,
 };
 use crate::serial_println;
 
@@ -81,6 +82,14 @@ static FRAMEBUFFER_REQUEST: LimineRequest<FramebufferResponse> = LimineRequest::
 #[used]
 #[unsafe(link_section = ".requests")]
 static RSDP_REQUEST: LimineRequest<RsdpResponse> = LimineRequest::RSDP;
+
+/// Request the raw kernel ELF binary for symbol table access.
+///
+/// Limine keeps the original kernel file mapped in memory.  We use
+/// this to parse .symtab for address-to-symbol resolution in backtraces.
+#[used]
+#[unsafe(link_section = ".requests")]
+static KERNEL_FILE_REQUEST: LimineRequest<KernelFileResponse> = LimineRequest::KERNEL_FILE;
 
 // ---------------------------------------------------------------------------
 // Public accessors
@@ -219,4 +228,28 @@ pub fn parse_boot_info() -> Option<BootInfo> {
         framebuffer,
         rsdp_address,
     })
+}
+
+/// Get the kernel file's virtual address and size.
+///
+/// Returns `Some((address, size))` where `address` is a pointer to
+/// the raw kernel ELF binary in memory (mapped by Limine via HHDM).
+/// Returns `None` if the bootloader didn't provide a kernel file response.
+///
+/// Used by `ksyms` to parse the `.symtab` section for address-to-symbol
+/// resolution in backtraces and crash diagnostics.
+#[allow(clippy::cast_possible_truncation)]
+pub fn kernel_file_address() -> Option<(u64, usize)> {
+    let response = KERNEL_FILE_REQUEST.response()?;
+    let file_ptr = response.kernel_file;
+    if file_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Limine guarantees the response and file descriptor are valid
+    // and the referenced data lives for the entire kernel lifetime.
+    let file = unsafe { &*file_ptr };
+    if file.address.is_null() || file.size == 0 {
+        return None;
+    }
+    Some((file.address as u64, file.size as usize))
 }

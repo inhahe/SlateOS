@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4231,6 +4231,7 @@ fn dispatch(line: &str) {
         "syscallprof" | "sprof" => cmd_syscall_prof(args),
         "capaudit" | "capa" => cmd_cap_audit(args),
         "checkpoint" | "ckpt" => cmd_checkpoint(args),
+        "strace" | "sctrace" => cmd_strace(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15836,6 +15837,95 @@ fn cmd_checkpoint(args: &str) {
             shell_println!("  checkpoint list        — list stored checkpoints");
             shell_println!("  checkpoint show A      — show checkpoint details");
             shell_println!("  checkpoint clear       — clear all");
+        }
+    }
+}
+
+/// `strace` — syscall tracing (per-event capture).
+///
+/// Usage:
+///   strace          — show recent traced syscalls
+///   strace on       — enable tracing (all PIDs)
+///   strace off      — disable tracing
+///   strace pid N    — trace only PID N (0 = all)
+///   strace reset    — clear trace log
+///   strace stats    — show trace statistics
+fn cmd_strace(args: &str) {
+    use crate::syscall::trace;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "on" => {
+            trace::enable();
+            shell_println!("Syscall tracing enabled (filter: {})",
+                if trace::pid_filter() == 0 { "all PIDs".into() }
+                else { alloc::format!("PID {}", trace::pid_filter()) });
+        }
+        "off" => {
+            trace::disable();
+            shell_println!("Syscall tracing disabled");
+        }
+        "pid" => {
+            if let Some(&pid_str) = parts.get(1) {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    trace::set_pid_filter(pid);
+                    if pid == 0 {
+                        shell_println!("Tracing all PIDs");
+                    } else {
+                        shell_println!("Tracing only PID {}", pid);
+                    }
+                } else {
+                    shell_println!("Error: invalid PID number");
+                }
+            } else {
+                shell_println!("Usage: strace pid <N>");
+            }
+        }
+        "reset" => {
+            trace::reset();
+            shell_println!("Syscall trace log cleared");
+        }
+        "stats" => {
+            let s = trace::stats();
+            shell_println!("=== Syscall Trace Stats ===");
+            shell_println!("");
+            shell_println!("  Enabled:     {}", if s.enabled { "yes" } else { "no" });
+            shell_println!("  PID filter:  {}",
+                if s.pid_filter == 0 { "all".into() }
+                else { alloc::format!("{}", s.pid_filter) });
+            shell_println!("  Events:      {}", s.total_events);
+            shell_println!("  Dropped:     {}", s.dropped_events);
+            shell_println!("  Buffer:      {}/{} entries", s.ring_entries, 64);
+        }
+        _ => {
+            // Show recent events.
+            let mut buf = [trace::TraceEvent::empty(); 16];
+            let n = trace::recent(&mut buf);
+            if n == 0 {
+                let s = trace::stats();
+                shell_println!("No traced syscalls (enabled: {}, events: {})",
+                    s.enabled, s.total_events);
+                shell_println!("Use 'strace on' to enable tracing");
+                return;
+            }
+            shell_println!("Last {} syscall events (newest first):", n);
+            shell_println!("  {:>10}  {:>4}  {:>4}  {:>16}  {:>8}  {:>7}",
+                "TSC", "PID", "NR", "ARG0", "RESULT", "CYCLES");
+            for i in 0..n {
+                let e = &buf[i];
+                if e.is_valid() {
+                    let name = crate::syscall::profile::syscall_name(e.syscall_nr as u64);
+                    let result_str = if e.complete {
+                        alloc::format!("{}", e.result)
+                    } else {
+                        alloc::format!("(entry)")
+                    };
+                    shell_println!("  {:>10}  {:>4}  {:>4}  {:>16x}  {:>8}  {:>7}",
+                        e.timestamp, e.pid, name,
+                        e.args[0], result_str, e.duration_cycles);
+                }
+            }
         }
     }
 }

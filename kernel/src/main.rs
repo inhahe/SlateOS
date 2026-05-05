@@ -959,6 +959,10 @@ extern "C" fn kmain() -> ! {
     // Memory state checkpoints for leak detection (save/diff).
     mm::alloc_checkpoint::self_test();
 
+    // Step 22e⅞++++m: Syscall tracer self-test.
+    // Per-event syscall capture for strace-like debugging.
+    syscall::trace::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

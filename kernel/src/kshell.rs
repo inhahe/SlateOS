@@ -13789,6 +13789,26 @@ fn cmd_diag() {
     shell_println!("  Uptime:    {:02}:{:02}:{:02} ({} ticks)",
         hours, minutes % 60, seconds % 60, ticks);
 
+    // --- Page faults ---
+    let pf = crate::mm::fault::fault_stats();
+    let status_pf = if pf.fatal > 0 { "FATAL FAULTS" } else { "OK" };
+    shell_println!("  PgFaults:  resolved={}, cow={}, fatal={}  [{}]",
+        pf.kernel_resolved.saturating_add(pf.user_resolved),
+        pf.cow, pf.fatal, status_pf);
+
+    // --- TLB ---
+    let tlb = crate::tlb::stats();
+    shell_println!("  TLB:       range={}, full={}, ipi={}, local={}",
+        tlb.range_flushes, tlb.full_flushes, tlb.ipi_flushes, tlb.local_only);
+
+    // --- Exceptions ---
+    let exc_total: u64 = crate::idt::vector_counts().iter().sum();
+    let pf_count = crate::idt::vector_count(14);
+    let non_pf_exceptions = exc_total.saturating_sub(pf_count);
+    let status_exc = if non_pf_exceptions > 100 { "HIGH" } else { "OK" };
+    shell_println!("  Exceptions: total={} (PF={}, other={})  [{}]",
+        exc_total, pf_count, non_pf_exceptions, status_exc);
+
     // --- Overall assessment ---
     shell_println!("");
     let issues = (pct_used > 90) as u8
@@ -13797,6 +13817,7 @@ fn cmd_diag() {
         + (heap.poison_violations > 0) as u8
         + (heap.double_free_violations > 0) as u8
         + (heap.redzone_violations > 0) as u8
+        + (pf.fatal > 0) as u8
         + (violations > 0) as u8;
     if issues == 0 {
         shell_println!("  Overall: HEALTHY (no issues detected)");

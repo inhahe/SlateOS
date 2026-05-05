@@ -79,6 +79,7 @@ mod keyboard;
 mod kobject;
 mod klog;
 mod kshell;
+mod ksnapshot;
 mod ksyms;
 mod boot_timing;
 mod kprofile;
@@ -985,6 +986,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++r: Watchpoint self-test.
     // Software memory watchpoints for debugging value changes.
     watchpoint::self_test();
+
+    // Step 22e⅞++++s: Kernel snapshot self-test.
+    // Comprehensive system state capture for before/after comparison.
+    ksnapshot::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

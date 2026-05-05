@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4237,6 +4237,7 @@ fn dispatch(line: &str) {
         "fraghist" | "fragtrend" => cmd_frag_history(args),
         "selftest" => cmd_selftest(args),
         "watch" => cmd_watchpoint(args),
+        "snapshot" | "snap" => cmd_snapshot(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -16047,6 +16048,120 @@ fn cmd_selftest(args: &str) {
                     shell_println!("=== {}/{} PASSED ===", results.passed, results.total);
                 }
             }
+        }
+    }
+}
+
+/// `snapshot` — comprehensive kernel state snapshot and diff.
+///
+/// Usage:
+///   snapshot save A     — capture current state as A
+///   snapshot save B     — capture current state as B
+///   snapshot diff A B   — compare two snapshots
+///   snapshot show A     — show snapshot details
+///   snapshot clear      — clear both snapshots
+fn cmd_snapshot(args: &str) {
+    use crate::ksnapshot;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "save" => {
+            let label = parts.get(1).and_then(|s| s.as_bytes().first().copied()).unwrap_or(b'A');
+            if label != b'A' && label != b'B' {
+                shell_println!("Error: label must be A or B");
+                return;
+            }
+            ksnapshot::save(label);
+            let snap = ksnapshot::get(label).expect("just saved");
+            shell_println!("Snapshot '{}' saved (tick={}, free={}/{}, pressure={})",
+                label as char, snap.tick, snap.free_frames, snap.total_frames, snap.pressure_score);
+        }
+        "diff" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: snapshot diff A B");
+                return;
+            }
+            let from = parts[1].as_bytes().first().copied().unwrap_or(b'A');
+            let to = parts[2].as_bytes().first().copied().unwrap_or(b'B');
+
+            match ksnapshot::diff(from, to) {
+                Some(d) => {
+                    shell_println!("=== Snapshot Diff: {} → {} (Δ {} ticks) ===",
+                        d.from_label as char, d.to_label as char, d.tick_delta);
+                    shell_println!("");
+                    shell_println!("  Memory:");
+                    shell_println!("    Free frames:    {:+}", d.free_frames_delta);
+                    shell_println!("    Fragmentation:  {:+}%", d.frag_delta);
+                    shell_println!("    Heap net objs:  {:+}", d.heap_net_delta);
+                    shell_println!("    Pressure:       {:+}", d.pressure_delta);
+                    shell_println!("");
+                    shell_println!("  Scheduler:");
+                    shell_println!("    Context sw:     +{}", d.ctx_switches_delta);
+                    shell_println!("    Tasks spawned:  +{}", d.tasks_spawned_delta);
+                    shell_println!("    Tasks exited:   +{}", d.tasks_exited_delta);
+                    shell_println!("    Load avg:       {:+}", d.load_delta);
+                    shell_println!("");
+                    shell_println!("  IPC:");
+                    shell_println!("    Total ops:      +{}", d.ipc_ops_delta);
+                    shell_println!("    Channel sends:  +{}", d.channel_sends_delta);
+                    shell_println!("    Pipe bytes:     +{}", d.pipe_bytes_delta);
+                    shell_println!("");
+                    shell_println!("  Objects:          {:+}", d.objects_delta);
+                    shell_println!("  Cap events:       +{}", d.cap_events_delta);
+                    if d.cap_denials_delta > 0 {
+                        shell_println!("  Cap denials:      +{} ⚠", d.cap_denials_delta);
+                    }
+
+                    // Warnings
+                    if d.free_frames_delta < -10 {
+                        shell_println!("");
+                        shell_println!("  ⚠ Memory consumed: {} frames", -d.free_frames_delta);
+                    }
+                    if d.objects_delta > 0 && d.tasks_exited_delta > 0 {
+                        shell_println!("  ⚠ Objects grew despite task exits — possible leak");
+                    }
+                }
+                None => {
+                    shell_println!("Error: one or both snapshots not found");
+                    shell_println!("  Use 'snapshot save A' and 'snapshot save B' first");
+                }
+            }
+        }
+        "show" => {
+            let label = parts.get(1).and_then(|s| s.as_bytes().first().copied()).unwrap_or(b'A');
+            match ksnapshot::get(label) {
+                Some(s) => {
+                    shell_println!("=== Snapshot '{}' (tick {}) ===", label as char, s.tick);
+                    shell_println!("");
+                    shell_println!("  Memory:     free={}/{} frag={}% pressure={}",
+                        s.free_frames, s.total_frames, s.frag_pct, s.pressure_score);
+                    shell_println!("  Heap:       slab={}/{} large={}",
+                        s.heap_slab_allocs, s.heap_slab_frees, s.heap_large_allocs);
+                    shell_println!("  Sched:      ctx_sw={} spawned={} exited={} load={}",
+                        s.total_ctx_switches, s.tasks_spawned, s.tasks_exited, s.load_avg_x100);
+                    shell_println!("  IPC:        ops={} chan={} pipe_b={} futex={}",
+                        s.ipc_total_ops, s.channel_sends, s.pipe_bytes, s.futex_waits);
+                    shell_println!("  Objects:    {}", s.total_objects);
+                    shell_println!("  Cap:        events={} denials={}", s.cap_events, s.cap_denials);
+                }
+                None => {
+                    shell_println!("Snapshot '{}' not found", label as char);
+                }
+            }
+        }
+        "clear" => {
+            ksnapshot::clear();
+            shell_println!("All snapshots cleared");
+        }
+        _ => {
+            shell_println!("Usage: snapshot <save|diff|show|clear>");
+            shell_println!("");
+            shell_println!("  snapshot save A     — capture state as A");
+            shell_println!("  snapshot save B     — capture state as B");
+            shell_println!("  snapshot diff A B   — compare A and B");
+            shell_println!("  snapshot show A     — show snapshot A details");
+            shell_println!("  snapshot clear      — clear both snapshots");
         }
     }
 }

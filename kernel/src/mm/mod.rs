@@ -26,6 +26,7 @@
 //! for kernel heap objects mitigates this for small objects.
 
 pub mod accounting;
+pub mod compact;
 pub mod compress;
 pub mod cow;
 pub mod dma;

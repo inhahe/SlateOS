@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "counters", "cpuacct", "cpufreq", "cpuid", "cputime", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4205,6 +4205,7 @@ fn dispatch(line: &str) {
         "topology" | "topo" => cmd_topology(),
         "cpufreq" | "freq" => cmd_cpufreq(args),
         "thermal" | "temp" => cmd_thermal(),
+        "compact" | "defrag" => cmd_compact(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15136,6 +15137,43 @@ fn cmd_cpufreq(args: &str) {
         info.min_perf, info.guaranteed_perf, info.max_perf);
     shell_println!("  Current perf: {}", info.current_perf);
     shell_println!("  Transitions:  {}", info.transitions);
+}
+
+/// `compact` — analyze memory fragmentation and trigger compaction.
+fn cmd_compact() {
+    shell_println!("=== Memory Compaction ===");
+    shell_println!("");
+
+    let Some(report) = crate::mm::compact::analyze() else {
+        shell_println!("  Unable to analyze fragmentation (allocator busy).");
+        return;
+    };
+
+    shell_println!("  Fragmentation:       {}%", report.fragmentation_pct);
+    shell_println!("  Free frames:         {} ({} KiB)",
+        report.free_frames,
+        report.free_frames.saturating_mul(crate::mm::frame::FRAME_SIZE) / 1024);
+    shell_println!("  Order-0 free:        {} (single frames, fragmented)",
+        report.order0_free);
+    shell_println!("  Higher-order free:   {} (can serve large allocs)",
+        report.higher_order_free);
+    shell_println!("  Largest free block:  {} frames ({} KiB)",
+        report.largest_free_block,
+        report.largest_free_block.saturating_mul(crate::mm::frame::FRAME_SIZE) / 1024);
+    shell_println!("  Estimated movable:   {} pages", report.estimated_movable);
+    shell_println!("");
+
+    if report.compaction_recommended {
+        shell_println!("  Status: Compaction RECOMMENDED (high fragmentation)");
+        shell_println!("          Page migration not yet implemented (requires rmap).");
+    } else {
+        shell_println!("  Status: Compaction not needed.");
+    }
+
+    let stats = crate::mm::compact::stats();
+    shell_println!("");
+    shell_println!("  History:");
+    shell_println!("    Total requests: {}", stats.total_requests);
 }
 
 /// `thermal` — display CPU thermal monitoring status.

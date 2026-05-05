@@ -796,6 +796,10 @@ pub fn signal_cpu(target_cpu: usize) {
     if let Some(flag) = RESCHEDULE_PENDING.get(target_cpu) {
         flag.store(true, Ordering::Release);
     }
+    // Also set the idle subsystem's need_resched flag.  If the target
+    // CPU is in MWAIT, the write to this cache line will wake it
+    // without needing an IPI (faster wakeup path).
+    crate::idle::signal_resched(target_cpu);
     // Only send IPI to remote CPUs.  Self-IPI is unnecessary (and
     // risky from ISR context).
     let local = current_cpu_id();

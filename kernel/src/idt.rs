@@ -168,6 +168,71 @@ pub fn vector_counts() -> [u64; VECTOR_STATS_SIZE] {
     result
 }
 
+// ---------------------------------------------------------------------------
+// Interrupt rate tracking (delta-based, snapshot-on-query)
+// ---------------------------------------------------------------------------
+
+/// Previous snapshot of vector counts — used to compute deltas.
+///
+/// Access is not atomic per-element because only a single kshell thread
+/// queries rates.  A slight inconsistency during concurrent reads is
+/// acceptable for diagnostic display.
+static RATE_SNAPSHOT_COUNTS: [AtomicU64; VECTOR_STATS_SIZE] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; VECTOR_STATS_SIZE]
+};
+
+/// Tick at which the last rate snapshot was taken.
+static RATE_SNAPSHOT_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Interrupt rate snapshot: counts per second for each vector.
+#[derive(Debug, Clone, Copy)]
+pub struct InterruptRates {
+    /// Per-vector interrupts/sec (fixed-point × 10 for 0.1 resolution).
+    /// Value of 15 means 1.5 IRQ/sec.
+    pub rates_x10: [u64; VECTOR_STATS_SIZE],
+    /// Measurement window duration in ticks.
+    pub window_ticks: u64,
+}
+
+/// Compute interrupt rates since the last call.
+///
+/// On the first call (or if no time has elapsed), returns all zeros
+/// and takes the baseline snapshot.  Subsequent calls return the
+/// delta divided by elapsed time.
+#[must_use]
+pub fn vector_rates() -> InterruptRates {
+    let now_tick = crate::apic::tick_count();
+    let prev_tick = RATE_SNAPSHOT_TICK.swap(now_tick, Ordering::Relaxed);
+    let elapsed = now_tick.saturating_sub(prev_tick);
+
+    let mut rates = InterruptRates {
+        rates_x10: [0; VECTOR_STATS_SIZE],
+        window_ticks: elapsed,
+    };
+
+    let tick_rate = u64::from(crate::apic::TICK_RATE_HZ);
+
+    for i in 0..VECTOR_STATS_SIZE {
+        let current = VECTOR_COUNTS.get(i)
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        let prev = RATE_SNAPSHOT_COUNTS.get(i)
+            .map_or(0, |c| c.swap(current, Ordering::Relaxed));
+        let delta = current.saturating_sub(prev);
+
+        // Rate = delta * tick_rate * 10 / elapsed (× 10 for decimal place).
+        if elapsed > 0 {
+            rates.rates_x10[i] = delta
+                .saturating_mul(tick_rate)
+                .saturating_mul(10)
+                .checked_div(elapsed)
+                .unwrap_or(0);
+        }
+    }
+
+    rates
+}
+
 /// Names for CPU exception vectors 0–31.
 pub const EXCEPTION_NAMES: [&str; 32] = [
     "#DE Divide Error",

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "jitter", "memmap", "pgfault", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "irqrate", "jitter", "memmap", "pgfault", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4190,6 +4190,7 @@ fn dispatch(line: &str) {
         "canary" | "stackcheck" => cmd_canary(),
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
+        "irqrate" => cmd_irqrate(),
         "jitter" | "tickjitter" => cmd_jitter(),
         "heapwm" | "watermark" => cmd_heapwm(),
         "memmap" => cmd_memmap(),
@@ -4468,6 +4469,7 @@ fn cmd_help() {
     crate::console_println!("  canary     Scan all task stack canaries for corruption");
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
+    crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
     crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
     crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
     crate::console_println!("  memmap     Show virtual address space layout");
@@ -14068,6 +14070,57 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+/// `irqrate` — display interrupt rates (IRQs/sec per vector).
+///
+/// Shows the rate of interrupts for each active vector since the last
+/// time this command was run.  First invocation establishes the baseline;
+/// second invocation shows actual rates.
+fn cmd_irqrate() {
+    let rates = crate::idt::vector_rates();
+
+    if rates.window_ticks == 0 {
+        shell_println!("Baseline snapshot taken. Run 'irqrate' again to see rates.");
+        return;
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    let window_ms = (rates.window_ticks * 1000) / u64::from(crate::apic::TICK_RATE_HZ);
+
+    shell_println!("=== Interrupt Rates (window: {} ms) ===", window_ms);
+    shell_println!("");
+    shell_println!("  Vec  Name                    Rate");
+    shell_println!("  ---  ----                    ----");
+
+    let mut any = false;
+    for i in 0..48 {
+        let rate_x10 = rates.rates_x10[i];
+        if rate_x10 == 0 {
+            continue;
+        }
+        any = true;
+
+        let name = if i < 32 {
+            crate::idt::EXCEPTION_NAMES[i]
+        } else {
+            match i {
+                32 => "APIC Timer",
+                33..=47 => "Device IRQ",
+                _ => "Unknown",
+            }
+        };
+
+        #[allow(clippy::arithmetic_side_effects)]
+        let whole = rate_x10 / 10;
+        #[allow(clippy::arithmetic_side_effects)]
+        let frac = rate_x10 % 10;
+        shell_println!("  {:3}  {:<22}  {}.{}/sec", i, name, whole, frac);
+    }
+
+    if !any {
+        shell_println!("  (no interrupt activity during window)");
+    }
 }
 
 /// `jitter` — display timer interrupt jitter statistics.

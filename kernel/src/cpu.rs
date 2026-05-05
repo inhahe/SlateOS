@@ -166,6 +166,290 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Cache topology detection
+// ---------------------------------------------------------------------------
+
+/// Maximum number of cache levels to detect.
+const MAX_CACHE_LEVELS: usize = 4;
+
+/// Information about a single cache level.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheInfo {
+    /// Cache level (1 = L1, 2 = L2, 3 = L3, etc.).
+    pub level: u8,
+    /// Cache type: 1 = data, 2 = instruction, 3 = unified.
+    pub cache_type: u8,
+    /// Total cache size in bytes.
+    pub size: u32,
+    /// Cache line size in bytes (typically 64).
+    pub line_size: u16,
+    /// Number of ways of associativity.
+    pub ways: u16,
+    /// Number of sets.
+    pub sets: u32,
+    /// Whether this cache is shared across cores.
+    pub shared: bool,
+    /// Maximum number of logical processors sharing this cache.
+    pub max_sharing: u16,
+}
+
+impl CacheInfo {
+    const fn empty() -> Self {
+        Self {
+            level: 0,
+            cache_type: 0,
+            size: 0,
+            line_size: 0,
+            ways: 0,
+            sets: 0,
+            shared: false,
+            max_sharing: 0,
+        }
+    }
+
+    /// Human-readable cache type name.
+    pub fn type_name(&self) -> &'static str {
+        match self.cache_type {
+            1 => "Data",
+            2 => "Instruction",
+            3 => "Unified",
+            _ => "Unknown",
+        }
+    }
+}
+
+/// Detected cache topology.
+static mut CACHE_TOPOLOGY: [CacheInfo; MAX_CACHE_LEVELS] = [CacheInfo::empty(); MAX_CACHE_LEVELS];
+
+/// Number of valid entries in CACHE_TOPOLOGY.
+static CACHE_LEVELS_DETECTED: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
+/// Cache line size (bytes) — the L1 data cache line size.
+/// Defaults to 64 if detection fails.
+static CACHE_LINE_SIZE: core::sync::atomic::AtomicU16 =
+    core::sync::atomic::AtomicU16::new(64);
+
+/// Detect cache topology via CPUID leaf 4 (Intel) or leaf 0x8000001D (AMD).
+///
+/// Must be called after [`detect_features`] during early boot.
+pub fn detect_cache_topology() {
+    let max_leaf = cpuid_max_leaf();
+
+    // Try Intel deterministic cache parameters (leaf 4).
+    if max_leaf >= 4 {
+        detect_cache_intel();
+    } else {
+        // Try AMD extended topology (leaf 0x8000001D).
+        let max_ext = cpuid_max_extended_leaf();
+        if max_ext >= 0x8000_001D {
+            detect_cache_amd();
+        }
+    }
+
+    // Set the global cache line size from L1 data cache.
+    let count = CACHE_LEVELS_DETECTED.load(core::sync::atomic::Ordering::Relaxed) as usize;
+    // SAFETY: We just wrote CACHE_TOPOLOGY during boot, single-threaded.
+    for i in 0..count {
+        let entry = unsafe {
+            let ptr = core::ptr::addr_of!(CACHE_TOPOLOGY) as *const CacheInfo;
+            core::ptr::read(ptr.add(i))
+        };
+        if entry.level == 1 && (entry.cache_type == 1 || entry.cache_type == 3) {
+            CACHE_LINE_SIZE.store(entry.line_size, core::sync::atomic::Ordering::Relaxed);
+            break;
+        }
+    }
+}
+
+/// Intel deterministic cache parameters (CPUID leaf 4).
+fn detect_cache_intel() {
+    let mut idx: usize = 0;
+    for subleaf in 0..MAX_CACHE_LEVELS {
+        let (eax, ebx, ecx, _edx) = cpuid_leaf4(subleaf as u32);
+        let cache_type = eax & 0x1F;
+        if cache_type == 0 {
+            break; // No more caches.
+        }
+        let level = ((eax >> 5) & 0x7) as u8;
+        let max_sharing = ((eax >> 14) & 0xFFF) + 1;
+        let line_size = ((ebx & 0xFFF) + 1) as u16;
+        let partitions = ((ebx >> 12) & 0x3FF) + 1;
+        let ways = ((ebx >> 22) & 0x3FF) + 1;
+        let sets = ecx + 1;
+
+        // size = ways × partitions × line_size × sets
+        let size = ways
+            .saturating_mul(partitions)
+            .saturating_mul(line_size as u32)
+            .saturating_mul(sets);
+
+        if idx < MAX_CACHE_LEVELS {
+            // SAFETY: Single-threaded boot, no concurrent readers yet.
+            unsafe {
+                CACHE_TOPOLOGY[idx] = CacheInfo {
+                    level,
+                    cache_type: cache_type as u8,
+                    size,
+                    line_size,
+                    ways: ways as u16,
+                    sets,
+                    shared: max_sharing > 1,
+                    max_sharing: max_sharing as u16,
+                };
+            }
+            idx += 1;
+        }
+    }
+    CACHE_LEVELS_DETECTED.store(idx as u8, core::sync::atomic::Ordering::Release);
+}
+
+/// AMD extended cache topology (CPUID leaf 0x8000001D).
+/// Same format as Intel leaf 4.
+fn detect_cache_amd() {
+    let mut idx: usize = 0;
+    for subleaf in 0..MAX_CACHE_LEVELS {
+        let (eax, ebx, ecx, _edx) = cpuid_ext_1d(subleaf as u32);
+        let cache_type = eax & 0x1F;
+        if cache_type == 0 {
+            break;
+        }
+        let level = ((eax >> 5) & 0x7) as u8;
+        let max_sharing = ((eax >> 14) & 0xFFF) + 1;
+        let line_size = ((ebx & 0xFFF) + 1) as u16;
+        let partitions = ((ebx >> 12) & 0x3FF) + 1;
+        let ways = ((ebx >> 22) & 0x3FF) + 1;
+        let sets = ecx + 1;
+
+        let size = ways
+            .saturating_mul(partitions)
+            .saturating_mul(line_size as u32)
+            .saturating_mul(sets);
+
+        if idx < MAX_CACHE_LEVELS {
+            unsafe {
+                CACHE_TOPOLOGY[idx] = CacheInfo {
+                    level,
+                    cache_type: cache_type as u8,
+                    size,
+                    line_size,
+                    ways: ways as u16,
+                    sets,
+                    shared: max_sharing > 1,
+                    max_sharing: max_sharing as u16,
+                };
+            }
+            idx += 1;
+        }
+    }
+    CACHE_LEVELS_DETECTED.store(idx as u8, core::sync::atomic::Ordering::Release);
+}
+
+/// Get detected cache topology.
+///
+/// Returns a slice of [`CacheInfo`] for each detected cache level.
+#[must_use]
+pub fn cache_topology() -> &'static [CacheInfo] {
+    let count = CACHE_LEVELS_DETECTED.load(core::sync::atomic::Ordering::Acquire) as usize;
+    // SAFETY: count was written during boot; CACHE_TOPOLOGY was written
+    // before CACHE_LEVELS_DETECTED was set (Release/Acquire ordering).
+    // The slice is valid for 'static because CACHE_TOPOLOGY is a static.
+    unsafe {
+        let ptr = core::ptr::addr_of!(CACHE_TOPOLOGY) as *const CacheInfo;
+        core::slice::from_raw_parts(ptr, count)
+    }
+}
+
+/// Get the L1 data cache line size (in bytes).
+///
+/// Returns 64 if detection failed (safe default for x86_64).
+#[must_use]
+pub fn cache_line_size() -> u16 {
+    CACHE_LINE_SIZE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// CPUID leaf 4 (Intel Deterministic Cache Parameters).
+fn cpuid_leaf4(subleaf: u32) -> (u32, u32, u32, u32) {
+    let eax: u32;
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: Caller verified max_leaf >= 4.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 4",
+            "mov ecx, {sub:e}",
+            "cpuid",
+            "mov {ebx_out:e}, ebx",
+            "pop rbx",
+            sub = in(reg) subleaf,
+            ebx_out = out(reg) ebx,
+            out("eax") eax,
+            out("ecx") ecx,
+            out("edx") edx,
+            options(nomem, nostack),
+        );
+    }
+    (eax, ebx, ecx, edx)
+}
+
+/// CPUID leaf 0x8000001D (AMD extended cache topology).
+fn cpuid_ext_1d(subleaf: u32) -> (u32, u32, u32, u32) {
+    let eax: u32;
+    let ebx: u32;
+    let ecx: u32;
+    let edx: u32;
+    // SAFETY: Caller verified max_ext_leaf >= 0x8000001D.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0x8000001D",
+            "mov ecx, {sub:e}",
+            "cpuid",
+            "mov {ebx_out:e}, ebx",
+            "pop rbx",
+            sub = in(reg) subleaf,
+            ebx_out = out(reg) ebx,
+            out("eax") eax,
+            out("ecx") ecx,
+            out("edx") edx,
+            options(nomem, nostack),
+        );
+    }
+    (eax, ebx, ecx, edx)
+}
+
+/// Log detected cache topology to serial.
+pub fn log_cache_topology() {
+    let caches = cache_topology();
+    if caches.is_empty() {
+        crate::serial_println!("[cpu] Cache topology: not detected");
+        return;
+    }
+    crate::serial_println!("[cpu] Cache topology ({} levels):", caches.len());
+    for c in caches {
+        let size_str = if c.size >= 1024 * 1024 {
+            alloc::format!("{} MiB", c.size / (1024 * 1024))
+        } else {
+            alloc::format!("{} KiB", c.size / 1024)
+        };
+        crate::serial_println!(
+            "[cpu]   L{} {}: {} ({}-way, {}-byte line, {} sets{})",
+            c.level,
+            c.type_name(),
+            size_str,
+            c.ways,
+            c.line_size,
+            c.sets,
+            if c.shared { ", shared" } else { "" },
+        );
+    }
+}
+
+extern crate alloc;
+
+// ---------------------------------------------------------------------------
 // Interrupt-disable duration tracking
 // ---------------------------------------------------------------------------
 

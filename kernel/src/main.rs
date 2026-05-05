@@ -175,6 +175,9 @@ extern "C" fn kmain() -> ! {
     // Must be done before FPU init so subsystems can query feature flags.
     cpu::detect_features();
     cpu::log_features();
+    // Cache topology detection uses only CPUID (no heap needed), but
+    // logging uses alloc::format, so we detect now and log later.
+    cpu::detect_cache_topology();
 
     // Step 4b: Initialize FPU/SSE hardware on the BSP.
     //
@@ -218,6 +221,9 @@ extern "C" fn kmain() -> ! {
     }
     boot_timing::mark(boot_timing::Milestone::Heap);
     console::boot_step_update(console::BootStatus::Ok, "Memory manager");
+
+    // Log cache topology (deferred from early boot — needs heap for formatting).
+    cpu::log_cache_topology();
 
     // Step 6b: Calibrate TSC frequency using PIT for benchmark timing.
     // Must be after serial (for output) and before subsystem benchmarks.

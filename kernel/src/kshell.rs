@@ -14117,6 +14117,32 @@ fn cmd_sysinfo() {
     // CPU count.
     shell_println!("");
     shell_println!("  Logical CPUs: {}", crate::smp::cpu_count());
+
+    // Cache topology.
+    let caches = cpu::cache_topology();
+    if !caches.is_empty() {
+        shell_println!("");
+        shell_println!("=== Cache Topology ===");
+        shell_println!("");
+        for c in caches {
+            let size_str = if c.size >= 1024 * 1024 {
+                alloc::format!("{} MiB", c.size / (1024 * 1024))
+            } else {
+                alloc::format!("{} KiB", c.size / 1024)
+            };
+            shell_println!("  L{} {:<11} {:>8}  {}-way  {}-byte line  {} sets{}",
+                c.level,
+                c.type_name(),
+                size_str,
+                c.ways,
+                c.line_size,
+                c.sets,
+                if c.shared { "  (shared)" } else { "" },
+            );
+        }
+        shell_println!("");
+        shell_println!("  Cache line size: {} bytes", cpu::cache_line_size());
+    }
 }
 
 fn cmd_tlb() {

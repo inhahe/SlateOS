@@ -86,6 +86,7 @@ mod security;
 mod serial;
 mod smp;
 mod softirq;
+mod sync;
 mod syscall;
 mod sysctl;
 mod tlb;

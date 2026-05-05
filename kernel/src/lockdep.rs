@@ -131,6 +131,12 @@ static mut HELD: [HeldStack; MAX_CPUS] = {
     [INIT; MAX_CPUS]
 };
 
+/// Per-CPU re-entrancy guard.
+///
+/// Prevents infinite recursion when lockdep's violation reporting
+/// acquires the serial lock (which would re-enter lockdep).
+static mut IN_LOCKDEP: [bool; MAX_CPUS] = [false; MAX_CPUS];
+
 // ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
@@ -179,9 +185,20 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
         return;
     }
 
+    // SAFETY: Only this CPU accesses its own IN_LOCKDEP flag.
+    // Prevents re-entrancy when violation reporting acquires locks
+    // (e.g., serial_println! → serial lock → lock_acquire → infinite).
+    let in_lockdep = unsafe { &mut IN_LOCKDEP[cpu] };
+    if *in_lockdep {
+        return;
+    }
+    *in_lockdep = true;
+
     // Find or register the lock class.
     let class_idx = find_or_register_class(lock_addr, name);
     let Some(class_idx) = class_idx else {
+        // SAFETY: Restoring re-entrancy guard for this CPU.
+        unsafe { IN_LOCKDEP[cpu] = false; }
         return; // Table full — silently skip.
     };
 
@@ -214,6 +231,9 @@ pub fn lock_acquire(lock_addr: usize, name: &[u8]) {
         held.stack[held.depth as usize] = class_idx;
         held.depth += 1;
     }
+
+    // SAFETY: Restoring re-entrancy guard for this CPU.
+    unsafe { IN_LOCKDEP[cpu] = false; }
 }
 
 /// Notify lockdep that a lock has been released.
@@ -230,8 +250,16 @@ pub fn lock_release(lock_addr: usize) {
         return;
     }
 
+    // SAFETY: Re-entrancy guard — same reasoning as lock_acquire.
+    let in_lockdep = unsafe { &mut IN_LOCKDEP[cpu] };
+    if *in_lockdep {
+        return;
+    }
+    *in_lockdep = true;
+
     let class_idx = find_class(lock_addr);
     let Some(class_idx) = class_idx else {
+        unsafe { IN_LOCKDEP[cpu] = false; }
         return; // Unknown lock — nothing to do.
     };
 
@@ -249,11 +277,15 @@ pub fn lock_release(lock_addr: usize) {
                 held.stack[j] = held.stack[j + 1];
             }
             held.depth -= 1;
+            // SAFETY: Restoring re-entrancy guard for this CPU.
+            unsafe { IN_LOCKDEP[cpu] = false; }
             return;
         }
     }
     // Lock not found in held stack — benign (might have been acquired
     // before lockdep was enabled, or table was full at acquire time).
+    // SAFETY: Restoring re-entrancy guard for this CPU.
+    unsafe { IN_LOCKDEP[cpu] = false; }
 }
 
 /// Return the number of violations detected so far.

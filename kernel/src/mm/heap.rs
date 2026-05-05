@@ -109,10 +109,16 @@ const POISON_MAGIC: [u8; 4] = [0xFE, 0xED, 0xFA, 0xCE];
 /// # Safety
 ///
 /// `ptr` must point to a valid slab slot of `class_size` bytes.
+///
+/// Returns `true` if a double-free was detected.  When this returns
+/// `true`, the caller must NOT push the slot back onto the free list
+/// — re-adding an already-freed slot would corrupt the free list by
+/// creating a cycle.  The slot is "leaked" intentionally: one leaked
+/// slot is better than cascading corruption.
 #[inline(never)]
-unsafe fn poison_free(ptr: *mut u8, class_size: usize) {
+unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
     if class_size < 16 {
-        return; // Need at least 8 (next ptr) + 4 (magic) + some poison.
+        return false; // Need at least 8 (next ptr) + 4 (magic) + some poison.
     }
     // Double-free detection: if the magic signature is already present,
     // this slot was freed before without being re-allocated in between.
@@ -130,6 +136,7 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) {
             "[heap] DOUBLE-FREE detected! slot={:#x}, class={}",
             ptr as usize, class_size
         );
+        return true;
     }
 
     // Write the magic signature at bytes 8..12 using volatile stores.
@@ -147,6 +154,7 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) {
             core::ptr::write_volatile(ptr.add(i), FREE_POISON);
         }
     }
+    false
 }
 
 /// Fill bytes 0..class_size with ALLOC_POISON.
@@ -424,10 +432,15 @@ impl HeapInner {
     #[allow(clippy::indexing_slicing, clippy::cast_ptr_alignment)]
     fn slab_dealloc(&mut self, ptr: *mut u8, class_idx: usize) {
         // Slab poisoning: fill freed memory with FREE_POISON pattern.
+        // If a double-free is detected, do NOT re-add the slot — it's
+        // already on the free list and re-adding would create a cycle.
         if POISON_ENABLED.load(Ordering::Relaxed) {
             let class_size = SIZE_CLASSES[class_idx];
             // SAFETY: ptr is a valid slab slot of class_size bytes.
-            unsafe { poison_free(ptr, class_size); }
+            let is_double_free = unsafe { poison_free(ptr, class_size) };
+            if is_double_free {
+                return; // Leak the slot intentionally to prevent corruption.
+            }
         }
 
         let slot = ptr.cast::<FreeSlot>();
@@ -719,9 +732,15 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
 
     // Slab poisoning: fill freed slot with FREE_POISON before linking
     // into the free list.  Must happen before writing the next pointer.
+    // If double-free is detected, skip re-adding — the slot is already
+    // on a free list and re-adding would create a cycle.
     if POISON_ENABLED.load(Ordering::Relaxed) {
         let class_size = SIZE_CLASSES[class_idx];
-        unsafe { poison_free(ptr, class_size); }
+        let is_double_free = unsafe { poison_free(ptr, class_size) };
+        if is_double_free {
+            cache.active = false;
+            return true; // "Handled" — leaked intentionally.
+        }
     }
 
     if cache.counts[class_idx] < PCPU_SLAB_MAX as u16 {
@@ -889,6 +908,12 @@ pub struct HeapStats {
     pub slab_refills: u64,
     /// Number of failed allocations (OOM).
     pub alloc_failures: u64,
+    /// Whether slab poisoning is currently enabled.
+    pub poison_enabled: bool,
+    /// Number of use-after-free violations detected.
+    pub poison_violations: u32,
+    /// Number of double-free violations detected.
+    pub double_free_violations: u32,
 }
 
 /// Read heap allocator statistics.
@@ -920,6 +945,9 @@ pub fn stats() -> HeapStats {
         large_frees: LARGE_FREES.load(Ordering::Relaxed),
         slab_refills: SLAB_REFILLS.load(Ordering::Relaxed),
         alloc_failures: ALLOC_FAILURES.load(Ordering::Relaxed),
+        poison_enabled: POISON_ENABLED.load(Ordering::Relaxed),
+        poison_violations: POISON_VIOLATIONS.load(Ordering::Relaxed),
+        double_free_violations: DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed),
     }
 }
 
@@ -1204,10 +1232,9 @@ pub fn poison_self_test() {
         df_pre + 1,
         "poison test: double-free not detected"
     );
-    // Clean up: alloc twice to consume the duplicate free-list entry,
-    // preventing corruption of the free list.
-    let _cleanup1 = unsafe { alloc::alloc::alloc(layout) };
-    let _cleanup2 = unsafe { alloc::alloc::alloc(layout) };
+    // No cleanup needed: the double-free'd slot was NOT re-added to the
+    // free list (poison_free returns true → dealloc skips the push).
+    // The slot from the first free is still validly on the list.
     serial_println!("[heap]   Double-free detection: OK (violation caught)");
 
     unsafe { crate::cpu::sti(); }

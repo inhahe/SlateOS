@@ -13275,6 +13275,11 @@ fn cmd_slabinfo() {
         overall.large_allocs, overall.large_frees,
         overall.slab_refills, overall.alloc_failures,
     );
+    shell_println!(
+        "Poison: {}  UAF violations: {}  Double-free violations: {}",
+        if overall.poison_enabled { "ON" } else { "off" },
+        overall.poison_violations, overall.double_free_violations,
+    );
 }
 
 fn cmd_workqueue() {

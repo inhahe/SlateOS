@@ -815,6 +815,9 @@ extern "C" fn kmain() -> ! {
     // Step 22k3: Barrier self-test.
     sched::barrier::self_test();
 
+    // Step 22k4: One-shot event self-test.
+    sched::once_event::self_test();
+
     // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();
 

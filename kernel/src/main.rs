@@ -812,6 +812,9 @@ extern "C" fn kmain() -> ! {
     // Step 22k2: Reader-writer lock self-test.
     sched::krwlock::self_test();
 
+    // Step 22k3: Barrier self-test.
+    sched::barrier::self_test();
+
     // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();
 

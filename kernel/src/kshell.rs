@@ -13823,6 +13823,66 @@ fn cmd_diag() {
     shell_println!("  Exceptions: total={} (PF={}, other={})  [{}]",
         exc_total, pf_count, non_pf_exceptions, status_exc);
 
+    // --- Timer jitter ---
+    let jitter_status = if let Some(j) = crate::apic::timer_jitter() {
+        if j.mean_cycles > 0 {
+            let max_dev_pct = j.max_cycles.saturating_sub(j.mean_cycles)
+                .saturating_mul(100)
+                .checked_div(j.mean_cycles)
+                .unwrap_or(0);
+            if max_dev_pct > 20 {
+                shell_println!("  Jitter:    max_dev=+{}% ({}→{} cycles)  [HIGH]",
+                    max_dev_pct, j.mean_cycles, j.max_cycles);
+                "HIGH"
+            } else {
+                shell_println!("  Jitter:    max_dev=+{}% ({} samples)  [OK]",
+                    max_dev_pct, j.count);
+                "OK"
+            }
+        } else {
+            shell_println!("  Jitter:    (no data)");
+            "OK"
+        }
+    } else {
+        shell_println!("  Jitter:    (no data)");
+        "OK"
+    };
+
+    // --- Heap watermark ---
+    shell_println!("  HeapWM:    in_use={} KiB, peak={} KiB",
+        heap.bytes_in_use / 1024, heap.peak_bytes_in_use / 1024);
+
+    // --- Scheduling latency ---
+    let lat = crate::sched::latency_histogram();
+    let lat_status = if lat.total_events > 0 {
+        let high_lat = lat.buckets[5].saturating_add(lat.buckets[6]).saturating_add(lat.buckets[7]);
+        let high_pct = high_lat.saturating_mul(100).checked_div(lat.total_events).unwrap_or(0);
+        if high_pct > 5 {
+            shell_println!("  Latency:   max={}ms, {}% >200ms  [HIGH]",
+                lat.max_ticks * 10, high_pct);
+            "HIGH"
+        } else {
+            shell_println!("  Latency:   max={}ms, mean={}.{}ms  [OK]",
+                lat.max_ticks * 10,
+                lat.mean_ticks_x100 / 10, lat.mean_ticks_x100 % 10);
+            "OK"
+        }
+    } else {
+        shell_println!("  Latency:   (no dispatches yet)");
+        "OK"
+    };
+
+    // --- Memory pressure score ---
+    let mp = crate::mm::memory_pressure();
+    let mp_status = match mp.level {
+        crate::mm::PressureLevel::Low => "OK",
+        crate::mm::PressureLevel::Moderate => "MODERATE",
+        crate::mm::PressureLevel::High => "HIGH",
+        crate::mm::PressureLevel::Critical => "CRITICAL",
+    };
+    shell_println!("  MemScore:  {}/100 (phys={} frag={} heap={} swap={})  [{}]",
+        mp.score, mp.phys_score, mp.frag_score, mp.heap_score, mp.swap_score, mp_status);
+
     // --- Overall assessment ---
     shell_println!("");
     let issues = (pct_used > 90) as u8
@@ -13832,7 +13892,10 @@ fn cmd_diag() {
         + (heap.double_free_violations > 0) as u8
         + (heap.redzone_violations > 0) as u8
         + (pf.fatal > 0) as u8
-        + (violations > 0) as u8;
+        + (violations > 0) as u8
+        + (jitter_status == "HIGH") as u8
+        + (lat_status == "HIGH") as u8
+        + (mp.score > 75) as u8;
     if issues == 0 {
         shell_println!("  Overall: HEALTHY (no issues detected)");
     } else {

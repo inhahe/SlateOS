@@ -64,6 +64,7 @@ mod fs;
 mod gdt;
 mod hpet;
 mod idt;
+mod idle;
 mod ioapic;
 mod ipc;
 mod keyboard;
@@ -805,6 +806,10 @@ extern "C" fn kmain() -> ! {
     watchdog::init();
     watchdog::self_test();
 
+    // Step 22f1.5: Initialize MWAIT-based idle (power-efficient CPU sleep).
+    idle::init();
+    idle::self_test();
+
     // Step 22f2: Stack backtrace self-test.
     // Verifies frame pointer chain walking works (requires -C force-frame-pointers=yes).
     // Gracefully skips if frame pointers are missing (e.g., optimized-out in release).
@@ -1166,14 +1171,18 @@ extern "C" fn deferred_bench_task(_arg: u64) {
 fn idle_loop() -> ! {
     let mut tick_counter = 0u32;
     loop {
-        cpu::hlt(); // Sleep until next interrupt (timer tick or IPI).
+        // Sleep until next interrupt or MWAIT cache-line wake.
+        // Uses MWAIT (power-efficient C-state idle) if supported,
+        // falls back to HLT otherwise.
+        idle::idle_once();
 
         tick_counter = tick_counter.wrapping_add(1);
 
         // If a reschedule IPI woke us (someone enqueued work for CPU 0),
         // yield immediately to pick up the new task.  This avoids the
         // up-to-10ms latency of waiting for the next timer tick.
-        if sched::reschedule_pending(0) {
+        if sched::reschedule_pending(0) || idle::resched_pending() {
+            idle::clear_resched();
             sched::yield_now();
         }
 

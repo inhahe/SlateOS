@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqoff", "irqrate", "jitter", "kprofile", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "idle", "irqoff", "irqrate", "jitter", "kprofile", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4194,6 +4194,7 @@ fn dispatch(line: &str) {
         "kprofile" => cmd_kprofile(args),
         "lockstats" | "lockstat" => cmd_lockstats(args),
         "irqoff" => cmd_irqoff(args),
+        "idle" => cmd_idle(),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -4479,6 +4480,7 @@ fn cmd_help() {
     crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
     crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
     crate::console_println!("  lockstats  Show spinlock contention statistics");
+    crate::console_println!("  idle       Show CPU idle state statistics (MWAIT/HLT)");
     crate::console_println!("  irqoff     Show interrupt-disabled duration tracking");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
@@ -14507,6 +14509,33 @@ fn cmd_lockstats(args: &str) {
 
     shell_println!("");
     shell_println!("  Tracking: ON | Use 'lockstats reset' to clear, 'lockstats off' to disable");
+}
+
+/// `idle` — show CPU idle state statistics.
+///
+/// Displays MWAIT/HLT idle entry counts, resched wakes, and C-state info.
+fn cmd_idle() {
+    let s = crate::idle::stats();
+
+    shell_println!("=== CPU Idle State ===");
+    shell_println!("");
+    shell_println!("  Mode:         {}", if s.mwait_enabled { "MWAIT" } else { "HLT (fallback)" });
+    shell_println!("  C-state hint: {:#04x}", s.cstate_hint);
+    shell_println!("");
+    shell_println!("  Total idle entries: {}", s.total_entries);
+    shell_println!("    via MWAIT: {}", s.mwait_entries);
+    shell_println!("    via HLT:   {}", s.hlt_entries);
+    shell_println!("");
+    shell_println!("  Resched wakes: {} (woken by need_resched flag)", s.resched_wakes);
+
+    if s.total_entries > 0 {
+        let mwait_pct = if s.total_entries > 0 {
+            s.mwait_entries.saturating_mul(100) / s.total_entries
+        } else {
+            0
+        };
+        shell_println!("  MWAIT usage:   {}%", mwait_pct);
+    }
 }
 
 /// `irqoff` — show interrupt-disabled duration statistics.

@@ -484,6 +484,8 @@ pub struct CpuFeatures {
     pub osxsave: bool,
     /// AES-NI (hardware AES instructions).
     pub aes_ni: bool,
+    /// MONITOR/MWAIT instructions (power-efficient idle).
+    pub mwait: bool,
     /// RDRAND (hardware random number generator).
     pub rdrand: bool,
     /// F16C (half-precision float conversion).
@@ -549,7 +551,7 @@ impl CpuFeatures {
         Self {
             sse3: false, ssse3: false, sse4_1: false, sse4_2: false,
             popcnt: false, avx: false, xsave: false, osxsave: false,
-            aes_ni: false, rdrand: false, f16c: false,
+            mwait: false, aes_ni: false, rdrand: false, f16c: false,
             fxsr: false, sse: false, sse2: false, tsc: false, apic: false,
             avx2: false, bmi1: false, bmi2: false, avx512f: false,
             sha: false, rdseed: false, vaes: false, rdpid: false,
@@ -578,6 +580,7 @@ pub fn detect_features() {
     // --- Leaf 1: basic feature flags ---
     let (ecx1, edx1) = cpuid_leaf1();
     f.sse3 = ecx1 & (1 << 0) != 0;
+    f.mwait = ecx1 & (1 << 3) != 0;
     f.ssse3 = ecx1 & (1 << 9) != 0;
     f.sse4_1 = ecx1 & (1 << 19) != 0;
     f.sse4_2 = ecx1 & (1 << 20) != 0;
@@ -679,8 +682,8 @@ pub fn log_features() {
         );
     }
     crate::serial_println!(
-        "[cpu]   AES-NI={} SHA={} RDRAND={} RDSEED={}",
-        f.aes_ni, f.sha, f.rdrand, f.rdseed
+        "[cpu]   AES-NI={} SHA={} RDRAND={} RDSEED={} MWAIT={}",
+        f.aes_ni, f.sha, f.rdrand, f.rdseed, f.mwait
     );
     crate::serial_println!(
         "[cpu]   RDTSCP={} 1GiB pages={} TSC={}",

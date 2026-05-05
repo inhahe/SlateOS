@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "slabinfo", "heapaudit", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
+    "slabinfo", "heapaudit", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
@@ -4171,6 +4171,7 @@ fn dispatch(line: &str) {
         "schedstat" => cmd_schedstat(),
         "slabinfo" => cmd_slabinfo(),
         "heapaudit" => cmd_heapaudit(),
+        "memtest" => cmd_memtest(args),
         "stack" => cmd_stack(),
         "wq" | "workqueue" => cmd_workqueue(),
         "ktimer" | "timers" => cmd_ktimer(),
@@ -13300,6 +13301,113 @@ fn cmd_heapaudit() {
         shell_println!("  Result: PASS (no corruption detected)");
     } else {
         shell_println!("  Result: FAIL — heap corruption detected!");
+    }
+}
+
+/// Quick physical memory test: allocate N frames, write patterns,
+/// read back and verify.  Catches stuck bits, addressing faults,
+/// and memory controller issues.
+///
+/// Usage: `memtest [count]` — default 32 frames (512 KiB).
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_memtest(args: &str) {
+    let count: usize = args.trim().parse().unwrap_or(32);
+    if count == 0 || count > 1024 {
+        shell_println!("Usage: memtest [1..1024] (frame count, default 32)");
+        return;
+    }
+
+    shell_println!("Testing {} frames ({} KiB)...", count, count * 16);
+
+    let hhdm = match crate::mm::page_table::hhdm() {
+        Some(h) => h,
+        None => {
+            shell_println!("ERROR: HHDM not available");
+            return;
+        }
+    };
+
+    // Allocate frames.
+    let mut frames: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    for _ in 0..count {
+        match crate::mm::frame::alloc_frame() {
+            Ok(f) => frames.push(f.addr()),
+            Err(_) => {
+                shell_println!("  Allocation failed after {} frames (OOM)", frames.len());
+                break;
+            }
+        }
+    }
+
+    let actual = frames.len();
+    let frame_size = crate::mm::frame::FRAME_SIZE;
+    let mut errors: usize = 0;
+
+    // Pattern 1: Walking ones (0x01, 0x02, 0x04, ...)
+    for (i, &phys) in frames.iter().enumerate() {
+        let ptr = (phys + hhdm) as *mut u8;
+        let pattern = 1u8 << (i & 7);
+        // SAFETY: frame is allocated, HHDM maps it validly.
+        unsafe {
+            core::ptr::write_bytes(ptr, pattern, frame_size);
+        }
+    }
+    for (i, &phys) in frames.iter().enumerate() {
+        let ptr = (phys + hhdm) as *const u8;
+        let pattern = 1u8 << (i & 7);
+        // SAFETY: same as above.
+        let slice = unsafe { core::slice::from_raw_parts(ptr, frame_size) };
+        for (offset, &byte) in slice.iter().enumerate() {
+            if byte != pattern {
+                if errors < 8 {
+                    shell_println!(
+                        "  FAIL: frame {} offset {} expected {:#04x} got {:#04x}",
+                        i, offset, pattern, byte
+                    );
+                }
+                errors += 1;
+            }
+        }
+    }
+
+    // Pattern 2: Complement (0xFE, 0xFD, ...)
+    for (i, &phys) in frames.iter().enumerate() {
+        let ptr = (phys + hhdm) as *mut u8;
+        let pattern = !(1u8 << (i & 7));
+        unsafe {
+            core::ptr::write_bytes(ptr, pattern, frame_size);
+        }
+    }
+    for (i, &phys) in frames.iter().enumerate() {
+        let ptr = (phys + hhdm) as *const u8;
+        let pattern = !(1u8 << (i & 7));
+        let slice = unsafe { core::slice::from_raw_parts(ptr, frame_size) };
+        for (offset, &byte) in slice.iter().enumerate() {
+            if byte != pattern {
+                if errors < 8 {
+                    shell_println!(
+                        "  FAIL: frame {} offset {} expected {:#04x} got {:#04x}",
+                        i, offset, pattern, byte
+                    );
+                }
+                errors += 1;
+            }
+        }
+    }
+
+    // Free all frames.
+    for &phys in &frames {
+        if let Some(f) = crate::mm::frame::PhysFrame::from_addr(phys) {
+            // SAFETY: we allocated these frames above.
+            let _ = unsafe { crate::mm::frame::free_frame(f) };
+        }
+    }
+
+    shell_println!("");
+    if errors == 0 {
+        shell_println!("  Result: PASS ({} frames, {} KiB verified)", actual, actual * 16);
+    } else {
+        shell_println!("  Result: FAIL ({} errors in {} frames)", errors, actual);
     }
 }
 

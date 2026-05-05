@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4221,6 +4221,7 @@ fn dispatch(line: &str) {
         "tlbgather" | "gather" => cmd_tlb_gather(),
         "migratetype" | "mtype" => cmd_migrate_type(),
         "pageage" | "aging" => cmd_page_age(),
+        "ptwalk" | "pagetables" => cmd_pt_walk(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15365,6 +15366,38 @@ fn cmd_migrate_type() {
     }
     shell_println!("");
     shell_println!("  Pageblock steals:  {}", s.pageblock_steals);
+}
+
+/// `ptwalk` — walk and summarize current kernel page tables.
+fn cmd_pt_walk() {
+    shell_println!("=== Page Table Walk (kernel) ===");
+    shell_println!("");
+
+    // Read CR3 for current PML4.
+    let cr3: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, cr3",
+            out(reg) cr3,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    let pml4_phys = cr3 & 0x000F_FFFF_FFFF_F000;
+    shell_println!("  PML4 physical: {:#x}", pml4_phys);
+
+    // Walk the full address space.
+    let (p4k, p2m, p1g, total) = unsafe {
+        crate::mm::pt_walk::count_mapped(pml4_phys)
+    };
+    shell_println!("  4 KiB pages:   {}", p4k);
+    shell_println!("  2 MiB pages:   {}", p2m);
+    shell_println!("  1 GiB pages:   {}", p1g);
+    shell_println!("  Total mapped:  {} MiB", total / (1024 * 1024));
+    shell_println!("");
+
+    let s = crate::mm::pt_walk::stats();
+    shell_println!("  Walk ops:      {}", s.walk_ops);
+    shell_println!("  Entries visited: {}", s.entries_visited);
 }
 
 /// `pageage` — display page aging statistics and histogram.

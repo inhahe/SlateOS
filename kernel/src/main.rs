@@ -920,6 +920,10 @@ extern "C" fn kmain() -> ! {
     // Tracks page access patterns for intelligent reclaim decisions.
     mm::page_age::self_test();
 
+    // Step 22e⅞++++c: Page table walker self-test.
+    // Generic page table iteration for RSS counting, fork, etc.
+    mm::pt_walk::self_test();
+
     // Step 22e⅞++++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();

@@ -44,6 +44,7 @@ pub mod page_age;
 pub mod oom;
 pub mod page_table;
 pub mod pcid;
+pub mod pt_walk;
 pub mod poison;
 pub mod pressure;
 pub mod protect;

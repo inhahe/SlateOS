@@ -122,6 +122,8 @@ static SHOOTDOWN_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 ///
 /// For single-CPU systems (or before SMP init), this just flushes locally.
 pub fn flush_range(vaddr: u64, page_count: u32) {
+    let _prof_t = crate::kprofile::begin(crate::kprofile::Slot::TlbShootdown);
+
     RANGE_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
     TOTAL_PAGES_FLUSHED.fetch_add(u64::from(page_count), Ordering::Relaxed);
 
@@ -132,6 +134,7 @@ pub fn flush_range(vaddr: u64, page_count: u32) {
     let online = crate::smp::cpu_count();
     if online <= 1 {
         LOCAL_ONLY_COUNT.fetch_add(1, Ordering::Relaxed);
+        crate::kprofile::end(crate::kprofile::Slot::TlbShootdown, _prof_t);
         return;
     }
 
@@ -160,6 +163,8 @@ pub fn flush_range(vaddr: u64, page_count: u32) {
     while ACK_COUNT.load(Ordering::Acquire) < target_acks {
         core::hint::spin_loop();
     }
+
+    crate::kprofile::end(crate::kprofile::Slot::TlbShootdown, _prof_t);
 }
 
 /// Flush the entire TLB on all CPUs (CR3 reload).

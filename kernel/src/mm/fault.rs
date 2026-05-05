@@ -228,6 +228,8 @@ pub fn init() {
 /// resolvable (no VMA, guard page, protection violation, reserved
 /// bit, etc.).
 pub fn resolve(fault_addr: u64, error_code: u64) -> KernelResult<()> {
+    let _prof_t = crate::kprofile::begin(crate::kprofile::Slot::PageFault);
+
     crate::ktrace::record(
         crate::ktrace::Category::Mm,
         crate::ktrace::event::PAGE_FAULT,
@@ -268,6 +270,7 @@ pub fn resolve(fault_addr: u64, error_code: u64) -> KernelResult<()> {
         record_kernel_resolved();
     }
 
+    crate::kprofile::end(crate::kprofile::Slot::PageFault, _prof_t);
     result
 }
 

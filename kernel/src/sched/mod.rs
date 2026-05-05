@@ -2731,6 +2731,7 @@ fn schedule_inner(requeue: bool) {
         // Stolen tasks need their last_cpu updated so wake()/kill_task()
         // dequeue from the correct (new) CPU queue, not the stale one.
         let mut migrated = alloc::vec::Vec::new();
+        let _pick_t = crate::kprofile::begin(crate::kprofile::Slot::SchedPickNext);
         let picked = match PER_CPU_SCHED.pick_next_local(cpu) {
             Some(id) => Some(id),
             None => {
@@ -2741,6 +2742,7 @@ fn schedule_inner(requeue: bool) {
                 stolen
             }
         };
+        crate::kprofile::end(crate::kprofile::Slot::SchedPickNext, _pick_t);
         // Update last_cpu for stolen tasks.  If a stolen task's affinity
         // forbids this CPU, put it back on its original (or first allowed)
         // CPU.  This is rare — most tasks have CPU_AFFINITY_ALL.

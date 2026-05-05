@@ -109,7 +109,7 @@ pub enum Owner {
 impl Owner {
     /// Convert from raw u8 tag.
     #[inline]
-    fn from_u8(v: u8) -> Self {
+    pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Free,
             1 => Self::Unknown,

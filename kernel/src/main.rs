@@ -936,6 +936,10 @@ extern "C" fn kmain() -> ! {
     // Per-frame subsystem tagging for "who allocated this memory?" diagnostics.
     mm::frame_owner::self_test();
 
+    // Step 22e⅞++++h: Allocation trace ring buffer self-test.
+    // Records recent alloc/free events for post-mortem debugging.
+    mm::alloc_trace::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

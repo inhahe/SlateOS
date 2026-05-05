@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4225,6 +4225,7 @@ fn dispatch(line: &str) {
         "scrub" | "memscrub" => cmd_scrub(),
         "faultinject" | "finject" => cmd_fault_inject(args),
         "frameowner" | "fowner" => cmd_frame_owner(),
+        "alloctrace" | "atrace" => cmd_alloc_trace(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15430,6 +15431,82 @@ fn cmd_frame_owner() {
 
 /// Max frames for display percentage calculation.
 const MAX_FRAMES_DISPLAY: usize = 65536;
+
+/// `alloctrace` — show allocation trace ring buffer contents.
+///
+/// Usage:
+///   alloctrace            — show stats and last 10 events
+///   alloctrace recent [N] — show last N events (default 20)
+///   alloctrace reset      — clear the ring buffer
+///   alloctrace on|off     — enable/disable tracing
+fn cmd_alloc_trace(args: &str) {
+    use crate::mm::alloc_trace;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "reset" => {
+            alloc_trace::reset();
+            shell_println!("Trace ring buffer reset");
+        }
+        "on" => {
+            alloc_trace::enable();
+            shell_println!("Allocation tracing enabled");
+        }
+        "off" => {
+            alloc_trace::disable();
+            shell_println!("Allocation tracing disabled");
+        }
+        "recent" => {
+            let count = parts.get(1)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(20)
+                .min(64);
+            let mut buf = [alloc_trace::TraceEntry::empty(); 64];
+            let n = alloc_trace::recent(&mut buf[..count]);
+            shell_println!("Last {} events (newest first):", n);
+            shell_println!("  {:>4}  {:>10}  {:>8}  {:>7}  {:>5}  {:>3}",
+                "#", "TSC", "FRAME", "OP", "OWNER", "CPU");
+            for i in 0..n {
+                let e = &buf[i];
+                if e.is_valid() {
+                    shell_println!("  {:>4}  {:>10}  {:>8}  {:>7}  {:>5}  {:>3}",
+                        i, e.timestamp & 0xFFFF_FFFF, e.frame_idx,
+                        e.operation().name(), e.owner_tag().name(), e.cpu);
+                }
+            }
+        }
+        _ => {
+            // Default: show stats + last 10.
+            let s = alloc_trace::stats();
+            let (allocs, frees) = alloc_trace::alloc_free_balance();
+            shell_println!("=== Allocation Trace ===");
+            shell_println!("");
+            shell_println!("  Enabled:       {}", if s.enabled { "yes" } else { "no" });
+            shell_println!("  Total events:  {}", s.total_events);
+            shell_println!("  Dropped:       {}", s.dropped);
+            shell_println!("  Buffer:        {}/{} entries", s.valid_entries, s.capacity);
+            shell_println!("  Balance:       {} allocs, {} frees", allocs, frees);
+            shell_println!("");
+            // Show last 10 events.
+            let mut buf = [alloc_trace::TraceEntry::empty(); 10];
+            let n = alloc_trace::recent(&mut buf);
+            if n > 0 {
+                shell_println!("  Recent events (newest first):");
+                shell_println!("    {:>10}  {:>8}  {:>7}  {:>5}  {:>3}",
+                    "TSC", "FRAME", "OP", "OWNER", "CPU");
+                for i in 0..n {
+                    let e = &buf[i];
+                    if e.is_valid() {
+                        shell_println!("    {:>10}  {:>8}  {:>7}  {:>5}  {:>3}",
+                            e.timestamp & 0xFFFF_FFFF, e.frame_idx,
+                            e.operation().name(), e.owner_tag().name(), e.cpu);
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// `faultinject` — display/control memory fault injection.
 ///

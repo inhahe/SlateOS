@@ -175,6 +175,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] CR0/CR4 configuration on BSP (init_bsp) and APs (init_ap)
   - [x] Fixed latent AP bug: CR4.OSFXSR not set after INIT-SIPI (SSE would #UD)
   - [x] Self-test: XMM0 round-trip through save/restore verified
+  - [x] Stress test: 4 tasks × 50 yields, unique XMM1 patterns, no cross-task leakage
 
 ### 1.4 IPC and syscalls
 - [x] Syscall dispatch (many specialized syscalls, not few generic ones)

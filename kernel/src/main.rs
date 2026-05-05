@@ -806,7 +806,10 @@ extern "C" fn kmain() -> ! {
     // Step 22j: Counting semaphore self-test.
     sched::semaphore::self_test();
 
-    // Step 22k: Reader-writer lock self-test.
+    // Step 22k: Condition variable self-test.
+    sched::condvar::self_test();
+
+    // Step 22k2: Reader-writer lock self-test.
     sched::krwlock::self_test();
 
     // Step 22l: Task supervisor self-test.

@@ -46,6 +46,7 @@
 //! safe because no code path ever holds a per-CPU lock and then tries
 //! to acquire `SCHED`.
 
+pub mod condvar;
 pub mod context;
 pub mod io_sched;
 pub mod kmutex;

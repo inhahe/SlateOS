@@ -175,6 +175,17 @@ pub struct KMutexGuard<'a, T> {
     mutex: &'a KMutex<T>,
 }
 
+impl<'a, T> KMutexGuard<'a, T> {
+    /// Get a reference to the underlying mutex.
+    ///
+    /// Used by [`CondVar`](super::condvar::CondVar) to re-acquire the
+    /// mutex after waking from a wait.
+    #[must_use]
+    pub fn mutex_ref(&self) -> &'a KMutex<T> {
+        self.mutex
+    }
+}
+
 impl<T> Deref for KMutexGuard<'_, T> {
     type Target = T;
 

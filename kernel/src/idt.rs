@@ -55,6 +55,103 @@ fn count_vector(vector: usize) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Recent exception log (lock-free ring buffer)
+// ---------------------------------------------------------------------------
+
+/// Number of recent exception entries to keep.
+const EXCEPTION_LOG_SIZE: usize = 32;
+
+/// A logged exception event.
+#[derive(Debug, Clone, Copy)]
+pub struct ExceptionLogEntry {
+    /// Vector number (0–31 for CPU exceptions).
+    pub vector: u8,
+    /// CPU that took the exception.
+    pub cpu: u8,
+    /// APIC tick count at the time of exception.
+    pub tick: u64,
+    /// Faulting instruction pointer (RIP).
+    pub rip: u64,
+    /// Auxiliary info: error code for #GP/#PF, CR2 for #PF, 0 otherwise.
+    pub aux: u64,
+}
+
+/// Wrapper to make UnsafeCell<ExceptionLogEntry> usable in a static.
+///
+/// SAFETY: The ring buffer is accessed via atomic index only. Partial
+/// reads are acceptable (all fields are Copy types with no invalid bit
+/// patterns). We never hold references across call boundaries.
+struct ExcLogSlot(core::cell::UnsafeCell<ExceptionLogEntry>);
+
+// SAFETY: Access is serialized by the atomic write-index. Concurrent
+// reads may see partial data but all bit patterns are valid.
+unsafe impl Sync for ExcLogSlot {}
+
+/// Ring buffer of recent exception events.
+///
+/// Lock-free: a single atomic write-index is bumped via fetch_add; each
+/// slot stores one entry.  Races on slots are benign (worst case: a
+/// partially-written entry is read, which is just slightly stale data).
+static EXCEPTION_LOG: [ExcLogSlot; EXCEPTION_LOG_SIZE] = {
+    const EMPTY: ExcLogSlot = ExcLogSlot(core::cell::UnsafeCell::new(
+        ExceptionLogEntry { vector: 0, cpu: 0, tick: 0, rip: 0, aux: 0 }
+    ));
+    [EMPTY; EXCEPTION_LOG_SIZE]
+};
+
+/// Write index for the exception log ring buffer.
+static EXCEPTION_LOG_IDX: AtomicU64 = AtomicU64::new(0);
+
+/// Record an exception in the recent exception log.
+///
+/// Called from exception handlers for interesting events (not every
+/// timer tick — only CPU exceptions vectors 0–31).
+#[inline]
+fn log_exception(vector: u8, rip: u64, aux: u64) {
+    let idx = EXCEPTION_LOG_IDX.fetch_add(1, Ordering::Relaxed) as usize;
+    let slot = idx % EXCEPTION_LOG_SIZE;
+    let entry = ExceptionLogEntry {
+        vector,
+        cpu: crate::sched::current_cpu_id() as u8,
+        tick: crate::apic::tick_count(),
+        rip,
+        aux,
+    };
+    // SAFETY: We own this slot by virtue of the atomic index bump.
+    // Concurrent reads of a partially-written entry are safe (all fields
+    // are POD with no invalid states).
+    unsafe {
+        core::ptr::write_volatile(EXCEPTION_LOG[slot].0.get(), entry);
+    }
+}
+
+/// Get the recent exception log (most recent last).
+///
+/// Returns up to `EXCEPTION_LOG_SIZE` entries, ordered oldest-to-newest.
+/// Entries with tick=0 are empty (never written).
+#[must_use]
+pub fn recent_exceptions() -> ([ExceptionLogEntry; EXCEPTION_LOG_SIZE], u64) {
+    let total = EXCEPTION_LOG_IDX.load(Ordering::Relaxed);
+    let mut result = [ExceptionLogEntry { vector: 0, cpu: 0, tick: 0, rip: 0, aux: 0 }; EXCEPTION_LOG_SIZE];
+
+    // Read entries in chronological order.
+    let count = total.min(EXCEPTION_LOG_SIZE as u64) as usize;
+    let start = if total > EXCEPTION_LOG_SIZE as u64 {
+        total as usize - EXCEPTION_LOG_SIZE
+    } else {
+        0
+    };
+
+    for i in 0..count {
+        let slot = (start + i) % EXCEPTION_LOG_SIZE;
+        // SAFETY: Reading a POD struct; partial reads produce valid (stale) data.
+        result[i] = unsafe { core::ptr::read_volatile(EXCEPTION_LOG[slot].0.get()) };
+    }
+
+    (result, total)
+}
+
 /// Get the count for a specific vector.
 #[must_use]
 pub fn vector_count(vector: usize) -> u64 {
@@ -799,6 +896,7 @@ fn dispatch_or_kill_userspace(
 #[unsafe(no_mangle)]
 extern "C" fn handle_divide_error(frame: &InterruptStackFrame, _error: u64) {
     count_vector(0);
+    log_exception(0, frame.rip, 0);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Divide Error (#DE)", frame, ExceptionCode::DivideError, 0);
@@ -898,6 +996,7 @@ extern "C" fn handle_bound_range(frame: &InterruptStackFrame, _error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_invalid_opcode(frame: &InterruptStackFrame, _error: u64) {
     count_vector(6);
+    log_exception(6, frame.rip, 0);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("Invalid Opcode (#UD)", frame, ExceptionCode::InvalidOpcode, 0);
@@ -970,6 +1069,7 @@ extern "C" fn handle_device_not_avail(frame: &InterruptStackFrame, _error: u64) 
 #[unsafe(no_mangle)]
 extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
     count_vector(8);
+    log_exception(8, frame.rip, error);
     // Double faults are always unrecoverable — even from ring 3.
     // By the time we get a #DF, the CPU has already failed to handle
     // the original exception AND the secondary fault.
@@ -1073,6 +1173,7 @@ extern "C" fn handle_stack_segment(frame: &InterruptStackFrame, error: u64) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64) {
     count_vector(13);
+    log_exception(13, frame.rip, error);
     if is_userspace_exception(frame) {
         use crate::proc::exception::ExceptionCode;
         dispatch_or_kill_userspace("General Protection Fault (#GP)", frame, ExceptionCode::GeneralProtectionFault, error);
@@ -1220,6 +1321,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
         // Unresolvable user fault — try SEH handler, then kill.
         mm::fault::record_fatal();
+        log_exception(14, frame.rip, cr2);
         let present = if error & 1 != 0 { "present" } else { "not-present" };
         let write = if error & 2 != 0 { "write" } else { "read" };
         serial_println!(
@@ -1235,6 +1337,7 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 
     // Unresolvable kernel page fault — halt.
     mm::fault::record_fatal();
+    log_exception(14, frame.rip, cr2);
     serial_println!(
         "EXCEPTION: Page Fault (#PF) at {:#x}, address={:#x}, error={:#x}",
         frame.rip,

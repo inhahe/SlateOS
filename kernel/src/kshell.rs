@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "cpuid", "exceptions", "faults", "memmap", "pgfault", "sysinfo", "tlb", "vectors",
+    "cpuid", "exceptions", "exclog", "faults", "memmap", "pgfault", "sysinfo", "tlb", "vectors",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4184,6 +4184,7 @@ fn dispatch(line: &str) {
         "bt" | "backtrace" => cmd_backtrace(),
         "diag" | "health" => cmd_diag(),
         "exceptions" | "vectors" => cmd_exceptions(),
+        "exclog" => cmd_exclog(),
         "sysinfo" | "cpuid" => cmd_sysinfo(),
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
@@ -4457,6 +4458,7 @@ fn cmd_help() {
     crate::console_println!("  bt        Show current kernel call stack (backtrace)");
     crate::console_println!("  diag      One-stop system health diagnostic summary");
     crate::console_println!("  exceptions Show per-vector exception/interrupt counts");
+    crate::console_println!("  exclog     Show recent exception event log");
     crate::console_println!("  sysinfo    Show CPU vendor, brand, features (cpuid)");
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
@@ -13831,6 +13833,35 @@ fn cmd_exceptions() {
     let total: u64 = counts.iter().sum();
     shell_println!("{}", "-".repeat(52));
     shell_println!("{:<6} {:<32} {:>12}", "", "TOTAL", total);
+}
+
+fn cmd_exclog() {
+    use crate::idt;
+
+    let (entries, total) = idt::recent_exceptions();
+    let count = total.min(32) as usize;
+
+    if count == 0 {
+        shell_println!("No exceptions logged.");
+        return;
+    }
+
+    shell_println!("Recent exceptions ({} total, showing last {}):", total, count);
+    shell_println!("{:<8} {:<5} {:<4} {:<18} {:<18}", "TICK", "VEC", "CPU", "RIP", "AUX");
+    shell_println!("{}", "-".repeat(56));
+
+    for entry in entries.iter().take(count) {
+        if entry.tick == 0 {
+            continue;
+        }
+        let name = if (entry.vector as usize) < 32 {
+            idt::EXCEPTION_NAMES[entry.vector as usize]
+        } else {
+            "IRQ"
+        };
+        shell_println!("{:<8} {:<5} {:<4} {:#018x} {:#018x}",
+            entry.tick, name, entry.cpu, entry.rip, entry.aux);
+    }
 }
 
 fn cmd_sysinfo() {

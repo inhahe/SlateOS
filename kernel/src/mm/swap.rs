@@ -1351,6 +1351,13 @@ pub unsafe fn swap_out_page(
         virt.as_u64(), swap_entry.slot()
     );
 
+    crate::ktrace::record(
+        crate::ktrace::Category::Mm,
+        crate::ktrace::event::SWAP_OUT,
+        virt.as_u64(),
+        swap_entry.slot() as u64,
+    );
+
     Ok(swap_entry)
 }
 
@@ -1453,6 +1460,13 @@ pub unsafe fn swap_in_page(
     serial_println!(
         "[swap] Swapped in: virt={:#x} ← slot={}",
         virt.as_u64(), swap_entry.slot()
+    );
+
+    crate::ktrace::record(
+        crate::ktrace::Category::Mm,
+        crate::ktrace::event::SWAP_IN,
+        virt.as_u64(),
+        swap_entry.slot() as u64,
     );
 
     Ok(())

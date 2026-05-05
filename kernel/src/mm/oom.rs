@@ -129,6 +129,14 @@ pub fn register_kill_callback(cb: KillCallback) {
 pub fn handle_oom(needed_pages: usize) -> usize {
     OOM_EVENTS.fetch_add(1, Ordering::Relaxed);
 
+    // Record OOM event in the kernel trace buffer for post-mortem analysis.
+    crate::ktrace::record(
+        crate::ktrace::Category::Mm,
+        crate::ktrace::event::RECLAIM, // Reuse: OOM is the ultimate reclaim event.
+        needed_pages as u64,
+        OOM_EVENTS.load(Ordering::Relaxed),
+    );
+
     // Last-resort pressure notification: give all caches one final
     // chance to free memory before we resort to killing processes.
     super::pressure::notify(super::pressure::PressureLevel::Critical);

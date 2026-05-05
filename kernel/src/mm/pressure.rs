@@ -258,6 +258,13 @@ pub fn notify(level: PressureLevel) {
             "level transition: {} -> {}",
             prev_level, level
         );
+        // Record pressure transition in trace buffer for timing analysis.
+        crate::ktrace::record(
+            crate::ktrace::Category::Mm,
+            crate::ktrace::event::RECLAIM,
+            prev_level as u64,
+            level as u64,
+        );
     }
 
     let table = SHRINKERS.lock();

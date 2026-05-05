@@ -168,6 +168,12 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] 12 categories, per-category filter, global enable/disable
   - [x] Trace points: task spawn, task exit
   - [x] Kshell 'trace' command for inspection
+- [x] FPU/SSE context save/restore
+  - [x] Eager fxsave64/fxrstor64 in switch_context assembly (matches modern Linux since 4.2)
+  - [x] Per-task FpuState (512-byte aligned buffer, default FCW=0x037F, MXCSR=0x1F80)
+  - [x] CR0/CR4 configuration on BSP (init_bsp) and APs (init_ap)
+  - [x] Fixed latent AP bug: CR4.OSFXSR not set after INIT-SIPI (SSE would #UD)
+  - [x] Self-test: XMM0 round-trip through save/restore verified
 
 ### 1.4 IPC and syscalls
 - [x] Syscall dispatch (many specialized syscalls, not few generic ones)

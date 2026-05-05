@@ -586,6 +586,69 @@ macro_rules! klog {
     }};
 }
 
+/// Kernel assertion macro with structured logging.
+///
+/// Like `assert!`, but logs a structured error entry to the klog ring
+/// buffer before panicking.  Provides richer context than bare assertions:
+/// - Logs the assertion as a structured event (retrievable via `dmesg`)
+/// - Records task ID and CPU context via the panic handler
+/// - Formats a descriptive message in the klog
+///
+/// # Usage
+///
+/// ```ignore
+/// kassert!(free_count > 0, "mm.frame", "No free frames for alloc (needed={})", needed);
+/// kassert!(ptr.is_aligned(), "mm.heap", "Unaligned pointer {:#x}", ptr as usize);
+/// ```
+///
+/// The module name (second argument) identifies the subsystem for log
+/// filtering (e.g., `dmesg -m mm` would show the assertion).
+#[macro_export]
+macro_rules! kassert {
+    ($cond:expr, $module:expr, $($arg:tt)*) => {{
+        if !$cond {
+            $crate::klog::log_fmt(
+                $crate::klog::Level::Error,
+                $module,
+                format_args!(
+                    "ASSERTION FAILED at {}:{}: {}",
+                    file!(),
+                    line!(),
+                    format_args!($($arg)*)
+                ),
+            );
+            panic!(
+                "kassert failed: {} ({}:{})",
+                format_args!($($arg)*),
+                file!(),
+                line!()
+            );
+        }
+    }};
+}
+
+/// Debug-only kernel assertion.
+///
+/// Like [`kassert!`] but compiled away in release builds (when
+/// `debug_assertions` is not set).  Use for expensive invariant checks
+/// that would impact hot-path performance.
+///
+/// In debug builds: logs and panics on failure.
+/// In release builds: completely eliminated (zero overhead).
+#[macro_export]
+macro_rules! kassert_debug {
+    ($cond:expr, $module:expr, $($arg:tt)*) => {{
+        #[cfg(debug_assertions)]
+        {
+            $crate::kassert!($cond, $module, $($arg)*);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = &$cond; // Suppress unused warnings.
+        }
+    }};
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

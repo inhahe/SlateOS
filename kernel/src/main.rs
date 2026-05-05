@@ -67,6 +67,7 @@ mod hpet;
 mod idt;
 mod idle;
 mod ioapic;
+mod irq_storm;
 mod ipc;
 mod keyboard;
 mod klog;

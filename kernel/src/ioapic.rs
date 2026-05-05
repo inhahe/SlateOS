@@ -725,8 +725,9 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     crate::virtio::blk::handle_irq(irq);
     crate::virtio::net::handle_irq(irq);
 
-    // 1. Record the interrupt.
+    // 1. Record the interrupt (for IRQ storm detection and notification).
     irq_notify(irq);
+    crate::irq_storm::record_irq(irq);
 
     // 2. Fast path: try immediate wake of the registered task.
     //    If the wake attempt fails (scheduler lock contention), raise

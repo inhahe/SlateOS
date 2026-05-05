@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "boottime", "boottiming", "canary", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4199,6 +4199,7 @@ fn dispatch(line: &str) {
         "kwarn" | "warnings" => cmd_kwarn(args),
         "loadavg" => cmd_loadavg(),
         "cputime" | "cpuacct" => cmd_cputime(),
+        "irqstorm" => cmd_irqstorm(args),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -14885,6 +14886,59 @@ fn cmd_cputime() {
     shell_println!("  IRQ:     {} ms", agg.irq_ns / 1_000_000);
     shell_println!("  Softirq: {} ms", agg.softirq_ns / 1_000_000);
     shell_println!("  Idle:    {} ms", agg.idle_ns / 1_000_000);
+}
+
+/// `irqstorm` — IRQ storm detection status and control.
+///
+/// Usage:
+///   `irqstorm`           — show status
+///   `irqstorm on`        — enable detection
+///   `irqstorm off`       — disable detection
+///   `irqstorm unmask N`  — force-unmask IRQ N
+fn cmd_irqstorm(args: &str) {
+    match args.trim() {
+        "on" => {
+            crate::irq_storm::set_enabled(true);
+            shell_println!("IRQ storm detection enabled.");
+        }
+        "off" => {
+            crate::irq_storm::set_enabled(false);
+            shell_println!("IRQ storm detection disabled.");
+        }
+        s if s.starts_with("unmask ") => {
+            if let Some(n_str) = s.strip_prefix("unmask ") {
+                if let Ok(irq) = n_str.trim().parse::<usize>() {
+                    crate::irq_storm::force_unmask(irq);
+                    shell_println!("IRQ {} force-unmasked.", irq);
+                } else {
+                    shell_println!("Usage: irqstorm unmask <irq_number>");
+                }
+            }
+        }
+        _ => {
+            // Show status.
+            let enabled = crate::irq_storm::is_enabled();
+            let total = crate::irq_storm::total_storms();
+            shell_println!("IRQ Storm Detector: {}", if enabled { "ENABLED" } else { "DISABLED" });
+            shell_println!("Total storms detected: {}", total);
+
+            let storm_stats = crate::irq_storm::stats();
+            if storm_stats.is_empty() {
+                shell_println!("(no storm activity recorded)");
+            } else {
+                shell_println!("");
+                shell_println!("  IRQ  Strikes  Masked  Storms  Cooldown");
+                shell_println!("  ---  -------  ------  ------  --------");
+                for s in &storm_stats {
+                    shell_println!("  {:>3}  {:>7}  {:>6}  {:>6}  {:>5}s",
+                        s.irq, s.strikes,
+                        if s.masked { "YES" } else { "no" },
+                        s.total_storms, s.cooldown_secs,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// `irqoff` — show interrupt-disabled duration statistics.

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqoff", "irqrate", "jitter", "kprofile", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4193,6 +4193,7 @@ fn dispatch(line: &str) {
         "irqrate" => cmd_irqrate(),
         "kprofile" => cmd_kprofile(args),
         "lockstats" | "lockstat" => cmd_lockstats(args),
+        "irqoff" => cmd_irqoff(args),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -4478,6 +4479,7 @@ fn cmd_help() {
     crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
     crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
     crate::console_println!("  lockstats  Show spinlock contention statistics");
+    crate::console_println!("  irqoff     Show interrupt-disabled duration tracking");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
     crate::console_println!("  sar        System activity reporter (compact one-liner)");
@@ -14505,6 +14507,76 @@ fn cmd_lockstats(args: &str) {
 
     shell_println!("");
     shell_println!("  Tracking: ON | Use 'lockstats reset' to clear, 'lockstats off' to disable");
+}
+
+/// `irqoff` — show interrupt-disabled duration statistics.
+///
+/// Shows how long interrupts have been disabled on average and at maximum.
+/// Useful for finding paths that hold interrupts off too long.
+///   `irqoff`       — show stats
+///   `irqoff reset` — reset counters
+///   `irqoff off`   — disable tracking
+///   `irqoff on`    — enable tracking
+fn cmd_irqoff(args: &str) {
+    match args.trim() {
+        "reset" => {
+            crate::cpu::irqoff_tracker::reset();
+            shell_println!("IRQ-off tracking stats reset.");
+            return;
+        }
+        "off" => {
+            crate::cpu::irqoff_tracker::set_enabled(false);
+            shell_println!("IRQ-off tracking disabled.");
+            return;
+        }
+        "on" => {
+            crate::cpu::irqoff_tracker::set_enabled(true);
+            shell_println!("IRQ-off tracking enabled.");
+            return;
+        }
+        _ => {}
+    }
+
+    let s = crate::cpu::irqoff_tracker::stats();
+
+    shell_println!("=== Interrupt-Disabled Duration ===");
+    shell_println!("");
+
+    if s.sections == 0 {
+        shell_println!("  No interrupt-off sections recorded yet.");
+        shell_println!("  (Tracking may be disabled, or no without_interrupts() calls made)");
+        return;
+    }
+
+    let freq = crate::bench::tsc_freq();
+    if freq > 0 {
+        let max_ns = crate::bench::cycles_to_ns(s.max_cycles);
+        let mean_ns = crate::bench::cycles_to_ns(s.mean_cycles);
+        let total_us = crate::bench::cycles_to_ns(s.total_cycles) / 1000;
+
+        shell_println!("  Sections recorded: {}", s.sections);
+        shell_println!("");
+        shell_println!("  Max IRQ-off:   {} cycles ({} ns)", s.max_cycles, max_ns);
+        shell_println!("  Mean IRQ-off:  {} cycles ({} ns)", s.mean_cycles, mean_ns);
+        shell_println!("  Total IRQ-off: {} cycles ({} us)", s.total_cycles, total_us);
+    } else {
+        shell_println!("  Sections recorded: {}", s.sections);
+        shell_println!("");
+        shell_println!("  Max IRQ-off:   {} cycles", s.max_cycles);
+        shell_println!("  Mean IRQ-off:  {} cycles", s.mean_cycles);
+        shell_println!("  Total IRQ-off: {} cycles", s.total_cycles);
+    }
+
+    // Warn if max is suspiciously long (> 1ms at assumed 3 GHz = 3M cycles).
+    if s.max_cycles > 3_000_000 {
+        shell_println!("");
+        shell_println!("  WARNING: Max IRQ-off duration exceeds 1ms!");
+        shell_println!("  This may cause timer jitter and missed interrupts.");
+    }
+
+    shell_println!("");
+    let enabled = if crate::cpu::irqoff_tracker::is_enabled() { "ON" } else { "OFF" };
+    shell_println!("  Tracking: {} | Use 'irqoff reset' to clear", enabled);
 }
 
 /// `pressure` — display memory pressure score and breakdown.

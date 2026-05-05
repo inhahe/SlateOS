@@ -153,14 +153,162 @@ where
     if were_enabled {
         // SAFETY: We restore the interrupt state after the closure.
         unsafe { cli(); }
+        irqoff_tracker::record_disable();
     }
     let result = f();
     if were_enabled {
+        irqoff_tracker::record_enable();
         // SAFETY: The IDT was already set up (interrupts were enabled
         // before we disabled them).
         unsafe { sti(); }
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Interrupt-disable duration tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks how long interrupts are disabled across all CPUs.
+///
+/// Maintains per-CPU TSC timestamps for when interrupts were last
+/// disabled, and global max/total statistics for diagnosing excessive
+/// interrupt-off durations.
+///
+/// ## Usage
+///
+/// The tracking is automatic when using [`without_interrupts`].
+/// For direct `cli()`/`sti()` usage, call
+/// [`irqoff_tracker::record_disable()`] after `cli()` and
+/// [`irqoff_tracker::record_enable()`] before `sti()`.
+///
+/// ## Overhead
+///
+/// One `rdtsc` per disable/enable pair (~10 cycles each) plus one
+/// atomic max-update on enable.  Negligible for typical workloads.
+pub mod irqoff_tracker {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Per-CPU TSC at last interrupt disable.
+    /// Index = CPU logical index.  0 means "not currently disabled" or
+    /// "tracking not active".
+    static DISABLE_TSC: [AtomicU64; crate::smp::MAX_CPUS] = {
+        const ZERO: AtomicU64 = AtomicU64::new(0);
+        [ZERO; crate::smp::MAX_CPUS]
+    };
+
+    /// Maximum interrupt-off duration observed (TSC cycles).
+    static MAX_OFF_CYCLES: AtomicU64 = AtomicU64::new(0);
+
+    /// Total interrupt-off duration accumulated (TSC cycles).
+    /// May wrap on very long-running systems — use for relative
+    /// measurement within a session, not absolute accounting.
+    static TOTAL_OFF_CYCLES: AtomicU64 = AtomicU64::new(0);
+
+    /// Number of interrupt-off sections completed.
+    static SECTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    /// Whether tracking is enabled.
+    static ENABLED: AtomicU64 = AtomicU64::new(1);
+
+    /// Record that interrupts were just disabled on this CPU.
+    #[inline]
+    pub fn record_disable() {
+        if ENABLED.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let cpu = crate::smp::current_cpu_index();
+        if let Some(slot) = DISABLE_TSC.get(cpu) {
+            slot.store(crate::bench::rdtsc(), Ordering::Relaxed);
+        }
+    }
+
+    /// Record that interrupts are about to be re-enabled on this CPU.
+    ///
+    /// Computes the duration since the last `record_disable()` call and
+    /// updates the max/total statistics.
+    #[inline]
+    pub fn record_enable() {
+        if ENABLED.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let cpu = crate::smp::current_cpu_index();
+        let start = DISABLE_TSC.get(cpu)
+            .map_or(0, |s| s.load(Ordering::Relaxed));
+        if start == 0 {
+            return; // No matching disable recorded.
+        }
+        let now = crate::bench::rdtsc();
+        let duration = now.saturating_sub(start);
+
+        SECTION_COUNT.fetch_add(1, Ordering::Relaxed);
+        TOTAL_OFF_CYCLES.fetch_add(duration, Ordering::Relaxed);
+
+        // Update max via CAS.
+        let mut cur = MAX_OFF_CYCLES.load(Ordering::Relaxed);
+        while duration > cur {
+            match MAX_OFF_CYCLES.compare_exchange_weak(
+                cur, duration, Ordering::Relaxed, Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
+
+        // Clear the slot.
+        if let Some(slot) = DISABLE_TSC.get(cpu) {
+            slot.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Interrupt-off duration statistics snapshot.
+    #[derive(Debug, Clone, Copy)]
+    pub struct IrqOffStats {
+        /// Number of interrupt-off sections recorded.
+        pub sections: u64,
+        /// Total TSC cycles spent with interrupts off.
+        pub total_cycles: u64,
+        /// Maximum single interrupt-off duration (TSC cycles).
+        pub max_cycles: u64,
+        /// Mean interrupt-off duration (TSC cycles), or 0 if no sections.
+        pub mean_cycles: u64,
+    }
+
+    /// Get current interrupt-off duration statistics.
+    #[must_use]
+    pub fn stats() -> IrqOffStats {
+        let sections = SECTION_COUNT.load(Ordering::Relaxed);
+        let total = TOTAL_OFF_CYCLES.load(Ordering::Relaxed);
+        let max = MAX_OFF_CYCLES.load(Ordering::Relaxed);
+        let mean = if sections > 0 { total / sections } else { 0 };
+        IrqOffStats {
+            sections,
+            total_cycles: total,
+            max_cycles: max,
+            mean_cycles: mean,
+        }
+    }
+
+    /// Reset all interrupt-off tracking counters.
+    #[allow(dead_code)]
+    pub fn reset() {
+        SECTION_COUNT.store(0, Ordering::Relaxed);
+        TOTAL_OFF_CYCLES.store(0, Ordering::Relaxed);
+        MAX_OFF_CYCLES.store(0, Ordering::Relaxed);
+    }
+
+    /// Enable or disable interrupt-off tracking.
+    #[allow(dead_code)]
+    pub fn set_enabled(enabled: bool) {
+        ENABLED.store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+    }
+
+    /// Check if tracking is enabled.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn is_enabled() -> bool {
+        ENABLED.load(Ordering::Relaxed) != 0
+    }
 }
 
 // ---------------------------------------------------------------------------

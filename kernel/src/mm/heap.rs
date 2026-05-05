@@ -68,6 +68,9 @@ static POISON_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 /// Count of detected double-free attempts.
 static DOUBLE_FREE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
+/// Count of detected buffer overflows (red zone corruption).
+static REDZONE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
 /// Enable slab poisoning (use-after-free detection).
 pub fn enable_poison() {
     POISON_ENABLED.store(true, Ordering::Release);
@@ -167,6 +170,46 @@ unsafe fn poison_alloc(ptr: *mut u8, class_size: usize) {
     // SAFETY: ptr is valid for class_size bytes.
     unsafe {
         ptr.write_bytes(ALLOC_POISON, class_size);
+    }
+}
+
+/// Check red zone integrity on dealloc.
+///
+/// The "red zone" is the gap between the user's requested size
+/// (`alloc_size`) and the slab class size (`class_size`).  On alloc,
+/// `poison_alloc` fills the entire slot with ALLOC_POISON (0xCD).
+/// The user writes their data into bytes 0..alloc_size.  If any byte
+/// in alloc_size..class_size is NOT 0xCD, the caller wrote past the
+/// end of their allocation — a buffer overflow.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid slab slot of `class_size` bytes.
+#[inline(never)]
+unsafe fn check_redzone(ptr: *mut u8, alloc_size: usize, class_size: usize) {
+    // No red zone if the allocation fills the entire class.
+    if alloc_size >= class_size {
+        return;
+    }
+    // Minimum red zone: need at least 4 bytes to be meaningful
+    // (avoids false positives from alignment padding the compiler adds).
+    if class_size.saturating_sub(alloc_size) < 4 {
+        return;
+    }
+
+    // Scan bytes from alloc_size to class_size for corruption.
+    // Use volatile reads to prevent optimizer from constant-propagating.
+    for i in alloc_size..class_size {
+        let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        if byte != ALLOC_POISON {
+            REDZONE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+            serial_println!(
+                "[heap] BUFFER OVERFLOW detected! slot={:#x}, alloc={}, class={}, offset={}",
+                ptr as usize, alloc_size, class_size, i
+            );
+            // Only report once per dealloc — no need to scan the rest.
+            return;
+        }
     }
 }
 
@@ -844,6 +887,17 @@ unsafe impl GlobalAlloc for KernelHeap {
         // through from the per-CPU fast path to the global slow path.
         let class_idx = HeapInner::size_class_index(&layout);
 
+        // Red zone check: if poisoning is enabled, verify that bytes
+        // between the user's allocation size and the class size still
+        // contain ALLOC_POISON.  If not, the user overflowed their buffer.
+        if POISON_ENABLED.load(Ordering::Relaxed) {
+            if let Some(idx) = class_idx {
+                let class_size = SIZE_CLASSES[idx];
+                // SAFETY: ptr points to a valid slab slot of class_size bytes.
+                unsafe { check_redzone(ptr, layout.size(), class_size); }
+            }
+        }
+
         // Per-CPU slab cache fast path.
         // OPT: No atomic counter on this path — the per-CPU
         // cache.slab_frees counter (plain increment, no lock prefix)
@@ -914,6 +968,8 @@ pub struct HeapStats {
     pub poison_violations: u32,
     /// Number of double-free violations detected.
     pub double_free_violations: u32,
+    /// Number of buffer overflow (red zone) violations detected.
+    pub redzone_violations: u32,
 }
 
 /// Read heap allocator statistics.
@@ -948,6 +1004,7 @@ pub fn stats() -> HeapStats {
         poison_enabled: POISON_ENABLED.load(Ordering::Relaxed),
         poison_violations: POISON_VIOLATIONS.load(Ordering::Relaxed),
         double_free_violations: DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed),
+        redzone_violations: REDZONE_VIOLATIONS.load(Ordering::Relaxed),
     }
 }
 
@@ -1365,6 +1422,28 @@ pub fn poison_self_test() {
     // free list (poison_free returns true → dealloc skips the push).
     // The slot from the first free is still validly on the list.
     serial_println!("[heap]   Double-free detection: OK (violation caught)");
+
+    // --- Test 4: Red zone (buffer overflow) detection ---
+    //
+    // Allocate 40 bytes (gets 64-byte class), write past byte 40 into
+    // the red zone (bytes 40..64), then free.  The free should detect
+    // that the red zone was corrupted.
+    let layout40 = Layout::from_size_align(40, 8).unwrap();
+    let p6 = unsafe { alloc::alloc::alloc(layout40) };
+    assert!(!p6.is_null(), "poison test: alloc for redzone test failed");
+    let rz_pre = REDZONE_VIOLATIONS.load(Ordering::Relaxed);
+    // Simulate buffer overflow: write past the 40-byte allocation
+    // into the red zone (byte 44 is in the gap between 40 and 64).
+    unsafe { core::ptr::write_volatile(p6.add(44), 0x42); }
+    // Free triggers red zone check — should detect corruption at byte 44.
+    unsafe { alloc::alloc::dealloc(p6, layout40); }
+    let rz_post = REDZONE_VIOLATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        rz_post,
+        rz_pre + 1,
+        "poison test: red zone overflow not detected"
+    );
+    serial_println!("[heap]   Buffer overflow (red zone) detection: OK");
 
     unsafe { crate::cpu::sti(); }
 

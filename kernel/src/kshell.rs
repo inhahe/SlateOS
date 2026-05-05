@@ -13278,9 +13278,10 @@ fn cmd_slabinfo() {
         overall.slab_refills, overall.alloc_failures,
     );
     shell_println!(
-        "Poison: {}  UAF violations: {}  Double-free violations: {}",
+        "Poison: {}  UAF: {}  Double-free: {}  Overflow: {}",
         if overall.poison_enabled { "ON" } else { "off" },
         overall.poison_violations, overall.double_free_violations,
+        overall.redzone_violations,
     );
 }
 

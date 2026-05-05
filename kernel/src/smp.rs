@@ -804,40 +804,62 @@ extern "C" fn ap_entry() -> ! {
         crate::cpu::sti();
     }
 
-    // Enter the AP idle loop.
+    // Enter the AP idle loop (tickless).
     //
-    // The timer ISR calls preempt() on every tick, which runs
-    // schedule_inner and switches to any ready task.  We do NOT call
-    // yield_now() here — it would redundantly acquire the SCHED lock
-    // (spinlock contention with other CPUs), re-enqueue the idle task,
-    // pick it right back, and return.  That contention was measured at
-    // ~4x regression on the context switch benchmark.
+    // When idle, this CPU stops its APIC timer to avoid 100 unnecessary
+    // interrupts/second per idle CPU.  The CPU wakes ONLY when a
+    // reschedule IPI arrives (vector 252), meaning new work has been
+    // enqueued on this CPU's run queue.
     //
-    // Maintenance tasks (reap + refill) run at reduced frequency to
-    // avoid lock thrashing: reap every ~1 second (100 ticks), refill
-    // on every wake.
-    let mut tick_counter = 0u32;
+    // The BSP (CPU 0) keeps its timer running because it drives the
+    // global tick_count and fires TIMER_SOFTIRQ for kernel timer
+    // expirations.  APs don't need their own timer ticks while idle.
+    //
+    // Flow:
+    //   1. Stop timer → HLT (sleep until reschedule IPI)
+    //   2. Wake → restart timer (need preemption for the task)
+    //   3. yield_now → switch to ready task → task runs with timer
+    //   4. Task blocks/finishes → scheduler returns us to idle
+    //   5. Back to step 1
+    //
+    // We do NOT call yield_now() without a reschedule_pending flag — it
+    // would redundantly acquire the SCHED lock (spinlock contention with
+    // other CPUs), re-enqueue the idle task, pick it right back, and
+    // return.  That contention was measured at ~4x regression on the
+    // context switch benchmark.
     loop {
-        crate::cpu::hlt(); // Sleep until next interrupt (timer tick or IPI).
+        // Stop the timer — no more ticks while idle.  This eliminates
+        // 100 unnecessary interrupts/second on this CPU.
+        //
+        // SAFETY: APIC is initialized on this AP, interrupts are enabled
+        // but we're about to HLT.  Even if a timer fires between
+        // stop_timer and HLT, it's harmless (just a spurious wake).
+        unsafe { crate::apic::stop_timer(); }
 
-        tick_counter = tick_counter.wrapping_add(1);
+        crate::cpu::hlt(); // Sleep until reschedule IPI.
+
+        // Woke up — restart the timer for preemptive time-slicing.
+        // The task we're about to switch to needs the timer for its
+        // time slice enforcement.
+        //
+        // SAFETY: APIC is initialized, restarting the periodic timer.
+        unsafe { crate::apic::restart_timer(); }
 
         // If a reschedule IPI woke us (someone enqueued work for this
         // CPU), yield immediately to pick up the new task.  This gives
-        // microsecond-level latency vs the 10ms timer tick interval.
+        // microsecond-level latency (IPI delivery time only — no 10ms
+        // timer tick wait).
         if crate::sched::reschedule_pending(cpu_index) {
             crate::sched::yield_now();
         }
 
-        // Reap dead tasks once per second (~100 ticks at 100 Hz).
-        // reap_dead_tasks allocates Vecs and acquires the SCHED lock
-        // even when nothing is dead, so throttling reduces contention.
-        if tick_counter.is_multiple_of(100) {
-            crate::sched::reap_dead_tasks();
-        }
-
-        // Refill the pre-zeroed frame pool.  This doesn't contend on
-        // the SCHED lock, only the frame allocator (per-CPU fast path).
+        // Refill the pre-zeroed frame pool on each wake.  This is
+        // cheap (per-CPU fast path, no SCHED lock) and keeps the pool
+        // topped up for demand paging.
+        //
+        // Note: reap_dead_tasks is handled by the BSP's idle loop
+        // (which keeps its timer running).  APs don't need to reap
+        // because dead tasks accumulate slowly and BSP handles them.
         crate::mm::frame::refill_zero_pool();
     }
 }

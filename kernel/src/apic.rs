@@ -683,6 +683,64 @@ pub unsafe fn send_fixed_ipi(apic_id: u8, vector: u8) {
 /// then checks the `RESCHEDULE_PENDING` flag and yields.
 pub const RESCHEDULE_VECTOR: u8 = 252;
 
+// ---------------------------------------------------------------------------
+// Tickless idle — stop/restart timer for idle CPUs
+// ---------------------------------------------------------------------------
+
+/// Stop the APIC timer on the current CPU (for tickless idle).
+///
+/// Masks the timer LVT entry so no more timer interrupts are delivered
+/// to this CPU.  The CPU can still be woken by the reschedule IPI
+/// (vector 252) when new work is enqueued.
+///
+/// This should only be called on APs entering idle.  The BSP (CPU 0)
+/// must keep its timer running because it drives the global `tick_count`
+/// and fires `TIMER_SOFTIRQ` for kernel timer expirations.
+///
+/// Call [`restart_timer`] when the CPU picks up a task and needs
+/// preemptive time-slice enforcement again.
+///
+/// # Safety
+///
+/// APIC must be initialized on this CPU.  Must be called with interrupts
+/// disabled or from a context where a timer interrupt won't race.
+pub unsafe fn stop_timer() {
+    // Mask the timer LVT entry (set bit 16).  The timer counter keeps
+    // running but no interrupt is delivered.  This is cheaper than
+    // setting initial_count=0 because we don't need to recalibrate
+    // when restarting.
+    //
+    // SAFETY: APIC is initialized, timer LVT is a valid register.
+    unsafe {
+        apic_write(APIC_TIMER_LVT, LVT_MASKED | TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR));
+    }
+}
+
+/// Restart the APIC timer on the current CPU (leaving tickless idle).
+///
+/// Unmasks the timer LVT entry and reprograms the initial count so
+/// the periodic timer resumes.  Call this when the CPU transitions
+/// from idle to running a task.
+///
+/// # Safety
+///
+/// APIC must be initialized on this CPU.
+pub unsafe fn restart_timer() {
+    let count = CALIBRATED_TIMER_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    if count == 0 {
+        return; // No calibration — timer was never started.
+    }
+
+    // SAFETY: APIC is initialized, writing valid register values.
+    unsafe {
+        // Unmask and set periodic mode.
+        apic_write(APIC_TIMER_LVT, TIMER_MODE_PERIODIC | u32::from(TIMER_VECTOR));
+        // Restart the countdown from the calibrated 10 ms value.
+        // Writing initial_count restarts the counter from this value.
+        apic_write(APIC_TIMER_INITIAL, count);
+    }
+}
+
 /// Initialize the Local APIC on an Application Processor.
 ///
 /// Reuses the BSP's calibrated timer count (APs don't recalibrate via PIT).

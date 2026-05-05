@@ -28,7 +28,7 @@ $proc = Start-Process -FilePath $qemu -ArgumentList @(
     "-no-shutdown"
 ) -NoNewWindow -PassThru
 
-Start-Sleep -Seconds 90
+Start-Sleep -Seconds 120
 Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
 
 if (Test-Path serial.log) {

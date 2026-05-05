@@ -85,6 +85,7 @@ mod pci;
 mod pmc;
 mod port;
 mod proc;
+mod ratelimit;
 mod rng;
 mod rtc;
 mod sched;

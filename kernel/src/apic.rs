@@ -894,9 +894,14 @@ pub unsafe fn init_ap() {
 /// Called from an interrupt handler with interrupts disabled.  Must
 /// not acquire locks that could be held by the interrupted code.
 #[unsafe(no_mangle)]
-pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
+pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _error: u64) {
     // --- CPU time accounting: entering IRQ context ---
     crate::cputime::enter_irq();
+
+    // --- RIP sampling: record where the CPU was when interrupted ---
+    // This is the core of the statistical profiler — captures the
+    // instruction pointer at each timer tick for performance analysis.
+    crate::rip_sample::record(frame.rip, crate::smp::current_cpu_index() as u8);
 
     // --- ISR latency measurement: record entry TSC ---
     //

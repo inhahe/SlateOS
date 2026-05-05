@@ -286,6 +286,20 @@ static SLAB_REFILLS: AtomicU64 = AtomicU64::new(0);
 /// Total number of failed allocations (OOM).
 static ALLOC_FAILURES: AtomicU64 = AtomicU64::new(0);
 
+/// Current bytes in use (allocated but not yet freed).
+///
+/// Incremented by `layout.size()` on each successful allocation,
+/// decremented on each deallocation.  Provides a live view of heap
+/// memory pressure.
+static BYTES_IN_USE: AtomicU64 = AtomicU64::new(0);
+
+/// Peak (high-water mark) of `BYTES_IN_USE` since boot.
+///
+/// Updated via CAS loop on each allocation.  Represents the maximum
+/// simultaneous heap consumption observed — useful for capacity planning
+/// and detecting memory pressure spikes.
+static PEAK_BYTES_IN_USE: AtomicU64 = AtomicU64::new(0);
+
 /// Per-size-class allocation counters (for leak detection / profiling).
 ///
 /// `CLASS_ALLOCS[i]` counts total allocations from size class `i` since boot.
@@ -863,6 +877,13 @@ unsafe impl GlobalAlloc for KernelHeap {
                     if let Some(counter) = CLASS_BYTES_REQUESTED.get(idx) {
                         counter.fetch_add(layout.size() as u64, Ordering::Relaxed);
                     }
+                    // Track bytes-in-use watermark.
+                    let current = BYTES_IN_USE.fetch_add(layout.size() as u64, Ordering::Relaxed)
+                        .saturating_add(layout.size() as u64);
+                    let _ = PEAK_BYTES_IN_USE.fetch_update(
+                        Ordering::Relaxed, Ordering::Relaxed,
+                        |peak| if current > peak { Some(current) } else { None },
+                    );
                     return ptr;
                 }
                 // Per-CPU path failed (OOM) — fall through to global.
@@ -891,8 +912,22 @@ unsafe impl GlobalAlloc for KernelHeap {
             if let Some(counter) = CLASS_BYTES_REQUESTED.get(idx) {
                 counter.fetch_add(layout.size() as u64, Ordering::Relaxed);
             }
+            // Track bytes-in-use watermark.
+            let current = BYTES_IN_USE.fetch_add(layout.size() as u64, Ordering::Relaxed)
+                .saturating_add(layout.size() as u64);
+            let _ = PEAK_BYTES_IN_USE.fetch_update(
+                Ordering::Relaxed, Ordering::Relaxed,
+                |peak| if current > peak { Some(current) } else { None },
+            );
         } else {
             LARGE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+            // Track bytes-in-use watermark for large allocs.
+            let current = BYTES_IN_USE.fetch_add(layout.size() as u64, Ordering::Relaxed)
+                .saturating_add(layout.size() as u64);
+            let _ = PEAK_BYTES_IN_USE.fetch_update(
+                Ordering::Relaxed, Ordering::Relaxed,
+                |peak| if current > peak { Some(current) } else { None },
+            );
         }
         ptr
     }
@@ -927,6 +962,7 @@ unsafe impl GlobalAlloc for KernelHeap {
             if let Some(idx) = class_idx {
                 // SAFETY: ptr was allocated from slab for this class.
                 if unsafe { pcpu_slab_dealloc(ptr, idx) } {
+                    BYTES_IN_USE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
                     return;
                 }
             }
@@ -945,11 +981,13 @@ unsafe impl GlobalAlloc for KernelHeap {
                 if let Some(counter) = CLASS_FREES.get(idx) {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
+                BYTES_IN_USE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
             }
             // SAFETY: Caller guarantees ptr was allocated with this layout.
             None => {
                 unsafe { inner.large_dealloc(ptr, &layout) };
                 LARGE_FREES.fetch_add(1, Ordering::Relaxed);
+                BYTES_IN_USE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
             }
         }
     }
@@ -990,6 +1028,10 @@ pub struct HeapStats {
     pub double_free_violations: u32,
     /// Number of buffer overflow (red zone) violations detected.
     pub redzone_violations: u32,
+    /// Current bytes in use (allocated - freed).
+    pub bytes_in_use: u64,
+    /// Peak bytes in use since boot (high-water mark).
+    pub peak_bytes_in_use: u64,
 }
 
 /// Read heap allocator statistics.
@@ -1025,6 +1067,8 @@ pub fn stats() -> HeapStats {
         poison_violations: POISON_VIOLATIONS.load(Ordering::Relaxed),
         double_free_violations: DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed),
         redzone_violations: REDZONE_VIOLATIONS.load(Ordering::Relaxed),
+        bytes_in_use: BYTES_IN_USE.load(Ordering::Relaxed),
+        peak_bytes_in_use: PEAK_BYTES_IN_USE.load(Ordering::Relaxed),
     }
 }
 

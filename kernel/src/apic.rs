@@ -114,7 +114,7 @@ const PIT_COMMAND: u16 = 0x43;
 const NMI_STATUS: u16 = 0x61;
 
 /// Desired tick rate in Hz (10 ms period).
-const TICK_RATE_HZ: u32 = 100;
+pub const TICK_RATE_HZ: u32 = 100;
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -151,6 +151,38 @@ static ISR_HARD_TOTAL: core::sync::atomic::AtomicU64 =
 /// Number of ticks measured.
 static ISR_MEASURE_COUNT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Timer jitter tracking (always-on, measures inter-tick interval variance)
+// ---------------------------------------------------------------------------
+
+/// TSC value at the previous timer tick (BSP only).
+///
+/// Used to compute the interval between consecutive timer interrupts.
+/// Zero means "not yet initialized" (first tick hasn't fired).
+static JITTER_LAST_TSC: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Minimum inter-tick interval in TSC cycles observed since boot.
+static JITTER_MIN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Maximum inter-tick interval in TSC cycles observed since boot.
+static JITTER_MAX: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Sum of all inter-tick intervals (for average computation).
+/// Wraps on overflow, but that takes centuries at typical TSC rates.
+static JITTER_SUM: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Number of inter-tick intervals recorded.
+static JITTER_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Tick counter
+// ---------------------------------------------------------------------------
 
 /// Tick counter — incremented on every timer interrupt.
 static TICK_COUNT: core::sync::atomic::AtomicU64 =
@@ -294,6 +326,64 @@ pub fn isr_measurement_results() -> Option<IsrMeasurement> {
         count,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Timer jitter — public API
+// ---------------------------------------------------------------------------
+
+/// Timer jitter statistics (inter-tick interval variance).
+///
+/// Measures the TSC-cycle interval between consecutive APIC timer
+/// interrupts on the BSP.  Jitter indicates that something delayed
+/// interrupt delivery: long critical sections, NMIs, SMIs, or
+/// hyper-visor VM exits.
+#[derive(Debug, Clone, Copy)]
+pub struct TimerJitter {
+    /// Minimum inter-tick interval (TSC cycles).
+    pub min_cycles: u64,
+    /// Maximum inter-tick interval (TSC cycles).
+    pub max_cycles: u64,
+    /// Mean inter-tick interval (TSC cycles).
+    pub mean_cycles: u64,
+    /// Number of intervals measured.
+    pub count: u64,
+    /// Expected interval (TSC cycles per tick).  Estimated from mean
+    /// if enough samples exist; zero if unknown.
+    pub expected_cycles: u64,
+}
+
+/// Read timer jitter statistics.
+///
+/// Returns `None` if fewer than 2 timer ticks have fired (need at least
+/// one interval to measure).
+#[must_use]
+pub fn timer_jitter() -> Option<TimerJitter> {
+    let count = JITTER_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    if count == 0 {
+        return None;
+    }
+    let sum = JITTER_SUM.load(core::sync::atomic::Ordering::Relaxed);
+    let mean = sum.checked_div(count).unwrap_or(0);
+    Some(TimerJitter {
+        min_cycles: JITTER_MIN.load(core::sync::atomic::Ordering::Relaxed),
+        max_cycles: JITTER_MAX.load(core::sync::atomic::Ordering::Relaxed),
+        mean_cycles: mean,
+        count,
+        // The mean *is* the best estimate of the expected interval
+        // (it converges to TSC_freq / TICK_RATE_HZ over many samples).
+        expected_cycles: mean,
+    })
+}
+
+/// Get the configured tick rate in Hz.
+#[must_use]
+pub fn tick_rate_hz() -> u32 {
+    TICK_RATE_HZ
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
 
 /// Initialize the Local APIC and start the periodic timer.
 ///
@@ -829,6 +919,33 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
     // don't double-count the global tick.
     if crate::smp::current_cpu_index() == 0 {
         TICK_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        // --- Timer jitter tracking ---
+        //
+        // Measure the TSC interval between consecutive timer interrupts
+        // on the BSP.  Ideal interval is constant (TSC_freq / TICK_RATE_HZ).
+        // Variance indicates long critical sections, NMIs, or SMIs that
+        // delayed interrupt delivery.  Cost: 1 rdtsc + 2 atomic stores
+        // per tick (~30 cycles total on modern x86).
+        let now_tsc = crate::bench::rdtsc();
+        let prev_tsc = JITTER_LAST_TSC.swap(now_tsc, core::sync::atomic::Ordering::Relaxed);
+        if prev_tsc != 0 {
+            let delta = now_tsc.saturating_sub(prev_tsc);
+            JITTER_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            JITTER_SUM.fetch_add(delta, core::sync::atomic::Ordering::Relaxed);
+            // Update min (CAS loop).
+            let _ = JITTER_MIN.fetch_update(
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+                |cur| if delta < cur { Some(delta) } else { None },
+            );
+            // Update max (CAS loop).
+            let _ = JITTER_MAX.fetch_update(
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+                |cur| if delta > cur { Some(delta) } else { None },
+            );
+        }
     }
 
     // Tick the scheduler and check if a reschedule is needed.

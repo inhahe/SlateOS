@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "memmap", "pgfault", "stackcheck", "sysinfo", "tlb", "vectors",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "heapwm", "jitter", "memmap", "pgfault", "stackcheck", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4190,6 +4190,8 @@ fn dispatch(line: &str) {
         "canary" | "stackcheck" => cmd_canary(),
         "tlb" => cmd_tlb(),
         "pgfault" | "faults" => cmd_pgfault(),
+        "jitter" | "tickjitter" => cmd_jitter(),
+        "heapwm" | "watermark" => cmd_heapwm(),
         "memmap" => cmd_memmap(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
@@ -4466,6 +4468,8 @@ fn cmd_help() {
     crate::console_println!("  canary     Scan all task stack canaries for corruption");
     crate::console_println!("  tlb        Show TLB shootdown statistics");
     crate::console_println!("  pgfault    Show page fault statistics by type");
+    crate::console_println!("  jitter     Show timer interrupt jitter (inter-tick variance)");
+    crate::console_println!("  heapwm     Show heap allocation watermark (peak usage)");
     crate::console_println!("  memmap     Show virtual address space layout");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
@@ -14064,6 +14068,83 @@ fn cmd_pgfault() {
         .saturating_sub(s.swap_in)
         .saturating_sub(s.stack_growth);
     shell_println!("    Demand page (other): {}", demand);
+}
+
+/// `jitter` — display timer interrupt jitter statistics.
+///
+/// Shows the variance in inter-tick intervals (the time between
+/// consecutive APIC timer interrupts).  Jitter indicates that something
+/// delayed interrupt delivery: long critical sections, NMIs, SMIs, or
+/// hypervisor VM exits.
+fn cmd_jitter() {
+    match crate::apic::timer_jitter() {
+        None => {
+            shell_println!("Timer jitter: no data (too few ticks)");
+        }
+        Some(j) => {
+            shell_println!("=== Timer Jitter (inter-tick interval) ===");
+            shell_println!("");
+            shell_println!("  Samples:  {} intervals", j.count);
+            shell_println!("  Expected: {} cycles/tick (from mean)", j.expected_cycles);
+            shell_println!("");
+            shell_println!("  Min:  {} cycles", j.min_cycles);
+            shell_println!("  Mean: {} cycles", j.mean_cycles);
+            shell_println!("  Max:  {} cycles", j.max_cycles);
+            shell_println!("");
+
+            // Compute jitter as percentage deviation from mean.
+            if j.mean_cycles > 0 {
+                let max_dev = j.max_cycles.saturating_sub(j.mean_cycles);
+                let min_dev = j.mean_cycles.saturating_sub(j.min_cycles);
+                #[allow(clippy::arithmetic_side_effects)]
+                let max_pct = (max_dev.saturating_mul(100)) / j.mean_cycles;
+                #[allow(clippy::arithmetic_side_effects)]
+                let min_pct = (min_dev.saturating_mul(100)) / j.mean_cycles;
+                shell_println!("  Deviation from mean:");
+                shell_println!("    Max late:  +{}% ({} cycles over)", max_pct, max_dev);
+                shell_println!("    Max early: -{}% ({} cycles under)", min_pct, min_dev);
+
+                // Warn if jitter exceeds 10%.
+                if max_pct > 10 || min_pct > 10 {
+                    shell_println!("");
+                    shell_println!("  WARNING: Jitter exceeds 10% — long critical");
+                    shell_println!("  sections or external delays (SMI/NMI) detected.");
+                }
+            }
+        }
+    }
+}
+
+/// `heapwm` — display heap allocation watermark (peak usage).
+///
+/// Shows current bytes in use, peak bytes since boot, and allocation
+/// throughput (total allocs/frees).
+fn cmd_heapwm() {
+    let s = crate::mm::heap::stats();
+
+    shell_println!("=== Heap Allocation Watermark ===");
+    shell_println!("");
+    shell_println!("  Current in-use:     {} bytes ({} KiB)",
+        s.bytes_in_use, s.bytes_in_use / 1024);
+    shell_println!("  Peak (high-water):  {} bytes ({} KiB)",
+        s.peak_bytes_in_use, s.peak_bytes_in_use / 1024);
+    shell_println!("");
+
+    // Utilization: current as percentage of peak.
+    if s.peak_bytes_in_use > 0 {
+        #[allow(clippy::arithmetic_side_effects)]
+        let util_pct = (s.bytes_in_use.saturating_mul(100)) / s.peak_bytes_in_use;
+        shell_println!("  Current/peak ratio: {}%", util_pct);
+    }
+    shell_println!("");
+
+    // Allocation throughput.
+    let total_allocs = s.slab_allocs.saturating_add(s.large_allocs);
+    let total_frees = s.slab_frees.saturating_add(s.large_frees);
+    shell_println!("  Total allocations:  {}", total_allocs);
+    shell_println!("  Total frees:        {}", total_frees);
+    shell_println!("  Net live objects:   {}", total_allocs.saturating_sub(total_frees));
+    shell_println!("  OOM failures:       {}", s.alloc_failures);
 }
 
 fn cmd_memmap() {

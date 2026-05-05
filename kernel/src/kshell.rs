@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4235,6 +4235,7 @@ fn dispatch(line: &str) {
         "ipcstat" | "ipc" => cmd_ipc_stat(args),
         "kobjects" | "kobj" => cmd_kobjects(args),
         "fraghist" | "fragtrend" => cmd_frag_history(args),
+        "selftest" => cmd_selftest(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15980,6 +15981,71 @@ fn cmd_kobjects(args: &str) {
             }
             shell_println!("");
             shell_println!("  Total active objects: {}", kobject::total_active());
+        }
+    }
+}
+
+/// `selftest` — run kernel self-tests.
+///
+/// Usage:
+///   selftest         — run all tests
+///   selftest list    — list available test suites
+///   selftest mm      — run only memory subsystem tests
+///   selftest <name>  — run a specific named test
+fn cmd_selftest(args: &str) {
+    use crate::selftest;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "list" => {
+            let suites = selftest::list();
+            shell_println!("=== Available Self-Tests ({}) ===", suites.len());
+            shell_println!("");
+            shell_println!("  {:16} {:8} {}", "NAME", "CATEGORY", "DESCRIPTION");
+            for s in &suites {
+                shell_println!("  {:16} {:8} {}", s.name, s.category, s.description);
+            }
+            shell_println!("");
+            let cats = selftest::categories();
+            shell_println!("  Categories: {:?}", cats);
+            shell_println!("  Usage: selftest <category> or selftest <name>");
+        }
+        "" | "all" => {
+            shell_println!("Running all self-tests...");
+            shell_println!("");
+            let results = selftest::run_all();
+            shell_println!("");
+            if results.failed.is_empty() {
+                shell_println!("=== ALL {} TESTS PASSED ===", results.total);
+            } else {
+                shell_println!("=== {}/{} PASSED, {} FAILED ===",
+                    results.passed, results.total, results.failed.len());
+                for name in &results.failed {
+                    shell_println!("  FAIL: {}", name);
+                }
+            }
+        }
+        filter => {
+            // Check if it's a category.
+            let cats = selftest::categories();
+            if cats.contains(&filter) {
+                shell_println!("Running '{}' category tests...", filter);
+                shell_println!("");
+                let results = selftest::run_category(filter);
+                shell_println!("");
+                shell_println!("=== {}/{} PASSED ===", results.passed, results.total);
+            } else {
+                // Try as a specific test name.
+                let results = selftest::run_one(filter);
+                if results.total == 0 {
+                    shell_println!("No test found with name '{}'", filter);
+                    shell_println!("Use 'selftest list' to see available tests");
+                } else {
+                    shell_println!("");
+                    shell_println!("=== {}/{} PASSED ===", results.passed, results.total);
+                }
+            }
         }
     }
 }

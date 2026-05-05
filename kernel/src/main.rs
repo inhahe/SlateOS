@@ -106,6 +106,7 @@ mod rtc;
 mod sched;
 mod sclatency;
 mod security;
+mod selftest;
 mod serial;
 mod smp;
 mod softirq;
@@ -975,6 +976,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++p: Fragmentation history self-test.
     // Tracks memory fragmentation over time for trend analysis.
     mm::frag_history::self_test();
+
+    // Step 22e⅞++++q: Self-test runner infrastructure test.
+    // Verifies the centralized test runner can enumerate suites.
+    selftest::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

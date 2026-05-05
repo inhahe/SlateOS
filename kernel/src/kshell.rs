@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4199,6 +4199,7 @@ fn dispatch(line: &str) {
         "kwarn" | "warnings" => cmd_kwarn(args),
         "loadavg" => cmd_loadavg(),
         "memtype" | "memacct" => cmd_memtype(),
+        "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -4489,6 +4490,7 @@ fn cmd_help() {
     crate::console_println!("  kwarn      Show kernel warnings (kwarn clear to reset)");
     crate::console_println!("  loadavg    Show 1/5/15 minute system load averages");
     crate::console_println!("  memtype    Show physical memory usage by type");
+    crate::console_println!("  sclatency  Show syscall latency histogram");
     crate::console_println!("  irqoff     Show interrupt-disabled duration tracking");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
@@ -14680,6 +14682,71 @@ fn cmd_kwarn(args: &str) {
 
         shell_println!("  [{}] {} ({}:{}) [{}]",
             i + 1, msg, file, w.line, age_str);
+    }
+    shell_println!("");
+}
+
+/// `sclatency` — show syscall latency histogram.
+///
+/// Displays the distribution of syscall execution times across
+/// logarithmic buckets.  `sclatency reset` clears the histogram.
+fn cmd_sclatency(args: &str) {
+    match args.trim() {
+        "reset" | "clear" => {
+            crate::sclatency::reset();
+            shell_println!("Syscall latency histogram reset.");
+            return;
+        }
+        "off" => {
+            crate::sclatency::set_enabled(false);
+            shell_println!("Syscall latency tracking disabled.");
+            return;
+        }
+        "on" => {
+            crate::sclatency::set_enabled(true);
+            shell_println!("Syscall latency tracking enabled.");
+            return;
+        }
+        _ => {}
+    }
+
+    let s = crate::sclatency::stats();
+    let labels = crate::sclatency::bucket_labels();
+
+    if s.total_calls == 0 {
+        shell_println!("No syscalls recorded yet.");
+        return;
+    }
+
+    shell_println!("=== Syscall Latency Histogram ({} calls) ===", s.total_calls);
+    shell_println!("");
+    shell_println!("  min={}ns  mean={}ns  max={}ns", s.min_ns, s.mean_ns, s.max_ns);
+    shell_println!("");
+
+    // Find max bucket count for bar scaling.
+    let max_count = s.buckets.iter().copied().max().unwrap_or(1).max(1);
+
+    for (i, &count) in s.buckets.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let pct = count.saturating_mul(100) / s.total_calls.max(1);
+        let bar_len = (count.saturating_mul(30) / max_count) as usize;
+        let bar: alloc::string::String = core::iter::repeat('#').take(bar_len).collect();
+        shell_println!("  {:>9} [{:>5} {:>3}%] {}",
+            labels[i], count, pct, bar);
+    }
+
+    // Per-syscall breakdown.
+    let per_sc = crate::sclatency::per_syscall_stats();
+    if !per_sc.is_empty() {
+        shell_println!("");
+        shell_println!("  Top syscalls by count:");
+        for (nr, count, mean_cyc) in per_sc.iter().take(8) {
+            let mean_ns = crate::bench::cycles_to_ns(*mean_cyc);
+            shell_println!("    syscall {:>2}: {:>6} calls, mean {}ns",
+                nr, count, mean_ns);
+        }
     }
     shell_println!("");
 }

@@ -375,6 +375,8 @@ const fn build_v1_table() -> SyscallTable {
 /// A [`SyscallResult`] with the return values for `rax` and `rdx`.
 #[allow(clippy::cast_possible_truncation)]
 pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
+    let sc_start = crate::sclatency::enter();
+
     crate::ktrace::record(
         crate::ktrace::Category::Syscall,
         crate::ktrace::event::SYSCALL_ENTER,
@@ -385,6 +387,7 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
     // Bounds check.
     let idx = nr as usize;
     if idx >= MAX_SYSCALL_NR {
+        crate::sclatency::exit(sc_start, nr);
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -392,7 +395,7 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
     //
     // SAFETY: idx is bounds-checked above.
     #[allow(clippy::indexing_slicing)]
-    if let Some(handler) = V1_TABLE.handlers[idx] {
+    let result = if let Some(handler) = V1_TABLE.handlers[idx] {
         handler(args)
     } else {
         serial_println!(
@@ -400,7 +403,10 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
             nr, V1_TABLE.version
         );
         SyscallResult::err(KernelError::NotSupported)
-    }
+    };
+
+    crate::sclatency::exit(sc_start, nr);
+    result
 }
 
 /// Get the current syscall ABI version.

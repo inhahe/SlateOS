@@ -88,6 +88,7 @@ mod proc;
 mod rng;
 mod rtc;
 mod sched;
+mod sclatency;
 mod security;
 mod serial;
 mod smp;

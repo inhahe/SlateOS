@@ -75,6 +75,7 @@ mod kprofile;
 mod kstat;
 mod kwarn;
 mod ktimer;
+mod loadavg;
 mod ktrace;
 mod limine;
 mod lockdep;

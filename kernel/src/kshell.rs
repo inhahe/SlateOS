@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4197,6 +4197,7 @@ fn dispatch(line: &str) {
         "idle" => cmd_idle(),
         "kstat" | "history" => cmd_kstat(args),
         "kwarn" | "warnings" => cmd_kwarn(args),
+        "loadavg" => cmd_loadavg(),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -5427,24 +5428,26 @@ fn cmd_uptime() {
     #[allow(clippy::arithmetic_side_effects)]
     let hours = minutes / 60;
 
-    // Load average from scheduler (×100 fixed-point).
-    let load = crate::sched::load_average_x100();
-    #[allow(clippy::arithmetic_side_effects)]
-    let load_whole = load / 100;
-    #[allow(clippy::arithmetic_side_effects)]
-    let load_frac = load % 100;
+    // Load averages (1/5/15 minute EWMA).
+    let (l1, l5, l15) = crate::loadavg::get();
+    let (l1_w, l1_f) = crate::loadavg::format_load(l1);
+    let (l5_w, l5_f) = crate::loadavg::format_load(l5);
+    let (l15_w, l15_f) = crate::loadavg::format_load(l15);
 
     // Active (non-idle) task count.
     let stats = crate::sched::sched_stats();
     let active = stats.total_tasks_spawned.saturating_sub(stats.total_tasks_exited);
+    let nr_run = crate::loadavg::nr_running();
 
     shell_println!(
-        "up {:02}:{:02}:{:02}, load average: {}.{:02}, {} tasks",
+        "up {:02}:{:02}:{:02}, load average: {}.{:02}, {}.{:02}, {}.{:02}, {}/{} tasks",
         hours,
         minutes % 60,
         seconds % 60,
-        load_whole,
-        load_frac,
+        l1_w, l1_f,
+        l5_w, l5_f,
+        l15_w, l15_f,
+        nr_run,
         active,
     );
 }
@@ -14650,6 +14653,31 @@ fn cmd_kwarn(args: &str) {
             i + 1, msg, file, w.line, age_str);
     }
     shell_println!("");
+}
+
+/// `loadavg` — show system load averages.
+///
+/// Displays 1-minute, 5-minute, and 15-minute exponential moving
+/// averages of the number of runnable tasks (like `/proc/loadavg`).
+fn cmd_loadavg() {
+    let (l1, l5, l15) = crate::loadavg::get();
+    let (l1_w, l1_f) = crate::loadavg::format_load(l1);
+    let (l5_w, l5_f) = crate::loadavg::format_load(l5);
+    let (l15_w, l15_f) = crate::loadavg::format_load(l15);
+
+    let nr_run = crate::loadavg::nr_running();
+    let samples = crate::loadavg::sample_count();
+
+    shell_println!("{}.{:02} {}.{:02} {}.{:02} {}/total {}",
+        l1_w, l1_f,
+        l5_w, l5_f,
+        l15_w, l15_f,
+        nr_run,
+        samples,
+    );
+    shell_println!("");
+    shell_println!("  1-min  5-min  15-min  running  samples");
+    shell_println!("  Load averages sampled every 5 seconds (EWMA, fixed-point)");
 }
 
 /// `irqoff` — show interrupt-disabled duration statistics.

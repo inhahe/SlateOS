@@ -342,6 +342,13 @@ fn handle_timer() {
     {
         crate::kstat::sample();
     }
+
+    // Load average update (every 5 seconds on BSP, like Linux's LOAD_FREQ).
+    if u64::from(ticks) % crate::loadavg::SAMPLE_INTERVAL_TICKS == 0
+        && crate::smp::current_cpu_index() == 0
+    {
+        crate::loadavg::sample();
+    }
 }
 
 /// Scheduler softirq handler — proactive push-based load balancing.

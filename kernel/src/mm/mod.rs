@@ -48,6 +48,7 @@ pub mod protect;
 pub mod rlimits;
 pub mod rmap;
 pub mod swap;
+pub mod tlb_gather;
 pub mod user;
 pub mod vmalloc;
 pub mod vma;

@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4218,6 +4218,7 @@ fn dispatch(line: &str) {
         "pcid" => cmd_pcid(),
         "poison" => cmd_poison(),
         "watermark" | "wmark" => cmd_watermark(),
+        "tlbgather" | "gather" => cmd_tlb_gather(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15346,6 +15347,17 @@ fn cmd_watermark() {
             .unwrap_or("?");
         shell_println!("  {:<20} {:>12} {:>12}", name, s.current, s.peak);
     }
+}
+
+/// `tlbgather` — display TLB gather (batch flush) statistics.
+fn cmd_tlb_gather() {
+    let s = crate::mm::tlb_gather::stats();
+    shell_println!("=== TLB Flush Gather ===");
+    shell_println!("");
+    shell_println!("  Gather operations:    {}", s.gather_ops);
+    shell_println!("  Pages freed (deferred): {}", s.pages_freed);
+    shell_println!("  Partial flushes:      {}", s.partial_flushes);
+    shell_println!("  Full flushes chosen:  {}", s.full_flush_chosen);
 }
 
 /// `msi` — display MSI (Message Signaled Interrupts) vector pool status.

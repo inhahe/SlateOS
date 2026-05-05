@@ -907,7 +907,11 @@ extern "C" fn kmain() -> ! {
     // Verifies per-subsystem peak usage tracking.
     mm::watermark::self_test();
 
-    // Step 22e⅞++: PCID (Process Context Identifiers) initialization.
+    // Step 22e⅞+++: TLB flush gather self-test.
+    // Verifies batched TLB shootdown and deferred frame free.
+    mm::tlb_gather::self_test();
+
+    // Step 22e⅞++++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();
     mm::pcid::enable_on_this_cpu();

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "irqrate", "jitter", "kprofile", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4192,6 +4192,7 @@ fn dispatch(line: &str) {
         "pgfault" | "faults" => cmd_pgfault(),
         "irqrate" => cmd_irqrate(),
         "kprofile" => cmd_kprofile(args),
+        "lockstats" | "lockstat" => cmd_lockstats(args),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -4476,6 +4477,7 @@ fn cmd_help() {
     crate::console_println!("  pgfault    Show page fault statistics by type");
     crate::console_println!("  irqrate    Show interrupt rates (IRQs/sec per vector)");
     crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
+    crate::console_println!("  lockstats  Show spinlock contention statistics");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
     crate::console_println!("  sar        System activity reporter (compact one-liner)");
@@ -14416,6 +14418,93 @@ fn cmd_kprofile(args: &str) {
         shell_println!("");
         shell_println!("  Profiling is {}. Instrumented paths will auto-record.", enabled);
     }
+}
+
+/// `lockstats` — display spinlock contention statistics.
+///
+/// Shows per-lock contention data: acquisitions, contentions, wait
+/// times, and hold times.  Subcommands:
+///   `lockstats`       — show all tracked locks
+///   `lockstats reset` — reset all counters
+///   `lockstats off`   — disable contention tracking
+///   `lockstats on`    — enable contention tracking
+#[allow(clippy::cast_possible_truncation)]
+fn cmd_lockstats(args: &str) {
+    match args.trim() {
+        "reset" => {
+            crate::sync::reset_all_stats();
+            shell_println!("Lock contention stats reset.");
+            return;
+        }
+        "off" => {
+            crate::sync::set_tracking_enabled(false);
+            shell_println!("Lock contention tracking disabled.");
+            return;
+        }
+        "on" => {
+            crate::sync::set_tracking_enabled(true);
+            shell_println!("Lock contention tracking enabled.");
+            return;
+        }
+        _ => {}
+    }
+
+    shell_println!("=== Spinlock Contention ===");
+    shell_println!("");
+
+    let snapshots = crate::sync::lock_stats();
+    let freq = crate::bench::tsc_freq();
+    let mut any = false;
+
+    if freq > 0 {
+        shell_println!("  {:<12} {:>8} {:>8} {:>5}  {:>7} {:>7}  {:>7} {:>7}",
+            "Lock", "Acquires", "Content.", "Pct",
+            "WaitMax", "HoldMax", "WaitTot", "HoldTot");
+        shell_println!("  {:<12} {:>8} {:>8} {:>5}  {:>7} {:>7}  {:>7} {:>7}",
+            "----", "--------", "--------", "---",
+            "-------", "-------", "-------", "-------");
+    } else {
+        shell_println!("  {:<12} {:>8} {:>8} {:>5}  {:>10} {:>10}",
+            "Lock", "Acquires", "Content.", "Pct", "MaxWait cy", "MaxHold cy");
+        shell_println!("  {:<12} {:>8} {:>8} {:>5}  {:>10} {:>10}",
+            "----", "--------", "--------", "---", "----------", "----------");
+    }
+
+    for snap in &snapshots {
+        if let Some(s) = snap {
+            if s.acquisitions == 0 {
+                continue;
+            }
+            any = true;
+            let name_str = core::str::from_utf8(s.name).unwrap_or("???");
+            let pct = if s.acquisitions > 0 {
+                (s.contentions * 100) / s.acquisitions
+            } else {
+                0
+            };
+
+            if freq > 0 {
+                let max_wait_ns = crate::bench::cycles_to_ns(s.max_wait_cycles);
+                let max_hold_ns = crate::bench::cycles_to_ns(s.max_hold_cycles);
+                let tot_wait_us = crate::bench::cycles_to_ns(s.total_wait_cycles) / 1000;
+                let tot_hold_us = crate::bench::cycles_to_ns(s.total_hold_cycles) / 1000;
+                shell_println!("  {:<12} {:>8} {:>8} {:>4}%  {:>5}ns {:>5}ns  {:>5}us {:>5}us",
+                    name_str, s.acquisitions, s.contentions, pct,
+                    max_wait_ns, max_hold_ns, tot_wait_us, tot_hold_us);
+            } else {
+                shell_println!("  {:<12} {:>8} {:>8} {:>4}%  {:>10} {:>10}",
+                    name_str, s.acquisitions, s.contentions, pct,
+                    s.max_wait_cycles, s.max_hold_cycles);
+            }
+        }
+    }
+
+    if !any {
+        shell_println!("  (no lock activity recorded yet)");
+    }
+
+    shell_println!("");
+    shell_println!("  Tracking: ON | Use 'lockstats reset' to clear, 'lockstats off' to disable");
 }
 
 /// `pressure` — display memory pressure score and breakdown.

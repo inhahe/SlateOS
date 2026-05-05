@@ -57,6 +57,7 @@ mod boot;
 mod cap;
 mod console;
 mod cpu;
+mod cpu_topology;
 mod cputime;
 mod crypto;
 mod error;
@@ -808,6 +809,11 @@ extern "C" fn kmain() -> ! {
     }
 
     boot_timing::mark(boot_timing::Milestone::Smp);
+
+    // Step 22b¾: CPU topology detection.
+    // Now that all CPUs are online, decode APIC ID hierarchy to determine
+    // package/core/SMT relationships for topology-aware scheduling.
+    cpu_topology::detect();
 
     // Step 22c: TLB shootdown self-test.
     // Now that all CPUs are online, verify the TLB shootdown IPI works.

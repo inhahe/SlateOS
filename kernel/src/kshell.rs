@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "counters", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "counters", "cpuacct", "cpuid", "cputime", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "memtype", "pacct", "pgfault", "pressure", "sar", "sclat", "sclatency", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4202,6 +4202,7 @@ fn dispatch(line: &str) {
         "irqstorm" => cmd_irqstorm(args),
         "pacct" | "acct" => cmd_pacct(args),
         "counters" | "kcounters" => cmd_counters(args),
+        "topology" | "topo" => cmd_topology(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15041,6 +15042,51 @@ fn cmd_counters(args: &str) {
     shell_println!("");
     shell_println!("Total: {} counters ({} registered, {} built-in)",
         all.len(), registered.len(), builtin.len());
+}
+
+/// `topology` — display CPU topology (package/core/SMT mapping).
+fn cmd_topology() {
+    let num_cpus = crate::smp::cpu_count().max(1);
+    let packages = crate::cpu_topology::num_packages();
+    let phys_cores = crate::cpu_topology::num_physical_cores();
+    let smt = crate::cpu_topology::smt_active();
+
+    shell_println!("=== CPU Topology ===");
+    shell_println!("");
+    shell_println!("  Packages (sockets): {}", packages);
+    shell_println!("  Physical cores:     {}", phys_cores);
+    shell_println!("  Logical CPUs:       {}", num_cpus);
+    shell_println!("  SMT (HyperThread):  {}", if smt { "active" } else { "inactive" });
+    shell_println!("");
+
+    shell_println!("{:<4} {:>4} {:>5} {:>4} {:>8} {:>12}", "CPU", "PKG", "CORE", "SMT", "APIC_ID", "SMT_SIBLINGS");
+    shell_println!("---------------------------------------------------");
+
+    for cpu in 0..num_cpus {
+        if let Some(topo) = crate::cpu_topology::cpu_topo(cpu) {
+            let siblings = crate::cpu_topology::smt_siblings(cpu);
+            // Format sibling mask as list of CPU numbers.
+            let mut sib_str = alloc::string::String::new();
+            for bit in 0..16u16 {
+                if siblings & (1u16 << bit) != 0 && bit as usize != cpu {
+                    if !sib_str.is_empty() {
+                        sib_str.push(',');
+                    }
+                    use core::fmt::Write;
+                    let _ = write!(sib_str, "{}", bit);
+                }
+            }
+            if sib_str.is_empty() {
+                sib_str.push_str("none");
+            }
+
+            shell_println!(
+                "{:<4} {:>4} {:>5} {:>4} {:>8} {:>12}",
+                cpu, topo.package_id, topo.core_id, topo.smt_id,
+                topo.apic_id, sib_str
+            );
+        }
+    }
 }
 
 /// `irqoff` — show interrupt-disabled duration statistics.

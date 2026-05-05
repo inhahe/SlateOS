@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "idle", "irqoff", "irqrate", "jitter", "kprofile", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
+    "boottime", "boottiming", "canary", "cpuid", "exceptions", "exclog", "faults", "healthcheck", "heapwm", "history", "idle", "irqoff", "irqrate", "jitter", "kprofile", "kstat", "latency", "lathist", "lockstat", "lockstats", "memmap", "mempressure", "pgfault", "pressure", "sar", "stackcheck", "syshealth", "sysinfo", "tickjitter", "tlb", "vectors", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4195,6 +4195,7 @@ fn dispatch(line: &str) {
         "lockstats" | "lockstat" => cmd_lockstats(args),
         "irqoff" => cmd_irqoff(args),
         "idle" => cmd_idle(),
+        "kstat" | "history" => cmd_kstat(args),
         "sar" => cmd_sar(),
         "syshealth" | "healthcheck" => cmd_syshealth(),
         "latency" | "lathist" => cmd_latency(),
@@ -4481,6 +4482,7 @@ fn cmd_help() {
     crate::console_println!("  kprofile   Kernel code profiler (cycle counts per region)");
     crate::console_println!("  lockstats  Show spinlock contention statistics");
     crate::console_println!("  idle       Show CPU idle state statistics (MWAIT/HLT)");
+    crate::console_println!("  kstat      Show system metrics history (1-min time series)");
     crate::console_println!("  irqoff     Show interrupt-disabled duration tracking");
     crate::console_println!("  latency    Show scheduling latency histogram");
     crate::console_println!("  pressure   Show memory pressure score (0-100)");
@@ -14509,6 +14511,68 @@ fn cmd_lockstats(args: &str) {
 
     shell_println!("");
     shell_println!("  Tracking: ON | Use 'lockstats reset' to clear, 'lockstats off' to disable");
+}
+
+/// `kstat` — show system metrics time series.
+///
+/// Displays the last N seconds of system metrics from the periodic sampler.
+/// Usage:
+///   `kstat`     — show last 10 samples
+///   `kstat N`   — show last N samples
+///   `kstat all` — show all 60 samples
+#[allow(clippy::cast_possible_truncation)]
+fn cmd_kstat(args: &str) {
+    let count: usize = match args.trim() {
+        "" => 10,
+        "all" => 60,
+        n => n.parse().unwrap_or(10),
+    };
+
+    let samples = crate::kstat::recent(count);
+    let total = crate::kstat::total_samples();
+
+    if samples.is_empty() {
+        shell_println!("No samples recorded yet (wait at least 1 second).");
+        return;
+    }
+
+    shell_println!("=== System Metrics History ({} samples, {} total recorded) ===",
+        samples.len(), total);
+    shell_println!("");
+    shell_println!("  {:<6} {:>5} {:>5} {:>7} {:>4} {:>4} {:>7} {:>5}",
+        "Age(s)", "Free%", "Press", "Heap KB", "Task", "CPU0", "CtxSw", "IRQs");
+    shell_println!("  {}", "-".repeat(55));
+
+    let now_tick = crate::apic::tick_count();
+
+    // Samples are newest-first.  Show oldest-first for natural time order.
+    for s in samples.iter().rev() {
+        let age_ticks = now_tick.saturating_sub(s.tick);
+        let age_sec = age_ticks / 100;
+
+        let free_pct = if s.total_frames > 0 {
+            s.free_frames.saturating_mul(100) / s.total_frames
+        } else {
+            0
+        };
+
+        let heap_kb = s.heap_bytes_in_use / 1024;
+
+        shell_println!("  {:>5}s {:>4}% {:>5} {:>5}KB {:>4} {:>3}% {:>7} {:>5}",
+            age_sec,
+            free_pct,
+            s.pressure_score,
+            heap_kb,
+            s.runnable_tasks,
+            s.cpu_util[0],
+            s.ctx_switches_lo,
+            s.interrupts_lo,
+        );
+    }
+
+    shell_println!("");
+    shell_println!("  Columns: Age=seconds ago, Free%=phys mem free, Press=pressure(0-100),");
+    shell_println!("           Heap=kernel heap, Task=active tasks, CPU0=util%, CtxSw/IRQs=totals");
 }
 
 /// `idle` — show CPU idle state statistics.

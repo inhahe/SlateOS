@@ -72,6 +72,7 @@ mod klog;
 mod kshell;
 mod boot_timing;
 mod kprofile;
+mod kstat;
 mod ktimer;
 mod ktrace;
 mod limine;

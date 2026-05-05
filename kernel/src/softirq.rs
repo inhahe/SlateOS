@@ -335,6 +335,13 @@ fn handle_timer() {
     {
         crate::watchdog::check();
     }
+
+    // Periodic system metrics sampling (1 sample/sec on BSP).
+    if u64::from(ticks) % crate::kstat::SAMPLE_INTERVAL_TICKS == 0
+        && crate::smp::current_cpu_index() == 0
+    {
+        crate::kstat::sample();
+    }
 }
 
 /// Scheduler softirq handler — proactive push-based load balancing.

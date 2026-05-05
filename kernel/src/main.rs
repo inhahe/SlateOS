@@ -916,6 +916,10 @@ extern "C" fn kmain() -> ! {
     mm::migrate_type::init();
     mm::migrate_type::self_test();
 
+    // Step 22e⅞++++b: Page aging self-test.
+    // Tracks page access patterns for intelligent reclaim decisions.
+    mm::page_age::self_test();
+
     // Step 22e⅞++++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();

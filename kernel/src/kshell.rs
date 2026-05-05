@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4220,6 +4220,7 @@ fn dispatch(line: &str) {
         "watermark" | "wmark" => cmd_watermark(),
         "tlbgather" | "gather" => cmd_tlb_gather(),
         "migratetype" | "mtype" => cmd_migrate_type(),
+        "pageage" | "aging" => cmd_page_age(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15364,6 +15365,31 @@ fn cmd_migrate_type() {
     }
     shell_println!("");
     shell_println!("  Pageblock steals:  {}", s.pageblock_steals);
+}
+
+/// `pageage` — display page aging statistics and histogram.
+fn cmd_page_age() {
+    let s = crate::mm::page_age::stats();
+    let hist = crate::mm::page_age::age_histogram();
+    shell_println!("=== Page Aging ===");
+    shell_println!("");
+    shell_println!("  Tracked pages:       {}", s.tracked_pages);
+    shell_println!("  Scan cycles:         {}", s.scan_cycles);
+    shell_println!("  Working set:         {} pages", s.working_set);
+    shell_println!("  Eviction candidates: {} pages", s.eviction_candidates);
+    shell_println!("  Hot found (total):   {}", s.hot_pages_found);
+    shell_println!("  Cold found (total):  {}", s.cold_pages_found);
+    shell_println!("  Dirty found (total): {}", s.dirty_pages_found);
+    shell_println!("");
+    shell_println!("  Age histogram:");
+    for (age, &count) in hist.iter().enumerate() {
+        if count > 0 {
+            shell_println!("    age {}: {} pages", age, count);
+        }
+    }
+    if hist.iter().all(|&c| c == 0) {
+        shell_println!("    (empty)");
+    }
 }
 
 /// `tlbgather` — display TLB gather (batch flush) statistics.

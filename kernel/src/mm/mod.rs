@@ -40,6 +40,7 @@ pub mod kswapd;
 pub mod mempool;
 pub mod memtype;
 pub mod migrate_type;
+pub mod page_age;
 pub mod oom;
 pub mod page_table;
 pub mod pcid;

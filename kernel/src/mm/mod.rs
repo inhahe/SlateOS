@@ -34,6 +34,7 @@ pub mod dma;
 pub mod fault;
 pub mod fault_inject;
 pub mod frame;
+pub mod frame_owner;
 pub mod heap;
 pub mod hugepage;
 pub mod kstack;

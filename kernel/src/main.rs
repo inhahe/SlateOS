@@ -932,6 +932,10 @@ extern "C" fn kmain() -> ! {
     // Verifies controlled allocation failure simulation for testing error paths.
     mm::fault_inject::self_test();
 
+    // Step 22e⅞++++g: Frame ownership tracker self-test.
+    // Per-frame subsystem tagging for "who allocated this memory?" diagnostics.
+    mm::frame_owner::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

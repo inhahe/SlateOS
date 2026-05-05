@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4224,6 +4224,7 @@ fn dispatch(line: &str) {
         "ptwalk" | "pagetables" => cmd_pt_walk(),
         "scrub" | "memscrub" => cmd_scrub(),
         "faultinject" | "finject" => cmd_fault_inject(args),
+        "frameowner" | "fowner" => cmd_frame_owner(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15383,6 +15384,52 @@ fn cmd_scrub() {
     shell_println!("  Total scrubbed:  {} MiB", s.total_bytes / (1024 * 1024));
     shell_println!("  Errors detected: {}", s.errors);
 }
+
+/// `frameowner` — show physical frame ownership by subsystem.
+fn cmd_frame_owner() {
+    use crate::mm::frame_owner;
+    use crate::mm::frame::FRAME_SIZE;
+
+    let top = frame_owner::top_owners();
+    let s = frame_owner::summary();
+
+    shell_println!("=== Frame Ownership ===");
+    shell_println!("");
+    shell_println!("  {:>12}  {:>6}  {:>8}  {}", "OWNER", "FRAMES", "SIZE", "BAR");
+    shell_println!("  {:>12}  {:>6}  {:>8}  {}", "-----", "------", "--------", "---");
+
+    // Show non-zero entries (top_owners is sorted descending).
+    for &(owner, count) in &top {
+        if count == 0 {
+            break;
+        }
+        let size_kb = (count as usize).saturating_mul(FRAME_SIZE) / 1024;
+        let size_str = if size_kb >= 1024 {
+            alloc::format!("{} MiB", size_kb / 1024)
+        } else {
+            alloc::format!("{} KiB", size_kb)
+        };
+
+        // Bar: 1 char per 1% of total (64K frames).
+        let pct = (count as u64).saturating_mul(100) / (MAX_FRAMES_DISPLAY as u64);
+        let bar_len = (pct as usize).min(40);
+        let bar: alloc::string::String = core::iter::repeat('█').take(bar_len).collect();
+
+        shell_println!("  {:>12}  {:>6}  {:>8}  {}", owner.name(), count, size_str, bar);
+    }
+
+    shell_println!("");
+    shell_println!("  Allocated: {} frames ({} KiB)",
+        s.total_allocated,
+        (s.total_allocated as usize).saturating_mul(FRAME_SIZE) / 1024);
+    shell_println!("  Free:      {} frames", s.total_free);
+    shell_println!("  Tracking:  {} (sets: {}, clears: {})",
+        if frame_owner::is_enabled() { "enabled" } else { "disabled" },
+        s.total_sets, s.total_clears);
+}
+
+/// Max frames for display percentage calculation.
+const MAX_FRAMES_DISPLAY: usize = 65536;
 
 /// `faultinject` — display/control memory fault injection.
 ///

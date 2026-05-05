@@ -920,6 +920,9 @@ pub fn yield_now() {
     if let Some(ctr) = VOLUNTARY_SWITCHES.get(current_cpu_id()) {
         ctr.fetch_add(1, Ordering::Relaxed);
     }
+    // Report RCU quiescent state — this CPU is voluntarily yielding,
+    // so it's not in an RCU read-side critical section.
+    crate::rcu::quiescent_state();
     schedule_inner(true);
 }
 
@@ -1265,6 +1268,11 @@ pub fn watchdog_status() -> [(u64, u64); priority_rr::MAX_CPUS] {
 /// steal is warranted — and a reschedule is needed.
 pub fn timer_tick() -> bool {
     let cpu = current_cpu_id();
+
+    // Report RCU quiescent state — the timer tick is a natural
+    // quiescent point (we're in interrupt context, not in any
+    // RCU read-side critical section).
+    crate::rcu::quiescent_state();
 
     // --- Fast path: per-CPU scheduler ops (no global lock) ---
     //

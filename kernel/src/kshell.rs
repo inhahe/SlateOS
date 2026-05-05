@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4212,6 +4212,7 @@ fn dispatch(line: &str) {
         "irqbalance" | "irqbal" => cmd_irqbalance(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
+        "rcu" => cmd_rcu(),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
         "sar" => cmd_sar(),
@@ -15243,6 +15244,18 @@ fn cmd_hotplug(args: &str) {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
         }
     }
+}
+
+/// `rcu` — display RCU (Read-Copy-Update) statistics.
+fn cmd_rcu() {
+    let st = crate::rcu::stats();
+    shell_println!("=== RCU Statistics ===");
+    shell_println!("");
+    shell_println!("  Grace periods completed: {}", st.gp_completed);
+    shell_println!("  Synchronize calls:       {}", st.sync_calls);
+    shell_println!("  Callbacks invoked:       {}", st.callbacks_invoked);
+    shell_println!("  Pending callbacks:       {}", st.pending_callbacks);
+    shell_println!("  Current GP counter:      {}", st.gp_counter);
 }
 
 /// `numa` — display NUMA topology information.

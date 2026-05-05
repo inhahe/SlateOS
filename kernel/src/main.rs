@@ -96,6 +96,7 @@ mod port;
 mod power;
 mod proc;
 mod ratelimit;
+mod rcu;
 mod rng;
 mod rtc;
 mod sched;
@@ -829,6 +830,10 @@ extern "C" fn kmain() -> ! {
     // Requires ACPI tables and SMP to be initialized.
     numa::init();
     numa::self_test();
+
+    // RCU (Read-Copy-Update) self-test.
+    // Must be after scheduler (needs yield_now for synchronize).
+    rcu::self_test();
 
     // IRQ balancer initialization — distributes interrupts across CPUs.
     // Requires IOAPIC, SMP, and cpu_hotplug to be initialized.

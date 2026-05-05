@@ -388,6 +388,13 @@ fn handle_timer() {
         crate::irqbalance::tick();
     }
 
+    // RCU callback processing: check for completed grace periods and
+    // invoke deferred callbacks.  Runs on BSP only (callbacks execute
+    // in softirq context which is process context — can allocate/sleep).
+    if crate::smp::current_cpu_index() == 0 {
+        crate::rcu::tick();
+    }
+
     // CPU frequency governor: ondemand mode samples load periodically.
     if crate::smp::current_cpu_index() == 0 {
         crate::cpufreq::ondemand_tick();

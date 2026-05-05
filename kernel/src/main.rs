@@ -895,6 +895,12 @@ extern "C" fn kmain() -> ! {
     // Verifies add/remove/lookup of physical frame → virtual address mappings.
     mm::rmap::self_test();
 
+    // Step 22e⅞+: PCID (Process Context Identifiers) initialization.
+    // Enables TLB tagging to avoid full flushes on context switch.
+    mm::pcid::detect();
+    mm::pcid::enable_on_this_cpu();
+    mm::pcid::self_test();
+
     // Step 22f: Initialize the soft lockup detector (watchdog).
     // Must be after SMP bootstrap so cpu_count() is accurate.
     // Monitors per-CPU heartbeats and warns if any CPU stops responding.

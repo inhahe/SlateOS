@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap",
+    "vmalloc", "vm", "rmap", "pcid",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4215,6 +4215,7 @@ fn dispatch(line: &str) {
         "hugepage" | "hugepages" | "hp" => cmd_hugepage(),
         "vmalloc" | "vm" => cmd_vmalloc(),
         "rmap" => cmd_rmap(),
+        "pcid" => cmd_pcid(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15291,6 +15292,18 @@ fn cmd_rmap() {
     shell_println!("  Lookup calls:    {}", st.lookup_count);
     shell_println!("  Overflows:       {}", st.overflow_count);
     shell_println!("  Table full:      {}", st.table_full_count);
+}
+
+/// `pcid` — display PCID (Process Context Identifiers) status.
+fn cmd_pcid() {
+    let st = crate::mm::pcid::stats();
+    shell_println!("=== PCID (Process Context Identifiers) ===");
+    shell_println!("");
+    shell_println!("  PCID enabled:      {}", st.enabled);
+    shell_println!("  INVPCID available: {}", st.has_invpcid);
+    shell_println!("  No-flush switches: {}", st.noflush_switches);
+    shell_println!("  Generation flushes:{}", st.generation_flushes);
+    shell_println!("  INVPCID singles:   {}", st.invpcid_singles);
 }
 
 /// `msi` — display MSI (Message Signaled Interrupts) vector pool status.

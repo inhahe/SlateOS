@@ -428,6 +428,9 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 17a½: Capability audit log self-test.
+    cap::audit::self_test();
+
     // Step 17b: Initialize structured logging subsystem.
     // JSON-lines log entries go to serial and a kernel ring buffer.
     // Must be after APIC init (uses tick_count for timestamps).

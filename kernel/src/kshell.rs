@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4229,6 +4229,7 @@ fn dispatch(line: &str) {
         "alloclat" | "alat" => cmd_alloc_lat(args),
         "heapprofile" | "hprof" => cmd_heap_profile(args),
         "syscallprof" | "sprof" => cmd_syscall_prof(args),
+        "capaudit" | "capa" => cmd_cap_audit(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -15630,6 +15631,71 @@ fn cmd_heap_profile(args: &str) {
             shell_println!("");
             shell_println!("  Status: {}",
                 if p.enabled { "enabled" } else { "disabled" });
+        }
+    }
+}
+
+/// `capaudit` — show capability audit log.
+///
+/// Usage:
+///   capaudit         — show stats and recent events
+///   capaudit recent  — show last 20 events
+///   capaudit reset   — clear the log
+///   capaudit on|off  — enable/disable auditing
+fn cmd_cap_audit(args: &str) {
+    use crate::cap::audit;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "reset" => {
+            audit::reset();
+            shell_println!("Capability audit log reset");
+        }
+        "on" => {
+            audit::enable();
+            shell_println!("Capability auditing enabled");
+        }
+        "off" => {
+            audit::disable();
+            shell_println!("Capability auditing disabled");
+        }
+        "recent" => {
+            let mut buf = [audit::AuditEntry::empty(); 20];
+            let n = audit::recent(&mut buf);
+            shell_println!("Last {} capability events (newest first):", n);
+            shell_println!("  {:>6}  {:>4}  {:>6}  {:>8}  {:>4}  {:>6}",
+                "TICK", "PID", "HANDLE", "OP", "TGT", "RESULT");
+            for i in 0..n {
+                let e = &buf[i];
+                if e.is_valid() {
+                    let result_str = if e.result == 0 {
+                        alloc::format!("ok")
+                    } else {
+                        alloc::format!("E{}", e.result)
+                    };
+                    shell_println!("  {:>6}  {:>4}  {:>6}  {:>8}  {:>4}  {:>6}",
+                        e.timestamp, e.pid, e.handle,
+                        e.operation().name(),
+                        e.target_pid, result_str);
+                }
+            }
+        }
+        _ => {
+            let s = audit::stats();
+            shell_println!("=== Capability Audit ===");
+            shell_println!("");
+            shell_println!("  Enabled:   {}", if s.enabled { "yes" } else { "no" });
+            shell_println!("  Events:    {}", s.total_events);
+            shell_println!("  Denials:   {}", s.total_denials);
+            shell_println!("  Grants:    {}", s.total_grants);
+            shell_println!("  Revokes:   {}", s.total_revokes);
+            shell_println!("  Buffer:    {}/{} entries", s.ring_entries, 128);
+
+            if s.total_denials > 0 {
+                shell_println!("");
+                shell_println!("  ⚠ {} access denial(s) recorded", s.total_denials);
+            }
         }
     }
 }

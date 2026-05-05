@@ -157,6 +157,15 @@ extern "C" fn kmain() -> ! {
         idt::init();
     }
     serial_println!("[idt] IDT initialized");
+
+    // Step 4b: Initialize FPU/SSE hardware on the BSP.
+    //
+    // Ensures CR0 and CR4 are configured for SSE operation (clear EM/TS,
+    // set OSFXSR/OSXMMEXCPT).  While Limine typically sets these, we
+    // configure them explicitly so the state is deterministic.  Must be
+    // done before any code that might use XMM registers (e.g., the heap
+    // allocator's memcpy, auto-vectorized loops).
+    sched::fpu::init_bsp();
     console::boot_step_update(console::BootStatus::Ok, "CPU tables (GDT/IDT)");
 
     // Step 5: Initialize the physical frame allocator.
@@ -240,6 +249,10 @@ extern "C" fn kmain() -> ! {
         serial_println!("FATAL: Scheduler self-test failed: {}", e);
         cpu::halt_loop();
     }
+
+    // Verify FPU/SSE state save/restore works correctly.
+    // This tests the fxsave64/fxrstor64 path that the context switch uses.
+    sched::fpu::self_test();
 
     // Step 9b: Initialize sysctl parameter registry.
     // Registers tunable kernel parameters for memory management,

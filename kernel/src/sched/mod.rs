@@ -49,6 +49,7 @@
 pub mod barrier;
 pub mod condvar;
 pub mod context;
+pub mod fpu;
 pub mod io_sched;
 pub mod kchannel;
 pub mod kmutex;
@@ -2522,6 +2523,8 @@ fn schedule_inner(requeue: bool) {
     // Data extracted under the single lock acquisition for the switch.
     let old_ctx_ptr: *mut Context;
     let new_ctx_ptr: *const Context;
+    let old_fpu_ptr: *mut fpu::FpuState;
+    let new_fpu_ptr: *const fpu::FpuState;
     let old_pml4: u64;
     let new_pml4: u64;
     let new_stack_top: u64;
@@ -2664,18 +2667,18 @@ fn schedule_inner(requeue: bool) {
                         task.last_cpu = cpu;
                     }
 
-                    // Extract context pointers for old (blocked/dead)
+                    // Extract context and FPU pointers for old (blocked/dead)
                     // and new tasks.  The old task's entry still exists
                     // in the BTreeMap — it's Blocked or Dead, not removed.
                     let old_data = s.tasks.get_mut(&current_id)
                         .map(|t| {
                             t.check_stack_canary();
-                            (&raw mut t.context, t.pml4_phys)
+                            (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
                         });
                     let new_data = s.tasks.get(&ready_id)
-                        .map(|t| (&raw const t.context, t.pml4_phys, t.stack_bottom));
+                        .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom));
 
-                    if let (Some((old_p, o_pml4)), Some((new_p, n_pml4, n_sb))) =
+                    if let (Some((old_p, old_fpu, o_pml4)), Some((new_p, new_fpu, n_pml4, n_sb))) =
                         (old_data, new_data)
                     {
                         drop(s);
@@ -2723,10 +2726,12 @@ fn schedule_inner(requeue: bool) {
                             ctr.fetch_add(1, Ordering::Relaxed);
                         }
 
-                        // SAFETY: Both pointers valid (from task table
-                        // under lock).  old is &mut (exclusive), new is
-                        // & (shared), pointing to different tasks.
-                        unsafe { switch_context(&mut *old_p, &*new_p); }
+                        // SAFETY: Both context and FPU pointers valid (from
+                        // task table under lock).  old is &mut (exclusive),
+                        // new is & (shared), pointing to different tasks.
+                        // FPU pointers are 16-byte aligned (FpuState has
+                        // repr(align(16))).
+                        unsafe { switch_context(&mut *old_p, &*new_p, old_fpu, new_fpu); }
 
                         // Resumed: this task was unblocked and switched
                         // back to.  (For Dead tasks, this line is
@@ -2777,16 +2782,18 @@ fn schedule_inner(requeue: bool) {
             .map(|t| {
                 // Check stack canary before switching away from this task.
                 t.check_stack_canary();
-                (&raw mut t.context, t.pml4_phys)
+                (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
             });
         let new_data = state.tasks.get(&next_id)
-            .map(|t| (&raw const t.context, t.pml4_phys, t.stack_bottom));
+            .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom));
 
-        if let (Some((old, o_pml4)), Some((new, n_pml4, n_stack_bottom))) =
+        if let (Some((old, old_fpu, o_pml4)), Some((new, new_fpu, n_pml4, n_stack_bottom))) =
             (old_data, new_data)
         {
             old_ctx_ptr = old;
             new_ctx_ptr = new;
+            old_fpu_ptr = old_fpu;
+            new_fpu_ptr = new_fpu;
             old_pml4 = o_pml4;
             new_pml4 = n_pml4;
             #[allow(clippy::arithmetic_side_effects)]
@@ -2849,18 +2856,20 @@ fn schedule_inner(requeue: bool) {
     }
 
     // SAFETY:
-    // - Both pointers are valid (extracted from the task table under lock).
+    // - Both context and FPU pointers are valid (extracted from the task
+    //   table under lock).
     // - The BTreeMap nodes won't be freed during the switch because no
     //   other code runs on this CPU until switch_context returns.
     // - old_ctx_ptr is &mut (exclusive write) and new_ctx_ptr is &
     //   (shared read), pointing to different tasks' contexts.
+    // - FPU pointers are 16-byte aligned (FpuState has repr(align(16))).
     // Increment context switch counter for this CPU.
     if let Some(ctr) = CTX_SWITCHES.get(cpu) {
         ctr.fetch_add(1, Ordering::Relaxed);
     }
 
     unsafe {
-        switch_context(&mut *old_ctx_ptr, &*new_ctx_ptr);
+        switch_context(&mut *old_ctx_ptr, &*new_ctx_ptr, old_fpu_ptr, new_fpu_ptr);
     }
 
     // When we return here, some other task has switched back to us.

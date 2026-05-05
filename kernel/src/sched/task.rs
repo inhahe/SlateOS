@@ -25,6 +25,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table;
 use crate::serial_println;
+use super::fpu::FpuState;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -394,6 +395,16 @@ pub struct Task {
     /// run queue.  It will be re-enqueued by the period-reset logic
     /// in [`unthrottle_expired`](super::unthrottle_expired).
     pub throttled: bool,
+
+    /// Saved FPU/SSE state (x87 + XMM0-XMM15).
+    ///
+    /// Saved by `fxsave64` on switch-out, restored by `fxrstor64` on
+    /// switch-in.  Initialized to a clean default state (all registers
+    /// zeroed, FCW=0x037F, MXCSR=0x1F80) for new tasks.
+    ///
+    /// 512 bytes, 16-byte aligned.  Placed last in the struct to avoid
+    /// padding between smaller fields.
+    pub fpu_state: FpuState,
 }
 
 impl Task {
@@ -587,6 +598,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            fpu_state: FpuState::new_default(),
         }
     }
 
@@ -651,6 +663,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            fpu_state: FpuState::new_default(),
         }
     }
 
@@ -755,6 +768,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            fpu_state: FpuState::new_default(),
         })
     }
 

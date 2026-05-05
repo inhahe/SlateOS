@@ -39,9 +39,12 @@ use super::task::Context;
 // ---------------------------------------------------------------------------
 
 global_asm!(
-    // fn switch_context(old: &mut Context, new: &Context)
+    // fn switch_context(old: &mut Context, new: &Context,
+    //                   old_fpu: *mut FpuState, new_fpu: *const FpuState)
     //   rdi = old context pointer
     //   rsi = new context pointer
+    //   rdx = old FPU state pointer (16-byte aligned, 512 bytes)
+    //   rcx = new FPU state pointer (16-byte aligned, 512 bytes)
     //
     // Context layout (must match task.rs Context struct):
     //   offset 0x00: rbx
@@ -54,7 +57,17 @@ global_asm!(
     //   offset 0x38: rflags
     ".global switch_context",
     "switch_context:",
-    // Save callee-saved registers to old context.
+
+    // --- Save old task's FPU/SSE state ---
+    //
+    // fxsave64 saves x87, MMX, and XMM0-XMM15 (512 bytes) to [rdx].
+    // This is non-destructive: the FPU registers are unchanged after
+    // the save.  We do this FIRST so the FPU state is captured before
+    // any potential clobbering by subsequent instructions (though the
+    // GPR save instructions don't touch FPU registers).
+    "fxsave64 [rdx]",
+
+    // --- Save callee-saved GPRs to old context ---
     "mov [rdi + 0x00], rbx",
     "mov [rdi + 0x08], rbp",
     "mov [rdi + 0x10], r12",
@@ -70,7 +83,12 @@ global_asm!(
     "pop rax",
     "mov [rdi + 0x38], rax",
 
-    // Restore callee-saved registers from new context.
+    // --- Restore callee-saved GPRs from new context ---
+    //
+    // After this sequence, we're on the NEW task's stack (rsp loaded
+    // from new context).  rdi and rsi are caller-saved, so they're
+    // stale — but rcx still holds new_fpu (untouched by the restore
+    // sequence since we only load rbx, rbp, r12-r15, rsp).
     "mov rbx, [rsi + 0x00]",
     "mov rbp, [rsi + 0x08]",
     "mov r12, [rsi + 0x10]",
@@ -78,10 +96,28 @@ global_asm!(
     "mov r14, [rsi + 0x20]",
     "mov r15, [rsi + 0x28]",
     "mov rsp, [rsi + 0x30]",
+
+    // --- Restore new task's FPU/SSE state ---
+    //
+    // fxrstor64 loads x87, MMX, and XMM0-XMM15 from [rcx].
+    // Done BEFORE restoring RFLAGS because popfq may enable interrupts
+    // (IF=1).  By restoring FPU first, any interrupt that fires after
+    // popfq sees the correct FPU state for the new task.
+    //
+    // rcx is still valid here: the GPR restore above only writes to
+    // rbx, rbp, r12-r15, rsp — it does not touch rcx.
+    "fxrstor64 [rcx]",
+
     // Restore RFLAGS from the target task's saved state.
     // For new tasks, rflags is set to 0x202 (IF=1, reserved bit 1=1)
     // by prepare_context(), ensuring interrupts are enabled when the
     // task first runs.
+    //
+    // WARNING: After popfq, interrupts may be enabled.  The CPU's
+    // one-instruction interrupt deferral after STI does NOT apply to
+    // popfq — an interrupt can fire between popfq and ret.  This is
+    // safe because the new task's full state (GPRs + FPU) is already
+    // restored at this point.
     "mov rax, [rsi + 0x38]",
     "push rax",
     "popfq",
@@ -112,20 +148,30 @@ global_asm!(
 
 // Import the assembly symbols so Rust can reference them.
 unsafe extern "C" {
-    /// Switch CPU context from `old` to `new`.
+    /// Switch CPU context from `old` to `new`, including FPU/SSE state.
     ///
-    /// Saves `rbx`, `rbp`, `r12`–`r15`, `rsp` into `old`, loads them
-    /// from `new`, then returns (into the new task).
+    /// Saves `rbx`, `rbp`, `r12`–`r15`, `rsp`, RFLAGS, and FPU/SSE
+    /// (via `fxsave64`) into `old`/`old_fpu`, then restores them from
+    /// `new`/`new_fpu` (via `fxrstor64`), and returns (into the new task).
     ///
     /// # Safety
     ///
     /// - Both `old` and `new` must point to valid `Context` structs.
+    /// - `old_fpu` must point to a valid, writable, 16-byte-aligned
+    ///   512-byte buffer for FXSAVE.
+    /// - `new_fpu` must point to a valid, readable, 16-byte-aligned
+    ///   512-byte buffer containing a valid FXSAVE image.
     /// - `new.rsp` must point to a valid stack with a return address
     ///   at the top (either from a previous `switch_context` call or
     ///   from [`Task::prepare_context`]).
     /// - Interrupts should be disabled around the call to prevent
     ///   preemption during the switch.
-    pub fn switch_context(old: &mut Context, new: &Context);
+    pub fn switch_context(
+        old: &mut Context,
+        new: &Context,
+        old_fpu: *mut super::fpu::FpuState,
+        new_fpu: *const super::fpu::FpuState,
+    );
 
     /// Entry trampoline for newly created tasks.
     ///

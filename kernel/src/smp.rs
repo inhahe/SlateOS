@@ -727,6 +727,19 @@ extern "C" fn ap_entry() -> ! {
 
     serial_println!("[smp] AP {} entered kernel (64-bit mode)", cpu_index);
 
+    // Enable FPU/SSE on this AP.
+    //
+    // APs start from INIT state with CR4 = 0 (only PAE is set by the
+    // trampoline).  Without this, SSE instructions would #UD because
+    // CR4.OSFXSR is not set.  Must be done before any Rust code that
+    // might use XMM registers (e.g., auto-vectorized memcpy).
+    //
+    // SAFETY: We're in kernel mode, interrupts disabled, standard AP
+    // startup context.
+    unsafe {
+        crate::sched::fpu::init_ap();
+    }
+
     // Initialize this AP's own GDT and TSS.
     //
     // Each CPU gets its own GDT (with a TSS descriptor pointing to its

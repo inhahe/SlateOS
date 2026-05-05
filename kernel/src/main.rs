@@ -88,6 +88,7 @@ mod syscall;
 mod sysctl;
 mod tlb;
 mod virtio;
+mod watchdog;
 mod workqueue;
 
 // ---------------------------------------------------------------------------
@@ -779,6 +780,12 @@ extern "C" fn kmain() -> ! {
     // Step 22e: Copy-on-Write self-test.
     // Verifies refcount API and COW PTE flag manipulation.
     mm::cow::self_test();
+
+    // Step 22f: Initialize the soft lockup detector (watchdog).
+    // Must be after SMP bootstrap so cpu_count() is accurate.
+    // Monitors per-CPU heartbeats and warns if any CPU stops responding.
+    watchdog::init();
+    watchdog::self_test();
 
     console::boot_step_update(console::BootStatus::Ok, "Keyboard & multi-core");
 

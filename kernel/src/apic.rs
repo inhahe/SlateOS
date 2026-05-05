@@ -816,6 +816,10 @@ pub extern "C" fn handle_timer_irq(_frame: &crate::idt::InterruptStackFrame, _er
         0
     };
 
+    // Per-CPU heartbeat for soft lockup detection.  Every CPU increments
+    // its own counter so the BSP can detect stalled APs.
+    crate::watchdog::heartbeat();
+
     // Only the BSP (CPU 0) increments the global tick counter.
     // Without this guard, each online CPU increments independently,
     // causing tick_count() to advance at N× rate (e.g., 200 Hz with

@@ -327,6 +327,14 @@ fn handle_timer() {
         // ~5 seconds.  No log spam; this is background housekeeping.
         let _ = crate::fs::cache::try_flush_expired();
     }
+
+    // Soft lockup detection: BSP checks all CPUs' heartbeats.
+    // Runs every CHECK_INTERVAL_TICKS ticks (1 second) on CPU 0 only.
+    if u64::from(ticks) % crate::watchdog::CHECK_INTERVAL_TICKS == 0
+        && crate::smp::current_cpu_index() == 0
+    {
+        crate::watchdog::check();
+    }
 }
 
 /// Scheduler softirq handler — proactive push-based load balancing.

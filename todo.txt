@@ -11,12 +11,12 @@ make sure latest WINE plan and automatic code change plan are in roadmap
 
 ## Known Bugs / Limitations
 
-- Init task null-pointer crash on SMP: Intermittent page fault at
-  RIP=0xffffffff80136b00, address=0x8 (null pointer + field offset 8),
-  in task "init" on CPU 1.  Race condition — occurs ~50% of 2-CPU boot
-  tests.  Likely a process/thread lifecycle race where shared state is
-  accessed after another CPU deallocates it.  Not triggered on 1-CPU.
-  Affects: init process system (kernel-ipc/kernel-process zone).
+- (FIXED) Init task BTreeMap corruption on SMP: Was a use-after-free via
+  raw pointers extracted from the task BTreeMap during context switch.
+  After dropping the SCHED lock, concurrent BTreeMap operations on other
+  CPUs could rebalance the tree, invalidating the pointers.  Fix: changed
+  `BTreeMap<TaskId, Task>` to `BTreeMap<TaskId, Box<Task>>` so tasks have
+  stable heap addresses independent of BTree node layout.
 
 - Debug kernel binary too large for Limine: The debug build (~9MB) causes
   Limine to panic "High memory allocator: Out of memory" with 128M QEMU.

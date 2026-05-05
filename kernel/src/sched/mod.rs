@@ -61,6 +61,7 @@ pub mod supervisor;
 pub mod task;
 pub mod waitqueue;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use crate::cpu;
 use crate::error::{KernelError, KernelResult};
@@ -189,7 +190,14 @@ static PER_CPU_SCHED: PerCpuScheduler = PerCpuScheduler::new_const();
 /// state transitions and metadata access go through this lock.
 pub(crate) struct SchedState {
     /// All tasks indexed by ID.
-    pub(crate) tasks: BTreeMap<TaskId, Task>,
+    ///
+    /// Tasks are `Box`ed so they have stable heap addresses.  This is
+    /// critical for the context switch path which extracts raw pointers
+    /// to task fields (Context, FpuState) and then drops the SCHED lock
+    /// before performing the actual switch.  Without Box, a concurrent
+    /// BTreeMap rebalance (from another CPU inserting/removing) would
+    /// move entries between nodes, invalidating those raw pointers.
+    pub(crate) tasks: BTreeMap<TaskId, Box<Task>>,
     /// Whether the scheduler has been initialized.
     initialized: bool,
 }
@@ -585,7 +593,7 @@ pub fn init() {
     // Create the idle task.  It represents the current execution
     // context (kmain), using the bootloader-provided stack.
     let idle = Task::new_idle();
-    state.tasks.insert(0, idle);
+    state.tasks.insert(0, Box::new(idle));
     set_current_task(0, 0); // BSP (CPU 0) starts with idle task 0.
 
     state.initialized = true;
@@ -625,7 +633,7 @@ pub fn register_ap_idle(cpu_index: usize) -> TaskId {
     let id = idle.id;
 
     let mut state = SCHED.lock();
-    state.tasks.insert(id, idle);
+    state.tasks.insert(id, Box::new(idle));
     set_current_task(cpu_index, id);
 
     serial_println!(
@@ -768,7 +776,7 @@ pub fn spawn_with_affinity(
         return Err(KernelError::NotSupported);
     }
 
-    state.tasks.insert(id, new_task);
+    state.tasks.insert(id, Box::new(new_task));
     PER_CPU_SCHED.enqueue(id, prio, target_cpu);
     drop(state); // Release lock before IPI to minimize hold time.
 
@@ -2018,7 +2026,7 @@ pub fn current_workload_profile() -> Option<WorkloadProfile> {
 #[must_use]
 pub fn get_effective_priority(task_id: TaskId) -> Option<u8> {
     let state = SCHED.lock();
-    state.tasks.get(&task_id).map(Task::effective_priority)
+    state.tasks.get(&task_id).map(|t| t.effective_priority())
 }
 
 /// Boost a task's scheduling priority via priority inheritance.

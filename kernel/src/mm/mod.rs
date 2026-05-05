@@ -35,6 +35,7 @@ pub mod frame;
 pub mod heap;
 pub mod hugepage;
 pub mod kstack;
+pub mod kvspace;
 pub mod kswapd;
 pub mod mempool;
 pub mod memtype;

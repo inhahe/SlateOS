@@ -895,6 +895,10 @@ extern "C" fn kmain() -> ! {
     // Verifies add/remove/lookup of physical frame → virtual address mappings.
     mm::rmap::self_test();
 
+    // Step 22e⅞+: Kernel virtual address space validation.
+    // Ensures no VA regions overlap (catches configuration bugs at boot).
+    mm::kvspace::self_test();
+
     // Step 22e⅞+: Memory poison self-test.
     // Verifies poison fill/verify for use-after-free and overflow detection.
     mm::poison::self_test();

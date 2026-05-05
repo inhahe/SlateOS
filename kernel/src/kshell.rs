@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "ktimer", "rng", "timers", "xattr", "xxd", "zip",
+    "ktimer", "rng", "supervisor", "sv", "timers", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4174,6 +4174,7 @@ fn dispatch(line: &str) {
         "wq" | "workqueue" => cmd_workqueue(),
         "ktimer" | "timers" => cmd_ktimer(),
         "rng" | "random" => cmd_rng(),
+        "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "uptime" => cmd_uptime(),
@@ -4434,6 +4435,7 @@ fn cmd_help() {
     crate::console_println!("  wq        Show kernel workqueue status and statistics");
     crate::console_println!("  ktimer    Show kernel timer statistics");
     crate::console_println!("  rng       Show kernel CSPRNG statistics");
+    crate::console_println!("  supervisor Show task supervisor status");
     crate::console_println!("  profile [name]   Show/set workload profile (desktop/server/dev/gaming)");
     crate::console_println!("  fallocate N F Pre-allocate N bytes for file F");
     crate::console_println!("  sort FILE Sort lines of a file alphabetically");
@@ -11945,7 +11947,7 @@ fn is_builtin(name: &str) -> bool {
         | "cut" | "tr" | "yes" | "tac" | "fold" | "paste" | "xargs"
         | "cpuinfo" | "cpu" | "watchdog" | "kill" | "renice" | "throttle"
         | "taskset" | "schedstat" | "slabinfo" | "stack" | "profile" | "top"
-        | "wq" | "workqueue" | "ktimer" | "timers" | "rng" | "random"
+        | "wq" | "workqueue" | "ktimer" | "timers" | "rng" | "random" | "supervisor" | "sv"
     )
 }
 
@@ -13322,6 +13324,20 @@ fn cmd_rng() {
     // Show a sample random value.
     let sample = crate::rng::next_u64();
     shell_println!("  Sample:       {:#018x}", sample);
+}
+
+fn cmd_supervisor() {
+    let active = crate::sched::supervisor::active_count();
+    let restarts = crate::sched::supervisor::total_restarts();
+    let exits = crate::sched::supervisor::total_exits();
+    let failures = crate::sched::supervisor::total_failures();
+
+    shell_println!("Task supervisor");
+    shell_println!("");
+    shell_println!("  Supervised:   {} active", active);
+    shell_println!("  Exits seen:   {}", exits);
+    shell_println!("  Restarts:     {}", restarts);
+    shell_println!("  Failures:     {}", failures);
 }
 
 #[allow(clippy::arithmetic_side_effects)]

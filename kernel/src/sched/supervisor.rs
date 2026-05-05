@@ -290,7 +290,6 @@ pub fn unregister(task_id: TaskId) -> bool {
 
 /// Get information about supervised tasks.
 #[must_use]
-#[allow(dead_code)]
 pub fn active_count() -> usize {
     let table = SUPERVISED.lock();
     table.iter().filter(|s| s.active).count()
@@ -298,21 +297,18 @@ pub fn active_count() -> usize {
 
 /// Total restarts since boot.
 #[must_use]
-#[allow(dead_code)]
 pub fn total_restarts() -> u64 {
     TOTAL_RESTARTS.load(Ordering::Relaxed)
 }
 
 /// Total supervised exits since boot.
 #[must_use]
-#[allow(dead_code)]
 pub fn total_exits() -> u64 {
     TOTAL_EXITS.load(Ordering::Relaxed)
 }
 
 /// Total restart failures since boot.
 #[must_use]
-#[allow(dead_code)]
 pub fn total_failures() -> u64 {
     RESTART_FAILURES.load(Ordering::Relaxed)
 }

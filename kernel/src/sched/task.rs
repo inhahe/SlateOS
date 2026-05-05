@@ -396,6 +396,12 @@ pub struct Task {
     /// in [`unthrottle_expired`](super::unthrottle_expired).
     pub throttled: bool,
 
+    /// If this task's stack was allocated via the kstack allocator
+    /// (with hardware guard pages), this holds the slot index for
+    /// deallocation.  `None` means the stack uses legacy HHDM-based
+    /// allocation (idle tasks, AP idle tasks) or is externally provided.
+    pub kstack_slot: Option<usize>,
+
     /// Saved FPU/SSE state (x87 + XMM0-XMM15).
     ///
     /// Saved by `fxsave64` on switch-out, restored by `fxrstor64` on
@@ -598,6 +604,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            kstack_slot: None,
             fpu_state: FpuState::new_default(),
         }
     }
@@ -663,6 +670,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            kstack_slot: None,
             fpu_state: FpuState::new_default(),
         }
     }
@@ -696,25 +704,35 @@ impl Task {
         let copy_len = task_name.len().min(name.len());
         name[..copy_len].copy_from_slice(&task_name[..copy_len]);
 
-        // Allocate stack frames.
-        //
-        // For a 2-frame (32 KiB) stack, we allocate order 1 (2 frames).
-        // The buddy allocator returns a physically contiguous block.
-        let order = if TASK_STACK_FRAMES <= 1 { 0 } else {
-            TASK_STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
-        };
-        let stack_frame = frame::alloc_order(order)?;
-        let stack_phys = stack_frame.addr();
-
-        // Convert to virtual address via HHDM.
-        let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-        let stack_bottom = stack_phys + hhdm;
-        let stack_top = stack_bottom + TASK_STACK_SIZE as u64;
+        // Allocate stack with hardware guard page (preferred) or fall
+        // back to HHDM-based allocation if the kstack subsystem isn't
+        // initialized yet (early boot tasks before mm::kstack::init()).
+        let (stack_phys, stack_bottom, stack_top, kstack_slot) =
+            if let Ok(info) = crate::mm::kstack::alloc() {
+                // Guard-page stack: the kstack allocator maps physical frames
+                // into a dedicated virtual region with an unmapped guard page
+                // below.  Any stack overflow triggers an immediate page fault.
+                (info.stack_phys, info.stack_bottom, info.stack_top, Some(info.slot))
+            } else {
+                // Fallback: allocate via buddy allocator + HHDM (no guard page).
+                // Only used during early boot before kstack::init().
+                let order = if TASK_STACK_FRAMES <= 1 { 0 } else {
+                    TASK_STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
+                };
+                let stack_frame = frame::alloc_order(order)?;
+                let sp = stack_frame.addr();
+                let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+                let sb = sp + hhdm;
+                let st = sb + TASK_STACK_SIZE as u64;
+                (sp, sb, st, None)
+            };
 
         // Plant the stack canary at the very bottom of the stack.
         // This is the first 8 bytes — furthest from the stack top,
         // so it will be the last thing overwritten on overflow.
-        // SAFETY: stack_bottom is a valid, freshly-allocated HHDM address.
+        // Retained as defense-in-depth alongside the guard page.
+        // SAFETY: stack_bottom is a valid, freshly-allocated address
+        // (either HHDM or kstack-mapped).
         unsafe {
             ptr::write_volatile(stack_bottom as *mut u64, STACK_CANARY);
         }
@@ -723,9 +741,8 @@ impl Task {
         // Skip the first 8 bytes (canary) and fill the rest.  This lets
         // us later scan from the bottom up to find how deep the stack grew.
         // SAFETY: The entire [stack_bottom..stack_top] range is freshly
-        // allocated, contiguous memory accessible via HHDM.  The pointer
-        // arithmetic stays within the 32 KiB allocation (which is well
-        // below usize::MAX on 64-bit systems).
+        // allocated, contiguous memory.  The pointer arithmetic stays within
+        // the 32 KiB allocation (which is well below usize::MAX on 64-bit).
         #[allow(clippy::arithmetic_side_effects)]
         unsafe {
             let start = stack_bottom as *mut u64;
@@ -768,6 +785,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            kstack_slot,
             fpu_state: FpuState::new_default(),
         })
     }
@@ -846,17 +864,32 @@ impl Task {
             return Ok(());
         }
 
-        let order = if TASK_STACK_FRAMES <= 1 { 0 } else {
-            TASK_STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
-        };
-
-        if let Some(frame) = frame::PhysFrame::from_addr(self.stack_phys) {
+        if let Some(slot) = self.kstack_slot {
+            // Guard-page stack: use the kstack allocator to unmap, free
+            // physical frames, remove guard VMA, and release the slot.
+            let info = crate::mm::kstack::KstackInfo {
+                stack_bottom: self.stack_bottom,
+                stack_top: self.stack_bottom + TASK_STACK_SIZE as u64,
+                stack_phys: self.stack_phys,
+                slot,
+            };
             // SAFETY: Caller guarantees no CPU is using this stack.
-            unsafe { frame::free_order(frame, order)?; }
+            unsafe { crate::mm::kstack::free(info)?; }
+        } else {
+            // Legacy HHDM-based stack: free via buddy allocator.
+            let order = if TASK_STACK_FRAMES <= 1 { 0 } else {
+                TASK_STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
+            };
+
+            if let Some(frame) = frame::PhysFrame::from_addr(self.stack_phys) {
+                // SAFETY: Caller guarantees no CPU is using this stack.
+                unsafe { frame::free_order(frame, order)?; }
+            }
         }
 
         self.stack_phys = 0;
         self.stack_bottom = 0;
+        self.kstack_slot = None;
         Ok(())
     }
 

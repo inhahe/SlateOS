@@ -32,6 +32,7 @@ pub mod dma;
 pub mod fault;
 pub mod frame;
 pub mod heap;
+pub mod kstack;
 pub mod kswapd;
 pub mod oom;
 pub mod page_table;

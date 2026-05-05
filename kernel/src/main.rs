@@ -241,6 +241,14 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 8c: Initialize kernel stack allocator with hardware guard pages.
+    // Must be after fault::init() since it registers Guard VMAs.
+    mm::kstack::init();
+    if let Err(e) = mm::kstack::self_test() {
+        serial_println!("FATAL: Kernel stack guard page self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     console::boot_step_update(console::BootStatus::Ok, "Virtual memory");
 
     // Step 9: Initialize the scheduler.

@@ -74,6 +74,7 @@ mod irq_storm;
 mod irqbalance;
 mod ipc;
 mod kcounters;
+mod kevent;
 mod keyboard;
 mod klog;
 mod kshell;
@@ -839,6 +840,9 @@ extern "C" fn kmain() -> ! {
 
     // Kernel symbol table self-test.
     ksyms::self_test();
+
+    // Kernel event bus self-test.
+    kevent::self_test();
 
     // RCU (Read-Copy-Update) self-test.
     // Must be after scheduler (needs yield_now for synchronize).

@@ -3101,7 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4213,6 +4213,7 @@ fn dispatch(line: &str) {
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
+        "kevent" | "events" => cmd_kevent(),
         "ksyms" | "symbols" => cmd_ksyms(args),
         "memtype" | "memacct" => cmd_memtype(),
         "sclatency" | "sclat" => cmd_sclatency(args),
@@ -15244,6 +15245,34 @@ fn cmd_hotplug(args: &str) {
         _ => {
             shell_println!("Usage: hotplug [status|offline <cpu>|online <cpu>]");
         }
+    }
+}
+
+/// `kevent` — display kernel event bus statistics.
+fn cmd_kevent() {
+    let st = crate::kevent::stats();
+    shell_println!("=== Kernel Event Bus ===");
+    shell_println!("");
+    shell_println!("  Events published:  {}", st.events_published);
+    shell_println!("  Events delivered:  {}", st.events_delivered);
+    shell_println!("  Events dropped:    {}", st.events_dropped);
+    shell_println!("");
+
+    let kind_names = [
+        "MemoryPressure", "ThermalCritical", "CpuHotplug",
+        "BlockDeviceError", "NetIfaceChange", "OomEvent",
+        "PowerStateChange", "FsMount", "PanicImminent",
+        "PeriodicTick", "Custom",
+    ];
+    shell_println!("  Subscribers per event kind:");
+    for (i, &count) in st.subscriber_counts.iter().enumerate() {
+        if count > 0 {
+            let name = kind_names.get(i).unwrap_or(&"Unknown");
+            shell_println!("    {:<20} {}", name, count);
+        }
+    }
+    if st.subscriber_counts.iter().all(|&c| c == 0) {
+        shell_println!("    (none)");
     }
 }
 

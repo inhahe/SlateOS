@@ -722,6 +722,49 @@ pub fn translate(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
     Some(pte.phys_addr() + virt.page_offset() as u64)
 }
 
+/// Translate a virtual address and return the page flags.
+///
+/// Walks the page table hierarchy and returns the flags of the PTE that
+/// maps `virt`.  Returns `None` if the address is not mapped.
+///
+/// Used by memory compaction to preserve flags when migrating pages.
+pub fn translate_flags(pml4_phys: u64, virt: VirtAddr) -> Option<PageFlags> {
+    let hhdm = hhdm()?;
+
+    if !virt.is_canonical() {
+        return None;
+    }
+
+    // SAFETY: pml4_phys from CR3 or our allocation.
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return None;
+    }
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() {
+        return None;
+    }
+    if pdpte.is_huge() {
+        // Extract flag bits (low 12 bits + NX bit 63).
+        let raw = pdpte.raw();
+        return Some(PageFlags::from_bits((raw & 0xFFF) | (raw & (1 << 63))));
+    }
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() {
+        return None;
+    }
+    if pde.is_huge() {
+        let raw = pde.raw();
+        return Some(PageFlags::from_bits((raw & 0xFFF) | (raw & (1 << 63))));
+    }
+    let pte = unsafe { read_entry(pde.phys_addr(), virt.pt_index(), hhdm) };
+    if !pte.is_present() {
+        return None;
+    }
+    let raw = pte.raw();
+    Some(PageFlags::from_bits((raw & 0xFFF) | (raw & (1 << 63))))
+}
+
 /// Map a single 4 KiB hardware page if not already mapped.
 ///
 /// Unlike [`map_frame`], this operates on individual 4 KiB pages and

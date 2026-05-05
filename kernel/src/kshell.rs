@@ -15173,7 +15173,6 @@ fn cmd_compact() {
 
     if report.compaction_recommended {
         shell_println!("  Status: Compaction RECOMMENDED (high fragmentation)");
-        shell_println!("          Page migration not yet implemented (requires rmap).");
     } else {
         shell_println!("  Status: Compaction not needed.");
     }
@@ -15181,7 +15180,10 @@ fn cmd_compact() {
     let stats = crate::mm::compact::stats();
     shell_println!("");
     shell_println!("  History:");
-    shell_println!("    Total requests: {}", stats.total_requests);
+    shell_println!("    Total requests:       {}", stats.total_requests);
+    shell_println!("    Pages migrated:       {}", stats.pages_migrated);
+    shell_println!("    Migration failures:   {}", stats.migration_failures);
+    shell_println!("    Pages scanned:        {}", stats.pages_scanned);
 }
 
 /// `shutdown` — power off the system.

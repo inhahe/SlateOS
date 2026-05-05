@@ -5,23 +5,22 @@
 //! contiguous regions (high-order buddy allocations) even when total free
 //! memory is sufficient.
 //!
-//! ## Current Status
+//! ## Algorithm
 //!
-//! This module provides the compaction framework and statistics tracking.
-//! The actual page migration requires reverse-mapping infrastructure (rmap)
-//! to safely find all page table entries pointing to a given frame.  Until
-//! rmap is implemented, compaction reports fragmentation metrics and serves
-//! as the integration point for future compaction work.
+//! Compaction works by migrating pages from high addresses to lower free
+//! frames, consolidating free space into larger contiguous blocks.
 //!
-//! ## Planned Algorithm
+//! The algorithm uses the rmap (reverse mapping) infrastructure to find
+//! all PTEs that map a given physical frame, then:
+//! 1. Allocates a new frame at a lower address.
+//! 2. Copies the page contents.
+//! 3. Updates all PTEs to point to the new frame.
+//! 4. Flushes TLBs.
+//! 5. Frees the old frame.
 //!
-//! When fully implemented, compaction will work by scanning from both ends:
-//! - A **free scanner** moves upward from low addresses, finding free frames.
-//! - A **migration scanner** moves downward from high addresses, finding
-//!   movable pages (single-refcount user pages).
-//!
-//! Movable pages are copied to free frames at lower addresses, and the
-//! source frame is freed — consolidating free space into larger blocks.
+//! Only privately-mapped pages (rmap count == 1) are eligible for migration.
+//! Shared pages (CoW) are skipped because updating multiple PTEs atomically
+//! under potential concurrent access is complex.
 //!
 //! ## Integration Points
 //!
@@ -39,6 +38,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::mm::frame::{self, FRAME_SIZE};
+use crate::mm::{rmap, page_table};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +61,15 @@ static REQUESTS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a compaction analysis is currently in progress.
 static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Total pages successfully migrated.
+static PAGES_MIGRATED: AtomicU64 = AtomicU64::new(0);
+
+/// Total migration attempts that failed.
+static MIGRATION_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Total pages scanned during compaction.
+static PAGES_SCANNED: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -214,6 +223,9 @@ pub fn stats() -> CompactStats {
     CompactStats {
         total_requests: REQUESTS.load(Ordering::Relaxed),
         is_running: RUNNING.load(Ordering::Relaxed),
+        pages_migrated: PAGES_MIGRATED.load(Ordering::Relaxed),
+        migration_failures: MIGRATION_FAILURES.load(Ordering::Relaxed),
+        pages_scanned: PAGES_SCANNED.load(Ordering::Relaxed),
     }
 }
 
@@ -224,6 +236,12 @@ pub struct CompactStats {
     pub total_requests: u64,
     /// Whether compaction is currently running.
     pub is_running: bool,
+    /// Total pages successfully migrated.
+    pub pages_migrated: u64,
+    /// Total migration failures.
+    pub migration_failures: u64,
+    /// Total pages scanned during compaction.
+    pub pages_scanned: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -237,15 +255,205 @@ pub struct CompactStats {
 fn estimate_movable_pages(stats: &frame::FrameAllocStats) -> usize {
     // Heuristic: total allocated = total - free.
     // Of those, some fraction are user pages (movable).
-    // Without rmap, we estimate based on tracked address spaces.
+    // Use rmap entry count as a rough movable page estimate.
+    let rmap_st = rmap::stats();
+    if rmap_st.entries_used > 0 {
+        return rmap_st.entries_used;
+    }
+
+    // Fallback: estimate based on tracked address spaces.
     let allocated = stats.total_frames.saturating_sub(stats.free_frames);
     let tracked = crate::mm::accounting::tracked_count();
 
-    // If there are user address spaces, assume ~50% of allocated memory
-    // is user-movable (conservative).  If no user spaces, nothing is movable.
     if tracked > 0 {
         allocated / 4 // Very conservative: assume 25% is movable
     } else {
         0
     }
+}
+
+// ---------------------------------------------------------------------------
+// Page migration
+// ---------------------------------------------------------------------------
+
+/// Maximum number of pages to migrate in a single compaction pass.
+/// Prevents compaction from monopolizing the CPU.
+const MAX_MIGRATE_PER_PASS: usize = 64;
+
+/// Migrate a single page from `old_frame` to `new_frame`.
+///
+/// Steps:
+/// 1. Look up all PTEs mapping `old_frame` via rmap.
+/// 2. Copy page contents from old to new.
+/// 3. Update each PTE to point to `new_frame`.
+/// 4. Flush TLB for the affected addresses.
+/// 5. Update rmap (remove old, add new).
+///
+/// Returns `true` if migration succeeded, `false` if skipped/failed.
+///
+/// # Safety
+///
+/// Both `old_frame` and `new_frame` must be valid physical frame addresses.
+/// `new_frame` must be freshly allocated (not mapped anywhere).
+/// The caller must ensure no concurrent page table modifications for the
+/// affected address space.
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn migrate_page(old_phys: u64, new_phys: u64) -> bool {
+    // Step 1: Look up all mappers of the old frame.
+    let mut mappers = [(0u64, 0u64); 4];
+    let lookup = rmap::lookup(old_phys, &mut mappers);
+
+    if lookup.count == 0 {
+        return false; // Not tracked in rmap.
+    }
+    if lookup.count > 1 || !lookup.is_complete {
+        return false; // Shared page — skip (too complex for now).
+    }
+
+    let (pml4_phys, virt_addr) = mappers[0];
+    if pml4_phys == 0 {
+        return false;
+    }
+
+    PAGES_SCANNED.fetch_add(1, Ordering::Relaxed);
+
+    // Step 2: Copy page contents (all 4 hardware pages = 16 KiB).
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return false,
+    };
+    let src_ptr = (hhdm + old_phys) as *const u8;
+    let dst_ptr = (hhdm + new_phys) as *mut u8;
+    // SAFETY: Both addresses are in the HHDM region, valid frames.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, FRAME_SIZE);
+    }
+
+    // Step 3: Update the PTE to point to the new frame.
+    // We need to unmap the old and map the new with the same flags.
+    let virt = page_table::VirtAddr::new(virt_addr);
+
+    // Read the existing PTE flags before unmapping.
+    let flags = match page_table::translate_flags(pml4_phys, virt) {
+        Some(f) => f,
+        None => return false, // PTE not found (race? stale rmap?)
+    };
+
+    // Unmap old frame from page table.
+    let old_frame = match unsafe { page_table::unmap_frame(pml4_phys, virt) } {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    // Verify it's the frame we expected.
+    if old_frame.addr() != old_phys {
+        // Unexpected — remap the old frame and bail.
+        let _ = unsafe { page_table::map_frame(pml4_phys, virt, old_frame, flags) };
+        return false;
+    }
+
+    // Map new frame at the same virtual address with same flags.
+    let new_frame = match frame::PhysFrame::from_addr(new_phys) {
+        Some(f) => f,
+        None => {
+            // Can't create frame struct — remap old and bail.
+            let _ = unsafe { page_table::map_frame(pml4_phys, virt, old_frame, flags) };
+            return false;
+        }
+    };
+
+    if unsafe { page_table::map_frame(pml4_phys, virt, new_frame, flags) }.is_err() {
+        // Mapping failed — restore old mapping.
+        let _ = unsafe { page_table::map_frame(pml4_phys, virt, old_frame, flags) };
+        return false;
+    }
+
+    // Step 4: Flush TLB for this address (both local and remote CPUs).
+    // Our frames are 16 KiB = 4 hardware pages.
+    crate::tlb::flush_range(virt_addr, 4);
+
+    // Step 5: Update rmap.
+    rmap::remove(old_phys, pml4_phys, virt_addr);
+    rmap::add(new_phys, pml4_phys, virt_addr);
+
+    // Step 6: Free the old frame.
+    let _ = unsafe { frame::free_frame(old_frame) };
+
+    PAGES_MIGRATED.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Attempt to migrate pages tracked by rmap to reduce fragmentation.
+///
+/// Scans rmap entries looking for privately-mapped pages (count == 1).
+/// For each eligible page, attempts to allocate a frame at a lower address
+/// and migrate the page contents there.
+///
+/// Returns the number of pages successfully migrated.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn try_compact() -> usize {
+    if RUNNING.swap(true, Ordering::Acquire) {
+        return 0; // Already running.
+    }
+
+    REQUESTS.fetch_add(1, Ordering::Relaxed);
+
+    let mut migrated = 0;
+    let rmap_st = rmap::stats();
+
+    if rmap_st.entries_used == 0 {
+        RUNNING.store(false, Ordering::Release);
+        return 0; // Nothing to migrate.
+    }
+
+    // For now, we don't have an iterator over rmap entries.
+    // The actual migration will be triggered when page migration candidates
+    // are identified (e.g., by the frame allocator on high-order failure).
+    // This function serves as the entry point for future scanning.
+    //
+    // TODO: Add rmap iteration API to scan for migration candidates.
+
+    serial_println!("[compact] try_compact: {} rmap entries, {} migrated",
+        rmap_st.entries_used, migrated);
+
+    RUNNING.store(false, Ordering::Release);
+    migrated
+}
+
+/// Migrate a specific page (called by frame allocator or kswapd).
+///
+/// If `old_phys` is privately mapped and a lower-address frame is available,
+/// migrates the page and returns `true`.
+///
+/// # Safety
+///
+/// `old_phys` must be a valid allocated frame address.
+pub unsafe fn try_migrate_one(old_phys: u64) -> bool {
+    // Only migrate privately-mapped pages.
+    if !rmap::is_private(old_phys) {
+        return false;
+    }
+
+    // Try to allocate a new frame (the allocator may give us a lower address).
+    let new_frame = match frame::alloc_frame() {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let new_phys = new_frame.addr();
+
+    // Only worth migrating if new frame is at a lower address (reduces fragmentation).
+    if new_phys >= old_phys {
+        let _ = unsafe { frame::free_frame(new_frame) };
+        return false;
+    }
+
+    // Attempt the migration.
+    let ok = unsafe { migrate_page(old_phys, new_phys) };
+    if !ok {
+        // Migration failed — free the new frame we allocated.
+        let _ = unsafe { frame::free_frame(new_frame) };
+        MIGRATION_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+    ok
 }

@@ -818,6 +818,9 @@ extern "C" fn kmain() -> ! {
     // Step 22k4: One-shot event self-test.
     sched::once_event::self_test();
 
+    // Step 22k5: Kernel channel self-test.
+    sched::kchannel::self_test();
+
     // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();
 

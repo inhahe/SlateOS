@@ -50,6 +50,7 @@ pub mod barrier;
 pub mod condvar;
 pub mod context;
 pub mod io_sched;
+pub mod kchannel;
 pub mod kmutex;
 pub mod krwlock;
 pub mod once_event;

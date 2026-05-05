@@ -50,6 +50,7 @@ pub mod swap;
 pub mod user;
 pub mod vmalloc;
 pub mod vma;
+pub mod watermark;
 
 // ---------------------------------------------------------------------------
 // Unified memory information (kernel equivalent of /proc/meminfo)

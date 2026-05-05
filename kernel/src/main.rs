@@ -899,6 +899,10 @@ extern "C" fn kmain() -> ! {
     // Verifies poison fill/verify for use-after-free and overflow detection.
     mm::poison::self_test();
 
+    // Step 22e⅞+: Memory watermark self-test.
+    // Verifies per-subsystem peak usage tracking.
+    mm::watermark::self_test();
+
     // Step 22e⅞++: PCID (Process Context Identifiers) initialization.
     // Enables TLB tagging to avoid full flushes on context switch.
     mm::pcid::detect();

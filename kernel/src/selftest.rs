@@ -161,6 +161,24 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::sysctl::self_test(); true },
         category: "kernel",
     });
+    suites.push(TestSuite {
+        name: "watchpoint",
+        description: "Software memory watchpoints",
+        run: || { crate::watchpoint::self_test(); true },
+        category: "kernel",
+    });
+    suites.push(TestSuite {
+        name: "ksnapshot",
+        description: "Comprehensive system state capture",
+        run: || { crate::ksnapshot::self_test(); true },
+        category: "kernel",
+    });
+    suites.push(TestSuite {
+        name: "rip_sample",
+        description: "Statistical RIP profiler",
+        run: || { crate::rip_sample::self_test(); true },
+        category: "kernel",
+    });
 
     suites
 }

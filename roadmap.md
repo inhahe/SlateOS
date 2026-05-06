@@ -532,6 +532,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] CPIO archive support (fs::cpio): newc (SVR4) format parsing and creation for Linux initramfs compatibility; 110-byte ASCII hex headers, entry types (file/dir/symlink/device/fifo), 4-byte alignment, TRAILER!!! termination; `cpio -t` list, `cpio -i` extract, `cpio -o` create commands; magic detection (newc + old binary); 5 self-tests (QEMU boot-verified)
   - [x] VFS globstar (`**`) recursive glob: Vfs::glob() now supports `**` pattern matching zero or more directory levels; `/**/foo.txt` finds files at any depth, `/tmp/**/*.log` finds all .log files recursively, `/home/**` collects everything; three recursive helpers (globstar_recurse, glob_collect_recursive) with GLOBSTAR_MAX_DEPTH=16 safety limit; self-test with 3-level directory tree
   - [x] Unix ar archive support (fs::ar): GNU/SysV variant with 60-byte ASCII headers, space-padded decimal/octal fields, 2-byte alignment; GNU extended names ("//" long name table, "/offset" references); `ar t` list, `ar x` extract, `ar r` create commands; .deb debian-binary sniffing in magic detection; 4 self-tests (QEMU boot-verified)
+  - [x] dpkg command for Debian package inspection/extraction: composes ar (outer container) + gzip/xz/zstd/bzip2 (decompression) + lightweight tar parser (inner archives); `dpkg -I` shows control info, `dpkg -c` lists data contents, `dpkg -x` extracts to directory; magic detection identifies .deb files; (QEMU boot-verified)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

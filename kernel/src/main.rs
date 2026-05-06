@@ -102,6 +102,7 @@ mod mm;
 mod msi;
 mod net;
 mod numa;
+mod nvme;
 mod pci;
 mod pacct;
 mod pmc;
@@ -893,6 +894,10 @@ extern "C" fn kmain() -> ! {
     // ACL self-test.
     if let Err(e) = fs::acl::self_test() {
         serial_println!("WARNING: ACL self-test failed: {:?}", e);
+    }
+    // Filesystem interceptor self-test.
+    if let Err(e) = fs::intercept::self_test() {
+        serial_println!("WARNING: FS interceptor self-test failed: {:?}", e);
     }
 
     // Run cryptographic self-tests.

@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "integrity", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4314,6 +4314,7 @@ fn dispatch(line: &str) {
         "quota" => cmd_quota(args),
         "getfacl" => cmd_getfacl(args),
         "setfacl" => cmd_setfacl(args),
+        "intercept" => cmd_intercept(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -9343,6 +9344,128 @@ fn print_quota_info(info: &crate::fs::quota::QuotaInfo) {
     }
 
     shell_println!("  Grace period: {}s", info.limits.grace_seconds);
+}
+
+/// `intercept` — manage filesystem operation interceptors.
+///
+/// Subcommands:
+///   intercept list           - list all interceptors
+///   intercept stats          - show statistics
+///   intercept add-ro PATH    - add read-only zone interceptor
+///   intercept add-nodelete PATH - add no-delete zone
+///   intercept add-audit PATH - add audit logger
+///   intercept enable ID      - enable an interceptor
+///   intercept disable ID     - disable an interceptor
+///   intercept remove ID      - remove an interceptor
+fn cmd_intercept(args: &str) {
+    use crate::fs::intercept;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        shell_println!("Usage: intercept <list|stats|add-ro|add-nodelete|add-audit|enable|disable|remove> [args...]");
+        return;
+    }
+
+    match parts.first().copied().unwrap_or("") {
+        "list" | "ls" => {
+            let all = intercept::list();
+            if all.is_empty() {
+                shell_println!("No interceptors registered.");
+            } else {
+                shell_println!("{:>4}  {:<6}  {:>6}  {:>6}  {:<16}  Path",
+                    "ID", "Active", "Calls", "Deny", "Name");
+                shell_println!("{}", "-".repeat(70));
+                for i in &all {
+                    shell_println!("{:>4}  {:<6}  {:>6}  {:>6}  {:<16}  {}",
+                        i.id,
+                        if i.active { "yes" } else { "no" },
+                        i.invocations,
+                        i.denials,
+                        i.name,
+                        if i.path_prefix.is_empty() { "(all)" } else { &i.path_prefix },
+                    );
+                }
+            }
+        }
+
+        "stats" | "st" => {
+            let st = intercept::stats();
+            shell_println!("=== Filesystem Interceptor Stats ===");
+            shell_println!("  Registered: {}", st.interceptors);
+            shell_println!("  Active:     {}", st.active);
+            shell_println!("  Checks:     {}", st.total_checks);
+            shell_println!("  Denials:    {}", st.total_denials);
+            shell_println!("  Allows:     {}", st.total_allows);
+        }
+
+        "add-ro" => {
+            let prefix = match parts.get(1) {
+                Some(p) => resolve_path(p),
+                None => { shell_println!("Usage: intercept add-ro <path_prefix>"); return; }
+            };
+            match intercept::register("read-only-zone", &prefix, intercept::FsOpMask::ALL_WRITES, intercept::readonly_handler) {
+                Ok(id) => shell_println!("Registered read-only zone interceptor #{} for '{}'", id, prefix),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "add-nodelete" => {
+            let prefix = match parts.get(1) {
+                Some(p) => resolve_path(p),
+                None => { shell_println!("Usage: intercept add-nodelete <path_prefix>"); return; }
+            };
+            match intercept::register("no-delete-zone", &prefix, intercept::FsOpMask::DELETE, intercept::no_delete_handler) {
+                Ok(id) => shell_println!("Registered no-delete zone interceptor #{} for '{}'", id, prefix),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "add-audit" => {
+            let prefix = parts.get(1).map(|p| resolve_path(p)).unwrap_or_default();
+            match intercept::register("audit-log", &prefix, intercept::FsOpMask::ALL, intercept::audit_handler) {
+                Ok(id) => shell_println!("Registered audit logger #{} for '{}'", id, if prefix.is_empty() { "(all paths)" } else { &prefix }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "enable" => {
+            let id = match parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                Some(id) => id,
+                None => { shell_println!("Usage: intercept enable <ID>"); return; }
+            };
+            match intercept::set_active(id, true) {
+                Ok(()) => shell_println!("Interceptor {} enabled.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "disable" => {
+            let id = match parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                Some(id) => id,
+                None => { shell_println!("Usage: intercept disable <ID>"); return; }
+            };
+            match intercept::set_active(id, false) {
+                Ok(()) => shell_println!("Interceptor {} disabled.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "remove" | "rm" => {
+            let id = match parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                Some(id) => id,
+                None => { shell_println!("Usage: intercept remove <ID>"); return; }
+            };
+            if intercept::unregister(id) {
+                shell_println!("Interceptor {} removed.", id);
+            } else {
+                shell_println!("No interceptor with ID {}.", id);
+            }
+        }
+
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Use: list, stats, add-ro, add-nodelete, add-audit, enable, disable, remove", parts[0]);
+        }
+    }
 }
 
 /// `getfacl PATH` — display ACL for a file.
@@ -14480,7 +14603,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

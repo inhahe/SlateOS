@@ -308,8 +308,8 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] Log recommendation if IOMMU not detected
   - [x] Kshell `iommu` command for status display
   - [x] Self-test for API consistency
-  - [ ] IOMMU page table setup (DMA remapping)
-  - [ ] Per-device DMA sandboxing for driver isolation
+  - [x] IOMMU page table setup (DMA remapping)
+  - [x] Per-device DMA sandboxing for driver isolation
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing
   - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, interrupt-driven completion with polling fallback)
@@ -863,7 +863,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [ ] Port Docker (or equivalent container runtime)
 
 ### 5.6 Additional software
-- [ ] Archive support (zip, 7z, tar.gz, rar)
+- [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)
 - [ ] Speech input / speech output
 - [ ] Cellphone camera/microphone integration
 - [ ] Scripting language registration (Lua and/or WASM runtime for app extensibility)

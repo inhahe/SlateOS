@@ -734,6 +734,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::handle::self_test() {
                 serial_println!("WARNING: File handle self-test failed: {:?}", e);
             }
+            // Run io_ring file handle test (requires mounted /tmp).
+            if let Err(e) = ipc::io_ring::self_test_fh() {
+                serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
+            }
             // Run buffer cache self-test (validates caching, write-back, LRU).
             if let Err(e) = fs::cache::self_test() {
                 serial_println!("WARNING: Buffer cache self-test failed: {:?}", e);

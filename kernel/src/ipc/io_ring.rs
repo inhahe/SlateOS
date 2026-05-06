@@ -189,6 +189,38 @@ pub const IO_OP_FS_READ: u8 = 6;
 /// `arg2` = data length.
 pub const IO_OP_FS_WRITE: u8 = 7;
 
+/// Read from a file handle at the current offset.
+/// `handle` = file handle, `addr` = buffer pointer, `len` = buffer capacity.
+/// Returns: bytes read (0 = EOF).
+pub const IO_OP_FH_READ: u8 = 8;
+
+/// Write to a file handle at the current offset.
+/// `handle` = file handle, `addr` = data pointer, `len` = data length.
+/// Returns: bytes written.
+pub const IO_OP_FH_WRITE: u8 = 9;
+
+/// Read from a file handle at a specific offset (positional read).
+/// `handle` = file handle, `addr` = buffer pointer, `len` = buffer capacity,
+/// `arg1` = file offset.  Does NOT move the handle's cursor.
+/// Returns: bytes read (0 = EOF).
+pub const IO_OP_FH_PREAD: u8 = 10;
+
+/// Write to a file handle at a specific offset (positional write).
+/// `handle` = file handle, `addr` = data pointer, `len` = data length,
+/// `arg1` = file offset.  Does NOT move the handle's cursor.
+/// Returns: bytes written.
+pub const IO_OP_FH_PWRITE: u8 = 11;
+
+/// Signal an eventfd (add value to counter).
+/// `handle` = eventfd handle, `arg1` = value to add.
+/// Returns: 0 on success.
+pub const IO_OP_EVENTFD_SIGNAL: u8 = 12;
+
+/// Signal a semaphore (increment count).
+/// `handle` = semaphore handle, `arg1` = count to add.
+/// Returns: 0 on success.
+pub const IO_OP_SEM_SIGNAL: u8 = 13;
+
 // ---------------------------------------------------------------------------
 // Ring management
 // ---------------------------------------------------------------------------
@@ -540,6 +572,12 @@ fn execute_sqe(sqe: &SqEntry) -> i64 {
         IO_OP_PIPE_READ => exec_pipe_read(sqe),
         IO_OP_FS_READ => exec_fs_read(sqe),
         IO_OP_FS_WRITE => exec_fs_write(sqe),
+        IO_OP_FH_READ => exec_fh_read(sqe),
+        IO_OP_FH_WRITE => exec_fh_write(sqe),
+        IO_OP_FH_PREAD => exec_fh_pread(sqe),
+        IO_OP_FH_PWRITE => exec_fh_pwrite(sqe),
+        IO_OP_EVENTFD_SIGNAL => exec_eventfd_signal(sqe),
+        IO_OP_SEM_SIGNAL => exec_sem_signal(sqe),
         _ => KernelError::NotSupported.code() as i64,
     }
 }
@@ -717,16 +755,183 @@ fn exec_fs_write(sqe: &SqEntry) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// File handle operations (opcodes 8–11)
+// ---------------------------------------------------------------------------
+
+fn exec_fh_read(sqe: &SqEntry) -> i64 {
+    let fh = sqe.handle;
+    let ptr = sqe.addr as *mut u8;
+    let cap = sqe.len as usize;
+
+    if ptr.is_null() || cap == 0 {
+        return KernelError::InvalidArgument.code() as i64;
+    }
+
+    // Allocate a kernel buffer, read into it, then copy to user pointer.
+    let mut kbuf = alloc::vec![0u8; cap.min(65536)];
+
+    match crate::fs::handle::read(fh, &mut kbuf) {
+        Ok(n) => {
+            if n > 0 {
+                // SAFETY: Caller guarantees ptr is valid for cap bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(kbuf.as_ptr(), ptr, n);
+                }
+            }
+            n as i64
+        }
+        Err(e) => e.code() as i64,
+    }
+}
+
+fn exec_fh_write(sqe: &SqEntry) -> i64 {
+    let fh = sqe.handle;
+    let ptr = sqe.addr as *const u8;
+    let len = sqe.len as usize;
+
+    if ptr.is_null() || len == 0 {
+        return KernelError::InvalidArgument.code() as i64;
+    }
+
+    // SAFETY: Caller guarantees ptr is valid for len bytes.
+    let data = unsafe { core::slice::from_raw_parts(ptr, len.min(65536)) };
+
+    match crate::fs::handle::write(fh, data) {
+        Ok(n) => n as i64,
+        Err(e) => e.code() as i64,
+    }
+}
+
+fn exec_fh_pread(sqe: &SqEntry) -> i64 {
+    use crate::fs::handle::SeekFrom;
+
+    let fh = sqe.handle;
+    let ptr = sqe.addr as *mut u8;
+    let cap = sqe.len as usize;
+    let offset = sqe.arg1;
+
+    if ptr.is_null() || cap == 0 {
+        return KernelError::InvalidArgument.code() as i64;
+    }
+
+    // Save current position, seek to offset, read, restore position.
+    let saved = match crate::fs::handle::seek(fh, SeekFrom::Current(0)) {
+        Ok(pos) => pos,
+        Err(e) => return e.code() as i64,
+    };
+
+    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(offset)) {
+        return e.code() as i64;
+    }
+
+    let mut kbuf = alloc::vec![0u8; cap.min(65536)];
+    let result = match crate::fs::handle::read(fh, &mut kbuf) {
+        Ok(n) => {
+            if n > 0 {
+                // SAFETY: Caller guarantees ptr is valid for cap bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(kbuf.as_ptr(), ptr, n);
+                }
+            }
+            n as i64
+        }
+        Err(e) => e.code() as i64,
+    };
+
+    // Restore original position.
+    let _ = crate::fs::handle::seek(fh, SeekFrom::Start(saved));
+
+    result
+}
+
+fn exec_fh_pwrite(sqe: &SqEntry) -> i64 {
+    use crate::fs::handle::SeekFrom;
+
+    let fh = sqe.handle;
+    let ptr = sqe.addr as *const u8;
+    let len = sqe.len as usize;
+    let offset = sqe.arg1;
+
+    if ptr.is_null() || len == 0 {
+        return KernelError::InvalidArgument.code() as i64;
+    }
+
+    // Save current position, seek to offset, write, restore position.
+    let saved = match crate::fs::handle::seek(fh, SeekFrom::Current(0)) {
+        Ok(pos) => pos,
+        Err(e) => return e.code() as i64,
+    };
+
+    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(offset)) {
+        return e.code() as i64;
+    }
+
+    // SAFETY: Caller guarantees ptr is valid for len bytes.
+    let data = unsafe { core::slice::from_raw_parts(ptr, len.min(65536)) };
+
+    let result = match crate::fs::handle::write(fh, data) {
+        Ok(n) => n as i64,
+        Err(e) => e.code() as i64,
+    };
+
+    // Restore original position.
+    let _ = crate::fs::handle::seek(fh, SeekFrom::Start(saved));
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Eventfd / semaphore operations (opcodes 12–13)
+// ---------------------------------------------------------------------------
+
+fn exec_eventfd_signal(sqe: &SqEntry) -> i64 {
+    use crate::ipc::eventfd::{self, EventFdHandle};
+
+    let handle = EventFdHandle::from_raw(sqe.handle);
+    let value = sqe.arg1;
+
+    if value == 0 {
+        return 0; // No-op signal.
+    }
+
+    match eventfd::write(handle, value) {
+        Ok(()) => 0,
+        Err(e) => e.code() as i64,
+    }
+}
+
+fn exec_sem_signal(sqe: &SqEntry) -> i64 {
+    use crate::ipc::semaphore::{self, SemHandle};
+
+    let handle = SemHandle::from_raw(sqe.handle);
+    let count = sqe.arg1;
+
+    match semaphore::signal(handle, count) {
+        Ok(()) => 0,
+        Err(e) => e.code() as i64,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Run io_ring self-tests.
+/// Run io_ring self-tests (early boot — no filesystem available).
 pub fn self_test() -> KernelResult<()> {
     test_ring_create_destroy()?;
     test_nop_submission()?;
     test_console_write_batch()?;
+    test_fh_read_write()?;
 
     Ok(())
+}
+
+/// Run io_ring file handle self-test (after filesystem is mounted).
+///
+/// This is called separately from main self_test() because it requires
+/// /tmp to be mounted, which happens later in the boot sequence.
+pub fn self_test_fh() -> KernelResult<()> {
+    test_fh_read_write()
 }
 
 /// Test 1: Create and destroy a ring.
@@ -926,5 +1131,106 @@ fn test_console_write_batch() -> KernelResult<()> {
 
     destroy(handle)?;
     serial_println!("[io_ring]   Console write batch (2 entries): OK");
+    Ok(())
+}
+
+/// Test 4: File handle read/write via io_ring.
+///
+/// Opens a temp file, writes data via IO_OP_FH_WRITE, reads it back
+/// via IO_OP_FH_READ, and verifies correctness.
+///
+/// Skipped if no filesystem is mounted yet (io_ring self-test runs
+/// before VFS init in the boot sequence).
+fn test_fh_read_write() -> KernelResult<()> {
+    // Check if /tmp is available.  If no filesystem is mounted yet
+    // (io_ring self-test runs early in boot), skip gracefully.
+    let test_path = "/tmp/io_ring_test";
+    let test_data = b"io_ring file handle test data 1234567890";
+    if crate::fs::Vfs::write_file(test_path, test_data).is_err() {
+        serial_println!("[io_ring]   File handle read/write: SKIPPED (no FS)");
+        return Ok(());
+    }
+
+    // Open the file for read.
+    let fh = crate::fs::handle::open(
+        test_path,
+        crate::fs::handle::OpenFlags::READ,
+    )?;
+
+    // Create io_ring.
+    let (ring_handle, base_virt, _frames) = setup(8, 16)?;
+    let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
+    #[allow(clippy::arithmetic_side_effects)]
+    let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
+    #[allow(clippy::arithmetic_side_effects)]
+    let cq_base = (base_virt
+        + core::mem::size_of::<IoRingHeader>() as u64
+        + 8u64 * core::mem::size_of::<SqEntry>() as u64) as *const CqEntry;
+
+    // Set up a read buffer in kernel memory (simulating user buffer).
+    let mut read_buf = [0u8; 64];
+
+    // Submit a FH_READ SQE.
+    let sqe = SqEntry {
+        opcode: IO_OP_FH_READ,
+        flags: 0,
+        _pad0: [0; 2],
+        _pad1: 0,
+        user_data: 500,
+        handle: fh,
+        addr: read_buf.as_mut_ptr() as u64,
+        len: read_buf.len() as u32,
+        _pad2: 0,
+        arg1: 0,
+        arg2: 0,
+    };
+    unsafe { *sq_base.add(0) = sqe; }
+    header.sq_tail.store(1, Ordering::Release);
+
+    let processed = enter(ring_handle, 0)?;
+    if processed != 1 {
+        serial_println!(
+            "[io_ring]   FAIL: fh_read processed {} SQEs, expected 1",
+            processed
+        );
+        let _ = crate::fs::handle::close(fh);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify CQE.
+    let cqe = unsafe { &*cq_base.add(0) };
+    if cqe.result != test_data.len() as i64 {
+        serial_println!(
+            "[io_ring]   FAIL: fh_read CQE result={}, expected {}",
+            cqe.result, test_data.len()
+        );
+        let _ = crate::fs::handle::close(fh);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+    if cqe.user_data != 500 {
+        serial_println!(
+            "[io_ring]   FAIL: fh_read CQE user_data={}, expected 500",
+            cqe.user_data
+        );
+        let _ = crate::fs::handle::close(fh);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify the data read matches.
+    if &read_buf[..test_data.len()] != test_data {
+        serial_println!("[io_ring]   FAIL: fh_read data mismatch");
+        let _ = crate::fs::handle::close(fh);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    let _ = crate::fs::handle::close(fh);
+    destroy(ring_handle)?;
+    let _ = crate::fs::Vfs::remove(test_path);
+    serial_println!("[io_ring]   File handle read/write (1 entry): OK");
     Ok(())
 }

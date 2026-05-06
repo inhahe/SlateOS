@@ -603,6 +603,24 @@ pub fn run_all() {
     // L4: ~0.5-1 µs).
     bench_ipc_channel();
 
+    // --- Pipe write+read round-trip ---
+    //
+    // Measures the kernel-side pipe hot path: write N bytes on the
+    // write end, read them back from the read end.
+    bench_ipc_pipe();
+
+    // --- Service registry connect+accept ---
+    //
+    // Measures the service discovery path: connect() creates a channel
+    // pair, queues one end, and returns the other.  accept() dequeues.
+    bench_service_connect();
+
+    // --- Eventfd signal+read round-trip ---
+    //
+    // Measures lightweight wake-up notification cost: write (signal)
+    // then try_read (consume).
+    bench_ipc_eventfd();
+
     // --- Page fault (demand-page anonymous fault) ---
     //
     // Measures the page fault handler's resolution path for a demand-
@@ -893,6 +911,144 @@ fn bench_ipc_channel() {
     } else {
         serial_println!(
             "[bench]   ipc_channel_roundtrip: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipe round-trip benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark pipe write+read round-trip.
+///
+/// Creates a pipe, writes 64 bytes, reads them back.  Measures the
+/// kernel-side hot path for byte-stream IPC.
+fn bench_ipc_pipe() {
+    use crate::ipc::pipe;
+
+    let (rd, wr) = pipe::create();
+
+    // Warm up.
+    {
+        let data = [0xABu8; 64];
+        pipe::write(wr, &data).expect("bench: pipe warmup write");
+        let mut buf = [0u8; 64];
+        let _ = pipe::read(rd, &mut buf).expect("bench: pipe warmup read");
+    }
+
+    let result = run("ipc_pipe_roundtrip_64", 1000, || {
+        let data = [0x42u8; 64];
+        pipe::write(wr, &data).expect("bench: pipe write");
+        let mut buf = [0u8; 64];
+        let n = pipe::try_read(rd, &mut buf).expect("bench: pipe read");
+        core::hint::black_box(n);
+    });
+
+    pipe::close(rd);
+    pipe::close(wr);
+
+    // Target: comparable to channel roundtrip (~1-2 µs).
+    let target_ns = 3000u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   ipc_pipe_roundtrip: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   ipc_pipe_roundtrip: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service registry connect+accept benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark service connect + accept cycle.
+///
+/// Registers a service, then repeatedly connects and accepts.  Measures
+/// the overhead of creating a channel pair and brokering the connection.
+fn bench_service_connect() {
+    use crate::ipc::service;
+    use crate::ipc::channel;
+
+    let listener = service::register(b"bench.svc")
+        .expect("bench: service register");
+
+    // Warm up.
+    {
+        let client = service::connect(b"bench.svc").expect("bench: warmup connect");
+        let server = service::try_accept(listener).expect("bench: warmup accept")
+            .expect("bench: warmup pending");
+        channel::close(client);
+        channel::close(server);
+    }
+
+    let result = run("service_connect_accept", 500, || {
+        let client = service::connect(b"bench.svc").expect("bench: connect");
+        let server = service::try_accept(listener).expect("bench: accept")
+            .expect("bench: pending");
+        channel::close(client);
+        channel::close(server);
+    });
+
+    service::unregister(listener).expect("bench: unregister");
+
+    // Target: connect+accept should be < 5 µs (channel create + queue push + dequeue).
+    let target_ns = 5000u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   service_connect_accept: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   service_connect_accept: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Eventfd signal+read benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark eventfd signal+read round-trip.
+///
+/// Creates an eventfd, writes (signals) it, then try_reads (consumes).
+/// Measures the lightweight wake-up notification path.
+fn bench_ipc_eventfd() {
+    use crate::ipc::eventfd;
+
+    let efd = eventfd::create(0);
+
+    // Warm up.
+    {
+        eventfd::write(efd, 1).expect("bench: efd warmup write");
+        let _ = eventfd::try_read(efd).expect("bench: efd warmup read");
+    }
+
+    let result = run("eventfd_signal_read", 2000, || {
+        eventfd::write(efd, 1).expect("bench: efd write");
+        let val = eventfd::try_read(efd).expect("bench: efd read");
+        core::hint::black_box(val);
+    });
+
+    eventfd::close(efd);
+
+    // Target: < 1 µs (lighter than channels).
+    let target_ns = 1000u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   eventfd_signal_read: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   eventfd_signal_read: ABOVE TARGET (min {}ns > target {}ns)",
             result.min_ns, target_ns
         );
     }

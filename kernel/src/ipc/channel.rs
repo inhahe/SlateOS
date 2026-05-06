@@ -1194,8 +1194,7 @@ fn test_recv_timeout() -> KernelResult<()> {
     sched::spawn(b"recv-to-test", 16, timeout_recv_task, ep1.0, 0)?;
 
     // Let the receiver run and block.  Wait a bit more than 5ms to ensure
-    // the timer fires.  We yield several times because yield_now only
-    // gives up the current timeslice (~10ms tick), not a wall-clock delay.
+    // the timer fires.
     sched::sleep_ms(20);
 
     let result = TIMEOUT_RESULT.load(Ordering::SeqCst);

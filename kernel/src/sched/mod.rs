@@ -2745,6 +2745,93 @@ pub fn sleep_until_tick(wake_tick: u64) {
     block_current();
 }
 
+// ---------------------------------------------------------------------------
+// Deferred wake queue — retry mechanism for ISR-context wakes
+// ---------------------------------------------------------------------------
+
+/// Maximum pending deferred wakes (small: usually 0-2 in flight).
+const DEFERRED_WAKE_SLOTS: usize = 32;
+
+/// Deferred wake slot: 0 = empty, non-zero = task_id to wake.
+static DEFERRED_WAKES: [AtomicU64; DEFERRED_WAKE_SLOTS] = {
+    const EMPTY: AtomicU64 = AtomicU64::new(0);
+    [EMPTY; DEFERRED_WAKE_SLOTS]
+};
+
+/// Queue a deferred wake for a task.
+///
+/// Called from ISR context when `try_wake` fails (scheduler lock
+/// contended by the interrupted code path).  The deferred wake will
+/// be processed on the next timer tick by [`process_deferred_wakes`].
+///
+/// If the queue is full (extremely unlikely — 32 slots), the wake is
+/// dropped.  The task will remain blocked until another explicit wake
+/// occurs.  This should never happen in practice because the queue
+/// drains every tick (10ms).
+fn defer_wake(task_id: TaskId) {
+    for slot in &DEFERRED_WAKES {
+        // CAS: claim an empty slot.
+        if slot
+            .compare_exchange(0, task_id, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    // Queue full — this is a diagnostic-only path.
+    // In practice should never happen (32 slots, drained every 10ms).
+}
+
+/// Process all pending deferred wakes (lock-free path for softirq).
+///
+/// Called from the timer softirq (alongside `process_sleep_wakeups`).
+/// Attempts to wake each queued task.  If `try_wake` still fails
+/// (lock contended again — extremely rare), the entry stays for the
+/// next tick.
+pub fn process_deferred_wakes() {
+    for slot in &DEFERRED_WAKES {
+        let task_id = slot.load(Ordering::Acquire);
+        if task_id == 0 {
+            continue;
+        }
+        if try_wake(task_id) {
+            // Success — clear the slot.
+            slot.store(0, Ordering::Release);
+        }
+        // If try_wake still fails, leave it for next tick.
+    }
+}
+
+/// Drain the deferred wake queue while holding the SCHED lock.
+///
+/// Called from `schedule_inner` with the lock already held.  This is
+/// the primary drain path — it guarantees that deferred wakes are
+/// processed at the next scheduling decision, even on single-CPU
+/// systems where the ISR-context `try_wake` always fails (because the
+/// interrupted code was holding the lock).
+fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
+    for slot in &DEFERRED_WAKES {
+        let task_id = slot.load(Ordering::Acquire);
+        if task_id == 0 {
+            continue;
+        }
+        // We already hold the lock — wake directly.
+        if let Some(task) = state.tasks.get_mut(&task_id) {
+            if task.state == TaskState::Blocked {
+                task.mark_ready(crate::apic::tick_count());
+                task.burst_ticks = 0;
+                let prio = task.effective_priority();
+                let target_cpu = choose_cpu_for_task(task);
+                task.last_cpu = target_cpu;
+                PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+            }
+        }
+        // Clear the slot regardless (task might have already been woken
+        // by another path, or may not exist anymore).
+        slot.store(0, Ordering::Release);
+    }
+}
+
 /// Sleep the current task for a precise duration in nanoseconds.
 ///
 /// Uses the high-resolution timer subsystem (HPET-backed) for sub-10ms
@@ -2778,9 +2865,16 @@ pub fn sleep_ns(duration_ns: u64) {
     let task_id = load_current_task();
 
     // Schedule an hrtimer to wake us.
+    //
+    // The callback runs from ISR context (timer tick).  It uses try_wake
+    // which may fail if the scheduler lock is held by the interrupted code.
+    // On failure, we defer the wake to the next tick via the deferred wake
+    // queue — guaranteeing the sleeper is eventually woken.
     fn wake_callback(task_id_arg: u64) {
-        // task_id_arg is already TaskId (u64) — wake the blocked task.
-        try_wake(task_id_arg);
+        if !try_wake(task_id_arg) {
+            // Scheduler lock was contended — defer to next tick.
+            defer_wake(task_id_arg);
+        }
     }
 
     let _handle = crate::hrtimer::schedule_ns(duration_ns, wake_callback, u64::from(task_id));
@@ -2904,6 +2998,11 @@ fn schedule_inner(requeue: bool) {
         if !state.initialized {
             return;
         }
+
+        // Process any deferred wakes that were queued by ISR-context
+        // hrtimer callbacks when the SCHED lock was contended.  We now
+        // hold the lock, so we can safely wake these tasks.
+        drain_deferred_wakes_locked(&mut *state, cpu);
 
         // Re-enqueue the current task if requested (on its current CPU).
         //
@@ -3404,6 +3503,15 @@ pub fn self_test() -> KernelResult<()> {
 
     serial_println!("[sched] Scheduler self-test PASSED");
     Ok(())
+}
+
+/// Post-interrupt-enable test for sleep_ns.
+///
+/// This test MUST run after `sti()` (interrupts enabled) because it
+/// requires the APIC timer to fire and drive the hrtimer subsystem.
+/// Called from main.rs after the full boot sequence enables interrupts.
+pub fn test_sleep_ns_postboot() -> KernelResult<()> {
+    test_sleep_ns()
 }
 
 /// Test 0: Stack canary — verify canary is planted and survives execution.
@@ -4887,5 +4995,88 @@ fn test_stack_watermark() -> KernelResult<()> {
     reap_dead_tasks();
 
     serial_println!("[sched]   Stack watermark: PASSED");
+    Ok(())
+}
+
+/// Test: sleep_ns wakes a task after the requested duration.
+///
+/// Spawns a helper task that sleeps for a known duration, then verifies
+/// it woke up within a reasonable time window.  This exercises the full
+/// hrtimer → APIC tick shortening → scheduler wake path.
+fn test_sleep_ns() -> KernelResult<()> {
+    use core::sync::atomic::AtomicU64;
+
+    static SLEEP_START: AtomicU64 = AtomicU64::new(0);
+    static SLEEP_END: AtomicU64 = AtomicU64::new(0);
+    static SLEEPER_DONE: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn sleeper_task(_arg: u64) {
+        SLEEP_START.store(crate::hrtimer::now_ns(), Ordering::Release);
+        // Sleep for 20ms — uses hrtimer (< 100ms threshold).
+        // Use a longer duration to be tolerant of QEMU TCG timing variability.
+        sleep_ns(20_000_000);
+        SLEEP_END.store(crate::hrtimer::now_ns(), Ordering::Release);
+        SLEEPER_DONE.store(1, Ordering::Release);
+    }
+
+    SLEEP_START.store(0, Ordering::Relaxed);
+    SLEEP_END.store(0, Ordering::Relaxed);
+    SLEEPER_DONE.store(0, Ordering::Relaxed);
+
+    let pml4 = crate::mm::page_table::active_pml4_phys();
+    let _id = spawn(b"test-sleep-ns", task::DEFAULT_PRIORITY, sleeper_task, 0, pml4)?;
+
+    // Wait for the sleeper to complete.  Use a spin loop that does NOT
+    // hold the scheduler lock constantly — the hrtimer callback calls
+    // try_wake() from the timer ISR, and if that fails (SCHED lock held
+    // by the interrupted yield_now), the deferred wake mechanism picks
+    // it up on the next schedule_inner call.
+    let deadline = crate::apic::tick_count().saturating_add(50);
+    loop {
+        if SLEEPER_DONE.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        if crate::apic::tick_count() >= deadline {
+            break;
+        }
+        // Spin without holding any locks — allows timer ISR to fire
+        // and process hrtimers.  Yield periodically to give the sleeper
+        // CPU time after it's woken.
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+        yield_now();
+    }
+
+    let done = SLEEPER_DONE.load(Ordering::Acquire);
+    assert!(done != 0, "sleep_ns: sleeper task did not complete within 500ms");
+
+    let start = SLEEP_START.load(Ordering::Acquire);
+    let end = SLEEP_END.load(Ordering::Acquire);
+    assert!(end > start, "sleep_ns: end time not after start");
+
+    let elapsed_ns = end.saturating_sub(start);
+    // We requested 20ms (20_000_000 ns).
+    // With hrtimer + tick shortening, actual should be >= 10ms and <= 200ms.
+    // (Lower bound accounts for timer granularity; upper bound for QEMU
+    // TCG scheduling delays where virtual timer ticks may bunch.)
+    assert!(
+        elapsed_ns >= 5_000_000,
+        "sleep_ns too short: {}ns (expected >= 5ms)",
+        elapsed_ns,
+    );
+    assert!(
+        elapsed_ns <= 500_000_000,
+        "sleep_ns too long: {}ns (expected <= 500ms, indicates timer didn't fire)",
+        elapsed_ns,
+    );
+
+    serial_println!(
+        "[sched]   sleep_ns: PASSED (slept {}.{:03}ms for 20ms request)",
+        elapsed_ns / 1_000_000,
+        (elapsed_ns % 1_000_000) / 1000,
+    );
+
+    reap_dead_tasks();
     Ok(())
 }

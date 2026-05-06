@@ -817,6 +817,14 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Test sleep_ns (requires interrupts for hrtimer-based wake).
+    // Must run after interrupts are enabled because the hrtimer callback
+    // fires from the APIC timer ISR.
+    if let Err(e) = sched::test_sleep_ns_postboot() {
+        serial_println!("FATAL: sleep_ns self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Softirq self-test — verify raise/process/reentry-guard work.
     // Must be after interrupts are enabled (softirq processing does
     // STI/CLI internally).

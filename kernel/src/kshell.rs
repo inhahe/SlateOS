@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4245,6 +4245,7 @@ fn dispatch(line: &str) {
         "bench" | "benchmark" => cmd_bench(args),
         "diag2" | "report" => cmd_diag_report(args),
         "hypervisor" | "vminfo" => cmd_hypervisor(),
+        "cet" | "cfi" => cmd_cet(),
         "fairness" | "jfi" => cmd_fairness(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
@@ -21522,6 +21523,35 @@ fn cmd_hypervisor() {
     } else {
         shell_println!("  Running on:     bare metal (no hypervisor)");
         shell_println!("  Virtualized:    no");
+    }
+}
+
+/// `cet` — show Intel CET (Control-flow Enforcement) status.
+fn cmd_cet() {
+    use crate::cet;
+
+    let s = cet::status();
+
+    shell_println!("=== Intel CET (Control-flow Enforcement) ===");
+    shell_println!("");
+    shell_println!("  Hardware support:");
+    shell_println!("    Shadow Stacks (SHSTK): {}",
+        if s.hw_shstk { "yes" } else { "no" });
+    shell_println!("    Indirect Branch Tracking (IBT): {}",
+        if s.hw_ibt { "yes" } else { "no" });
+    shell_println!("");
+    shell_println!("  Supervisor mode:");
+    shell_println!("    Shadow stacks: {}",
+        if s.supervisor_shstk { "ACTIVE" } else { "inactive" });
+    shell_println!("    IBT enforcement: {}",
+        if s.supervisor_ibt { "ACTIVE" } else { "inactive" });
+    shell_println!("");
+    shell_println!("  #CP exceptions: {}", s.cp_exceptions);
+
+    if !s.hw_shstk && !s.hw_ibt {
+        shell_println!("");
+        shell_println!("  Note: This CPU does not support CET.");
+        shell_println!("  CET requires Intel 11th gen+ or AMD Zen 3+.");
     }
 }
 

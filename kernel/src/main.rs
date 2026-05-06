@@ -55,6 +55,7 @@ mod bench;
 mod blkdev;
 mod boot;
 mod cap;
+mod cet;
 mod console;
 mod cpu;
 mod cpu_hotplug;
@@ -208,6 +209,9 @@ extern "C" fn kmain() -> ! {
     // early because hypervisor type affects TSC behavior and driver
     // selection (e.g., prefer virtio under KVM/QEMU).
     hypervisor::detect();
+    // Detect Intel CET (Control-flow Enforcement Technology) support.
+    // On hardware with CET, this enables shadow stacks and IBT for kernel protection.
+    cet::detect();
     // Cache topology detection uses only CPUID (no heap needed), but
     // logging uses alloc::format, so we detect now and log later.
     cpu::detect_cache_topology();
@@ -1029,6 +1033,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++z: Scheduler fairness measurement self-test.
     // Computes Jain's Fairness Index for CPU time distribution.
     sched_fairness::self_test();
+
+    // Step 22e⅞+++++a: Intel CET self-test.
+    // Verifies CET detection, error code parsing, and CR4 state.
+    cet::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

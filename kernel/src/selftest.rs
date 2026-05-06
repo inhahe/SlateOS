@@ -215,6 +215,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::sched_fairness::self_test(); true },
         category: "sched",
     });
+    suites.push(TestSuite {
+        name: "cet",
+        description: "Intel CET (shadow stacks + IBT) detection",
+        run: || { crate::cet::self_test(); true },
+        category: "security",
+    });
 
     suites
 }

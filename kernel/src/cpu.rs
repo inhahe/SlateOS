@@ -806,6 +806,12 @@ pub struct CpuFeatures {
     pub vaes: bool,
     /// RDPID (read processor ID without TSC).
     pub rdpid: bool,
+    /// CET Shadow Stacks (hardware return-address protection).
+    pub cet_ss: bool,
+
+    // --- CPUID leaf 7, subleaf 0, EDX ---
+    /// CET Indirect Branch Tracking (ENDBR enforcement).
+    pub cet_ibt: bool,
 
     // --- CPUID leaf 0x80000001, EDX ---
     /// RDTSCP (read TSC + processor ID atomically).
@@ -839,6 +845,7 @@ impl CpuFeatures {
             fxsr: false, sse: false, sse2: false, tsc: false, apic: false,
             avx2: false, bmi1: false, bmi2: false, avx512f: false,
             sha: false, rdseed: false, vaes: false, rdpid: false,
+            cet_ss: false, cet_ibt: false,
             rdtscp: false, page_1g: false,
             xsave_area_size: 0, xcr0_supported: 0,
             pmu_version: 0, pmu_counters: 0, pmu_counter_width: 0,
@@ -885,7 +892,7 @@ pub fn detect_features() {
     // --- Leaf 7, subleaf 0: structured extended features ---
     let max_leaf = cpuid_max_leaf();
     if max_leaf >= 7 {
-        let (ebx7, ecx7) = cpuid_leaf7_sub0();
+        let (ebx7, ecx7, edx7) = cpuid_leaf7_sub0();
         f.avx2 = ebx7 & (1 << 5) != 0;
         f.bmi1 = ebx7 & (1 << 3) != 0;
         f.bmi2 = ebx7 & (1 << 8) != 0;
@@ -894,6 +901,9 @@ pub fn detect_features() {
         f.rdseed = ebx7 & (1 << 18) != 0;
         f.vaes = ecx7 & (1 << 9) != 0;
         f.rdpid = ecx7 & (1 << 22) != 0;
+        // Intel CET (Control-flow Enforcement Technology).
+        f.cet_ss = ecx7 & (1 << 7) != 0;   // Shadow Stack support
+        f.cet_ibt = edx7 & (1 << 20) != 0; // Indirect Branch Tracking
     }
 
     // --- Leaf 0x80000001: extended features ---
@@ -973,6 +983,10 @@ pub fn log_features() {
         "[cpu]   RDTSCP={} 1GiB pages={} TSC={}",
         f.rdtscp, f.page_1g, f.tsc
     );
+    crate::serial_println!(
+        "[cpu]   CET: shadow_stack={} indirect_branch_tracking={}",
+        f.cet_ss, f.cet_ibt
+    );
     if f.pmu_version > 0 {
         crate::serial_println!(
             "[cpu]   PMU v{}: {} counters × {}-bit",
@@ -1025,9 +1039,10 @@ fn cpuid_leaf1() -> (u32, u32) {
 }
 
 /// CPUID leaf 7, subleaf 0: returns (EBX, ECX) structured extended features.
-fn cpuid_leaf7_sub0() -> (u32, u32) {
+fn cpuid_leaf7_sub0() -> (u32, u32, u32) {
     let ebx: u32;
     let ecx: u32;
+    let edx: u32;
     // SAFETY: Caller verified max_leaf >= 7.
     unsafe {
         core::arch::asm!(
@@ -1040,11 +1055,11 @@ fn cpuid_leaf7_sub0() -> (u32, u32) {
             ebx_out = out(reg) ebx,
             out("eax") _,
             out("ecx") ecx,
-            out("edx") _,
+            out("edx") edx,
             options(nomem, nostack),
         );
     }
-    (ebx, ecx)
+    (ebx, ecx, edx)
 }
 
 /// CPUID extended leaf 0x80000000: maximum supported extended leaf.

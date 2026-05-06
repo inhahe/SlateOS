@@ -50,6 +50,7 @@ pub mod memfs;
 pub mod mime;
 pub mod notify;
 pub mod procfs;
+pub mod quota;
 #[allow(dead_code)]
 pub mod rar;
 pub mod sysfs;

@@ -3092,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
-    "printf", "profile", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
+    "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "strings", "tac", "tr",
@@ -4311,6 +4311,7 @@ fn dispatch(line: &str) {
         "fhist" | "filehist" => cmd_fhist(args),
         "mime" | "mimetype" => cmd_mime(args),
         "assoc" | "openwith" => cmd_assoc(args),
+        "quota" => cmd_quota(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -9070,6 +9071,276 @@ fn cmd_assoc(args: &str) {
             shell_println!("Unknown subcommand '{}'. Use: list, show, add, remove, lookup, stats", parts[0]);
         }
     }
+}
+
+/// `quota` — manage filesystem quotas.
+///
+/// Subcommands:
+///   quota on/off                  - enable/disable enforcement
+///   quota set user UID soft hard  - set byte limits for a user
+///   quota set group GID soft hard - set byte limits for a group
+///   quota setfiles user UID soft hard - set inode limits
+///   quota show [user UID | group GID] - show quota info
+///   quota list                    - list all quotas
+///   quota stats                   - show summary statistics
+///   quota remove user UID | group GID - remove a quota
+fn cmd_quota(args: &str) {
+    use crate::fs::quota;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    if parts.is_empty() {
+        shell_println!("Usage: quota <on|off|set|setfiles|show|list|stats|remove> [args...]");
+        shell_println!("  Quotas are currently {}.", if quota::is_enabled() { "enabled" } else { "disabled" });
+        return;
+    }
+
+    match parts.first().copied().unwrap_or("") {
+        "on" | "enable" => {
+            quota::set_enabled(true);
+            shell_println!("Quota enforcement enabled.");
+        }
+
+        "off" | "disable" => {
+            quota::set_enabled(false);
+            shell_println!("Quota enforcement disabled.");
+        }
+
+        "set" => {
+            // quota set user UID SOFT_BYTES HARD_BYTES [GRACE_SECS]
+            // quota set group GID SOFT_BYTES HARD_BYTES [GRACE_SECS]
+            if parts.len() < 5 {
+                shell_println!("Usage: quota set <user|group> <ID> <soft_bytes> <hard_bytes> [grace_secs]");
+                return;
+            }
+            let subject = match parts[1] {
+                "user" | "u" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(uid) => quota::QuotaSubject::User(uid),
+                        Err(_) => { shell_println!("Invalid UID: {}", parts[2]); return; }
+                    }
+                }
+                "group" | "g" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(gid) => quota::QuotaSubject::Group(gid),
+                        Err(_) => { shell_println!("Invalid GID: {}", parts[2]); return; }
+                    }
+                }
+                _ => { shell_println!("Expected 'user' or 'group', got '{}'", parts[1]); return; }
+            };
+
+            let soft: u64 = match parse_size_suffix(parts[3]) {
+                Some(v) => v,
+                None => { shell_println!("Invalid size: {}", parts[3]); return; }
+            };
+            let hard: u64 = match parse_size_suffix(parts[4]) {
+                Some(v) => v,
+                None => { shell_println!("Invalid size: {}", parts[4]); return; }
+            };
+            let grace = parts.get(5).and_then(|s| s.parse::<u64>().ok()).unwrap_or(7 * 24 * 3600);
+
+            // Preserve existing inode limits if any.
+            let existing = quota::get_info(subject);
+            let (si, hi) = existing.map_or((0, 0), |i| (i.limits.soft_inodes, i.limits.hard_inodes));
+
+            quota::set_limits(subject, quota::QuotaLimits {
+                soft_bytes: soft,
+                hard_bytes: hard,
+                soft_inodes: si,
+                hard_inodes: hi,
+                grace_seconds: grace,
+            });
+            shell_println!("Set byte quota: soft={}, hard={}, grace={}s",
+                quota::format_bytes(soft), quota::format_bytes(hard), grace);
+        }
+
+        "setfiles" | "setinodes" => {
+            // quota setfiles user UID SOFT_INODES HARD_INODES
+            if parts.len() < 5 {
+                shell_println!("Usage: quota setfiles <user|group> <ID> <soft_files> <hard_files>");
+                return;
+            }
+            let subject = match parts[1] {
+                "user" | "u" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(uid) => quota::QuotaSubject::User(uid),
+                        Err(_) => { shell_println!("Invalid UID: {}", parts[2]); return; }
+                    }
+                }
+                "group" | "g" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(gid) => quota::QuotaSubject::Group(gid),
+                        Err(_) => { shell_println!("Invalid GID: {}", parts[2]); return; }
+                    }
+                }
+                _ => { shell_println!("Expected 'user' or 'group', got '{}'", parts[1]); return; }
+            };
+
+            let soft: u64 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid number: {}", parts[3]); return; }
+            };
+            let hard: u64 = match parts[4].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid number: {}", parts[4]); return; }
+            };
+
+            // Preserve existing byte limits if any.
+            let existing = quota::get_info(subject);
+            let (sb, hb, grace) = existing.map_or((0, 0, 7 * 24 * 3600), |i| {
+                (i.limits.soft_bytes, i.limits.hard_bytes, i.limits.grace_seconds)
+            });
+
+            quota::set_limits(subject, quota::QuotaLimits {
+                soft_bytes: sb,
+                hard_bytes: hb,
+                soft_inodes: soft,
+                hard_inodes: hard,
+                grace_seconds: grace,
+            });
+            shell_println!("Set inode quota: soft={}, hard={}", soft, hard);
+        }
+
+        "show" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: quota show <user|group> <ID>");
+                return;
+            }
+            let subject = match parts[1] {
+                "user" | "u" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(uid) => quota::QuotaSubject::User(uid),
+                        Err(_) => { shell_println!("Invalid UID: {}", parts[2]); return; }
+                    }
+                }
+                "group" | "g" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(gid) => quota::QuotaSubject::Group(gid),
+                        Err(_) => { shell_println!("Invalid GID: {}", parts[2]); return; }
+                    }
+                }
+                _ => { shell_println!("Expected 'user' or 'group', got '{}'", parts[1]); return; }
+            };
+
+            match quota::get_info(subject) {
+                Some(info) => {
+                    print_quota_info(&info);
+                }
+                None => {
+                    shell_println!("No quota configured for {:?}", subject);
+                }
+            }
+        }
+
+        "list" | "ls" => {
+            let all = quota::list_all();
+            if all.is_empty() {
+                shell_println!("No quotas configured.");
+            } else {
+                shell_println!("{:<12} {:>12} {:>12} {:>12} {:>12}  Status",
+                    "Subject", "Bytes Used", "Soft Limit", "Hard Limit", "Files");
+                shell_println!("{}", "-".repeat(78));
+                for info in &all {
+                    let subj_str = match info.subject {
+                        quota::QuotaSubject::User(uid) => alloc::format!("user:{}", uid),
+                        quota::QuotaSubject::Group(gid) => alloc::format!("group:{}", gid),
+                    };
+                    let status = if info.over_hard_bytes || info.over_hard_inodes {
+                        "OVER HARD"
+                    } else if info.over_soft_bytes || info.over_soft_inodes {
+                        "over soft"
+                    } else {
+                        "ok"
+                    };
+                    shell_println!("{:<12} {:>12} {:>12} {:>12} {:>12}  {}",
+                        subj_str,
+                        quota::format_bytes(info.usage.bytes_used),
+                        if info.limits.soft_bytes > 0 { quota::format_bytes(info.limits.soft_bytes) } else { alloc::format!("-") },
+                        if info.limits.hard_bytes > 0 { quota::format_bytes(info.limits.hard_bytes) } else { alloc::format!("-") },
+                        info.usage.inodes_used,
+                        status,
+                    );
+                }
+                shell_println!("({} quota entries)", all.len());
+            }
+        }
+
+        "stats" | "st" => {
+            let st = quota::stats();
+            shell_println!("=== Filesystem Quota Statistics ===");
+            shell_println!("  Enforcement: {}", if st.enabled { "enabled" } else { "disabled" });
+            shell_println!("  Total entries: {}", st.entries);
+            shell_println!("  User quotas:  {}", st.user_quotas);
+            shell_println!("  Group quotas: {}", st.group_quotas);
+            shell_println!("  Over soft:    {}", st.over_soft);
+            shell_println!("  Over hard:    {}", st.over_hard);
+        }
+
+        "remove" | "rm" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: quota remove <user|group> <ID>");
+                return;
+            }
+            let subject = match parts[1] {
+                "user" | "u" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(uid) => quota::QuotaSubject::User(uid),
+                        Err(_) => { shell_println!("Invalid UID: {}", parts[2]); return; }
+                    }
+                }
+                "group" | "g" => {
+                    match parts[2].parse::<u32>() {
+                        Ok(gid) => quota::QuotaSubject::Group(gid),
+                        Err(_) => { shell_println!("Invalid GID: {}", parts[2]); return; }
+                    }
+                }
+                _ => { shell_println!("Expected 'user' or 'group', got '{}'", parts[1]); return; }
+            };
+
+            if quota::remove(subject) {
+                shell_println!("Quota removed for {:?}.", subject);
+            } else {
+                shell_println!("No quota found for {:?}.", subject);
+            }
+        }
+
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Use: on, off, set, setfiles, show, list, stats, remove", parts[0]);
+        }
+    }
+}
+
+/// Helper to print detailed quota info.
+fn print_quota_info(info: &crate::fs::quota::QuotaInfo) {
+    use crate::fs::quota;
+
+    let subj_str = match info.subject {
+        quota::QuotaSubject::User(uid) => alloc::format!("User {}", uid),
+        quota::QuotaSubject::Group(gid) => alloc::format!("Group {}", gid),
+    };
+
+    shell_println!("=== Quota: {} ===", subj_str);
+    shell_println!("  Bytes:");
+    shell_println!("    Used:  {}", quota::format_bytes(info.usage.bytes_used));
+    shell_println!("    Soft:  {}", if info.limits.soft_bytes > 0 { quota::format_bytes(info.limits.soft_bytes) } else { alloc::format!("unlimited") });
+    shell_println!("    Hard:  {}", if info.limits.hard_bytes > 0 { quota::format_bytes(info.limits.hard_bytes) } else { alloc::format!("unlimited") });
+    if info.over_hard_bytes {
+        shell_println!("    ** OVER HARD LIMIT **");
+    } else if info.over_soft_bytes {
+        shell_println!("    * over soft limit (grace period active) *");
+    }
+
+    shell_println!("  Files:");
+    shell_println!("    Used:  {}", info.usage.inodes_used);
+    shell_println!("    Soft:  {}", if info.limits.soft_inodes > 0 { alloc::format!("{}", info.limits.soft_inodes) } else { alloc::format!("unlimited") });
+    shell_println!("    Hard:  {}", if info.limits.hard_inodes > 0 { alloc::format!("{}", info.limits.hard_inodes) } else { alloc::format!("unlimited") });
+    if info.over_hard_inodes {
+        shell_println!("    ** OVER HARD LIMIT **");
+    } else if info.over_soft_inodes {
+        shell_println!("    * over soft limit *");
+    }
+
+    shell_println!("  Grace period: {}s", info.limits.grace_seconds);
 }
 
 /// Similar to the Unix `file` command.  Uses `lstat` to avoid following
@@ -13987,7 +14258,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

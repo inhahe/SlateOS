@@ -103,6 +103,7 @@ const ROOT_FILES: &[&str] = &[
     "cas",
     "integrity",
     "fhistory",
+    "quotas",
     "security",
 ];
 
@@ -1083,6 +1084,67 @@ fn gen_fhistory() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `/proc/quotas` — Filesystem quota status.
+///
+/// Shows global quota enforcement status and per-subject usage/limits.
+fn gen_quotas() -> Vec<u8> {
+    let st = super::quota::stats();
+    let all = super::quota::list_all();
+
+    let mut s = String::with_capacity(1024);
+    s.push_str("Filesystem Quotas\n");
+    s.push_str("-----------------\n");
+    s.push_str(&format!(
+        "enforcement: {}\n\
+         entries:     {}\n\
+         user_quotas: {}\n\
+         group_quotas:{}\n\
+         over_soft:   {}\n\
+         over_hard:   {}\n",
+        if st.enabled { "yes" } else { "no" },
+        st.entries,
+        st.user_quotas,
+        st.group_quotas,
+        st.over_soft,
+        st.over_hard,
+    ));
+
+    if !all.is_empty() {
+        s.push_str("\nSubject      Bytes Used   Soft Limit   Hard Limit   Files  Status\n");
+        for info in &all {
+            let subj = match info.subject {
+                super::quota::QuotaSubject::User(uid) => format!("user:{}", uid),
+                super::quota::QuotaSubject::Group(gid) => format!("group:{}", gid),
+            };
+            let status = if info.over_hard_bytes || info.over_hard_inodes {
+                "OVER_HARD"
+            } else if info.over_soft_bytes || info.over_soft_inodes {
+                "over_soft"
+            } else {
+                "ok"
+            };
+            s.push_str(&format!("{:<12} {:>12} {:>12} {:>12} {:>6} {}\n",
+                subj,
+                super::quota::format_bytes(info.usage.bytes_used),
+                if info.limits.soft_bytes > 0 {
+                    super::quota::format_bytes(info.limits.soft_bytes)
+                } else {
+                    String::from("-")
+                },
+                if info.limits.hard_bytes > 0 {
+                    super::quota::format_bytes(info.limits.hard_bytes)
+                } else {
+                    String::from("-")
+                },
+                info.usage.inodes_used,
+                status,
+            ));
+        }
+    }
+
+    s.into_bytes()
+}
+
 /// `/proc/security` — Security posture summary.
 ///
 /// Consolidates capability system status, IOMMU protection,
@@ -1494,6 +1556,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cas" => Ok(gen_cas()),
         "integrity" => Ok(gen_integrity()),
         "fhistory" => Ok(gen_fhistory()),
+        "quotas" => Ok(gen_quotas()),
         "security" => Ok(gen_security()),
         _ => Err(KernelError::NotFound),
     }

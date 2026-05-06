@@ -881,6 +881,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("WARNING: File associations self-test failed: {:?}", e);
     }
 
+    // Filesystem quota self-test.
+    if let Err(e) = fs::quota::self_test() {
+        serial_println!("WARNING: Filesystem quota self-test failed: {:?}", e);
+    }
+
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {
         serial_println!("WARNING: SHA-256 self-test failed: {:?}", e);

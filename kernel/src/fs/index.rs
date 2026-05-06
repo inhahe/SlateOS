@@ -641,6 +641,86 @@ fn to_ascii_lower(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// VFS event hooks — automatic incremental updates
+// ---------------------------------------------------------------------------
+//
+// These functions are called by VFS write/create/delete/rename operations
+// to keep the index current without requiring manual `updatedb`.  They are
+// best-effort: failures are silently ignored so filesystem operations are
+// never blocked by indexer issues.
+
+/// Check if the indexer is initialized and has been rebuilt at least once.
+fn is_live() -> bool {
+    let idx = INDEX.lock();
+    idx.stats.initialized && idx.stats.rebuild_count > 0
+}
+
+/// Check if a path is within a configured watch directory.
+///
+/// Returns false if the path is in an excluded directory.
+fn is_watched(path: &str) -> bool {
+    let idx = INDEX.lock();
+    if idx.config.watch_dirs.is_empty() {
+        return false;
+    }
+
+    // Check exclusions first.
+    for excl in &idx.config.exclude_dirs {
+        if path.starts_with(excl.as_str()) {
+            return false;
+        }
+    }
+
+    // Check if within any watch dir.
+    for dir in &idx.config.watch_dirs {
+        if path.starts_with(dir.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Called by VFS when a file is created or modified.
+///
+/// Adds or updates the file in the index.  No-op if the indexer hasn't
+/// been initialized or rebuilt, or if the path is outside watch dirs.
+pub fn on_file_changed(path: &str) {
+    if !is_live() || !is_watched(path) {
+        return;
+    }
+    // add_entry calls Vfs::stat internally — the VFS lock must NOT be
+    // held by the caller (it isn't: VFS calls emit after releasing).
+    let _ = add_entry(path);
+}
+
+/// Called by VFS when a file or directory is deleted.
+///
+/// Removes the entry (and children for directories) from the index.
+pub fn on_file_deleted(path: &str) {
+    if !is_live() || !is_watched(path) {
+        return;
+    }
+    remove_entry(path);
+}
+
+/// Called by VFS when a file or directory is renamed.
+///
+/// Removes the old path and adds the new path.
+pub fn on_file_renamed(old_path: &str, new_path: &str) {
+    if !is_live() {
+        return;
+    }
+    // Remove old entry if it was watched.
+    if is_watched(old_path) {
+        remove_entry(old_path);
+    }
+    // Add new entry if it's now in a watched directory.
+    if is_watched(new_path) {
+        let _ = add_entry(new_path);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

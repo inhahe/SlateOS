@@ -1587,8 +1587,9 @@ impl Vfs {
         // Writing may create a new file — invalidate negative cache entries
         // that claimed this path didn't exist.
         VFS_DCACHE.lock().invalidate_negative_prefix(&path);
-        // Notify and journal after releasing VFS lock (avoids holding both locks).
+        // Notify, index, and journal after releasing VFS lock (avoids holding both locks).
         super::notify::emit_modified(&path);
+        super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
     }
@@ -1760,6 +1761,7 @@ impl Vfs {
         // traverse through it (if it was a symlink) or resolve to it.
         VFS_DCACHE.lock().invalidate_prefix(&path);
         super::notify::emit_deleted(&path);
+        super::index::on_file_deleted(&path);
         super::journal::record(super::journal::JournalEventType::Deleted, &path);
         Ok(())
     }
@@ -1782,6 +1784,7 @@ impl Vfs {
         // unaffected — existing path resolutions remain valid.
         VFS_DCACHE.lock().invalidate_negative_prefix(&path);
         super::notify::emit_created(&path);
+        super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
         Ok(())
     }
@@ -1846,6 +1849,7 @@ impl Vfs {
         // Removing a directory invalidates any cached paths through it.
         VFS_DCACHE.lock().invalidate_prefix(&path);
         super::notify::emit_deleted(&path);
+        super::index::on_file_deleted(&path);
         super::journal::record(super::journal::JournalEventType::Deleted, &path);
         Ok(())
     }
@@ -1979,6 +1983,7 @@ impl Vfs {
             dcache.invalidate_prefix(&to);
         }
         super::notify::emit_renamed(&from, &to);
+        super::index::on_file_renamed(&from, &to);
         super::journal::record_rename(&from, &to);
         Ok(())
     }
@@ -2210,6 +2215,7 @@ impl Vfs {
             VFS_DCACHE.lock().invalidate_prefix(parent);
         }
         super::notify::emit_created(&path);
+        super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
         Ok(())
     }
@@ -2296,6 +2302,7 @@ impl Vfs {
         // New hard link invalidates negative cache entries for the new path.
         VFS_DCACHE.lock().invalidate_negative_prefix(&new_path);
         super::notify::emit_created(&new_path);
+        super::index::on_file_changed(&new_path);
         super::journal::record(super::journal::JournalEventType::Created, &new_path);
         Ok(())
     }

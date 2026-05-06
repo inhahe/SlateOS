@@ -778,6 +778,10 @@ extern "C" fn ap_entry() -> ! {
         unsafe { crate::cpu::wrmsr(IA32_TSC_AUX, cpu_index as u64); }
     }
 
+    // Enable SMEP/UMIP on this AP (each CPU has its own CR4).
+    // SMAP is intentionally not enabled until user access paths are instrumented.
+    crate::smep_smap::init_ap();
+
     // Bump the online CPU count.
     NUM_CPUS_ONLINE.fetch_add(1, Ordering::Release);
 

@@ -146,7 +146,6 @@ pub fn init() {
 /// Enable SMEP/SMAP on an Application Processor during SMP bootstrap.
 ///
 /// Each CPU has its own CR4, so each AP must independently enable these bits.
-#[allow(dead_code)]
 pub fn init_ap() {
     let Some(features) = crate::cpu::features() else { return };
 

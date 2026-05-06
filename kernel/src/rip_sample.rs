@@ -357,32 +357,37 @@ pub fn self_test() {
     serial_println!("[rip_sample]   Disabled no-op: OK");
 
     // Test 3: Enable and record samples.
-    enable();
-    assert!(is_enabled());
+    // Disable interrupts to prevent timer ticks from sneaking in extra
+    // samples between enable() and our stats check.  The sampler records
+    // on every timer interrupt, so without this guard we'd get spurious
+    // count mismatches.
+    crate::cpu::without_interrupts(|| {
+        enable();
+        assert!(is_enabled());
 
-    // Simulate kernel text samples.
-    record(0xffffffff80001000, 0);
-    record(0xffffffff80001000, 0);
-    record(0xffffffff80002000, 1);
-    // Simulate user space sample.
-    record(0x00000000_00401000, 0);
-    // Simulate HHDM sample.
-    record(0xffff800010000000, 0);
+        // Simulate kernel text samples.
+        record(0xffffffff80001000, 0);
+        record(0xffffffff80001000, 0);
+        record(0xffffffff80002000, 1);
+        // Simulate user space sample.
+        record(0x00000000_00401000, 0);
+        // Simulate HHDM sample.
+        record(0xffff800010000000, 0);
 
-    let s = stats();
-    assert_eq!(s.total_samples, 5);
-    // Kernel text bucket should have 3.
-    assert_eq!(s.bucket_counts[AddrClass::KernelText as usize], 3);
-    // User code bucket should have 1.
-    assert_eq!(s.bucket_counts[AddrClass::UserCode as usize], 1);
-    // HHDM bucket should have 1.
-    assert_eq!(s.bucket_counts[AddrClass::Hhdm as usize], 1);
+        let s = stats();
+        assert_eq!(s.total_samples, 5);
+        // Kernel text bucket should have 3.
+        assert_eq!(s.bucket_counts[AddrClass::KernelText as usize], 3);
+        // User code bucket should have 1.
+        assert_eq!(s.bucket_counts[AddrClass::UserCode as usize], 1);
+        // HHDM bucket should have 1.
+        assert_eq!(s.bucket_counts[AddrClass::Hhdm as usize], 1);
+
+        // Disable while still in no-interrupt context so no spurious
+        // samples can arrive before we inspect the ring buffer.
+        disable();
+    });
     serial_println!("[rip_sample]   Record/classify: OK (5 samples, 3 kernel, 1 user, 1 hhdm)");
-
-    // Disable before inspecting the ring buffer — otherwise a timer
-    // interrupt can sneak in an extra sample between the stats check
-    // above and the recent() call below, causing a count mismatch.
-    disable();
 
     // Test 4: Recent samples (newest first).
     let mut buf = [RipSample::empty(); 8];

@@ -108,17 +108,31 @@ static IFACE: Mutex<InterfaceInfo> = Mutex::new(InterfaceInfo {
     dns: Ipv4Addr::UNSPECIFIED,
 });
 
-/// Initialize the network interface from the virtio-net device.
+/// Initialize the network interface from the active NIC.
+///
+/// Tries virtio-net first, then falls back to e1000.
 pub fn init() {
+    // Try virtio-net first.
     let mac = crate::virtio::net::with_device(|dev| dev.mac());
     if let Some(mac) = mac {
         let mut iface = IFACE.lock();
         iface.mac = mac;
         iface.up = true;
-        crate::serial_println!("[net] Interface up: MAC {}", mac);
-    } else {
-        crate::serial_println!("[net] No NIC — interface not configured");
+        crate::serial_println!("[net] Interface up (virtio-net): MAC {}", mac);
+        return;
     }
+
+    // Fall back to e1000.
+    let mac = crate::e1000::with_device(|dev| dev.mac());
+    if let Some(mac) = mac {
+        let mut iface = IFACE.lock();
+        iface.mac = mac;
+        iface.up = true;
+        crate::serial_println!("[net] Interface up (e1000): MAC {}", mac);
+        return;
+    }
+
+    crate::serial_println!("[net] No NIC — interface not configured");
 }
 
 /// Check if the interface is up.

@@ -896,6 +896,27 @@ pub fn init(hhdm_offset: u64) {
 
         serial_println!("[ahci]   ABAR physical: {:#010x}, virtual: {:#x}", abar_phys, abar_virt);
 
+        // Map AHCI MMIO region into kernel page tables.
+        // BAR addresses may be above physical RAM (not covered by HHDM).
+        let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
+        let mmio_flags = page_table::PageFlags::PRESENT
+            | page_table::PageFlags::WRITABLE
+            | page_table::PageFlags::NO_CACHE;
+        // AHCI HBA registers + port registers fit in ~8 KiB, but map 1 frame (16 KiB).
+        if let Some(abar_frame) = frame::PhysFrame::from_addr(abar_phys) {
+            let virt = page_table::VirtAddr::new(abar_phys + hhdm_offset);
+            // SAFETY: abar_phys is the PCI BAR5 MMIO region for AHCI.
+            if let Err(_e) = unsafe {
+                page_table::map_frame(pml4_phys, virt, abar_frame, mmio_flags)
+            } {
+                // May already be mapped in HHDM on high-RAM systems.
+            }
+            // SAFETY: Standard invlpg.
+            unsafe {
+                core::arch::asm!("invlpg [{}]", in(reg) abar_virt, options(nostack, preserves_flags));
+            }
+        }
+
         // Enable bus mastering (required for DMA).
         crate::pci::enable_bus_master(ctrl.address);
 

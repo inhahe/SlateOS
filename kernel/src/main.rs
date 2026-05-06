@@ -62,6 +62,7 @@ mod cpu;
 mod cpu_hotplug;
 mod cpu_topology;
 mod cpufreq;
+mod e1000;
 mod cputime;
 mod crypto;
 mod error;
@@ -649,10 +650,15 @@ extern "C" fn kmain() -> ! {
     // Non-fatal if no NIC is present.
     virtio::net::init(boot_info.hhdm_offset);
 
+    // Step 20d-2b: Initialize Intel e1000 NIC (if present).
+    // Provides native NIC support for QEMU/VirtualBox without virtio.
+    // Falls back gracefully if no Intel NIC is found.
+    e1000::init(boot_info.hhdm_offset);
+
     console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
 
     // Step 20d-3: Initialize networking stack.
-    // Sets up the network interface from the virtio-net device
+    // Sets up the network interface from the active NIC (virtio-net or e1000)
     // and attempts DHCP to obtain an IP address.
     console::boot_step(console::BootStatus::Running, "Network stack");
     net::init();
@@ -910,6 +916,26 @@ extern "C" fn kmain() -> ! {
     // Resource limits self-test.
     if let Err(e) = fs::rlimit::self_test() {
         serial_println!("WARNING: Resource limits self-test failed: {:?}", e);
+    }
+    // Overlay filesystem self-test.
+    if let Err(e) = fs::overlay::self_test() {
+        serial_println!("WARNING: Overlay filesystem self-test failed: {:?}", e);
+    }
+    // Named pipe self-test.
+    if let Err(e) = fs::pipe::self_test() {
+        serial_println!("WARNING: Named pipe self-test failed: {:?}", e);
+    }
+    // Tmpwatch self-test.
+    if let Err(e) = fs::tmpwatch::self_test() {
+        serial_println!("WARNING: Tmpwatch self-test failed: {:?}", e);
+    }
+    // Filesystem audit self-test.
+    if let Err(e) = fs::audit::self_test() {
+        serial_println!("WARNING: Filesystem audit self-test failed: {:?}", e);
+    }
+    // Mount namespace self-test.
+    if let Err(e) = fs::mount_ns::self_test() {
+        serial_println!("WARNING: Mount namespace self-test failed: {:?}", e);
     }
 
     // Run cryptographic self-tests.
@@ -1224,6 +1250,9 @@ extern "C" fn kmain() -> ! {
 
     // NVMe driver self-test.
     nvme::self_test();
+
+    // Intel e1000 NIC self-test.
+    e1000::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

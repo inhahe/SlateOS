@@ -545,8 +545,8 @@ fn test_dispatch_unimplemented() -> KernelResult<()> {
         arg0: 0, arg1: 0, arg2: 0,
         arg3: 0, arg4: 0, arg5: 0,
     };
-    // Use a known-undefined number in kernel-core range.
-    let result = dispatch(42, &args);
+    // Use a known-undefined number in kernel-core range (95 is unallocated).
+    let result = dispatch(95, &args);
     if result.value != i64::from(KernelError::NotSupported.code()) {
         serial_println!(
             "[syscall]   FAIL: unimplemented syscall returned {}, expected NotSupported",

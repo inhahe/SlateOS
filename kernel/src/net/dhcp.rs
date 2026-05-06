@@ -222,8 +222,7 @@ fn send_discover() -> KernelResult<()> {
         &ip_udp_packet,
     );
 
-    crate::virtio::net::with_device(|dev| dev.send(&frame))
-        .unwrap_or(Err(KernelError::NoSuchDevice))?;
+    super::send_frame(&frame)?;
 
     *DHCP_STATE.lock() = DhcpState::Discovering;
     crate::serial_println!("[dhcp] DISCOVER sent");
@@ -250,8 +249,7 @@ fn send_request(requested_ip: Ipv4Addr, server_ip: Ipv4Addr) -> KernelResult<()>
         &ip_udp_packet,
     );
 
-    crate::virtio::net::with_device(|dev| dev.send(&frame))
-        .unwrap_or(Err(KernelError::NoSuchDevice))?;
+    super::send_frame(&frame)?;
 
     *DHCP_STATE.lock() = DhcpState::Requesting;
     crate::serial_println!("[dhcp] REQUEST sent for {}", requested_ip);

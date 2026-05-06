@@ -265,11 +265,10 @@ pub fn send(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
         super::arp::resolve(next_hop)?
     };
 
-    // Wrap in Ethernet frame and send.
+    // Wrap in Ethernet frame and send via the active NIC.
     let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &ip_packet);
 
-    crate::virtio::net::with_device(|dev| dev.send(&frame))
-        .unwrap_or(Err(KernelError::NoSuchDevice))?;
+    super::send_frame(&frame)?;
 
     Ok(())
 }

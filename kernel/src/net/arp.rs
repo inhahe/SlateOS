@@ -212,8 +212,7 @@ fn send_reply(target_mac: &MacAddress, target_ip: Ipv4Addr) -> KernelResult<()> 
     let arp_data = build_arp(ARP_REPLY, &our_mac, our_ip, target_mac, target_ip);
     let frame = ethernet::build_frame(target_mac, &our_mac, ETHERTYPE_ARP, &arp_data);
 
-    crate::virtio::net::with_device(|dev| dev.send(&frame))
-        .unwrap_or(Err(KernelError::NoSuchDevice))?;
+    super::send_frame(&frame)?;
 
     Ok(())
 }
@@ -232,8 +231,7 @@ pub fn send_request(target_ip: Ipv4Addr) -> KernelResult<()> {
     );
     let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_ARP, &arp_data);
 
-    crate::virtio::net::with_device(|dev| dev.send(&frame))
-        .unwrap_or(Err(KernelError::NoSuchDevice))?;
+    super::send_frame(&frame)?;
 
     Ok(())
 }

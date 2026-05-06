@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "ar", "base64", "bunzip2", "bzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio",
+    "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
@@ -4393,6 +4393,7 @@ fn dispatch(line: &str) {
         "dns" | "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
         "firewall" | "fw" => cmd_firewall(args),
+        "capgroups" | "cg" => cmd_cap_groups(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
@@ -9950,6 +9951,61 @@ fn cmd_firewall(args: &str) {
     }
 }
 
+/// `capgroups` — manage named capability groups.
+///
+/// Usage:
+///   capgroups             — list all groups
+///   capgroups info NAME   — show details for a group
+///   capgroups create NAME — create a new group
+///   capgroups remove NAME — remove a group (not built-ins)
+fn cmd_cap_groups(args: &str) {
+    use crate::cap::groups;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let all = groups::list();
+            crate::console_println!("=== Capability Groups ({}) ===", all.len());
+            crate::console_println!("{:<5} {:<15} {:<6} {:<8} {}",
+                "ID", "Name", "Caps", "Members", "Type");
+            for (id, name, caps, members, builtin) in &all {
+                let kind = if *builtin { "built-in" } else { "custom" };
+                crate::console_println!("{:<5} {:<15} {:<6} {:<8} {}",
+                    id, name, caps, members, kind);
+            }
+        }
+        "create" | "add" => {
+            if let Some(name) = parts.get(1) {
+                match groups::create(name) {
+                    Ok(id) => crate::console_println!("Group '{}' created (id={})", name, id),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            } else {
+                crate::console_println!("Usage: capgroups create <name>");
+            }
+        }
+        "remove" | "rm" | "del" => {
+            if let Some(name) = parts.get(1) {
+                if let Some(id) = groups::find_by_name(name) {
+                    match groups::remove(id) {
+                        Ok(()) => crate::console_println!("Group '{}' removed", name),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                } else {
+                    crate::console_println!("Group '{}' not found", name);
+                }
+            } else {
+                crate::console_println!("Usage: capgroups remove <name>");
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: capgroups [list|create|remove]");
+        }
+    }
+}
+
 /// Parse a simple URL: "http://host/path" or just "host/path" or "host".
 /// Returns (host, port, path).
 fn parse_url(url: &str) -> Option<(&str, u16, &str)> {
@@ -12345,7 +12401,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

@@ -379,6 +379,11 @@ pub fn self_test() {
     assert_eq!(s.bucket_counts[AddrClass::Hhdm as usize], 1);
     serial_println!("[rip_sample]   Record/classify: OK (5 samples, 3 kernel, 1 user, 1 hhdm)");
 
+    // Disable before inspecting the ring buffer — otherwise a timer
+    // interrupt can sneak in an extra sample between the stats check
+    // above and the recent() call below, causing a count mismatch.
+    disable();
+
     // Test 4: Recent samples (newest first).
     let mut buf = [RipSample::empty(); 8];
     let n = recent(&mut buf);

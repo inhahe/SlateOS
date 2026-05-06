@@ -120,6 +120,14 @@ struct ServiceEntry {
 
     /// Whether the service has been unregistered (closed).
     closed: bool,
+
+    /// Namespace in which this service was registered.
+    ///
+    /// Services in the root namespace (0) are visible to all processes.
+    /// Services in other namespaces are only visible to processes in the
+    /// same namespace.  This prevents a sandboxed process from connecting
+    /// to services outside its isolation boundary.
+    namespace_id: u64,
 }
 
 /// Global service registry.
@@ -221,6 +229,16 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         return Err(KernelError::AlreadyExists);
     }
 
+    // Determine the registering process's namespace.
+    // Services registered from the root namespace (0) are globally visible.
+    let ns_id = {
+        let task_id = sched::current_task_id();
+        match crate::proc::thread::owner_process(task_id) {
+            Some(pid) if pid != 0 => super::namespace::query(pid),
+            _ => 0, // Kernel tasks register in root namespace.
+        }
+    };
+
     // Check for pre-queued connections from socket activation.
     let pre_queued = drain_pre_queue(name);
 
@@ -229,6 +247,7 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         pending: pre_queued,
         accept_waiter: None,
         closed: false,
+        namespace_id: ns_id,
     };
 
     reg.listeners.insert(id, entry);
@@ -284,6 +303,24 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
                     channel::close(client_ep);
                     channel::close(server_ep);
                     return Err(KernelError::NotFound);
+                }
+
+                // Namespace isolation: a process can only connect to
+                // services in its own namespace or the root namespace.
+                // Root namespace (0) services are always visible.
+                if entry.namespace_id != 0 {
+                    let client_ns = {
+                        let task_id = sched::current_task_id();
+                        match crate::proc::thread::owner_process(task_id) {
+                            Some(pid) if pid != 0 => super::namespace::query(pid),
+                            _ => 0, // Kernel → root namespace.
+                        }
+                    };
+                    if client_ns != entry.namespace_id {
+                        channel::close(client_ep);
+                        channel::close(server_ep);
+                        return Err(KernelError::NotFound);
+                    }
                 }
 
                 if entry.pending.len() >= MAX_PENDING_CONNECTIONS {

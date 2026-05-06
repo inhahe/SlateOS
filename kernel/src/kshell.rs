@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4242,6 +4242,7 @@ fn dispatch(line: &str) {
         "invariant" | "invar" => cmd_invariant(args),
         "migrate" | "migrations" => cmd_migrate(args),
         "wchan" => cmd_wchan(),
+        "bench" | "benchmark" => cmd_bench(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -21336,4 +21337,118 @@ fn cmd_wchan() {
     } else {
         shell_println!("  No tasks currently blocked (or no wchan data recorded)");
     }
+}
+
+/// `bench` — run kernel micro-benchmarks on demand.
+///
+/// Usage:
+///   bench           — run all standard benchmarks
+///   bench alloc     — benchmark frame alloc/free
+///   bench heap      — benchmark heap alloc/free
+///   bench atomic    — benchmark atomic operations
+///   bench memcpy    — benchmark memory copy
+///   bench list      — list available benchmarks
+fn cmd_bench(args: &str) {
+    use crate::bench;
+
+    let sub = args.trim();
+
+    match sub {
+        "list" => {
+            shell_println!("Available benchmarks:");
+            shell_println!("  alloc    — frame allocate + free cycle");
+            shell_println!("  heap     — slab alloc + free (64 bytes)");
+            shell_println!("  atomic   — atomic CAS round-trip");
+            shell_println!("  memcpy   — 4 KiB memory copy");
+            shell_println!("  rdtsc    — TSC read overhead");
+            shell_println!("  (blank)  — run all of the above");
+        }
+        "alloc" => bench_alloc(),
+        "heap" => bench_heap(),
+        "atomic" => bench_atomic(),
+        "memcpy" => bench_memcpy(),
+        "rdtsc" => bench_rdtsc(),
+        "" => {
+            shell_println!("=== Kernel Micro-Benchmarks ===");
+            shell_println!("");
+            bench_rdtsc();
+            bench_atomic();
+            bench_alloc();
+            bench_heap();
+            bench_memcpy();
+            shell_println!("");
+            shell_println!("TSC freq: {} MHz", bench::tsc_freq() / 1_000_000);
+        }
+        other => {
+            shell_println!("Unknown benchmark '{}'. Use 'bench list'.", other);
+        }
+    }
+}
+
+fn bench_rdtsc() {
+    use crate::bench;
+    let r = bench::run("rdtsc", 1000, || {
+        core::hint::black_box(bench::rdtsc());
+    });
+    shell_println!("  rdtsc:   min={} cyc ({} ns), mean={} ns",
+        r.min_cycles, r.min_ns, r.mean_ns);
+}
+
+fn bench_atomic() {
+    use crate::bench;
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static BENCH_ATOM: AtomicU64 = AtomicU64::new(0);
+
+    let r = bench::run("atomic_cas", 1000, || {
+        let old = BENCH_ATOM.load(Ordering::Relaxed);
+        let _ = BENCH_ATOM.compare_exchange(old, old + 1,
+            Ordering::AcqRel, Ordering::Relaxed);
+    });
+    shell_println!("  atomic:  min={} cyc ({} ns), mean={} ns",
+        r.min_cycles, r.min_ns, r.mean_ns);
+}
+
+fn bench_alloc() {
+    use crate::bench;
+    use crate::mm::frame;
+
+    let r = bench::run("frame_alloc_free", 100, || {
+        if let Ok(f) = frame::alloc_frame() {
+            // SAFETY: We just allocated this frame and haven't mapped it.
+            let _ = unsafe { frame::free_frame(f) };
+        }
+    });
+    shell_println!("  alloc:   min={} cyc ({} ns), mean={} ns",
+        r.min_cycles, r.min_ns, r.mean_ns);
+}
+
+fn bench_heap() {
+    use crate::bench;
+    use alloc::boxed::Box;
+
+    let r = bench::run("heap_alloc_free", 500, || {
+        let b = Box::new([0u8; 64]);
+        core::hint::black_box(&*b);
+        drop(b);
+    });
+    shell_println!("  heap:    min={} cyc ({} ns), mean={} ns",
+        r.min_cycles, r.min_ns, r.mean_ns);
+}
+
+fn bench_memcpy() {
+    use crate::bench;
+
+    let src = [0xABu8; 4096];
+    let mut dst = [0u8; 4096];
+
+    let r = bench::run("memcpy_4k", 200, || {
+        // SAFETY: src and dst are valid, non-overlapping, properly aligned.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), 4096);
+        }
+        core::hint::black_box(&dst);
+    });
+    shell_println!("  memcpy:  min={} cyc ({} ns), mean={} ns  ({} MiB/s)",
+        r.min_cycles, r.min_ns, r.mean_ns,
+        if r.mean_ns > 0 { 4096 * 1_000_000_000 / (r.mean_ns * 1024 * 1024) } else { 0 });
 }

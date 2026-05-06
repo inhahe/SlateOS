@@ -4373,6 +4373,7 @@ fn dispatch(line: &str) {
         "bunzip2" | "bzcat" => cmd_bunzip2(args),
         "bzip2" => cmd_bzip2(args),
         "unxz" | "xzcat" => cmd_unxz(args),
+        "xz" => cmd_xz(args),
         "unzstd" | "zstdcat" => cmd_unzstd(args),
         "zstd" => cmd_zstd(args),
         "unzip" => cmd_unzip(args),
@@ -4600,6 +4601,7 @@ fn cmd_help() {
     crate::console_println!("  bunzip2 F [-o OUT] Decompress bzip2 file (bzcat alias)");
     crate::console_println!("  bzip2 [-N] F [-o OUT]  Compress file with bzip2 (-1..-9 block size)");
     crate::console_println!("  unxz F [-o OUT]    Decompress XZ/LZMA2 file (xzcat alias)");
+    crate::console_println!("  xz F [-o OUT]      Compress file with XZ/LZMA2");
     crate::console_println!("  unzstd F [-o OUT]  Decompress Zstandard file (zstdcat alias)");
     crate::console_println!("  zstd [-s] F [-o OUT]   Compress file with Zstandard (-s = store mode)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
@@ -18617,10 +18619,20 @@ fn cmd_tar(args: &str) {
             }
             compressed
         } else if xz_compress {
-            // XZ compression not yet implemented — fall back to store.
-            // Use zstd store mode as a placeholder to produce a valid archive.
-            crate::console_println!("tar: XZ compression not available, writing uncompressed");
-            archive_data
+            match crate::fs::xz::xz_compress(&archive_data) {
+                Ok(compressed) => {
+                    crate::console_println!(
+                        "tar: xz compressed {}B → {}B ({}%)",
+                        archive_data.len(), compressed.len(),
+                        compressed.len().wrapping_mul(100) / archive_data.len().max(1),
+                    );
+                    compressed
+                }
+                Err(e) => {
+                    crate::console_println!("tar: xz compression failed: {:?}", e);
+                    return;
+                }
+            }
         } else {
             archive_data
         };
@@ -20406,6 +20418,95 @@ fn cmd_bzip2(args: &str) {
         }
         Err(e) => {
             crate::console_println!("bzip2: write '{}': {:?}", out, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// xz — XZ/LZMA2 compression
+// ---------------------------------------------------------------------------
+
+fn cmd_xz(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: xz FILE [-o OUTPUT]   Compress file with XZ/LZMA2\n\
+             \x20 -o F    Write output to F instead of FILE.xz"
+        );
+        return;
+    }
+
+    let mut input_path: Option<&str> = None;
+    let mut output_path: Option<&str> = None;
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-o" => {
+                if let Some(&out) = parts.get(i.wrapping_add(1)) {
+                    output_path = Some(out);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("xz: -o requires an argument");
+                    return;
+                }
+            }
+            _ => {
+                if input_path.is_none() {
+                    input_path = Some(p);
+                }
+            }
+        }
+    }
+
+    let input = match input_path {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("xz: no input file specified");
+            return;
+        }
+    };
+
+    let file_data = match crate::fs::Vfs::read_file(&input) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("xz: '{}': {:?}", input, e);
+            return;
+        }
+    };
+
+    let compressed = match crate::fs::xz::xz_compress(&file_data) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::console_println!("xz: compression failed: {:?}", e);
+            return;
+        }
+    };
+
+    let out = if let Some(explicit) = output_path {
+        resolve_path(explicit)
+    } else {
+        alloc::format!("{}.xz", input)
+    };
+
+    match crate::fs::Vfs::write_file(&out, &compressed) {
+        Ok(()) => {
+            let ratio = if file_data.is_empty() {
+                0
+            } else {
+                compressed.len().wrapping_mul(100) / file_data.len()
+            };
+            crate::console_println!(
+                "xz: '{}' -> '{}' ({} -> {} bytes, {}%)",
+                input, out, file_data.len(), compressed.len(), ratio
+            );
+        }
+        Err(e) => {
+            crate::console_println!("xz: write '{}': {:?}", out, e);
         }
     }
 }

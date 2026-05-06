@@ -594,6 +594,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Filesystem interceptors (fs::intercept): pre-operation hooks for policy enforcement (approve/deny writes, deletes, renames before they happen), path prefix matching, operation mask filtering, built-in readonly/no-delete/audit handlers; `intercept` kshell command; 10 self-tests
   - [x] Symlink/hardlink security (fs::symlink_security): Linux-style protected_symlinks/protected_hardlinks restrictions, lock-free AtomicBool config, TOCTOU protection (owner/directory checks), FIFO write protection; 7 self-tests
   - [x] Resource limits (fs::rlimit): ulimit-style per-UID soft/hard limits for open files (NOFILE), file size (FSIZE), advisory locks (LOCKS); privilege enforcement, global defaults with per-UID overrides; `ulimit` kshell command; TooManyOpenFiles/FileTooLarge error variants; 10 self-tests
+  - [x] Overlay filesystem (fs::overlay): layered directory composition with copy-up, whiteout, and opaque directory semantics; read-only lower + read-write upper merge; reset (discard changes) and commit (merge to lower); `overlay` kshell command with 13 subcommands; 12 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

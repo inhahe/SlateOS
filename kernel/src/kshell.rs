@@ -12376,7 +12376,16 @@ fn cmd_net() {
         return;
     }
 
-    crate::console_println!("Network interface: virtio-net");
+    // Detect which NIC is active.
+    let nic_name = if crate::virtio::net::with_device(|_| ()).is_some() {
+        "virtio-net"
+    } else if crate::e1000::with_device(|_| ()).is_some() {
+        "e1000"
+    } else {
+        "unknown"
+    };
+
+    crate::console_println!("Network interface: {}", nic_name);
     crate::console_println!("  MAC address:  {}", info.mac);
     crate::console_println!("  IPv4 address: {}", info.ip);
     crate::console_println!("  Subnet mask:  {}", info.subnet_mask);
@@ -12384,7 +12393,12 @@ fn cmd_net() {
     crate::console_println!("  DNS server:   {}", info.dns);
     crate::console_println!("  DHCP state:   {}", crate::net::dhcp::state_str());
 
-    // Also show RX buffer status from the NIC.
+    // Show link status for e1000.
+    if let Some(link) = crate::e1000::with_device(|dev| dev.link_up()) {
+        crate::console_println!("  Link status:  {}", if link { "UP" } else { "DOWN" });
+    }
+
+    // Also show RX buffer status from the virtio-net NIC.
     let rx_info = crate::virtio::net::with_device(|dev| dev.rx_pending());
     if let Some(pending) = rx_info {
         crate::console_println!("  RX buffers:   {} pending", pending);

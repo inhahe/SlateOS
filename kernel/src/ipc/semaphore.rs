@@ -251,10 +251,23 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
 
         sched::block_current();
 
-        // Re-check: we were woken because a signal occurred and
-        // consumed one unit on our behalf.  Return success.
-        // (The signal path wakes us instead of incrementing the count.)
-        return Ok(());
+        // We were woken.  Two possibilities:
+        // 1. signal() removed us from the waiter queue and woke us — a
+        //    unit has been consumed on our behalf → return Ok.
+        // 2. close() drained all waiters and woke us — sem is gone.
+        //
+        // Distinguish by re-checking whether the semaphore still exists.
+        // If it's been removed from the table (close removes it),
+        // return ChannelClosed.  If it still exists, we were woken by
+        // signal (which removed us from the queue — we won't be in it).
+        {
+            let table = SEM_TABLE.lock();
+            match table.get(&handle.id()) {
+                None => return Err(KernelError::ChannelClosed),
+                Some(sem) if sem.closed => return Err(KernelError::ChannelClosed),
+                Some(_) => return Ok(()), // Woken by signal.
+            }
+        }
     }
 }
 
@@ -337,11 +350,9 @@ pub fn has_value(handle: SemHandle) -> bool {
 use core::sync::atomic::{AtomicBool, Ordering as AtOrd};
 
 /// Flag for signal-wake test.
-#[allow(dead_code)] // Used in self_test.
 static SEM_TEST_ACQUIRED: AtomicBool = AtomicBool::new(false);
 
 /// Task entry: blocks on sem wait, expects ChannelClosed.
-#[allow(dead_code)] // Used in self_test.
 extern "C" fn sem_close_waiter_task(h_raw: u64) {
     let handle = SemHandle::from_raw(h_raw);
     match wait(handle) {
@@ -358,7 +369,6 @@ extern "C" fn sem_close_waiter_task(h_raw: u64) {
 }
 
 /// Task entry: blocks on sem wait, sets ACQUIRED flag.
-#[allow(dead_code)] // Used in self_test.
 extern "C" fn sem_signal_waiter_task(h_raw: u64) {
     let handle = SemHandle::from_raw(h_raw);
     if wait(handle).is_ok() {
@@ -367,7 +377,6 @@ extern "C" fn sem_signal_waiter_task(h_raw: u64) {
 }
 
 /// Run semaphore self-tests.
-#[allow(dead_code)] // Called from boot sequence when enabled.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[sem] Running IPC semaphore self-test...");
 

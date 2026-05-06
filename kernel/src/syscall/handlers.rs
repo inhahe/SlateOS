@@ -1502,6 +1502,25 @@ pub fn sys_eventfd_close(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_EVENTFD_READ_TIMEOUT` — read with a timeout (nanoseconds).
+///
+/// `arg0`: eventfd handle.
+/// `arg1`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: counter value, or `TimedOut` if deadline expires.
+pub fn sys_eventfd_read_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = EventFdHandle::from_raw(args.arg0);
+    let timeout_ns = args.arg1;
+
+    match eventfd::read_timeout(handle, timeout_ns) {
+        Ok(val) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(val as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Completion port handlers (250–259)
 // ---------------------------------------------------------------------------

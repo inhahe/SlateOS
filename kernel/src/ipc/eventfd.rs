@@ -318,6 +318,106 @@ pub fn try_read(handle: EventFdHandle) -> KernelResult<u64> {
     result
 }
 
+/// Read with a timeout (nanoseconds).
+///
+/// Blocks up to `timeout_ns` nanoseconds waiting for the counter to
+/// become non-zero.  Returns `Err(TimedOut)` if the deadline expires.
+///
+/// `timeout_ns = 0` is equivalent to `try_read()` (returns `TimedOut`
+/// instead of `WouldBlock` when counter is 0).
+///
+/// # Returns
+///
+/// - `Ok(value)` — counter consumed.
+/// - `Err(TimedOut)` — no signal within the deadline.
+/// - `Err(ChannelClosed)` — eventfd closed.
+/// - `Err(InvalidHandle)` — not found.
+pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64> {
+    // Fast path.
+    {
+        let mut table = EVENTFD_TABLE.lock();
+        let efd = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
+
+        if efd.counter > 0 {
+            let val = efd.counter;
+            efd.counter = 0;
+            let writer = efd.writer_waiter.take();
+            drop(table);
+            if let Some(task_id) = writer {
+                sched::wake(task_id);
+            }
+            return Ok(val);
+        }
+
+        if efd.closed {
+            return Err(KernelError::ChannelClosed);
+        }
+    }
+
+    // Non-blocking mode.
+    if timeout_ns == 0 {
+        return Err(KernelError::TimedOut);
+    }
+
+    // Schedule timer.
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    let timer_handle = crate::hrtimer::schedule_ns(
+        timeout_ns,
+        timeout_wake,
+        sched::current_task_id(),
+    );
+
+    // Block loop.
+    loop {
+        {
+            let mut table = EVENTFD_TABLE.lock();
+            let efd = table
+                .get_mut(&handle.id())
+                .ok_or_else(|| {
+                    crate::hrtimer::cancel(timer_handle);
+                    KernelError::InvalidHandle
+                })?;
+
+            if efd.counter > 0 {
+                let val = efd.counter;
+                efd.counter = 0;
+                let writer = efd.writer_waiter.take();
+                crate::hrtimer::cancel(timer_handle);
+                drop(table);
+                if let Some(task_id) = writer {
+                    sched::wake(task_id);
+                }
+                return Ok(val);
+            }
+
+            if efd.closed {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::ChannelClosed);
+            }
+
+            // Check timeout.
+            if crate::hrtimer::now_ns() >= deadline_ns {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::TimedOut);
+            }
+
+            // Register as waiter.
+            efd.reader_waiter = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+    }
+}
+
 /// Close an eventfd handle.
 ///
 /// Wakes any blocked reader or writer (they will see `ChannelClosed`).
@@ -460,6 +560,112 @@ fn test_nonblocking() -> KernelResult<()> {
 
     close(handle);
     serial_println!("[eventfd]   Non-blocking: OK");
+    Ok(())
+}
+
+/// Run eventfd timeout self-tests.
+///
+/// Must be called after hrtimer init (uses `hrtimer::schedule_ns`).
+///
+/// Tests:
+/// 1. Timeout on empty counter returns `TimedOut`.
+/// 2. Immediate read with timeout when counter > 0 succeeds.
+/// 3. Signaled before timeout expires — returns value.
+pub fn self_test_timeout() -> KernelResult<()> {
+    serial_println!("[eventfd] Running timeout self-test...");
+
+    test_timeout_expires()?;
+    test_timeout_fast_path()?;
+    test_timeout_signaled()?;
+
+    serial_println!("[eventfd] Timeout self-test PASSED");
+    Ok(())
+}
+
+/// Timeout test 1: empty counter, timeout expires.
+fn test_timeout_expires() -> KernelResult<()> {
+    let handle = create(0);
+
+    match read_timeout(handle, 5_000_000) {
+        Err(KernelError::TimedOut) => {} // Expected.
+        other => {
+            serial_println!("[eventfd]   FAIL: timeout_expires: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(handle);
+    serial_println!("[eventfd]   Timeout expires: OK");
+    Ok(())
+}
+
+/// Timeout test 2: counter > 0, returns immediately (fast path).
+fn test_timeout_fast_path() -> KernelResult<()> {
+    let handle = create(0);
+    write(handle, 99)?;
+
+    match read_timeout(handle, 100_000_000) {
+        Ok(99) => {}
+        other => {
+            serial_println!("[eventfd]   FAIL: timeout_fast_path: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(handle);
+    serial_println!("[eventfd]   Timeout fast path: OK");
+    Ok(())
+}
+
+/// Atomic for the signaled-before-timeout test.
+static EVENTFD_TIMEOUT_RESULT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Task that reads with a long timeout (should be signaled quickly).
+extern "C" fn eventfd_timeout_reader_task(handle_raw: u64) {
+    let handle = EventFdHandle::from_raw(handle_raw);
+    match read_timeout(handle, 500_000_000) {
+        Ok(val) => {
+            EVENTFD_TIMEOUT_RESULT.store(val, core::sync::atomic::Ordering::SeqCst);
+        }
+        _ => {
+            EVENTFD_TIMEOUT_RESULT.store(u64::MAX, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Timeout test 3: reader blocks with timeout, signaled before expiry.
+fn test_timeout_signaled() -> KernelResult<()> {
+    EVENTFD_TIMEOUT_RESULT.store(0, core::sync::atomic::Ordering::SeqCst);
+
+    let handle = create(0);
+
+    // Spawn reader that will block with 500ms timeout.
+    sched::spawn(b"efd-to-test", 16, eventfd_timeout_reader_task, handle.raw(), 0)?;
+
+    // Let reader run and block.
+    sched::yield_now();
+
+    // Signal after a tiny delay (well before the 500ms timeout).
+    sched::sleep_ms(5);
+    write(handle, 42)?;
+
+    // Let reader wake and process.
+    sched::yield_now();
+    sched::yield_now();
+    sched::sleep_ms(5);
+
+    let result = EVENTFD_TIMEOUT_RESULT.load(core::sync::atomic::Ordering::SeqCst);
+    if result != 42 {
+        serial_println!("[eventfd]   FAIL: timeout_signaled: got {}", result);
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+    serial_println!("[eventfd]   Timeout signaled: OK");
     Ok(())
 }
 

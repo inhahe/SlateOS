@@ -594,6 +594,17 @@ pub const SYS_EVENTFD_TRY_READ: u64 = 243;
 /// Wakes any blocked reader or writer (they see `ChannelClosed`).
 pub const SYS_EVENTFD_CLOSE: u64 = 244;
 
+/// Read an eventfd with a timeout (nanoseconds).
+///
+/// `arg0`: eventfd handle.
+/// `arg1`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Blocks until counter > 0 or the deadline expires.  Returns the
+/// counter value and resets it to 0 on success.
+///
+/// Returns: counter value (> 0), `TimedOut` if deadline expires.
+pub const SYS_EVENTFD_READ_TIMEOUT: u64 = 245;
+
 /// Create a completion port (unified wait multiplexer).
 ///
 /// Returns: completion port handle.

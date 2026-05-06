@@ -28,7 +28,8 @@ use super::number::{
     SYS_DEBUG_PRINT, SYS_LOG_READ,
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
     SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EXIT,
+    SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ,
+    SYS_EVENTFD_WRITE, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
     SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS, SYS_FS_FLOCK,
     SYS_FS_FUNLOCK, SYS_FS_SYNC,
@@ -243,6 +244,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_EVENTFD_READ as usize] = Some(handlers::sys_eventfd_read);
     handlers[SYS_EVENTFD_TRY_READ as usize] = Some(handlers::sys_eventfd_try_read);
     handlers[SYS_EVENTFD_CLOSE as usize] = Some(handlers::sys_eventfd_close);
+    handlers[SYS_EVENTFD_READ_TIMEOUT as usize] = Some(handlers::sys_eventfd_read_timeout);
     handlers[SYS_CP_CREATE as usize] = Some(handlers::sys_cp_create);
     handlers[SYS_CP_REGISTER as usize] = Some(handlers::sys_cp_register);
     handlers[SYS_CP_UNREGISTER as usize] = Some(handlers::sys_cp_unregister);

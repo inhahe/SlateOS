@@ -201,6 +201,10 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] pipe::read_timeout (SYS_PIPE_READ_TIMEOUT 226)
   - [x] semaphore::wait_timeout (SYS_SEM_WAIT_TIMEOUT 275)
   - [x] eventfd::read_timeout (SYS_EVENTFD_READ_TIMEOUT 245)
+  - [x] pipe::write_timeout (SYS_PIPE_WRITE_TIMEOUT 227)
+  - [x] eventfd::write_timeout (SYS_EVENTFD_WRITE_TIMEOUT 246)
+  - [x] channel::send_timeout (SYS_CHANNEL_SEND_TIMEOUT 208)
+  - [x] channel::send_blocking — blocks on full queue, wakes on consume
 - [x] Capability transfer through channel messages (Fuchsia-style):
   - [x] SYS_CHANNEL_SEND_CAPS (206): move cap handles into message (sender loses access)
   - [x] SYS_CHANNEL_RECV_CAPS (207): extract caps into receiver's table (new handles)

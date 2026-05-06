@@ -2789,6 +2789,31 @@ pub fn sleep_ns(duration_ns: u64) {
     block_current();
 }
 
+/// Sleep the current task for a given number of milliseconds.
+///
+/// Convenience wrapper around [`sleep_ns`].  Uses hrtimer for durations
+/// ≤ 100ms, tick-based sleep for longer.
+///
+/// # Arguments
+///
+/// - `ms` — sleep duration in milliseconds (0 = yield)
+#[inline]
+pub fn sleep_ms(ms: u64) {
+    sleep_ns(ms.saturating_mul(1_000_000));
+}
+
+/// Sleep the current task for a given number of microseconds.
+///
+/// Convenience wrapper around [`sleep_ns`].
+///
+/// # Arguments
+///
+/// - `us` — sleep duration in microseconds (0 = yield)
+#[inline]
+pub fn sleep_us(us: u64) {
+    sleep_ns(us.saturating_mul(1_000));
+}
+
 /// Scan the sleep queue and wake tasks whose sleep deadline has passed.
 ///
 /// Called from the APIC timer ISR on every tick.  Must be lock-free

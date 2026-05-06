@@ -483,6 +483,63 @@ pub fn probe(hhdm_offset: u64) -> Option<VirtioBlkDevice> {
     }
 }
 
+/// Find and initialize ALL virtio-blk devices on the PCI bus.
+///
+/// Returns a Vec of successfully initialized devices.  QEMU can
+/// present multiple virtio-blk devices (e.g., disk.img=vda,
+/// ext4_test.img=vdb, swap.img=vdc).
+pub fn probe_all(hhdm_offset: u64) -> alloc::vec::Vec<VirtioBlkDevice> {
+    let pci_devs = pci::find_all_devices(VIRTIO_VENDOR, VIRTIO_BLK_DEVICE);
+    let mut devices = alloc::vec::Vec::new();
+
+    for pci_dev in &pci_devs {
+        crate::serial_println!(
+            "[virtio-blk] Found device at {:02x}:{:02x}.{} (irq={})",
+            pci_dev.address.bus,
+            pci_dev.address.device,
+            pci_dev.address.function,
+            pci_dev.irq_line,
+        );
+
+        match VirtioBlkDevice::init(pci_dev, hhdm_offset) {
+            Ok(dev) => {
+                // Store the first device's IRQ line for the shared
+                // interrupt handler.  All virtio-blk devices share
+                // the same IRQ handler via level-triggered IOAPIC.
+                if devices.is_empty() {
+                    BLK_IRQ_LINE.store(pci_dev.irq_line, Ordering::Release);
+                }
+                crate::serial_println!(
+                    "[virtio-blk] Device {} initialized ({} sectors)",
+                    devices.len(),
+                    dev.capacity()
+                );
+                devices.push(dev);
+            }
+            Err(e) => {
+                crate::serial_println!(
+                    "[virtio-blk] Init failed at {:02x}:{:02x}.{}: {:?}",
+                    pci_dev.address.bus,
+                    pci_dev.address.device,
+                    pci_dev.address.function,
+                    e
+                );
+            }
+        }
+    }
+
+    if devices.is_empty() {
+        crate::serial_println!("[virtio-blk] No devices found");
+    } else {
+        crate::serial_println!(
+            "[virtio-blk] {} device(s) discovered",
+            devices.len()
+        );
+    }
+
+    devices
+}
+
 // ---------------------------------------------------------------------------
 // Global device instance
 // ---------------------------------------------------------------------------

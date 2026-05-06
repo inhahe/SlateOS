@@ -252,15 +252,50 @@ pub fn list_devices_full() -> Vec<BlockDeviceInfo> {
 /// Called from `kmain()` after all device drivers are probed.
 pub fn init() {
     // Move the global virtio-blk device (if present) into the registry.
+    // This handles the single-device path used by virtio::blk::init().
     let dev = crate::virtio::blk::take_device();
     if let Some(device) = dev {
-        let info = device.info();
+        let cap = device.capacity();
         crate::serial_println!(
             "[blkdev] Found virtio-blk: {} sectors ({} KiB)",
-            info.sector_count,
-            info.sector_count.saturating_mul(u64::from(info.sector_size)) / 1024
+            cap,
+            cap.saturating_mul(SECTOR_SIZE as u64) / 1024
         );
-        register(&info.name, Box::new(device));
+        register("vda", Box::new(device));
+    }
+
+    let devices = list_devices_full();
+    if devices.is_empty() {
+        crate::serial_println!("[blkdev] No block devices registered");
+    } else {
+        crate::serial_println!("[blkdev] {} device(s) registered", devices.len());
+    }
+}
+
+/// Initialize block devices by discovering ALL virtio-blk devices.
+///
+/// Unlike [`init()`] which only takes the single pre-probed device,
+/// this function probes the PCI bus for every virtio-blk device and
+/// registers them as vda, vdb, vdc, etc.
+///
+/// Call this instead of `init()` when multi-device support is needed
+/// (e.g., QEMU with disk.img + ext4_test.img + swap.img).
+pub fn init_multi(hhdm_offset: u64) {
+    let devices = crate::virtio::blk::probe_all(hhdm_offset);
+
+    for (i, device) in devices.into_iter().enumerate() {
+        // Generate name: vda, vdb, vdc, ...
+        let suffix = b'a'.checked_add(i as u8).unwrap_or(b'z');
+        let name = alloc::format!("vd{}", suffix as char);
+
+        let cap = device.capacity();
+        crate::serial_println!(
+            "[blkdev] Registering '{}': {} sectors ({} KiB)",
+            name,
+            cap,
+            cap.saturating_mul(SECTOR_SIZE as u64) / 1024
+        );
+        register(&name, Box::new(device));
     }
 
     let devices = list_devices_full();

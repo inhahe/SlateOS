@@ -602,10 +602,9 @@ extern "C" fn kmain() -> ! {
         serial_println!("WARNING: PCI scan failed: {}", e);
     }
 
-    // Step 20d: Probe for virtio-blk storage device.
-    // Uses legacy PCI transport (I/O port BAR0) with polling.
-    // The device is stored temporarily in the virtio module.
-    virtio::blk::init(boot_info.hhdm_offset);
+    // Step 20d: virtio-net probe is done first (it doesn't need the
+    // blkdev registry).  virtio-blk devices are discovered in the
+    // multi-device init below (step 20e).
 
     // Step 20d-2: Probe for virtio-net network device.
     // Uses legacy PCI transport (I/O port BAR0) with polling.
@@ -637,10 +636,11 @@ extern "C" fn kmain() -> ! {
     console::boot_step_update(console::BootStatus::Ok, "Network stack");
 
     // Step 20e: Initialize block device abstraction layer.
-    // Moves driver instances from their module globals into the
-    // unified block device registry.
+    // Discovers ALL virtio-blk devices on the PCI bus and registers
+    // them as vda, vdb, vdc, etc.  QEMU can present multiple devices
+    // (disk.img, ext4_test.img, swap.img).
     console::boot_step(console::BootStatus::Running, "Storage & filesystems");
-    blkdev::init();
+    blkdev::init_multi(boot_info.hhdm_offset);
 
     // Step 20e-2: Add disk-backed swap alongside zram.
     // Multi-device swap: zram (priority 100) handles most evictions with

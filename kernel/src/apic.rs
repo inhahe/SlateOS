@@ -831,6 +831,83 @@ pub unsafe fn restart_timer() {
     }
 }
 
+/// Reprogram the APIC timer for an earlier deadline (nanoseconds from now).
+///
+/// Used by the hrtimer subsystem to get sub-tick precision: if the next
+/// timer expires in less than one full tick (10ms), shorten the current
+/// periodic interval.  On the next interrupt, the timer fires, hrtimers
+/// process the expired entry, and the full periodic rate is restored.
+///
+/// This does NOT switch to one-shot mode — it merely shortens the current
+/// period.  The next `handle_timer_irq` will call `restore_periodic_rate`
+/// to reset the full 10ms period.
+///
+/// # Arguments
+///
+/// - `delay_ns`: Nanoseconds until the timer should fire.  Clamped to
+///   a minimum of 1µs (avoid programming a count of 0 which would stop
+///   the timer on some hardware).
+///
+/// # Safety
+///
+/// APIC must be initialized.  Should only be called from contexts where
+/// the APIC timer LVT won't be concurrently modified (e.g., from the
+/// timer ISR itself or with interrupts disabled).
+pub fn shorten_tick_for_hrtimer(delay_ns: u64) {
+    let cal = CALIBRATED_TIMER_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    if cal == 0 {
+        return; // Not calibrated yet.
+    }
+
+    // Convert delay_ns to APIC timer ticks.
+    // cal ticks = 10_000_000 ns, so ticks_per_ns = cal / 10_000_000.
+    // target_count = delay_ns * cal / 10_000_000.
+    // Use u64 math to avoid overflow for large delays.
+    let target = (delay_ns.saturating_mul(u64::from(cal))) / 10_000_000;
+
+    // Clamp: minimum 100 ticks (~1µs at typical APIC frequencies) to
+    // avoid races where the timer expires before we finish reprogramming.
+    // Maximum: don't exceed the full period (no point programming longer).
+    let target_clamped = target.clamp(100, u64::from(cal)) as u32;
+
+    // If the shortened interval would be >= full period, don't bother.
+    if target_clamped >= cal {
+        return;
+    }
+
+    // Reprogram: writing APIC_TIMER_INITIAL restarts the countdown
+    // from the new value immediately.  The timer remains in periodic mode.
+    //
+    // SAFETY: APIC is initialized, we're programming a valid count.
+    unsafe {
+        apic_write(APIC_TIMER_INITIAL, target_clamped);
+    }
+
+    // Track that we shortened this tick so the ISR knows to restore.
+    TICK_SHORTENED.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Restore the APIC timer to its full periodic rate (10ms / 100 Hz).
+///
+/// Called at the top of `handle_timer_irq` when a shortened tick was
+/// programmed.  This ensures subsequent ticks are at the normal 100 Hz
+/// rate even if no more hrtimers are pending.
+#[inline]
+fn restore_periodic_rate() {
+    let cal = CALIBRATED_TIMER_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    if cal > 0 {
+        // SAFETY: APIC is initialized, restoring the calibrated count.
+        unsafe {
+            apic_write(APIC_TIMER_INITIAL, cal);
+        }
+    }
+    TICK_SHORTENED.store(false, core::sync::atomic::Ordering::Release);
+}
+
+/// Whether the current tick period has been shortened for an hrtimer.
+static TICK_SHORTENED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Initialize the Local APIC on an Application Processor.
 ///
 /// Reuses the BSP's calibrated timer count (APs don't recalibrate via PIT).
@@ -898,6 +975,12 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // --- CPU time accounting: entering IRQ context ---
     crate::cputime::enter_irq();
 
+    // If the previous tick was shortened for hrtimer precision, restore
+    // the full periodic rate immediately so subsequent ticks are normal.
+    if TICK_SHORTENED.load(core::sync::atomic::Ordering::Relaxed) {
+        restore_periodic_rate();
+    }
+
     // --- RIP sampling: record where the CPU was when interrupted ---
     // This is the core of the statistical profiler — captures the
     // instruction pointer at each timer tick for performance analysis.
@@ -964,6 +1047,23 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // Fire any high-resolution timers that have expired.
     // Checked every tick (~10 ms); actual precision depends on HPET timestamps.
     crate::hrtimer::process_expired();
+
+    // --- hrtimer precision: shorten tick for imminent deadlines ---
+    //
+    // If the next hrtimer expires before the next full tick (~10ms),
+    // reprogram the APIC timer to fire earlier.  This gives hrtimers
+    // sub-millisecond precision without switching to full one-shot mode.
+    if let Some(next_ns) = crate::hrtimer::next_expiry_ns() {
+        let now_ns = crate::hrtimer::now_ns();
+        if next_ns > now_ns {
+            let delta_ns = next_ns.saturating_sub(now_ns);
+            // Only shorten if the deadline is less than one full tick away.
+            // 10_000_000 ns = 10 ms = one tick at 100 Hz.
+            if delta_ns < 10_000_000 {
+                shorten_tick_for_hrtimer(delta_ns);
+            }
+        }
+    }
 
     // Send EOI before softirq processing — this allows the LAPIC to
     // deliver new interrupts (including on other CPUs).

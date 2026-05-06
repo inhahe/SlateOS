@@ -125,6 +125,7 @@ pub mod event {
     pub const YIELD: u16 = 6;
     pub const PREEMPT: u16 = 7;
     pub const WORK_STEAL: u16 = 8;
+    pub const DEFERRED_WAKE: u16 = 9;
 
     // MM events
     pub const PAGE_FAULT: u16 = 1;

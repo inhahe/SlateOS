@@ -2775,6 +2775,13 @@ fn defer_wake(task_id: TaskId) {
             .compare_exchange(0, task_id, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            // Record that a wake was deferred (indicates ISR lock contention).
+            crate::ktrace::record(
+                crate::ktrace::Category::Sched,
+                crate::ktrace::event::DEFERRED_WAKE,
+                task_id,
+                0, // arg2 unused
+            );
             return;
         }
     }
@@ -2848,6 +2855,19 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
 pub fn sleep_ns(duration_ns: u64) {
     if duration_ns == 0 {
         yield_now();
+        return;
+    }
+
+    // If interrupts aren't enabled (early boot, before sti()), the APIC
+    // timer ISR won't fire, so hrtimer callbacks never execute.  Fall back
+    // to a spin-wait on the HPET counter, which advances independently of
+    // interrupt delivery.  This only happens during self-tests; production
+    // code always runs with interrupts enabled.
+    if !crate::cpu::interrupts_enabled() {
+        let deadline = crate::hrtimer::now_ns().saturating_add(duration_ns);
+        while crate::hrtimer::now_ns() < deadline {
+            core::hint::spin_loop();
+        }
         return;
     }
 

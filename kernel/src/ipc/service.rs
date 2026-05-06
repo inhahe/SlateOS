@@ -41,6 +41,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::ipc::channel::{self, ChannelHandle};
@@ -61,6 +62,9 @@ const MAX_PENDING_CONNECTIONS: usize = 128;
 
 /// Maximum number of registered services.
 const MAX_SERVICES: usize = 1024;
+
+/// Maximum socket activation entries.
+const MAX_SOCKET_ACTIVATIONS: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Handle
@@ -142,6 +146,46 @@ impl Registry {
 }
 
 // ---------------------------------------------------------------------------
+// Socket activation
+// ---------------------------------------------------------------------------
+
+/// Status of a socket-activated service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationStatus {
+    /// Service is registered but hasn't been triggered yet.
+    Idle,
+    /// Service is being started (spawn triggered, waiting for register).
+    Starting,
+    /// Service has registered and is running.
+    Running,
+    /// Service failed to start or crashed.
+    Failed,
+}
+
+/// A socket activation entry.
+///
+/// Describes a service that should be started on-demand when a client
+/// first connects to its name.
+struct SocketActivationEntry {
+    /// The service name (must match what the service will `register` with).
+    name: Vec<u8>,
+    /// Path to the ELF binary or kernel task name to spawn.
+    spawn_path: String,
+    /// Current status.
+    status: ActivationStatus,
+    /// Number of times the service has been started.
+    start_count: u32,
+    /// Connections queued before the service registered.
+    ///
+    /// When the service calls `register()`, these are transferred to its
+    /// pending queue.
+    pre_queue: VecDeque<ChannelHandle>,
+}
+
+/// Socket activation registry.
+static SOCKET_ACTIVATIONS: Mutex<Vec<SocketActivationEntry>> = Mutex::new(Vec::new());
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -177,15 +221,21 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
         return Err(KernelError::AlreadyExists);
     }
 
+    // Check for pre-queued connections from socket activation.
+    let pre_queued = drain_pre_queue(name);
+
     let entry = ServiceEntry {
         name: name.to_vec(),
-        pending: VecDeque::new(),
+        pending: pre_queued,
         accept_waiter: None,
         closed: false,
     };
 
     reg.listeners.insert(id, entry);
     reg.names.insert(name.to_vec(), id);
+
+    // Mark socket activation as running (if applicable).
+    mark_activation_running(name);
 
     Ok(ServiceListenerHandle(id))
 }
@@ -218,39 +268,78 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
     {
         let mut reg = SERVICE_REGISTRY.lock();
 
-        let listener_id = reg.names.get(name)
-            .copied()
-            .ok_or_else(|| {
-                // Clean up the channel we just created.
-                channel::close(client_ep);
-                channel::close(server_ep);
-                KernelError::NotFound
-            })?;
+        let listener_id_opt = reg.names.get(name).copied();
 
-        let entry = reg.listeners.get_mut(&listener_id)
-            .ok_or_else(|| {
-                channel::close(client_ep);
-                channel::close(server_ep);
-                KernelError::NotFound
-            })?;
+        match listener_id_opt {
+            Some(listener_id) => {
+                // Service is registered — standard connect path.
+                let entry = reg.listeners.get_mut(&listener_id)
+                    .ok_or_else(|| {
+                        channel::close(client_ep);
+                        channel::close(server_ep);
+                        KernelError::NotFound
+                    })?;
 
-        if entry.closed {
-            channel::close(client_ep);
-            channel::close(server_ep);
-            return Err(KernelError::NotFound);
+                if entry.closed {
+                    channel::close(client_ep);
+                    channel::close(server_ep);
+                    return Err(KernelError::NotFound);
+                }
+
+                if entry.pending.len() >= MAX_PENDING_CONNECTIONS {
+                    channel::close(client_ep);
+                    channel::close(server_ep);
+                    return Err(KernelError::ResourceExhausted);
+                }
+
+                // Queue the server endpoint for the service to accept.
+                entry.pending.push_back(server_ep);
+
+                // Wake the service if it's blocked on accept.
+                wake_task = entry.accept_waiter.take();
+            }
+            None => {
+                // Service not registered — check socket activation.
+                drop(reg); // Release registry lock before acquiring activations lock.
+
+                let mut activated = false;
+                {
+                    let mut activations = SOCKET_ACTIVATIONS.lock();
+                    if let Some(entry) = activations.iter_mut()
+                        .find(|e| e.name == name)
+                    {
+                        // Queue the connection for when the service registers.
+                        if entry.pre_queue.len() >= MAX_PENDING_CONNECTIONS {
+                            channel::close(client_ep);
+                            channel::close(server_ep);
+                            return Err(KernelError::ResourceExhausted);
+                        }
+                        entry.pre_queue.push_back(server_ep);
+
+                        // Trigger service start if idle.
+                        if entry.status == ActivationStatus::Idle {
+                            entry.status = ActivationStatus::Starting;
+                            entry.start_count = entry.start_count.saturating_add(1);
+                            let path = entry.spawn_path.clone();
+                            activated = true;
+
+                            // Drop lock before spawn to avoid deadlock.
+                            drop(activations);
+                            trigger_service_spawn(&path, name);
+                        }
+                    } else {
+                        // No registration and no socket activation → NotFound.
+                        channel::close(client_ep);
+                        channel::close(server_ep);
+                        return Err(KernelError::NotFound);
+                    }
+                }
+                let _ = activated; // Suppress unused warning.
+
+                // Connection is queued (either in pre_queue or registry).
+                return Ok(client_ep);
+            }
         }
-
-        if entry.pending.len() >= MAX_PENDING_CONNECTIONS {
-            channel::close(client_ep);
-            channel::close(server_ep);
-            return Err(KernelError::ResourceExhausted);
-        }
-
-        // Queue the server endpoint for the service to accept.
-        entry.pending.push_back(server_ep);
-
-        // Wake the service if it's blocked on accept.
-        wake_task = entry.accept_waiter.take();
     }
 
     if let Some(task_id) = wake_task {
@@ -467,6 +556,165 @@ pub fn pending_count(listener: ServiceListenerHandle) -> KernelResult<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Socket activation API
+// ---------------------------------------------------------------------------
+
+/// Register a service for socket activation (on-demand start).
+///
+/// When a client calls `connect()` for this name and no service is registered,
+/// the kernel will:
+/// 1. Queue the client connection.
+/// 2. Spawn the service using the given path/name.
+/// 3. When the service calls `register()`, it inherits the queued connections.
+///
+/// # Parameters
+///
+/// - `name`: Service name (what clients connect to).
+/// - `spawn_path`: ELF binary path or kernel task name to spawn.
+///
+/// # Errors
+///
+/// - [`InvalidArgument`] — name or path is empty/too long.
+/// - [`AlreadyExists`] — activation already registered for this name.
+/// - [`ResourceExhausted`] — too many activations.
+///
+/// [`InvalidArgument`]: KernelError::InvalidArgument
+/// [`AlreadyExists`]: KernelError::AlreadyExists
+/// [`ResourceExhausted`]: KernelError::ResourceExhausted
+pub fn register_socket_activation(name: &[u8], spawn_path: &str) -> KernelResult<()> {
+    if name.is_empty() || name.len() > MAX_NAME_LEN || spawn_path.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut activations = SOCKET_ACTIVATIONS.lock();
+
+    if activations.len() >= MAX_SOCKET_ACTIVATIONS {
+        return Err(KernelError::ResourceExhausted);
+    }
+
+    // Check for duplicate.
+    if activations.iter().any(|e| e.name == name) {
+        return Err(KernelError::AlreadyExists);
+    }
+
+    activations.push(SocketActivationEntry {
+        name: name.to_vec(),
+        spawn_path: String::from(spawn_path),
+        status: ActivationStatus::Idle,
+        start_count: 0,
+        pre_queue: VecDeque::new(),
+    });
+
+    serial_println!("[service] Socket activation registered: {:?} → {}",
+        core::str::from_utf8(name).unwrap_or("<bin>"), spawn_path);
+    Ok(())
+}
+
+/// Remove a socket activation entry.
+///
+/// Any pre-queued connections are closed.
+pub fn unregister_socket_activation(name: &[u8]) -> KernelResult<()> {
+    let mut activations = SOCKET_ACTIVATIONS.lock();
+
+    if let Some(pos) = activations.iter().position(|e| e.name == name) {
+        let entry = activations.remove(pos);
+        // Close any pre-queued connections.
+        for handle in entry.pre_queue {
+            channel::close(handle);
+        }
+        Ok(())
+    } else {
+        Err(KernelError::NotFound)
+    }
+}
+
+/// List all socket activation entries (for monitoring/kshell).
+///
+/// Returns (name, spawn_path, status, start_count, pre_queue_len).
+pub fn list_socket_activations() -> Vec<(String, String, ActivationStatus, u32, usize)> {
+    let activations = SOCKET_ACTIVATIONS.lock();
+    activations.iter().map(|e| {
+        let name = String::from(core::str::from_utf8(&e.name).unwrap_or("<bin>"));
+        (name, e.spawn_path.clone(), e.status, e.start_count, e.pre_queue.len())
+    }).collect()
+}
+
+/// Mark a socket-activated service as failed (e.g., after crash).
+///
+/// Called by the process supervisor when a socket-activated service exits
+/// abnormally. Resets status to Idle so the next connect triggers a restart.
+pub fn mark_activation_failed(name: &[u8]) {
+    let mut activations = SOCKET_ACTIVATIONS.lock();
+    if let Some(entry) = activations.iter_mut().find(|e| e.name == name) {
+        entry.status = ActivationStatus::Failed;
+        // Close pre-queued connections — they'll get errors.
+        while let Some(handle) = entry.pre_queue.pop_front() {
+            channel::close(handle);
+        }
+    }
+}
+
+/// Reset a failed socket activation back to idle (allows retry).
+pub fn reset_activation(name: &[u8]) -> KernelResult<()> {
+    let mut activations = SOCKET_ACTIVATIONS.lock();
+    if let Some(entry) = activations.iter_mut().find(|e| e.name == name) {
+        entry.status = ActivationStatus::Idle;
+        Ok(())
+    } else {
+        Err(KernelError::NotFound)
+    }
+}
+
+/// Check if a service name has socket activation configured.
+pub fn is_socket_activated(name: &[u8]) -> bool {
+    let activations = SOCKET_ACTIVATIONS.lock();
+    activations.iter().any(|e| e.name == name)
+}
+
+// ---------------------------------------------------------------------------
+// Socket activation helpers (internal)
+// ---------------------------------------------------------------------------
+
+/// Drain pre-queued connections for a name from the activation registry.
+///
+/// Called when a service registers — transfers queued connections to its
+/// pending queue.
+fn drain_pre_queue(name: &[u8]) -> VecDeque<ChannelHandle> {
+    let mut activations = SOCKET_ACTIVATIONS.lock();
+    if let Some(entry) = activations.iter_mut().find(|e| e.name == name) {
+        let queue = core::mem::take(&mut entry.pre_queue);
+        queue
+    } else {
+        VecDeque::new()
+    }
+}
+
+/// Mark a socket activation entry as running.
+fn mark_activation_running(name: &[u8]) {
+    let mut activations = SOCKET_ACTIVATIONS.lock();
+    if let Some(entry) = activations.iter_mut().find(|e| e.name == name) {
+        entry.status = ActivationStatus::Running;
+    }
+}
+
+/// Trigger spawning of a socket-activated service.
+///
+/// Currently logs the spawn request. In the future, this will invoke the
+/// process spawner to start the service binary.
+fn trigger_service_spawn(path: &str, name: &[u8]) {
+    let name_str = core::str::from_utf8(name).unwrap_or("<bin>");
+    serial_println!("[service] Socket activation: spawning '{}' for service '{}'",
+        path, name_str);
+
+    // In the future, this calls proc::spawn::spawn_process(path, ...) or
+    // similar. For now we just log it — actual spawning requires the process
+    // subsystem to support on-demand launching from service names.
+    //
+    // The service will eventually call register(name) which transfers the
+    // pre-queued connections.
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -487,6 +735,7 @@ pub fn self_test() -> KernelResult<()> {
     test_unregister()?;
     test_duplicate_name()?;
     test_blocking_accept()?;
+    test_socket_activation()?;
 
     serial_println!("[service] Service registry self-test PASSED");
     Ok(())
@@ -675,5 +924,84 @@ fn test_blocking_accept() -> KernelResult<()> {
     unregister(listener)?;
 
     serial_println!("[service]   Blocking accept: OK");
+    Ok(())
+}
+
+/// Test 6: socket activation — pre-queue connection, then register.
+fn test_socket_activation() -> KernelResult<()> {
+    let name = b"test.socket_activated";
+
+    // Register socket activation.
+    register_socket_activation(name, "/sbin/test-service")?;
+
+    // Verify it's activated.
+    if !is_socket_activated(name) {
+        serial_println!("[service]   FAIL: socket activation not registered");
+        unregister_socket_activation(name).ok();
+        return Err(KernelError::InternalError);
+    }
+
+    // Client connects — service not running yet.
+    // This should queue the connection in pre_queue and trigger spawn.
+    let client_ep = connect(name)?;
+
+    // Verify the connection was pre-queued (activation should be Starting).
+    {
+        let activations = SOCKET_ACTIVATIONS.lock();
+        let entry = activations.iter().find(|e| e.name == name)
+            .ok_or(KernelError::InternalError)?;
+        if entry.status != ActivationStatus::Starting {
+            serial_println!("[service]   FAIL: expected Starting, got {:?}", entry.status);
+            channel::close(client_ep);
+            unregister_socket_activation(name).ok();
+            return Err(KernelError::InternalError);
+        }
+        if entry.pre_queue.len() != 1 {
+            serial_println!("[service]   FAIL: expected 1 pre-queued, got {}", entry.pre_queue.len());
+            channel::close(client_ep);
+            unregister_socket_activation(name).ok();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Simulate the service starting: it calls register().
+    // This should transfer the pre-queued connection.
+    let listener = register(name)?;
+
+    // The service should now have 1 pending connection.
+    let count = pending_count(listener)?;
+    if count != 1 {
+        serial_println!("[service]   FAIL: expected 1 pending, got {}", count);
+        channel::close(client_ep);
+        unregister(listener).ok();
+        unregister_socket_activation(name).ok();
+        return Err(KernelError::InternalError);
+    }
+
+    // Accept the connection and verify it works.
+    let server_ep = try_accept(listener)?
+        .ok_or(KernelError::InternalError)?;
+
+    // Send a message through the channel.
+    let msg = channel::Message::from_bytes(b"socket activated!")?;
+    channel::send(client_ep, msg)?;
+
+    let received = channel::recv(server_ep)?;
+    if received.data() != b"socket activated!" {
+        serial_println!("[service]   FAIL: message mismatch");
+        channel::close(client_ep);
+        channel::close(server_ep);
+        unregister(listener).ok();
+        unregister_socket_activation(name).ok();
+        return Err(KernelError::InternalError);
+    }
+
+    // Cleanup.
+    channel::close(client_ep);
+    channel::close(server_ep);
+    unregister(listener)?;
+    unregister_socket_activation(name)?;
+
+    serial_println!("[service]   Socket activation: OK");
     Ok(())
 }

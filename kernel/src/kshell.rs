@@ -3094,12 +3094,12 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "profile", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
-    "rmdir", "run", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sort", "source",
+    "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sockact", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
-    "uname", "un7z", "unalias", "uniq", "unmount", "unset", "unxz", "unzip", "unzstd", "uptime", "ver", "version", "vmstat",
+    "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
@@ -4380,6 +4380,7 @@ fn dispatch(line: &str) {
         "lz4" => cmd_lz4(args),
         "unzip" => cmd_unzip(args),
         "un7z" => cmd_un7z(args),
+        "unrar" => cmd_unrar(args),
         "cpio" => cmd_cpio(args),
         "ar" => cmd_ar(args),
         "dpkg" => cmd_dpkg(args),
@@ -4397,6 +4398,7 @@ fn dispatch(line: &str) {
         "firewall" | "fw" => cmd_firewall(args),
         "capgroups" | "cg" => cmd_cap_groups(args),
         "captags" | "ct" => cmd_cap_tags(args),
+        "sockact" | "sa" => cmd_socket_activation(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
@@ -4617,6 +4619,7 @@ fn cmd_help() {
     crate::console_println!("  lz4 F [-o OUT]     Compress file with LZ4 (fast)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
     crate::console_println!("  un7z [-l] F [-d DIR]   List or extract 7-zip archive");
+    crate::console_println!("  unrar [-l] F [-d DIR]  List or extract RAR5 archive (stored entries only)");
     crate::console_println!("  cpio -i|-t [-d DIR] < F.cpio  Extract or list CPIO archive (newc format)");
     crate::console_println!("  cpio -o F.cpio FILE..  Create CPIO archive from files");
     crate::console_println!("  ar t F.a | ar x F.a [-d DIR] | ar r F.a FILE..  List/extract/create ar archive");
@@ -8411,6 +8414,7 @@ fn extension_hint(path: &str) -> &'static str {
         "tbz2" | "tbz" => "bzip2 compressed tar archive",
         "zip" => "ZIP archive",
         "7z" => "7-zip archive",
+        "rar" => "RAR archive",
         "deb" => "Debian package",
         "cpio" => "CPIO archive",
         "xz" => "XZ compressed",
@@ -10144,6 +10148,78 @@ fn cmd_cap_tags(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: captags [list|show|add|remove|clear|check]");
+        }
+    }
+}
+
+/// `sockact` — manage socket activation entries.
+///
+/// Usage:
+///   sockact                     — list all socket activations
+///   sockact add NAME PATH       — register socket activation
+///   sockact remove NAME         — remove socket activation
+///   sockact reset NAME          — reset failed service to idle
+fn cmd_socket_activation(args: &str) {
+    use crate::ipc::service;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let all = service::list_socket_activations();
+            if all.is_empty() {
+                crate::console_println!("No socket activations configured.");
+                return;
+            }
+            crate::console_println!("=== Socket Activations ({}) ===", all.len());
+            crate::console_println!("{:<25} {:<25} {:<10} {:<6} {}",
+                "Service", "Spawn Path", "Status", "Starts", "Queued");
+            for (name, path, status, starts, queued) in &all {
+                let status_str = match status {
+                    service::ActivationStatus::Idle => "idle",
+                    service::ActivationStatus::Starting => "starting",
+                    service::ActivationStatus::Running => "running",
+                    service::ActivationStatus::Failed => "FAILED",
+                };
+                crate::console_println!("{:<25} {:<25} {:<10} {:<6} {}",
+                    name, path, status_str, starts, queued);
+            }
+        }
+        "add" | "register" => {
+            if parts.len() >= 3 {
+                let name = parts[1];
+                let path = parts[2];
+                match service::register_socket_activation(name.as_bytes(), path) {
+                    Ok(()) => crate::console_println!("Socket activation registered: {} → {}", name, path),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            } else {
+                crate::console_println!("Usage: sockact add <service_name> <spawn_path>");
+            }
+        }
+        "remove" | "rm" | "del" => {
+            if let Some(name) = parts.get(1) {
+                match service::unregister_socket_activation(name.as_bytes()) {
+                    Ok(()) => crate::console_println!("Socket activation removed: {}", name),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            } else {
+                crate::console_println!("Usage: sockact remove <service_name>");
+            }
+        }
+        "reset" => {
+            if let Some(name) = parts.get(1) {
+                match service::reset_activation(name.as_bytes()) {
+                    Ok(()) => crate::console_println!("Activation reset: {}", name),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            } else {
+                crate::console_println!("Usage: sockact reset <service_name>");
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: sockact [list|add|remove|reset]");
         }
     }
 }
@@ -12540,10 +12616,10 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "sockact" | "sa" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"
@@ -20572,6 +20648,186 @@ fn cmd_un7z(args: &str) {
         archive_path,
         if errors > 0 {
             alloc::format!(" ({} errors)", errors)
+        } else {
+            alloc::string::String::new()
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// unrar — RAR5 archive listing and extraction (uses fs::rar module)
+// ---------------------------------------------------------------------------
+
+/// `unrar` command — list or extract RAR5 archives.
+///
+/// Usage:
+///   `unrar [-l] archive.rar [-d dir]`
+fn cmd_unrar(args: &str) {
+    use crate::fs::Vfs;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: unrar [-l] archive.rar [-d dir]\n\
+             \x20 -l      List archive contents\n\
+             \x20 -d DIR  Extract to directory DIR\n\
+             \x20 Note: only Store-mode (uncompressed) entries can be extracted"
+        );
+        return;
+    }
+
+    let mut list_mode = false;
+    let mut archive_arg: Option<&str> = None;
+    let mut target_dir = alloc::string::String::from("/");
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-l" | "--list" => list_mode = true,
+            "-d" => {
+                if let Some(&dir) = parts.get(i.wrapping_add(1)) {
+                    target_dir = resolve_path(dir);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("unrar: -d requires a directory argument");
+                    return;
+                }
+            }
+            _ => {
+                if archive_arg.is_none() {
+                    archive_arg = Some(p);
+                }
+            }
+        }
+    }
+
+    let archive_path = match archive_arg {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("unrar: no archive file specified");
+            return;
+        }
+    };
+
+    let data = match Vfs::read_file(&archive_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("unrar: '{}': {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let entries = match crate::fs::rar::parse(&data) {
+        Ok(e) => e,
+        Err(crate::error::KernelError::InvalidArgument) => {
+            crate::console_println!("unrar: '{}': RAR4 format not supported (only RAR5)", archive_path);
+            return;
+        }
+        Err(e) => {
+            crate::console_println!("unrar: '{}': parse failed: {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    if list_mode {
+        crate::console_println!(
+            "  {:>10}  {:>10}  {:>4}  {:>5}  Name",
+            "Size", "Packed", "Type", "Mode"
+        );
+        crate::console_println!(
+            "  {}  {}  {}  {}  {}",
+            "-".repeat(10), "-".repeat(10), "-".repeat(4), "-".repeat(5), "-".repeat(40)
+        );
+
+        let mut total_size: u64 = 0;
+        let mut file_count = 0u64;
+        let mut dir_count = 0u64;
+        for entry in &entries {
+            let type_str = if entry.is_dir { "dir" } else { "file" };
+            let mode = if entry.is_stored { "store" } else { "comp" };
+            crate::console_println!(
+                "  {:>10}  {:>10}  {:>4}  {:>5}  {}",
+                entry.unpacked_size, entry.packed_size, type_str, mode, entry.name
+            );
+            total_size = total_size.wrapping_add(entry.unpacked_size);
+            if entry.is_dir {
+                dir_count = dir_count.wrapping_add(1);
+            } else {
+                file_count = file_count.wrapping_add(1);
+            }
+        }
+        crate::console_println!(
+            "  {} files, {} directories, {} bytes total",
+            file_count, dir_count, total_size
+        );
+        return;
+    }
+
+    // Extract stored entries.
+    let mut extracted = 0u64;
+    let mut skipped = 0u64;
+    let mut errors = 0u64;
+
+    for entry in &entries {
+        let dest = if target_dir == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", target_dir, entry.name)
+        };
+
+        if entry.is_dir {
+            let _ = Vfs::mkdir(&dest);
+            continue;
+        }
+
+        if !entry.is_stored {
+            crate::console_println!("unrar: skip '{}' (compressed, not extractable)", entry.name);
+            skipped = skipped.wrapping_add(1);
+            continue;
+        }
+
+        // Ensure parent directory exists.
+        if let Some(slash_pos) = dest.rfind('/') {
+            if slash_pos > 0 {
+                let parent = &dest[..slash_pos];
+                let _ = Vfs::mkdir(parent);
+            }
+        }
+
+        match crate::fs::rar::entry_data(&data, entry) {
+            Ok(file_data) => {
+                match Vfs::write_file(&dest, file_data) {
+                    Ok(()) => {
+                        extracted = extracted.wrapping_add(1);
+                    }
+                    Err(e) => {
+                        crate::console_println!("unrar: write '{}': {:?}", dest, e);
+                        errors = errors.wrapping_add(1);
+                    }
+                }
+            }
+            Err(e) => {
+                crate::console_println!("unrar: extract '{}': {:?}", entry.name, e);
+                errors = errors.wrapping_add(1);
+            }
+        }
+    }
+
+    crate::console_println!(
+        "unrar: extracted {} file(s) from '{}'{}{}",
+        extracted,
+        archive_path,
+        if skipped > 0 {
+            alloc::format!(", {} skipped (compressed)", skipped)
+        } else {
+            alloc::string::String::new()
+        },
+        if errors > 0 {
+            alloc::format!(", {} errors", errors)
         } else {
             alloc::string::String::new()
         }

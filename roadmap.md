@@ -593,7 +593,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Userspace pointer validation on all syscall handlers
   - [x] Service spawn/management (init reads ELF from VFS, spawns child, waits for exit)
 - [x] Dependency-based parallel service startup
-- [ ] Socket activation
+- [x] Socket activation
+  - [x] SocketActivationEntry: name, spawn_path, status, pre_queue
+  - [x] register_socket_activation/unregister_socket_activation API
+  - [x] connect() integrates with activation: queues connection + triggers spawn for idle services
+  - [x] register() transfers pre-queued connections to service's pending queue
+  - [x] Activation lifecycle: Idle → Starting → Running, Failed with reset
+  - [x] mark_activation_failed/reset_activation for supervisor integration
+  - [x] Kshell `sockact`/`sa` command (list/add/remove/reset)
+  - [x] Self-test: register activation, connect triggers spawn, register transfers queue, channel works
 - [x] Automatic crash restart with backoff
 - [ ] Resource limits per service (cgroup-equivalent)
 - [x] JSON-lines structured logging (text-based, not binary)

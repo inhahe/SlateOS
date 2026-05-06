@@ -3099,13 +3099,13 @@ const COMMANDS: &[&str] = &[
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
-    "uname", "unalias", "uniq", "unmount", "unset", "unxz", "unzip", "uptime", "ver", "version", "vmstat",
+    "uname", "unalias", "uniq", "unmount", "unset", "unxz", "unzip", "unzstd", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
     "fpu", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
-    "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
+    "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip", "zstdcat",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4372,6 +4372,7 @@ fn dispatch(line: &str) {
         "gunzip" | "gzip" => cmd_gunzip(args),
         "bunzip2" | "bzcat" => cmd_bunzip2(args),
         "unxz" | "xzcat" => cmd_unxz(args),
+        "unzstd" | "zstdcat" => cmd_unzstd(args),
         "unzip" => cmd_unzip(args),
         "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
@@ -4592,10 +4593,11 @@ fn cmd_help() {
     crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
     crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
     crate::console_println!("  fsck.ext4 [-v] DEVICE       Check ext4 filesystem consistency (read-only)");
-    crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz/.tar.bz2/.tar.xz supported)");
+    crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz/.tar.bz2/.tar.xz/.tar.zst supported)");
     crate::console_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
     crate::console_println!("  bunzip2 F [-o OUT] Decompress bzip2 file (bzcat alias)");
     crate::console_println!("  unxz F [-o OUT]    Decompress XZ/LZMA2 file (xzcat alias)");
+    crate::console_println!("  unzstd F [-o OUT]  Decompress Zstandard file (zstdcat alias)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
     crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
@@ -8358,6 +8360,8 @@ fn extension_hint(path: &str) -> &'static str {
         "tbz2" | "tbz" => "bzip2 compressed tar archive",
         "zip" => "ZIP archive",
         "xz" => "XZ compressed",
+        "zst" | "zstd" => "Zstandard compressed",
+        "tzst" => "Zstandard compressed tar archive",
 
         // Config and data.
         "cfg" | "conf" | "ini" => "configuration file",
@@ -12126,7 +12130,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzcat" | "unxz" | "xzcat" | "unzip" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstdcat" | "unzip" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -18673,6 +18677,31 @@ fn cmd_tar(args: &str) {
                     return;
                 }
             }
+        } else if raw_data.len() >= 4 {
+            // Check for Zstandard magic (FD 2F B5 28).
+            let magic = u32::from(raw_data[0])
+                | (u32::from(raw_data[1]) << 8)
+                | (u32::from(raw_data[2]) << 16)
+                | (u32::from(raw_data[3]) << 24);
+            if magic == 0xFD2F_B528 {
+                match crate::fs::zstd::unzstd(&raw_data) {
+                    Ok(decompressed) => {
+                        if verbose {
+                            crate::console_println!(
+                                "tar: decompressed zstd: {} -> {} bytes",
+                                raw_data.len(), decompressed.len()
+                            );
+                        }
+                        decompressed
+                    }
+                    Err(e) => {
+                        crate::console_println!("tar: zstd decompress failed: {:?}", e);
+                        return;
+                    }
+                }
+            } else {
+                raw_data
+            }
         } else {
             raw_data
         };
@@ -20359,6 +20388,130 @@ fn cmd_unxz(args: &str) {
         }
         Err(e) => {
             crate::console_println!("unxz: write '{}': {:?}", out, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// unzstd / zstdcat — Zstandard decompression
+// ---------------------------------------------------------------------------
+
+/// `unzstd` / `zstdcat` command — decompress Zstandard (.zst) files.
+fn cmd_unzstd(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: unzstd [-t] FILE.zst [-o OUTPUT]   Decompress Zstandard file\n\
+             \x20      zstdcat FILE.zst                    Decompress to stdout\n\
+             \x20 -t   Test integrity only (no output written)\n\
+             \x20 -o F Write output to F instead of auto-naming"
+        );
+        return;
+    }
+
+    let mut test_only = false;
+    let mut input_path: Option<&str> = None;
+    let mut output_path: Option<&str> = None;
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-t" | "--test" => test_only = true,
+            "-o" => {
+                if let Some(&out) = parts.get(i.wrapping_add(1)) {
+                    output_path = Some(out);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("unzstd: -o requires an argument");
+                    return;
+                }
+            }
+            _ => {
+                if input_path.is_none() {
+                    input_path = Some(p);
+                }
+            }
+        }
+    }
+
+    let input = match input_path {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("unzstd: no input file specified");
+            return;
+        }
+    };
+
+    // Read the input data.
+    let file_data = match crate::fs::Vfs::read_file(&input) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("unzstd: '{}': {:?}", input, e);
+            return;
+        }
+    };
+
+    // Verify Zstandard magic (FD 2F B5 28).
+    if file_data.len() < 8 {
+        crate::console_println!("unzstd: '{}': file too small", input);
+        return;
+    }
+    let magic = u32::from(file_data[0])
+        | (u32::from(file_data[1]) << 8)
+        | (u32::from(file_data[2]) << 16)
+        | (u32::from(file_data[3]) << 24);
+    if magic != 0xFD2F_B528 {
+        crate::console_println!("unzstd: '{}': not a Zstandard file", input);
+        return;
+    }
+
+    // Decompress.
+    let decompressed = match crate::fs::zstd::unzstd(&file_data) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("unzstd: '{}': decompression failed: {:?}", input, e);
+            return;
+        }
+    };
+
+    if test_only {
+        crate::console_println!(
+            "unzstd: '{}': OK ({} -> {} bytes)",
+            input, file_data.len(), decompressed.len()
+        );
+        return;
+    }
+
+    // Determine output path.
+    let out = if let Some(explicit) = output_path {
+        resolve_path(explicit)
+    } else {
+        // Strip .zst extension, or .tzst → .tar
+        if input.ends_with(".zst") {
+            alloc::string::String::from(&input[..input.len().saturating_sub(4)])
+        } else if input.ends_with(".tzst") {
+            let base = &input[..input.len().saturating_sub(5)];
+            alloc::format!("{}.tar", base)
+        } else if input.ends_with(".zstd") {
+            alloc::string::String::from(&input[..input.len().saturating_sub(5)])
+        } else {
+            alloc::format!("{}.out", input)
+        }
+    };
+
+    match crate::fs::Vfs::write_file(&out, &decompressed) {
+        Ok(()) => {
+            crate::console_println!(
+                "unzstd: '{}' -> '{}' ({} -> {} bytes)",
+                input, out, file_data.len(), decompressed.len()
+            );
+        }
+        Err(e) => {
+            crate::console_println!("unzstd: write '{}': {:?}", out, e);
         }
     }
 }

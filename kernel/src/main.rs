@@ -766,6 +766,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::xz::self_test() {
                 serial_println!("WARNING: XZ self-test failed: {:?}", e);
             }
+            // Run Zstandard decompression self-test.
+            if let Err(e) = fs::zstd::self_test() {
+                serial_println!("WARNING: Zstd self-test failed: {:?}", e);
+            }
             // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
             if let Err(e) = fs::memfs::self_test() {
                 serial_println!("WARNING: MemFs self-test failed: {:?}", e);
@@ -1290,6 +1294,11 @@ extern "C" fn kmain() -> ! {
     // Futex wait_timeout self-test (requires hrtimer).
     if let Err(e) = ipc::futex::self_test_timeout() {
         serial_println!("[FATAL] Futex timeout self-test failed: {:?}", e);
+    }
+
+    // Eventfd read_timeout self-test (requires hrtimer).
+    if let Err(e) = ipc::eventfd::self_test_timeout() {
+        serial_println!("[FATAL] Eventfd timeout self-test failed: {:?}", e);
     }
 
     // Step 22e: CSPRNG self-test.

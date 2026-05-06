@@ -3099,7 +3099,7 @@ const COMMANDS: &[&str] = &[
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
-    "uname", "unalias", "uniq", "unmount", "unset", "unxz", "unzip", "unzstd", "uptime", "ver", "version", "vmstat",
+    "uname", "un7z", "unalias", "uniq", "unmount", "unset", "unxz", "unzip", "unzstd", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
@@ -4377,6 +4377,7 @@ fn dispatch(line: &str) {
         "unzstd" | "zstdcat" => cmd_unzstd(args),
         "zstd" => cmd_zstd(args),
         "unzip" => cmd_unzip(args),
+        "un7z" => cmd_un7z(args),
         "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
         "sed" => cmd_sed(args),
@@ -4605,6 +4606,7 @@ fn cmd_help() {
     crate::console_println!("  unzstd F [-o OUT]  Decompress Zstandard file (zstdcat alias)");
     crate::console_println!("  zstd [-s] F [-o OUT]   Compress file with Zstandard (-s = store mode)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
+    crate::console_println!("  un7z [-l] F [-d DIR]   List or extract 7-zip archive");
     crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
     crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
@@ -8365,6 +8367,7 @@ fn extension_hint(path: &str) -> &'static str {
         "bz2" => "bzip2 compressed",
         "tbz2" | "tbz" => "bzip2 compressed tar archive",
         "zip" => "ZIP archive",
+        "7z" => "7-zip archive",
         "xz" => "XZ compressed",
         "zst" | "zstd" => "Zstandard compressed",
         "tzst" => "Zstandard compressed tar archive",
@@ -12136,7 +12139,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -19396,6 +19399,161 @@ fn cmd_unzip(args: &str) {
             alloc::string::String::new()
         },
         archive_path
+    );
+}
+
+// ---------------------------------------------------------------------------
+// un7z — 7-zip archive extraction and listing
+// ---------------------------------------------------------------------------
+
+/// `un7z` command — list or extract 7-zip archives.
+///
+/// Usage:
+///   un7z [-l] archive.7z [-d dir]
+///
+/// -l  List archive contents instead of extracting.
+/// -d  Extract into specified directory (default: current dir).
+fn cmd_un7z(args: &str) {
+    use crate::fs::Vfs;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: un7z [-l] archive.7z [-d dir]\n\
+             \x20 -l      List archive contents\n\
+             \x20 -d DIR  Extract to directory DIR"
+        );
+        return;
+    }
+
+    let mut list_mode = false;
+    let mut archive_arg: Option<&str> = None;
+    let mut target_dir = alloc::string::String::from("/");
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-l" | "--list" => list_mode = true,
+            "-d" => {
+                if let Some(&dir) = parts.get(i.wrapping_add(1)) {
+                    target_dir = resolve_path(dir);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("un7z: -d requires a directory argument");
+                    return;
+                }
+            }
+            _ => {
+                if archive_arg.is_none() {
+                    archive_arg = Some(p);
+                }
+            }
+        }
+    }
+
+    let archive_path = match archive_arg {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("un7z: no archive file specified");
+            return;
+        }
+    };
+
+    let data = match Vfs::read_file(&archive_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("un7z: '{}': {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let entries = match crate::fs::sevenz::un7z(&data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("un7z: '{}': extraction failed: {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    if list_mode {
+        crate::console_println!(
+            "  {:>10}  {:>4}  Name",
+            "Size", "Type"
+        );
+        crate::console_println!("  {}  {}  {}", "-".repeat(10), "-".repeat(4), "-".repeat(40));
+
+        let mut total_size: u64 = 0;
+        let mut file_count = 0u64;
+        let mut dir_count = 0u64;
+        for entry in &entries {
+            let type_str = if entry.is_dir { "dir" } else { "file" };
+            crate::console_println!(
+                "  {:>10}  {:>4}  {}",
+                entry.data.len(), type_str, entry.name
+            );
+            total_size = total_size.wrapping_add(entry.data.len() as u64);
+            if entry.is_dir {
+                dir_count = dir_count.wrapping_add(1);
+            } else {
+                file_count = file_count.wrapping_add(1);
+            }
+        }
+        crate::console_println!(
+            "  {} files, {} directories, {} bytes total",
+            file_count, dir_count, total_size
+        );
+        return;
+    }
+
+    // Extract all entries.
+    let mut extracted = 0u64;
+    let mut errors = 0u64;
+
+    for entry in &entries {
+        let dest = if target_dir == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", target_dir, entry.name)
+        };
+
+        if entry.is_dir {
+            // Create directory (ignore errors — it may already exist).
+            let _ = Vfs::mkdir(&dest);
+            continue;
+        }
+
+        // Ensure parent directory exists.
+        if let Some(slash_pos) = dest.rfind('/') {
+            if slash_pos > 0 {
+                let parent = &dest[..slash_pos];
+                let _ = Vfs::mkdir(parent);
+            }
+        }
+
+        match Vfs::write_file(&dest, &entry.data) {
+            Ok(()) => {
+                extracted = extracted.wrapping_add(1);
+            }
+            Err(e) => {
+                crate::console_println!("un7z: write '{}': {:?}", dest, e);
+                errors = errors.wrapping_add(1);
+            }
+        }
+    }
+
+    crate::console_println!(
+        "un7z: extracted {} file(s) from '{}'{}",
+        extracted,
+        archive_path,
+        if errors > 0 {
+            alloc::format!(" ({} errors)", errors)
+        } else {
+            alloc::string::String::new()
+        }
     );
 }
 

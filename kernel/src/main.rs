@@ -803,6 +803,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::zstd::self_test() {
         serial_println!("WARNING: Zstd self-test failed: {:?}", e);
     }
+    if let Err(e) = fs::sevenz::self_test() {
+        serial_println!("WARNING: 7z self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

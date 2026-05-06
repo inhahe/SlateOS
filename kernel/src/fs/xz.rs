@@ -292,7 +292,7 @@ impl LenDecoder {
 // ---------------------------------------------------------------------------
 
 /// Full LZMA probability model and decoder state.
-struct LzmaState {
+pub(crate) struct LzmaState {
     // Properties
     lc: u8,
     lp: u8,
@@ -332,7 +332,7 @@ struct LzmaState {
 
 impl LzmaState {
     /// Create a new LZMA state with the given properties.
-    fn new(lc: u8, lp: u8, pb: u8) -> Self {
+    pub(crate) fn new(lc: u8, lp: u8, pb: u8) -> Self {
         let num_lit_subcoders = 1usize << (lc.saturating_add(lp) as usize);
         let lit_size = num_lit_subcoders.saturating_mul(0x300);
         let mut literal_probs = Vec::new();
@@ -404,7 +404,7 @@ impl LzmaState {
 /// `dict_size` is the sliding window size for back-references.
 ///
 /// Returns `Ok(())` on success; output is appended to `output`.
-fn lzma_decode(
+pub(crate) fn lzma_decode(
     lzma: &mut LzmaState,
     data: &[u8],
     uncompressed_size: usize,
@@ -658,7 +658,7 @@ fn get_dict_byte(output: &[u8], distance: usize) -> u8 {
 ///
 /// `data` is the LZMA2 payload (after the XZ block header).
 /// `dict_size` is the dictionary size from the LZMA2 properties byte.
-fn lzma2_decode(data: &[u8], dict_size: u32) -> KernelResult<Vec<u8>> {
+pub(crate) fn lzma2_decode(data: &[u8], dict_size: u32) -> KernelResult<Vec<u8>> {
     let mut output = Vec::new();
     let mut pos = 0usize;
     let mut lzma: Option<LzmaState> = None;
@@ -801,7 +801,7 @@ fn read_vli(data: &[u8], start: usize) -> KernelResult<(u64, usize)> {
 /// `byte` encodes the dictionary size as `(2 | (byte & 1)) << (byte/2 + 11)`,
 /// with special cases: byte=0 → 4096, byte=40 → u32::MAX (per xz-utils).
 /// Values above 40 are invalid per the XZ spec.
-fn lzma2_dict_size(byte: u8) -> u32 {
+pub(crate) fn lzma2_dict_size(byte: u8) -> u32 {
     if byte == 0 {
         return MIN_DICT_SIZE;
     }

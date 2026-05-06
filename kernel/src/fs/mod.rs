@@ -42,6 +42,8 @@ pub mod sysfs;
 pub mod trash;
 pub mod vfs;
 #[allow(dead_code)]
+pub mod sevenz;
+#[allow(dead_code)]
 pub mod xz;
 #[allow(dead_code)]
 pub mod zstd;

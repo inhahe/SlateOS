@@ -828,6 +828,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::tar::self_test() {
         serial_println!("WARNING: tar self-test failed: {:?}", e);
     }
+    if let Err(e) = fs::lz4::self_test() {
+        serial_println!("WARNING: LZ4 self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

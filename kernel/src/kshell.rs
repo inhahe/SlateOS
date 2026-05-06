@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio",
+    "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
@@ -3105,7 +3105,7 @@ const COMMANDS: &[&str] = &[
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
     "fpu", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
-    "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip", "zstd", "zstdcat",
+    "ktimer", "ktrace", "lockdep", "lz4", "lz4cat", "rng", "supervisor", "sv", "timers", "trace", "unlz4", "xattr", "xxd", "zip", "zstd", "zstdcat",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4376,6 +4376,8 @@ fn dispatch(line: &str) {
         "xz" => cmd_xz(args),
         "unzstd" | "zstdcat" => cmd_unzstd(args),
         "zstd" => cmd_zstd(args),
+        "unlz4" | "lz4cat" => cmd_unlz4(args),
+        "lz4" => cmd_lz4(args),
         "unzip" => cmd_unzip(args),
         "un7z" => cmd_un7z(args),
         "cpio" => cmd_cpio(args),
@@ -4394,6 +4396,7 @@ fn dispatch(line: &str) {
         "wget" | "http" => cmd_wget(args),
         "firewall" | "fw" => cmd_firewall(args),
         "capgroups" | "cg" => cmd_cap_groups(args),
+        "captags" | "ct" => cmd_cap_tags(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
@@ -4602,7 +4605,7 @@ fn cmd_help() {
     crate::console_println!("  mkfs.fat [-L LABEL] DEVICE  Format device as FAT16/FAT32 (auto-selects type)");
     crate::console_println!("  fsck.fat [-a] DEVICE        Check/repair FAT filesystem consistency");
     crate::console_println!("  fsck.ext4 [-v] DEVICE       Check ext4 filesystem consistency (read-only)");
-    crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz/.tar.bz2/.tar.xz/.tar.zst supported)");
+    crate::console_println!("  tar -cf A F.. | -xf A [-C D] | -tf A  Create/extract/list USTAR archives (.tar.gz/.tar.bz2/.tar.xz/.tar.zst/.tar.lz4 supported)");
     crate::console_println!("  gunzip F [-o OUT]  Decompress gzip file (gzip -d alias)");
     crate::console_println!("  bunzip2 F [-o OUT] Decompress bzip2 file (bzcat alias)");
     crate::console_println!("  bzip2 [-N] F [-o OUT]  Compress file with bzip2 (-1..-9 block size)");
@@ -4610,6 +4613,8 @@ fn cmd_help() {
     crate::console_println!("  xz F [-o OUT]      Compress file with XZ/LZMA2");
     crate::console_println!("  unzstd F [-o OUT]  Decompress Zstandard file (zstdcat alias)");
     crate::console_println!("  zstd [-s] F [-o OUT]   Compress file with Zstandard (-s = store mode)");
+    crate::console_println!("  unlz4 F [-o OUT]   Decompress LZ4 file (lz4cat alias)");
+    crate::console_println!("  lz4 F [-o OUT]     Compress file with LZ4 (fast)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
     crate::console_println!("  un7z [-l] F [-d DIR]   List or extract 7-zip archive");
     crate::console_println!("  cpio -i|-t [-d DIR] < F.cpio  Extract or list CPIO archive (newc format)");
@@ -8208,6 +8213,10 @@ fn detect_magic(header: &[u8]) -> Option<&'static str> {
         if magic == 0xFD2F_B528 {
             return Some("Zstandard compressed data");
         }
+        // LZ4 frame
+        if magic == 0x04224D18 {
+            return Some("LZ4 compressed data");
+        }
     }
 
     // RAR
@@ -8407,6 +8416,7 @@ fn extension_hint(path: &str) -> &'static str {
         "xz" => "XZ compressed",
         "zst" | "zstd" => "Zstandard compressed",
         "tzst" => "Zstandard compressed tar archive",
+        "lz4" => "LZ4 compressed",
 
         // Config and data.
         "cfg" | "conf" | "ini" => "configuration file",
@@ -10002,6 +10012,138 @@ fn cmd_cap_groups(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: capgroups [list|create|remove]");
+        }
+    }
+}
+
+/// `captags` — manage file/directory capability tags.
+///
+/// Usage:
+///   captags                    — list all tagged paths
+///   captags show PATH          — show tags on a path (including inherited)
+///   captags add PATH GROUP     — tag a path with a capability group
+///   captags remove PATH GROUP  — remove a tag from a path
+///   captags clear PATH         — remove all tags from a path
+///   captags check PATH UID GID — test access for a uid/gid combo
+fn cmd_cap_tags(args: &str) {
+    use crate::cap::file_tags;
+    use crate::cap::groups;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let all = file_tags::list_all();
+            if all.is_empty() {
+                crate::console_println!("No file capability tags set.");
+                return;
+            }
+            crate::console_println!("=== File Capability Tags ({}) ===", all.len());
+            for (path, group_ids) in &all {
+                let names: alloc::vec::Vec<alloc::string::String> = group_ids.iter().map(|&id| {
+                    // Try to get group name.
+                    let all_groups = groups::list();
+                    all_groups.iter()
+                        .find(|(gid, _, _, _, _)| *gid == id)
+                        .map(|(_, name, _, _, _)| name.clone())
+                        .unwrap_or_else(|| alloc::format!("id={}", id))
+                }).collect();
+                crate::console_println!("  {} → [{}]", path, names.join(", "));
+            }
+        }
+        "show" => {
+            if let Some(path) = parts.get(1) {
+                let direct = file_tags::get_tags(path);
+                let effective = file_tags::effective_tags(path);
+                let all_groups = groups::list();
+
+                let name_for = |id: u32| -> alloc::string::String {
+                    all_groups.iter()
+                        .find(|(gid, _, _, _, _)| *gid == id)
+                        .map(|(_, name, _, _, _)| name.clone())
+                        .unwrap_or_else(|| alloc::format!("id={}", id))
+                };
+
+                crate::console_println!("Path: {}", path);
+                if direct.is_empty() {
+                    crate::console_println!("  Direct tags: (none)");
+                } else {
+                    let names: alloc::vec::Vec<_> = direct.iter().map(|&id| name_for(id)).collect();
+                    crate::console_println!("  Direct tags: [{}]", names.join(", "));
+                }
+                if effective.is_empty() {
+                    crate::console_println!("  Effective tags (incl. inherited): (none)");
+                } else {
+                    let names: alloc::vec::Vec<_> = effective.iter().map(|&id| name_for(id)).collect();
+                    crate::console_println!("  Effective tags (incl. inherited): [{}]", names.join(", "));
+                }
+            } else {
+                crate::console_println!("Usage: captags show <path>");
+            }
+        }
+        "add" | "tag" => {
+            if parts.len() >= 3 {
+                let path = parts[1];
+                let group_name = parts[2];
+                if let Some(group_id) = groups::find_by_name(group_name) {
+                    match file_tags::tag_path(path, group_id) {
+                        Ok(()) => crate::console_println!("Tagged '{}' with group '{}'", path, group_name),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                } else {
+                    crate::console_println!("Group '{}' not found", group_name);
+                }
+            } else {
+                crate::console_println!("Usage: captags add <path> <group_name>");
+            }
+        }
+        "remove" | "rm" | "untag" => {
+            if parts.len() >= 3 {
+                let path = parts[1];
+                let group_name = parts[2];
+                if let Some(group_id) = groups::find_by_name(group_name) {
+                    match file_tags::untag_path(path, group_id) {
+                        Ok(()) => crate::console_println!("Removed '{}' tag from '{}'", group_name, path),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                } else {
+                    crate::console_println!("Group '{}' not found", group_name);
+                }
+            } else {
+                crate::console_println!("Usage: captags remove <path> <group_name>");
+            }
+        }
+        "clear" => {
+            if let Some(path) = parts.get(1) {
+                match file_tags::clear_tags(path) {
+                    Ok(()) => crate::console_println!("All tags cleared from '{}'", path),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            } else {
+                crate::console_println!("Usage: captags clear <path>");
+            }
+        }
+        "check" => {
+            // captags check <path> <uid> <gid>
+            if parts.len() >= 4 {
+                let path = parts[1];
+                let uid: u32 = parts[2].parse().unwrap_or(u32::MAX);
+                let gid: u32 = parts[3].parse().unwrap_or(u32::MAX);
+                if uid == u32::MAX || gid == u32::MAX {
+                    crate::console_println!("Usage: captags check <path> <uid> <gid>");
+                    return;
+                }
+                match file_tags::check_access(uid, gid, &[], path) {
+                    Ok(()) => crate::console_println!("ACCESS ALLOWED for uid={} gid={} on '{}'", uid, gid, path),
+                    Err(_) => crate::console_println!("ACCESS DENIED for uid={} gid={} on '{}'", uid, gid, path),
+                }
+            } else {
+                crate::console_println!("Usage: captags check <path> <uid> <gid>");
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: captags [list|show|add|remove|clear|check]");
         }
     }
 }
@@ -12398,7 +12540,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -18609,6 +18751,7 @@ fn cmd_tar(args: &str) {
         crate::console_println!("  -cjf      Create bzip2-compressed archive (.tar.bz2)");
         crate::console_println!("  -cJf      Create xz-compressed archive (.tar.xz)");
         crate::console_println!("  --zstd    Use zstd compression (.tar.zst)");
+        crate::console_println!("  --lz4     Use lz4 compression (.tar.lz4)");
         crate::console_println!("  -xf       Extract archive (auto-detects compression)");
         crate::console_println!("  -tf       List archive contents");
         crate::console_println!("  -v        Verbose output");
@@ -18625,6 +18768,7 @@ fn cmd_tar(args: &str) {
     let bz2_compress = flags.contains('j');
     let xz_compress = flags.contains('J');
     let zstd_compress = parts.iter().any(|&p| p == "--zstd");
+    let lz4_compress = parts.iter().any(|&p| p == "--lz4");
 
     // Exactly one mode required.
     let mode_count = u8::from(create) + u8::from(extract) + u8::from(list);
@@ -18720,6 +18864,15 @@ fn cmd_tar(args: &str) {
                     return;
                 }
             }
+        } else if lz4_compress {
+            let compressed = crate::fs::lz4::compress(&archive_data);
+            if verbose {
+                crate::console_println!(
+                    "tar: lz4 compressed {} -> {} bytes",
+                    archive_data.len(), compressed.len()
+                );
+            }
+            compressed
         } else {
             archive_data
         };
@@ -18833,6 +18986,23 @@ fn cmd_tar(args: &str) {
                     }
                     Err(e) => {
                         crate::console_println!("tar: zstd decompress failed: {:?}", e);
+                        return;
+                    }
+                }
+            } else if magic == 0x04224D18 {
+                // LZ4 frame magic.
+                match crate::fs::lz4::decompress(&raw_data) {
+                    Ok(decompressed) => {
+                        if verbose {
+                            crate::console_println!(
+                                "tar: decompressed lz4: {} -> {} bytes",
+                                raw_data.len(), decompressed.len()
+                            );
+                        }
+                        decompressed
+                    }
+                    Err(e) => {
+                        crate::console_println!("tar: lz4 decompress failed: {:?}", e);
                         return;
                     }
                 }
@@ -21736,6 +21906,219 @@ fn cmd_zstd(args: &str) {
         }
         Err(e) => {
             crate::console_println!("zstd: write '{}': {:?}", out, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// unlz4 / lz4cat — LZ4 decompression
+// ---------------------------------------------------------------------------
+
+/// `unlz4` command — decompress LZ4 frame files.
+///
+/// Usage:
+///   `unlz4 [-t] FILE.lz4 [-o OUTPUT]`
+///   `lz4cat FILE.lz4`  — decompress to stdout
+fn cmd_unlz4(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: unlz4 [-t] FILE.lz4 [-o OUTPUT]   Decompress LZ4 file\n\
+             \x20      lz4cat FILE.lz4                    Decompress to stdout\n\
+             \x20 -t   Test integrity only (no output written)\n\
+             \x20 -o F Write output to F instead of auto-naming"
+        );
+        return;
+    }
+
+    let mut test_only = false;
+    let mut input_path: Option<&str> = None;
+    let mut output_path: Option<&str> = None;
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-t" | "--test" => test_only = true,
+            "-o" => {
+                if let Some(&out) = parts.get(i.wrapping_add(1)) {
+                    output_path = Some(out);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("unlz4: -o requires an argument");
+                    return;
+                }
+            }
+            _ => {
+                if input_path.is_none() {
+                    input_path = Some(p);
+                }
+            }
+        }
+    }
+
+    let input = match input_path {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("unlz4: no input file specified");
+            return;
+        }
+    };
+
+    // Read the input data.
+    let file_data = match crate::fs::Vfs::read_file(&input) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("unlz4: '{}': {:?}", input, e);
+            return;
+        }
+    };
+
+    // Verify LZ4 frame magic (04 22 4D 18).
+    if file_data.len() < 7 {
+        crate::console_println!("unlz4: '{}': file too small", input);
+        return;
+    }
+    let magic = u32::from(file_data[0])
+        | (u32::from(file_data[1]) << 8)
+        | (u32::from(file_data[2]) << 16)
+        | (u32::from(file_data[3]) << 24);
+    if magic != 0x04224D18 {
+        crate::console_println!("unlz4: '{}': not an LZ4 file (magic: {:#010X})", input, magic);
+        return;
+    }
+
+    // Decompress.
+    let decompressed = match crate::fs::lz4::decompress(&file_data) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("unlz4: '{}': decompression failed: {:?}", input, e);
+            return;
+        }
+    };
+
+    if test_only {
+        crate::console_println!(
+            "unlz4: '{}': OK ({} -> {} bytes)",
+            input, file_data.len(), decompressed.len()
+        );
+        return;
+    }
+
+    // Determine output path.
+    let out = if let Some(explicit) = output_path {
+        resolve_path(explicit)
+    } else {
+        // Strip .lz4 extension, or .tlz4 → .tar
+        if input.ends_with(".lz4") {
+            alloc::string::String::from(&input[..input.len().saturating_sub(4)])
+        } else {
+            alloc::format!("{}.out", input)
+        }
+    };
+
+    match crate::fs::Vfs::write_file(&out, &decompressed) {
+        Ok(()) => {
+            crate::console_println!(
+                "unlz4: '{}' -> '{}' ({} -> {} bytes)",
+                input, out, file_data.len(), decompressed.len()
+            );
+        }
+        Err(e) => {
+            crate::console_println!("unlz4: write '{}': {:?}", out, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// lz4 — LZ4 compression
+// ---------------------------------------------------------------------------
+
+/// `lz4` command — compress files using LZ4 frame format.
+///
+/// Usage:
+///   `lz4 FILE [-o OUTPUT]`
+fn cmd_lz4(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: lz4 FILE [-o OUTPUT]   Compress file with LZ4\n\
+             \x20 -o F Write output to F instead of FILE.lz4"
+        );
+        return;
+    }
+
+    let mut input_path: Option<&str> = None;
+    let mut output_path: Option<&str> = None;
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-o" => {
+                if let Some(&out) = parts.get(i.wrapping_add(1)) {
+                    output_path = Some(out);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("lz4: -o requires an argument");
+                    return;
+                }
+            }
+            _ => {
+                if input_path.is_none() {
+                    input_path = Some(p);
+                }
+            }
+        }
+    }
+
+    let input = match input_path {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("lz4: no input file specified");
+            return;
+        }
+    };
+
+    // Read the input data.
+    let file_data = match crate::fs::Vfs::read_file(&input) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("lz4: '{}': {:?}", input, e);
+            return;
+        }
+    };
+
+    // Compress.
+    let compressed = crate::fs::lz4::compress(&file_data);
+
+    // Determine output path.
+    let out = if let Some(explicit) = output_path {
+        resolve_path(explicit)
+    } else {
+        alloc::format!("{}.lz4", input)
+    };
+
+    match crate::fs::Vfs::write_file(&out, &compressed) {
+        Ok(()) => {
+            let ratio = if file_data.is_empty() {
+                0
+            } else {
+                compressed.len().wrapping_mul(100) / file_data.len()
+            };
+            crate::console_println!(
+                "lz4: '{}' -> '{}' ({} -> {} bytes, {}%)",
+                input, out, file_data.len(), compressed.len(), ratio
+            );
+        }
+        Err(e) => {
+            crate::console_println!("lz4: write '{}': {:?}", out, e);
         }
     }
 }

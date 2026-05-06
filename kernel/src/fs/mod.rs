@@ -39,6 +39,8 @@ pub mod fat;
 pub mod handle;
 pub mod iso9660;
 pub mod journal;
+#[allow(dead_code)]
+pub mod lz4;
 pub mod memfs;
 pub mod notify;
 pub mod procfs;

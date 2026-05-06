@@ -844,7 +844,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [ ] Port F2FS (SSD optimization)
 - [ ] NTFS read/write support
 - [ ] Queryable file metadata / indexed attributes (BeOS BFS-inspired)
-- [ ] Application-level atomic write transactions
+- [x] Application-level atomic write transactions (Vfs::atomic_write, write-temp-sync-rename pattern, atomic_write_preserve for metadata, VFS self-test)
 
 ### 5.3 Additional schedulers (if needed)
 - [ ] EEVDF-style scheduler (for users wanting sophisticated fairness)

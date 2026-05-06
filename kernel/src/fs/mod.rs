@@ -46,6 +46,7 @@ pub mod journal;
 #[allow(dead_code)]
 pub mod lz4;
 pub mod memfs;
+pub mod mime;
 pub mod notify;
 pub mod procfs;
 #[allow(dead_code)]

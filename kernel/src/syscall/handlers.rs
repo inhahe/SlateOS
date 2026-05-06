@@ -5423,6 +5423,15 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: listener handle.
 pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Service capability with WRITE rights.
+    // This prevents untrusted processes from squatting on service names.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Service,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
 
@@ -5554,6 +5563,14 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: new namespace ID.
 pub fn sys_ns_create(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Namespace capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Namespace,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let clone_from = args.arg0;
 
     match crate::ipc::namespace::create(clone_from) {
@@ -5678,6 +5695,15 @@ pub fn sys_ns_hide(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: process ID (0 = calling process).
 /// `arg1`: namespace ID (0 = root/default).
 pub fn sys_ns_attach(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Namespace capability with WRITE rights.
+    // Without this, a process cannot change its own or another's namespace.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Namespace,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
     let pid = if args.arg0 == 0 {
         // Use the calling process's PID.
         let task_id = sched::current_task_id();

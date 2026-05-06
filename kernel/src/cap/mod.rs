@@ -117,6 +117,23 @@ pub enum ResourceType {
     /// to submit I/O requests at the Realtime priority class.
     /// Without it, Realtime requests are downgraded to BestEffort.
     IoScheduler = 13,
+    /// Service registry access.
+    ///
+    /// Required to register named services (prevents name squatting
+    /// by untrusted processes).  Connecting to services does NOT
+    /// require this capability — any process can connect.
+    ///
+    /// `resource_id` is reserved (currently 0).
+    /// Rights: WRITE = can register services.
+    Service = 14,
+    /// Namespace management.
+    ///
+    /// Required to create namespaces or attach processes to them.
+    /// Without this, a process can only operate within its inherited
+    /// namespace.
+    ///
+    /// Rights: WRITE = create/modify/attach namespaces.
+    Namespace = 15,
 }
 
 // ---------------------------------------------------------------------------

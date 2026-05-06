@@ -87,8 +87,11 @@ static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 /// `duration_ns`: time until first expiry (nanoseconds).
 /// `flags`: `TIMER_PERIODIC` for repeating timers, 0 for one-shot.
 ///
-/// Returns the timer handle, or 0 if no slots are available.
-pub fn create(duration_ns: u64, flags: u64) -> u64 {
+/// Returns the timer handle on success, or `ResourceExhausted` if
+/// the timer table is full.
+pub fn create(duration_ns: u64, flags: u64) -> crate::error::KernelResult<u64> {
+    use crate::error::KernelError;
+
     // Convert nanoseconds to ticks (100Hz = 10ms per tick), rounding up.
     let ticks = duration_ns
         .saturating_add(9_999_999)
@@ -112,13 +115,13 @@ pub fn create(duration_ns: u64, flags: u64) -> u64 {
             entry.expired.store(false, Ordering::Release);
             entry.interval.store(interval, Ordering::Release);
             entry.cp_handle.store(0, Ordering::Release);
-            return handle;
+            return Ok(handle);
         }
     }
 
     // No slots available.
     serial_println!("[timer] WARNING: timer table full ({} timers)", MAX_TIMERS);
-    0
+    Err(KernelError::ResourceExhausted)
 }
 
 /// Cancel and destroy a timer.
@@ -258,11 +261,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[timer] Running timer self-test...");
 
     // Test 1: Create a one-shot timer with a very short deadline.
-    let h = create(1_000_000, 0); // 1ms → 1 tick minimum
-    if h == 0 {
-        serial_println!("[timer]   FAIL: create returned 0");
-        return Err(crate::error::KernelError::InternalError);
-    }
+    let h = create(1_000_000, 0)?; // 1ms → 1 tick minimum
 
     // Timer should not be expired immediately (it fires on the next tick).
     // But since the APIC timer ISR fires at 100Hz, we can't rely on
@@ -277,11 +276,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[timer]   Cancel timer: OK");
 
     // Test 3: Create a periodic timer.
-    let h2 = create(50_000_000, TIMER_PERIODIC); // 50ms
-    if h2 == 0 {
-        serial_println!("[timer]   FAIL: create periodic returned 0");
-        return Err(crate::error::KernelError::InternalError);
-    }
+    let h2 = create(50_000_000, TIMER_PERIODIC)?; // 50ms
     serial_println!("[timer]   Create periodic timer: OK (handle={})", h2);
 
     // Clean up.

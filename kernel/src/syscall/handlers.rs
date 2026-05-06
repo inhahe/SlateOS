@@ -2432,13 +2432,13 @@ pub fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let handle = crate::ipc::timer::create(duration_ns, flags);
-    if handle == 0 {
-        return SyscallResult::err(KernelError::OutOfMemory);
+    match crate::ipc::timer::create(duration_ns, flags) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
     }
-
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(handle as i64)
 }
 
 /// `SYS_TIMER_CANCEL` — cancel and destroy a timer.

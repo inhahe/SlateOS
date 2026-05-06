@@ -103,6 +103,7 @@ const ROOT_FILES: &[&str] = &[
     "cas",
     "integrity",
     "fhistory",
+    "security",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1051,18 +1052,125 @@ fn gen_fhistory() -> Vec<u8> {
 
     s.push_str(&format!(
         "enabled:            {}\n\
+         auto_version:       {}\n\
          tracked_files:      {}\n\
          total_versions:     {}\n\
          evicted_versions:   {}\n\
          record_operations:  {}\n\
          restore_operations: {}\n",
         if st.enabled { "yes" } else { "no" },
+        if st.auto_version { "yes" } else { "no" },
         st.tracked_files,
         st.total_versions,
         st.evicted_versions,
         st.record_count,
         st.restore_count,
     ));
+
+    s.into_bytes()
+}
+
+/// `/proc/security` — Security posture summary.
+///
+/// Consolidates capability system status, IOMMU protection,
+/// namespace isolation, file tags, audit trail, and pending
+/// capability requests into a single overview.
+fn gen_security() -> Vec<u8> {
+    let mut s = String::with_capacity(1024);
+    s.push_str("Security Posture\n");
+    s.push_str("================\n\n");
+
+    // --- IOMMU ---
+    s.push_str("[IOMMU / DMA Protection]\n");
+    let iommu_available = crate::iommu::is_available();
+    s.push_str(&format!(
+        "  status:             {}\n",
+        if iommu_available { "active" } else { "not detected" }
+    ));
+    if iommu_available {
+        s.push_str(&format!(
+            "  vendor:             {:?}\n\
+             units:              {}\n",
+            crate::iommu::vendor(),
+            crate::iommu::unit_count(),
+        ));
+    }
+    s.push('\n');
+
+    // --- Capability Audit ---
+    let audit = crate::cap::audit::stats();
+    s.push_str("[Capability Audit]\n");
+    s.push_str(&format!(
+        "  auditing:           {}\n\
+           total_events:       {}\n\
+           grants:             {}\n\
+           denials:            {}\n\
+           revocations:        {}\n\
+           ring_entries:       {} / 128\n",
+        if audit.enabled { "enabled" } else { "disabled" },
+        audit.total_events,
+        audit.total_grants,
+        audit.total_denials,
+        audit.total_revokes,
+        audit.ring_entries,
+    ));
+    s.push('\n');
+
+    // --- Capability Groups ---
+    let group_count = crate::cap::groups::count();
+    s.push_str("[Capability Groups]\n");
+    s.push_str(&format!("  defined_groups:     {}\n", group_count));
+    // List groups briefly.
+    let groups = crate::cap::groups::list();
+    for (id, name, member_count, _max, enabled) in &groups {
+        s.push_str(&format!(
+            "  group[{}]:           {} (members: {}, {})\n",
+            id,
+            name,
+            member_count,
+            if *enabled { "active" } else { "disabled" },
+        ));
+    }
+    s.push('\n');
+
+    // --- File Tags ---
+    let file_tag_count = crate::cap::file_tags::count();
+    s.push_str("[File Capability Tags]\n");
+    s.push_str(&format!("  tagged_paths:       {}\n", file_tag_count));
+    s.push('\n');
+
+    // --- Capability Requests ---
+    let pending = crate::cap::request::pending_count();
+    s.push_str("[Capability Requests]\n");
+    s.push_str(&format!("  pending_requests:   {}\n", pending));
+    s.push('\n');
+
+    // --- Process Namespaces ---
+    let ns_count = crate::ipc::namespace::active_count();
+    s.push_str("[Process Namespaces]\n");
+    s.push_str(&format!("  active_namespaces:  {}\n", ns_count));
+    s.push('\n');
+
+    // --- Overall Assessment ---
+    s.push_str("[Assessment]\n");
+    let mut issues: u32 = 0;
+    if !iommu_available {
+        s.push_str("  WARNING: No IOMMU — DMA attacks possible from PCI devices\n");
+        issues += 1;
+    }
+    if !audit.enabled {
+        s.push_str("  WARNING: Capability auditing disabled\n");
+        issues += 1;
+    }
+    if audit.total_denials > 0 {
+        s.push_str(&format!(
+            "  NOTE: {} capability denial(s) recorded — review audit log\n",
+            audit.total_denials,
+        ));
+    }
+    if issues == 0 {
+        s.push_str("  All security subsystems operational\n");
+    }
 
     s.into_bytes()
 }
@@ -1339,6 +1447,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cas" => Ok(gen_cas()),
         "integrity" => Ok(gen_integrity()),
         "fhistory" => Ok(gen_fhistory()),
+        "security" => Ok(gen_security()),
         _ => Err(KernelError::NotFound),
     }
 }

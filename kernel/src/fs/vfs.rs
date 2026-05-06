@@ -1487,6 +1487,7 @@ impl Vfs {
     /// the underlying filesystem doesn't have a physical directory there).
     pub fn readdir(path: &str) -> KernelResult<Vec<DirEntry>> {
         let path = Self::resolve_follow(path)?;
+        check_file_tags(&path)?;
         let mut vfs = VFS.lock();
 
         // Collect mount-point names that are direct children of `path`.
@@ -1553,6 +1554,7 @@ impl Vfs {
     /// Read a file's contents.
     pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
+        check_file_tags(&path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.read_file(relative)
@@ -1561,6 +1563,7 @@ impl Vfs {
     /// Get metadata for a path.
     pub fn stat(path: &str) -> KernelResult<DirEntry> {
         let path = Self::resolve_follow(path)?;
+        check_file_tags(&path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.stat(relative)
@@ -1569,6 +1572,7 @@ impl Vfs {
     /// Write data to a file (create or overwrite).
     pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_file_tags(&path)?;
         check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
@@ -1737,6 +1741,7 @@ impl Vfs {
     /// Does NOT follow the final symlink — removes the link itself.
     pub fn remove(path: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
+        check_file_tags(&path)?;
         check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
@@ -1757,6 +1762,7 @@ impl Vfs {
     /// new directory name (not followed if it happens to exist).
     pub fn mkdir(path: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
+        check_file_tags(&path)?;
         check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
@@ -1822,6 +1828,7 @@ impl Vfs {
     /// Remove an empty directory.
     pub fn rmdir(path: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
+        check_file_tags(&path)?;
         check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
@@ -1838,6 +1845,7 @@ impl Vfs {
     /// Read a range of bytes from a file.
     pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
+        check_file_tags(&path)?;
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.read_at(relative, offset, len)
@@ -1848,6 +1856,7 @@ impl Vfs {
     /// Write bytes at a specific offset within a file.
     pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
+        check_file_tags(&path)?;
         check_writable(&path)?;
         {
             let mut vfs = VFS.lock();
@@ -1909,6 +1918,8 @@ impl Vfs {
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
         let from = Self::resolve_no_follow(from)?;
         let to = Self::resolve_no_follow(to)?;
+        check_file_tags(&from)?;
+        check_file_tags(&to)?;
         check_writable(&from)?;
         check_writable(&to)?;
 
@@ -2437,6 +2448,13 @@ impl Vfs {
     /// `NotFound` / `PermissionDenied` on failure.
     pub fn access(path: &str, mode: u32) -> KernelResult<()> {
         let meta = Self::metadata(path)?; // NotFound propagated here
+
+        // File capability tag check — regardless of mode, a process
+        // must pass group membership requirements on tagged paths.
+        {
+            let resolved = Self::resolve_follow(path).unwrap_or_else(|_| String::from(path));
+            check_file_tags(&resolved)?;
+        }
 
         // F_OK (0) — existence only; metadata() already succeeded.
         if mode == F_OK {
@@ -3094,6 +3112,46 @@ fn check_writable(path: &str) -> KernelResult<()> {
         return Err(KernelError::ReadOnlyFilesystem);
     }
     Ok(())
+}
+
+/// Check file/directory capability tag access for the current process.
+///
+/// Files and directories can be tagged with capability group requirements.
+/// If the current path (or any ancestor) has tags, the calling process
+/// must be a member of every required group (AND-composition).
+///
+/// - Kernel tasks (no owning process) always pass.
+/// - Root (uid=0) always passes.
+/// - Untagged paths always pass (no restriction).
+///
+/// This function is called from VFS operations (read, write, stat, open,
+/// etc.) to enforce file-level capability requirements.
+fn check_file_tags(path: &str) -> KernelResult<()> {
+    // Skip check if there are no tagged paths at all (fast path for
+    // the common case of no file tags configured).
+    if crate::cap::file_tags::count() == 0 {
+        return Ok(());
+    }
+
+    // Get the calling process's PID.
+    let task_id = crate::sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return Ok(()), // Kernel task or PID 0 — bypass.
+    };
+
+    // Get process credentials.
+    let creds = match crate::proc::pcb::get_credentials(pid) {
+        Some(c) => c,
+        None => return Ok(()), // No credentials — process being torn down.
+    };
+
+    crate::cap::file_tags::check_access(
+        creds.uid,
+        creds.gid,
+        &creds.groups,
+        path,
+    )
 }
 
 // ---------------------------------------------------------------------------

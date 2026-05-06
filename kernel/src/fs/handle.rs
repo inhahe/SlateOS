@@ -154,6 +154,38 @@ static OPEN_FILES: Mutex<BTreeMap<u64, OpenFile>> = Mutex::new(BTreeMap::new());
 const MAX_OPEN_FILES: usize = 1024;
 
 // ---------------------------------------------------------------------------
+// Capability tag enforcement
+// ---------------------------------------------------------------------------
+
+/// Check file/directory capability tag access for the current process.
+///
+/// Same logic as `vfs::check_file_tags` but for the handle module.
+/// Called at open time — the handle is proof of access after that.
+fn check_file_tags_for_handle(path: &str) -> KernelResult<()> {
+    if crate::cap::file_tags::count() == 0 {
+        return Ok(());
+    }
+
+    let task_id = crate::sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return Ok(()),
+    };
+
+    let creds = match crate::proc::pcb::get_credentials(pid) {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    crate::cap::file_tags::check_access(
+        creds.uid,
+        creds.gid,
+        &creds.groups,
+        path,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -174,7 +206,17 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
     // to the original target.
     let norm = crate::fs::Vfs::resolve_path(path)?;
 
+    // Check file capability tags — the process must be a member of
+    // all required groups for this path (or any ancestor with tags).
+    // This is checked at open time; subsequent reads/writes on the
+    // handle are allowed without re-checking (the handle is proof
+    // of access, like a file descriptor).
+    check_file_tags_for_handle(&norm)?;
+
     // Check if the file exists.
+    // Note: Vfs::stat() also checks file tags internally, but our
+    // explicit check above handles the CREATE case (file doesn't
+    // exist yet, so stat is never called — we still need the check).
     let stat_result = crate::fs::Vfs::stat(&norm);
 
     match stat_result {

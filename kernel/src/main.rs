@@ -67,6 +67,7 @@ mod font;
 mod fs;
 mod gdt;
 mod hpet;
+mod hypervisor;
 mod idt;
 mod idle;
 mod invariant;
@@ -202,6 +203,10 @@ extern "C" fn kmain() -> ! {
     // Must be done before FPU init so subsystems can query feature flags.
     cpu::detect_features();
     cpu::log_features();
+    // Detect virtualization environment via CPUID.  This must happen
+    // early because hypervisor type affects TSC behavior and driver
+    // selection (e.g., prefer virtio under KVM/QEMU).
+    hypervisor::detect();
     // Cache topology detection uses only CPUID (no heap needed), but
     // logging uses alloc::format, so we detect now and log later.
     cpu::detect_cache_topology();
@@ -1015,6 +1020,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++x: Diagnostic report generator self-test.
     // Comprehensive system state collection for bug reports.
     kdiag::self_test();
+
+    // Step 22e⅞++++y: Hypervisor detection self-test.
+    // Verifies CPUID-based VM detection and signature matching.
+    hypervisor::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

@@ -203,6 +203,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::kdiag::self_test(); true },
         category: "kernel",
     });
+    suites.push(TestSuite {
+        name: "hypervisor",
+        description: "Hypervisor/VM detection via CPUID",
+        run: || { crate::hypervisor::self_test(); true },
+        category: "kernel",
+    });
 
     suites
 }

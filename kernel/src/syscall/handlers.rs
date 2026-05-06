@@ -2213,6 +2213,144 @@ pub fn sys_cap_query(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(count as i64)
 }
 
+/// `SYS_CAP_REQUEST` — request a capability the caller does not hold.
+///
+/// Submits a request to the security policy handler.  The request
+/// includes a human-readable reason string that will be presented to
+/// the user for approval or denial.
+///
+/// `arg0`: resource type (`ResourceType` discriminant as u16).
+/// `arg1`: rights bitfield (`Rights` bits as u32).
+/// `arg2`: pointer to reason string (UTF-8, user buffer).
+/// `arg3`: length of reason string in bytes (max 256).
+///
+/// Returns: request ID (positive u64) on success.
+pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::{self, request, Rights};
+    use crate::proc::{pcb, thread};
+
+    let resource_type_raw = args.arg0 as u16;
+    let rights_raw = args.arg1 as u32;
+    let reason_ptr = args.arg2 as *const u8;
+    let reason_len = args.arg3 as usize;
+
+    // Validate resource type.
+    let resource_type = match resource_type_raw {
+        1 => cap::ResourceType::Channel,
+        2 => cap::ResourceType::Pipe,
+        3 => cap::ResourceType::SharedMemory,
+        4 => cap::ResourceType::EventFd,
+        5 => cap::ResourceType::CompletionPort,
+        6 => cap::ResourceType::Process,
+        7 => cap::ResourceType::Thread,
+        8 => cap::ResourceType::PortIo,
+        9 => cap::ResourceType::DeviceIrq,
+        10 => cap::ResourceType::File,
+        11 => cap::ResourceType::Socket,
+        12 => cap::ResourceType::Timer,
+        13 => cap::ResourceType::IoScheduler,
+        14 => cap::ResourceType::Service,
+        15 => cap::ResourceType::Namespace,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // Validate rights (must be non-zero).
+    let rights = Rights::from_raw(rights_raw as u64);
+    if rights.is_empty() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate reason string.
+    if reason_ptr.is_null() || reason_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let safe_len = reason_len.min(256);
+
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, safe_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Buffer validated above — in user space and mapped.
+    let reason_bytes = unsafe { core::slice::from_raw_parts(reason_ptr, safe_len) };
+    let reason_str = match core::str::from_utf8(reason_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // Get the calling process's PID and name.
+    let task_id = sched::current_task_id();
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return SyscallResult::err(KernelError::PermissionDenied),
+    };
+    let proc_name = pcb::name(pid).unwrap_or_else(|| alloc::string::String::from("unknown"));
+
+    // Submit the request.
+    match request::request_capability(pid, &proc_name, resource_type, rights, reason_str) {
+        Ok(id) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(id as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CAP_REQUEST_STATUS` — check the status of a capability request.
+///
+/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
+///
+/// Returns status as an integer:
+/// - 0 = Pending
+/// - 1 = Approved
+/// - 2 = Denied
+/// - 3 = TimedOut
+/// - 4 = Cancelled
+pub fn sys_cap_request_status(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::request::{self, RequestStatus};
+
+    let request_id = args.arg0;
+
+    match request::get_status(request_id) {
+        Some(status) => {
+            let code = match status {
+                RequestStatus::Pending => 0,
+                RequestStatus::Approved => 1,
+                RequestStatus::Denied => 2,
+                RequestStatus::TimedOut => 3,
+                RequestStatus::Cancelled => 4,
+            };
+            SyscallResult::ok(code)
+        }
+        None => SyscallResult::err(KernelError::NotFound),
+    }
+}
+
+/// `SYS_CAP_REQUEST_CANCEL` — cancel a pending capability request.
+///
+/// Only the process that submitted the request can cancel it.
+///
+/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
+///
+/// Returns 0 on success.
+pub fn sys_cap_request_cancel(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::request;
+    use crate::proc::thread;
+
+    let request_id = args.arg0;
+
+    // Get the calling process's PID.
+    let task_id = sched::current_task_id();
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return SyscallResult::err(KernelError::PermissionDenied),
+    };
+
+    match request::cancel(request_id, pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_SET_EXCEPTION_HANDLER` — register a per-process exception handler.
 ///
 /// `arg0`: handler function address, or 0 to unregister.

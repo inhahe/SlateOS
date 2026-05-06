@@ -58,7 +58,8 @@ use super::number::{
     SYS_SYSCTL_GET, SYS_SYSCTL_SET,
     SYS_MM_SET_PROFILE, SYS_MM_GET_PROFILE,
     SYS_SYSTEM_SET_PROFILE,
-    SYS_CAP_QUERY, SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
+    SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL,
+    SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
     SYS_PROCESS_CRASH_INFO,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
@@ -305,6 +306,9 @@ const fn build_v1_table() -> SyscallTable {
 
     // Security (400–499).
     handlers[SYS_CAP_QUERY as usize] = Some(handlers::sys_cap_query);
+    handlers[SYS_CAP_REQUEST as usize] = Some(handlers::sys_cap_request);
+    handlers[SYS_CAP_REQUEST_STATUS as usize] = Some(handlers::sys_cap_request_status);
+    handlers[SYS_CAP_REQUEST_CANCEL as usize] = Some(handlers::sys_cap_request_cancel);
 
     // Process management (500–509).
     handlers[SYS_PROCESS_SPAWN as usize] = Some(handlers::sys_process_spawn);

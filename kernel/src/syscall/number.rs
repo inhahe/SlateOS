@@ -913,6 +913,48 @@ pub const SYS_NS_QUERY: u64 = 295;
 /// Query the calling process's capabilities.
 pub const SYS_CAP_QUERY: u64 = 400;
 
+/// Request a capability the calling process does not hold.
+///
+/// Submits a request to the security policy handler (eventually a GUI
+/// dialog, initially console-based).  The request includes a reason
+/// string displayed to the user for approval/denial.
+///
+/// `arg0`: resource type (`ResourceType` as u16, zero-extended).
+/// `arg1`: rights bitfield (`Rights` as u32, zero-extended).
+/// `arg2`: pointer to reason string (UTF-8, user buffer).
+/// `arg3`: length of reason string in bytes (max 256).
+///
+/// Returns: request ID (positive u64) on success, negative error on failure.
+///
+/// Errors:
+/// - `InvalidArgument` — invalid resource type or zero-length reason.
+/// - `ResourceExhausted` — too many pending requests.
+pub const SYS_CAP_REQUEST: u64 = 401;
+
+/// Check the status of a pending capability request.
+///
+/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
+///
+/// Returns: status code on success (0=Pending, 1=Approved, 2=Denied,
+///          3=TimedOut, 4=Cancelled), negative error on failure.
+///
+/// Errors:
+/// - `NotFound` — no request with that ID exists.
+pub const SYS_CAP_REQUEST_STATUS: u64 = 402;
+
+/// Cancel a pending capability request.
+///
+/// Only the process that submitted the request can cancel it.
+///
+/// `arg0`: request ID (from `SYS_CAP_REQUEST`).
+///
+/// Returns: 0 on success, negative error on failure.
+///
+/// Errors:
+/// - `NotFound` — no request with that ID from this process.
+/// - `InvalidArgument` — request is not in Pending state.
+pub const SYS_CAP_REQUEST_CANCEL: u64 = 403;
+
 // ---------------------------------------------------------------------------
 // Process syscalls (500–599)
 // ---------------------------------------------------------------------------

@@ -264,7 +264,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Handler register/unregister with auto-deny on unregister
   - [x] Kshell `capreq`/`cr` command (list/approve/deny/handler/test)
   - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
-  - [ ] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS)
+  - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
   - [ ] GUI security dialog integration
 - [ ] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
 - [ ] Enable LLVM CFI as default for C/C++ compilation

@@ -29,6 +29,8 @@
 //! ├── buddyinfo      Buddy allocator free blocks per order
 //! ├── swaps          Active swap devices with usage and priority
 //! ├── fsstats        Per-filesystem debug statistics
+//! ├── cas            Content-addressed store statistics
+//! ├── integrity      File integrity monitoring statistics
 //! └── <pid>/         Per-process directories
 //!     ├── status     Process name, state, priority, credentials
 //!     ├── cmdline    Process command name (null-terminated)
@@ -97,6 +99,8 @@ const ROOT_FILES: &[&str] = &[
     "fsstats",
     "heapinfo",
     "bcache",
+    "cas",
+    "integrity",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -964,6 +968,74 @@ fn gen_swaps() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `/proc/cas` — Content-addressed store statistics.
+///
+/// Shows blob count, total bytes, deduplication hits, GC stats,
+/// and capacity.
+fn gen_cas() -> Vec<u8> {
+    let st = super::cas::stats();
+
+    let mut s = String::with_capacity(512);
+    s.push_str("Content-Addressed Store\n");
+    s.push_str("----------------------\n");
+
+    let util_pct = if st.max_bytes > 0 {
+        (st.total_bytes * 100) / st.max_bytes
+    } else {
+        0
+    };
+
+    s.push_str(&format!(
+        "blob_count:         {}\n\
+         total_bytes:        {} ({} / {} = {}%)\n\
+         total_refs:         {}\n\
+         dedup_hits:         {}\n\
+         gc_collected:       {}\n\
+         integrity_failures: {}\n",
+        st.blob_count,
+        st.total_bytes, st.total_bytes, st.max_bytes, util_pct,
+        st.total_refs,
+        st.dedup_hits,
+        st.gc_collected,
+        st.integrity_failures,
+    ));
+
+    s.into_bytes()
+}
+
+/// `/proc/integrity` — File integrity monitoring statistics.
+///
+/// Shows baseline entry count, configuration, and operation counts.
+fn gen_integrity() -> Vec<u8> {
+    let st = super::integrity::stats();
+
+    let mut s = String::with_capacity(512);
+    s.push_str("File Integrity Monitor\n");
+    s.push_str("---------------------\n");
+
+    s.push_str(&format!(
+        "baseline_entries:    {}\n\
+         max_entries:         {}\n\
+         max_file_size:       {}\n\
+         baseline_operations: {}\n\
+         verify_operations:   {}\n",
+        st.baseline_entries,
+        st.max_entries,
+        st.max_file_size,
+        st.baseline_count,
+        st.verify_count,
+    ));
+
+    if st.baseline_timestamp > 0 {
+        let secs = st.baseline_timestamp / 1_000_000_000;
+        s.push_str(&format!("last_baseline:       {}s after boot\n", secs));
+    } else {
+        s.push_str("last_baseline:       never\n");
+    }
+
+    s.into_bytes()
+}
+
 /// `/proc/<pid>/status` — per-task status information (human-readable).
 ///
 /// Includes both task-level (scheduler) and process-level (PCB) data
@@ -1233,6 +1305,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fsstats" => Ok(gen_fsstats()),
         "heapinfo" => Ok(gen_heapinfo()),
         "bcache" => Ok(gen_bcache()),
+        "cas" => Ok(gen_cas()),
+        "integrity" => Ok(gen_integrity()),
         _ => Err(KernelError::NotFound),
     }
 }

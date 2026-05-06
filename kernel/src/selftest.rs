@@ -197,6 +197,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::wchan::self_test(); true },
         category: "sched",
     });
+    suites.push(TestSuite {
+        name: "kdiag",
+        description: "Comprehensive diagnostic report generator",
+        run: || { crate::kdiag::self_test(); true },
+        category: "kernel",
+    });
 
     suites
 }

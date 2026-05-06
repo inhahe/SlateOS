@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4243,6 +4243,7 @@ fn dispatch(line: &str) {
         "migrate" | "migrations" => cmd_migrate(args),
         "wchan" => cmd_wchan(),
         "bench" | "benchmark" => cmd_bench(args),
+        "diag2" | "report" => cmd_diag_report(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -21451,4 +21452,55 @@ fn bench_memcpy() {
     shell_println!("  memcpy:  min={} cyc ({} ns), mean={} ns  ({} MiB/s)",
         r.min_cycles, r.min_ns, r.mean_ns,
         if r.mean_ns > 0 { 4096 * 1_000_000_000 / (r.mean_ns * 1024 * 1024) } else { 0 });
+}
+
+/// `report` — comprehensive system diagnostic report (structured).
+///
+/// Usage:
+///   report              — full diagnostic report (all sections)
+///   report summary      — one-line health summary
+///   report <section>    — single section (memory, sched, ipc, obj, cap, migrate, invar)
+fn cmd_diag_report(args: &str) {
+    use crate::kdiag;
+
+    let sub = args.trim();
+
+    match sub {
+        "summary" | "health" => {
+            let (health, msg) = kdiag::health_summary();
+            shell_println!("[{}] {}", health.label(), msg);
+        }
+        "" => {
+            // Full report.
+            let report = kdiag::full_report();
+            shell_println!("=== Kernel Diagnostic Report ===");
+            shell_println!("Overall health: [{}]", report.overall.label());
+            shell_println!("");
+
+            for section in &report.sections {
+                shell_println!("--- {} [{}] ---", section.title, section.health.label());
+                for line in &section.lines {
+                    shell_println!("  {}", line);
+                }
+                shell_println!("");
+            }
+        }
+        name => {
+            // Single section.
+            match kdiag::section(name) {
+                Some(s) => {
+                    shell_println!("--- {} [{}] ---", s.title, s.health.label());
+                    for line in &s.lines {
+                        shell_println!("  {}", line);
+                    }
+                }
+                None => {
+                    shell_println!("Unknown section '{}'. Available:", name);
+                    shell_println!("  system, memory/mem/mm, scheduler/sched, ipc,");
+                    shell_println!("  objects/obj, capabilities/cap, migrations/migrate,");
+                    shell_println!("  invariants/invar");
+                }
+            }
+        }
+    }
 }

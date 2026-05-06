@@ -75,6 +75,7 @@ mod irq_storm;
 mod irqbalance;
 mod ipc;
 mod kcounters;
+mod kdiag;
 mod kevent;
 mod keyboard;
 mod kobject;
@@ -1010,6 +1011,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++w: Wait channel tracker self-test.
     // Tracks what blocked tasks are waiting on (WCHAN for ps/top).
     wchan::self_test();
+
+    // Step 22e⅞++++x: Diagnostic report generator self-test.
+    // Comprehensive system state collection for bug reports.
+    kdiag::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

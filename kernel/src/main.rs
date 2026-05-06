@@ -1287,6 +1287,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("[FATAL] Channel timeout self-test failed: {:?}", e);
     }
 
+    // Futex wait_timeout self-test (requires hrtimer).
+    if let Err(e) = ipc::futex::self_test_timeout() {
+        serial_println!("[FATAL] Futex timeout self-test failed: {:?}", e);
+    }
+
     // Step 22e: CSPRNG self-test.
     // Verifies output quality now that we've accumulated some interrupt
     // entropy during the boot process (ISR timing mixed in).

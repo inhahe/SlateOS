@@ -470,6 +470,16 @@ pub const SYS_FUTEX_LOCK_PI: u64 = 212;
 /// Returns: 0 on success, negative error.
 pub const SYS_FUTEX_UNLOCK_PI: u64 = 213;
 
+/// Block on a futex with a timeout (nanoseconds).
+///
+/// `arg0`: pointer to a 32-bit futex word (must be 4-byte aligned).
+/// `arg1`: expected value.
+/// `arg2`: timeout in nanoseconds (0 = check only, never block).
+///
+/// Returns: 1 if blocked and woken, 0 if value didn't match,
+/// `TimedOut` if timeout expired.
+pub const SYS_FUTEX_WAIT_TIMEOUT: u64 = 214;
+
 /// Create a one-way pipe.
 ///
 /// Returns two handles packed into `rax` (read end) and `rdx` (write end).

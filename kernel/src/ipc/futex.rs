@@ -180,6 +180,101 @@ pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
     Ok(true)
 }
 
+/// Wait on a futex address with a timeout (nanoseconds).
+///
+/// Same as [`futex_wait`] but returns `Err(TimedOut)` if `timeout_ns`
+/// elapses before a wake occurs.  `timeout_ns == 0` means check
+/// `*addr == expected` but never block (returns Ok(false) if matched
+/// but effectively a non-blocking check).
+///
+/// # Returns
+///
+/// - `Ok(true)` — blocked and woken by `futex_wake`.
+/// - `Ok(false)` — `*addr != expected` (spurious non-match).
+/// - `Err(TimedOut)` — timeout expired before a wake.
+/// - `Err(InvalidAddress)` / `Err(BadAlignment)` — bad pointer.
+pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelResult<bool> {
+    if addr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    if addr & 3 != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+
+    let current_task = sched::current_task_id();
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+
+        // SAFETY: Caller guarantees addr is valid and aligned.
+        let actual = unsafe {
+            let ptr = addr as *const AtomicU32;
+            (*ptr).load(Ordering::Acquire)
+        };
+
+        if actual != expected {
+            return Ok(false);
+        }
+
+        // Non-blocking mode: if timeout is 0, treat as "try".
+        if timeout_ns == 0 {
+            return Err(KernelError::TimedOut);
+        }
+
+        let idx = FutexTable::bucket_index(addr);
+
+        #[allow(clippy::indexing_slicing)]
+        table.buckets[idx].push_back(Waiter {
+            addr,
+            task_id: current_task,
+        });
+    }
+
+    // Schedule a timer to wake us at the deadline.
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, current_task);
+
+    // Block until woken (by futex_wake or timer).
+    sched::block_current();
+
+    // We woke up — determine why.
+    // If the timer expired, we're still in the bucket and need to
+    // remove ourselves.  If futex_wake woke us, we were already
+    // removed from the bucket by the waker.
+    let mut was_timed_out = false;
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+        let idx = FutexTable::bucket_index(addr);
+
+        #[allow(clippy::indexing_slicing)]
+        let bucket = &mut table.buckets[idx];
+
+        // If we're still in the bucket, the timer woke us (not futex_wake).
+        if let Some(pos) = bucket.iter().position(|w| w.task_id == current_task && w.addr == addr) {
+            bucket.remove(pos);
+            was_timed_out = true;
+        }
+    }
+
+    crate::hrtimer::cancel(timer_handle);
+
+    if was_timed_out && crate::hrtimer::now_ns() >= deadline_ns {
+        Err(KernelError::TimedOut)
+    } else {
+        Ok(true)
+    }
+}
+
 /// Wake up to `max_wake` tasks blocked on `addr`.
 ///
 /// Returns the number of tasks actually woken.
@@ -866,6 +961,123 @@ fn test_priority_inheritance() -> KernelResult<()> {
 
     // Suppress "unused variable" since we use h_id for spawning only.
     let _ = h_id;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Timeout self-test (requires hrtimer — runs late in boot)
+// ---------------------------------------------------------------------------
+
+/// Result storage for timeout test.
+static TIMEOUT_TEST_RESULT: AtomicU32 = AtomicU32::new(0);
+
+/// Late-boot self-test for `futex_wait_timeout`.
+///
+/// Requires hrtimer to be initialized.
+pub fn self_test_timeout() -> KernelResult<()> {
+    test_timeout_expires()?;
+    test_timeout_woken_before_deadline()?;
+    test_timeout_zero_nonblocking()?;
+
+    serial_println!("[futex]   Wait timeout: OK");
+    Ok(())
+}
+
+/// Timeout test A: Nobody wakes us — should time out.
+fn test_timeout_expires() -> KernelResult<()> {
+    let futex_word = AtomicU32::new(1);
+    let addr = (&raw const futex_word) as u64;
+
+    // Wait expecting 1 (matches), with 5ms timeout.
+    // Nobody will wake us, so it should time out.
+    match futex_wait_timeout(addr, 1, 5_000_000) {
+        Err(KernelError::TimedOut) => {} // Expected.
+        Ok(blocked) => {
+            serial_println!("[futex]   FAIL: timeout_expires returned Ok({})", blocked);
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!("[futex]   FAIL: timeout_expires returned Err({:?})", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    Ok(())
+}
+
+/// Task that wakes a futex after a short delay.
+extern "C" fn timeout_waker_task(addr_raw: u64) {
+    // Brief delay to let the main task block.
+    sched::yield_now();
+    sched::yield_now();
+
+    // Wake the waiter.
+    futex_wake(addr_raw, 1);
+    TIMEOUT_TEST_RESULT.store(1, Ordering::SeqCst);
+}
+
+/// Timeout test B: Woken before deadline — should return Ok(true).
+fn test_timeout_woken_before_deadline() -> KernelResult<()> {
+    let futex_word = AtomicU32::new(7);
+    let addr = (&raw const futex_word) as u64;
+
+    TIMEOUT_TEST_RESULT.store(0, Ordering::SeqCst);
+
+    // Spawn a waker that will wake us quickly.
+    sched::spawn(b"futex-waker", 16, timeout_waker_task, addr, 0)?;
+
+    // Wait expecting 7 (matches), with 500ms timeout.
+    // The waker should wake us well before 500ms.
+    match futex_wait_timeout(addr, 7, 500_000_000) {
+        Ok(true) => {} // Expected: blocked and woken.
+        Ok(false) => {
+            serial_println!("[futex]   FAIL: timeout_woken returned Ok(false)");
+            return Err(KernelError::InternalError);
+        }
+        Err(KernelError::TimedOut) => {
+            serial_println!("[futex]   FAIL: timeout_woken timed out");
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!("[futex]   FAIL: timeout_woken returned Err({:?})", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Verify the waker actually ran.
+    sched::yield_now();
+    if TIMEOUT_TEST_RESULT.load(Ordering::SeqCst) != 1 {
+        serial_println!("[futex]   FAIL: waker task didn't run");
+        return Err(KernelError::InternalError);
+    }
+
+    Ok(())
+}
+
+/// Timeout test C: Zero timeout — non-blocking, matches but doesn't block.
+fn test_timeout_zero_nonblocking() -> KernelResult<()> {
+    let futex_word = AtomicU32::new(5);
+    let addr = (&raw const futex_word) as u64;
+
+    // Value matches (5 == 5) and timeout is 0 → should return TimedOut
+    // (non-blocking mode: value matches but we don't block).
+    match futex_wait_timeout(addr, 5, 0) {
+        Err(KernelError::TimedOut) => {} // Expected.
+        other => {
+            serial_println!("[futex]   FAIL: zero_timeout returned {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Value doesn't match → Ok(false) regardless of timeout.
+    match futex_wait_timeout(addr, 99, 0) {
+        Ok(false) => {} // Expected: value mismatch.
+        other => {
+            serial_println!("[futex]   FAIL: zero_timeout mismatch returned {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
 
     Ok(())
 }

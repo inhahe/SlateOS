@@ -1092,6 +1092,29 @@ pub fn sys_futex_wake(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(i64::from(woken))
 }
 
+/// `SYS_FUTEX_WAIT_TIMEOUT` — block on a futex with a deadline.
+///
+/// `arg0`: pointer to 32-bit futex word (4-byte aligned).
+/// `arg1`: expected value.
+/// `arg2`: timeout in nanoseconds (0 = non-blocking check).
+///
+/// Returns: 1 if blocked and woken, 0 if value didn't match, `TimedOut`.
+pub fn sys_futex_wait_timeout(args: &SyscallArgs) -> SyscallResult {
+    let addr = args.arg0;
+    let expected = args.arg1 as u32;
+    let timeout_ns = args.arg2;
+
+    if let Err(e) = crate::mm::user::validate_user_read(addr, 4) {
+        return SyscallResult::err(e);
+    }
+
+    match futex::futex_wait_timeout(addr, expected, timeout_ns) {
+        Ok(true) => SyscallResult::ok(1),
+        Ok(false) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FUTEX_LOCK_PI` — lock a PI (Priority Inheritance) futex.
 ///
 /// `arg0`: pointer to 32-bit futex word (4-byte aligned).

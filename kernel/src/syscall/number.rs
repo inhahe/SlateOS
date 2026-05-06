@@ -542,7 +542,8 @@ pub const SYS_CP_CREATE: u64 = 250;
 /// Register a waitable source with a completion port.
 ///
 /// `arg0`: completion port handle.
-/// `arg1`: source type (0=channel, 1=`pipe_read`, 2=`pipe_write`, 3=eventfd).
+/// `arg1`: source type (0=channel, 1=pipe_read, 2=pipe_write, 3=eventfd,
+///         4=process_exit, 5=timer, 6=semaphore, 7=io_completion).
 /// `arg2`: source handle (raw u64).
 /// `arg3`: `user_data` — arbitrary u64 returned with events.
 ///

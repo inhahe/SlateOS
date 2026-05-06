@@ -149,6 +149,13 @@ pub fn create(initial: u64, max_count: u64) -> SemHandle {
     let mut table = SEM_TABLE.lock();
     table.insert(id, sem);
 
+    crate::ktrace::record(
+        crate::ktrace::Category::Ipc,
+        crate::ktrace::event::SEM_CREATE,
+        id,
+        initial,
+    );
+
     SemHandle(id)
 }
 
@@ -207,6 +214,13 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
         sem.count = sem.count.saturating_add(units_left);
     }
 
+    crate::ktrace::record(
+        crate::ktrace::Category::Ipc,
+        crate::ktrace::event::SEM_SIGNAL,
+        handle.raw(),
+        count,
+    );
+
     // Wake collected tasks outside the lock.
     for task_id in to_wake.iter().flatten() {
         sched::wake(*task_id);
@@ -226,6 +240,13 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
 /// - `Err(ChannelClosed)` — semaphore was closed while waiting.
 /// - `Err(InvalidHandle)` — semaphore not found.
 pub fn wait(handle: SemHandle) -> KernelResult<()> {
+    crate::ktrace::record(
+        crate::ktrace::Category::Ipc,
+        crate::ktrace::event::SEM_WAIT,
+        handle.raw(),
+        0,
+    );
+
     loop {
         {
             let mut table = SEM_TABLE.lock();
@@ -312,6 +333,13 @@ pub fn count(handle: SemHandle) -> KernelResult<u64> {
 /// All blocked waiters are woken (they will receive `ChannelClosed`).
 /// The semaphore is removed from the table.
 pub fn close(handle: SemHandle) {
+    crate::ktrace::record(
+        crate::ktrace::Category::Ipc,
+        crate::ktrace::event::SEM_CLOSE,
+        handle.raw(),
+        0,
+    );
+
     let mut wake_list = VecDeque::new();
 
     {

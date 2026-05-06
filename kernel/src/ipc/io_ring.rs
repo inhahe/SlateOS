@@ -223,6 +223,8 @@ struct IoRing {
     owner_task: u64,
     /// Physical frame addresses backing this ring (for cleanup).
     phys_frames: alloc::vec::Vec<u64>,
+    /// Completion port to notify when CQEs are posted (0 = none).
+    cp_handle: u64,
 }
 
 // SAFETY: IoRing's raw pointers point to HHDM-mapped memory that is
@@ -340,6 +342,7 @@ pub fn setup(
         cq_entries: cq,
         owner_task: owner,
         phys_frames: phys_frames.clone(),
+        cp_handle: 0,
     };
 
     {
@@ -430,6 +433,20 @@ pub fn enter(ring_handle: u64, to_submit: u32) -> KernelResult<u32> {
     header.sq_head.store(new_sq_head, Ordering::Release);
     header.cq_tail.store(new_cq_tail, Ordering::Release);
 
+    // Notify the associated completion port if CQEs were posted.
+    let cp = ring.cp_handle;
+    // Must drop the table lock before calling completion::notify
+    // (lock ordering: CP_TABLE → RING_TABLE would deadlock).
+    drop(table);
+
+    if processed > 0 && cp != 0 {
+        use super::completion::{self, CpHandle, WaitSource};
+        completion::notify(
+            CpHandle::from_raw(cp),
+            WaitSource::IoCompletion(ring_handle),
+        );
+    }
+
     Ok(processed)
 }
 
@@ -460,6 +477,35 @@ pub fn destroy(ring_handle: u64) -> KernelResult<()> {
     );
 
     Ok(())
+}
+
+/// Associate an io_ring with a completion port.
+///
+/// When CQEs are posted via `enter()`, the completion port is notified.
+/// Pass 0 to clear the association.
+pub fn set_cp(ring_handle: u64, cp_raw: u64) {
+    let mut table = RING_TABLE.lock();
+    if let Some(ring) = table.get_mut(&ring_handle) {
+        ring.cp_handle = cp_raw;
+    }
+}
+
+/// Check whether an io_ring has pending completion entries.
+///
+/// Returns `true` if CQ tail > CQ head (user hasn't consumed all CQEs).
+/// Used by completion port polling.
+pub fn has_completions_ready(ring_handle: u64) -> bool {
+    let table = RING_TABLE.lock();
+    let Some(ring) = table.get(&ring_handle) else {
+        return false;
+    };
+
+    // SAFETY: ring pointers are valid HHDM addresses, we hold RING_TABLE lock.
+    let header = unsafe { &*ring.header_ptr };
+    let cq_head = header.cq_head.load(Ordering::Acquire);
+    let cq_tail = header.cq_tail.load(Ordering::Acquire);
+
+    cq_tail != cq_head
 }
 
 /// Get the number of pending completions in a ring.

@@ -1262,6 +1262,7 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
         4 => Some(WaitSource::ProcessExit(handle)),
         5 => Some(WaitSource::Timer(handle)),
         6 => Some(WaitSource::Semaphore(handle)),
+        7 => Some(WaitSource::IoCompletion(handle)),
         _ => None,
     }
 }
@@ -1336,6 +1337,7 @@ fn encode_event(event: &completion::CompletionEvent) -> CpEventRaw {
         WaitSource::ProcessExit(h) => (4, h),
         WaitSource::Timer(h) => (5, h),
         WaitSource::Semaphore(h) => (6, h),
+        WaitSource::IoCompletion(h) => (7, h),
     };
     CpEventRaw {
         source_type,

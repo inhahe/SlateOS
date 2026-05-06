@@ -88,6 +88,9 @@ pub enum WaitSource {
     /// An IPC semaphore — ready when count > 0.
     /// The u64 is the semaphore handle from `semaphore::create()`.
     Semaphore(u64),
+    /// An io_ring — ready when the completion queue has pending entries.
+    /// The u64 is the ring handle from `io_ring::setup()`.
+    IoCompletion(u64),
 }
 
 impl WaitSource {
@@ -101,7 +104,8 @@ impl WaitSource {
             | Self::EventFd(h)
             | Self::ProcessExit(h)
             | Self::Timer(h)
-            | Self::Semaphore(h) => h,
+            | Self::Semaphore(h)
+            | Self::IoCompletion(h) => h,
         }
     }
 
@@ -116,6 +120,7 @@ impl WaitSource {
             Self::ProcessExit(h) => (4, h),
             Self::Timer(h) => (5, h),
             Self::Semaphore(h) => (6, h),
+            Self::IoCompletion(h) => (7, h),
         }
     }
 }
@@ -262,6 +267,7 @@ fn poll_source(source: WaitSource) -> bool {
         WaitSource::Semaphore(h) => {
             super::semaphore::has_value(super::semaphore::SemHandle::from_raw(h))
         }
+        WaitSource::IoCompletion(h) => super::io_ring::has_completions_ready(h),
     }
 }
 
@@ -333,10 +339,16 @@ pub fn register(
 
     port.registrations.push(Registration { source, user_data });
 
-    // For timer sources, tell the timer which CP to notify on expiry.
-    // This enables push-based notification instead of poll-only.
-    if let WaitSource::Timer(timer_handle) = source {
-        super::timer::set_cp(timer_handle, cp.raw());
+    // For timer and io_ring sources, tell the subsystem which CP to
+    // notify.  This enables push-based notification instead of poll-only.
+    match source {
+        WaitSource::Timer(timer_handle) => {
+            super::timer::set_cp(timer_handle, cp.raw());
+        }
+        WaitSource::IoCompletion(ring_handle) => {
+            super::io_ring::set_cp(ring_handle, cp.raw());
+        }
+        _ => {}
     }
 
     Ok(())
@@ -368,9 +380,15 @@ pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
     // Remove any queued events for this source.
     port.event_queue.retain(|e| e.source.key() != key);
 
-    // Clear the CP association for timer sources.
-    if let WaitSource::Timer(timer_handle) = source {
-        super::timer::set_cp(timer_handle, 0);
+    // Clear the CP association for timer and io_ring sources.
+    match source {
+        WaitSource::Timer(timer_handle) => {
+            super::timer::set_cp(timer_handle, 0);
+        }
+        WaitSource::IoCompletion(ring_handle) => {
+            super::io_ring::set_cp(ring_handle, 0);
+        }
+        _ => {}
     }
 
     Ok(())
@@ -596,6 +614,7 @@ pub fn self_test() -> KernelResult<()> {
     test_try_wait_empty()?;
     test_notify_wakes_waiter()?;
     test_unregister()?;
+    test_io_completion()?;
 
     serial_println!("[completion] Completion port self-test PASSED");
     Ok(())
@@ -819,5 +838,117 @@ fn test_unregister() -> KernelResult<()> {
     eventfd::close(efd2);
     close(cp);
     serial_println!("[completion]   Unregister: OK");
+    Ok(())
+}
+
+/// Test 5: io_ring integrated with completion port.
+///
+/// Create an io_ring, register it with a CP, submit NOP SQEs,
+/// and verify the CP fires.
+fn test_io_completion() -> KernelResult<()> {
+    use super::io_ring;
+    use core::mem::size_of;
+
+    let cp = create();
+    let (ring_handle, base_virt, _frames) = io_ring::setup(8, 16)?;
+
+    // Register the io_ring with user_data = 77.
+    register(cp, WaitSource::IoCompletion(ring_handle), 77)?;
+
+    // No CQEs yet — CP should not fire.
+    match try_wait(cp) {
+        Err(KernelError::WouldBlock) => {} // Expected.
+        other => {
+            serial_println!(
+                "[completion]   FAIL: io_ring try_wait before submit: {:?}",
+                other
+            );
+            io_ring::destroy(ring_handle)?;
+            close(cp);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Submit 2 NOP SQEs.
+    #[allow(clippy::arithmetic_side_effects)]
+    let sq_base = (base_virt + size_of::<io_ring::IoRingHeader>() as u64)
+        as *mut io_ring::SqEntry;
+
+    for i in 0u32..2 {
+        let sqe = io_ring::SqEntry {
+            opcode: io_ring::IO_OP_NOP,
+            flags: 0,
+            _pad0: [0; 2],
+            _pad1: 0,
+            user_data: u64::from(i).wrapping_add(200),
+            handle: 0,
+            addr: 0,
+            len: 0,
+            _pad2: 0,
+            arg1: 0,
+            arg2: 0,
+        };
+        // SAFETY: sq_base points to valid SQ array, i < sq_entries.
+        unsafe {
+            *sq_base.add(i as usize) = sqe;
+        }
+    }
+
+    // Advance SQ tail.
+    let header = unsafe { &mut *(base_virt as *mut io_ring::IoRingHeader) };
+    header.sq_tail.store(2, core::sync::atomic::Ordering::Release);
+
+    // Process — this should post CQEs and notify our CP.
+    let processed = io_ring::enter(ring_handle, 0)?;
+    if processed != 2 {
+        serial_println!(
+            "[completion]   FAIL: io_ring processed {} SQEs, expected 2",
+            processed
+        );
+        io_ring::destroy(ring_handle)?;
+        close(cp);
+        return Err(KernelError::InternalError);
+    }
+
+    // CP should now have an event (io_ring has pending CQEs).
+    let events = try_wait(cp)?;
+    if events.is_empty() {
+        serial_println!(
+            "[completion]   FAIL: CP try_wait empty after io_ring submit"
+        );
+        io_ring::destroy(ring_handle)?;
+        close(cp);
+        return Err(KernelError::InternalError);
+    }
+
+    let ev = &events[0];
+    if ev.user_data != 77 {
+        serial_println!(
+            "[completion]   FAIL: io_ring event user_data {}, expected 77",
+            ev.user_data
+        );
+        io_ring::destroy(ring_handle)?;
+        close(cp);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify the source is IoCompletion.
+    match ev.source {
+        WaitSource::IoCompletion(h) if h == ring_handle => {}
+        _ => {
+            serial_println!(
+                "[completion]   FAIL: event source not IoCompletion"
+            );
+            io_ring::destroy(ring_handle)?;
+            close(cp);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Unregister and clean up.
+    unregister(cp, WaitSource::IoCompletion(ring_handle))?;
+    io_ring::destroy(ring_handle)?;
+    close(cp);
+    serial_println!("[completion]   IO completion: OK");
     Ok(())
 }

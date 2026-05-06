@@ -159,6 +159,17 @@ pub mod event {
     pub const TIMER_CANCEL: u16 = 3;
     pub const TIMER_TICK_SHORT: u16 = 4;
 
+    // IPC (continued)
+    pub const EVENTFD_SIGNAL: u16 = 5;
+    pub const EVENTFD_WAIT: u16 = 6;
+    pub const SEM_CREATE: u16 = 7;
+    pub const SEM_SIGNAL: u16 = 8;
+    pub const SEM_WAIT: u16 = 9;
+    pub const SEM_CLOSE: u16 = 10;
+    pub const CP_REGISTER: u16 = 11;
+    pub const CP_WAIT: u16 = 12;
+    pub const CP_NOTIFY: u16 = 13;
+
     // Sync events
     pub const MUTEX_ACQUIRE: u16 = 1;
     pub const MUTEX_RELEASE: u16 = 2;

@@ -155,6 +155,8 @@ pub mod event {
     // Timer events
     pub const TIMER_FIRE: u16 = 1;
     pub const TIMER_SCHEDULE: u16 = 2;
+    pub const TIMER_CANCEL: u16 = 3;
+    pub const TIMER_TICK_SHORT: u16 = 4;
 
     // Sync events
     pub const MUTEX_ACQUIRE: u16 = 1;

@@ -885,6 +885,14 @@ pub fn shorten_tick_for_hrtimer(delay_ns: u64) {
 
     // Track that we shortened this tick so the ISR knows to restore.
     TICK_SHORTENED.store(true, core::sync::atomic::Ordering::Release);
+
+    // Trace: tick shortened (arg0 = delay_ns requested, arg1 = actual ticks programmed).
+    crate::ktrace::record(
+        crate::ktrace::Category::Timer,
+        crate::ktrace::event::TIMER_TICK_SHORT,
+        delay_ns,
+        u64::from(target_clamped),
+    );
 }
 
 /// Restore the APIC timer to its full periodic rate (10ms / 100 Hz).

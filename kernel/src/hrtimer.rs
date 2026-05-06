@@ -198,6 +198,12 @@ pub fn cancel(handle: HrTimerHandle) -> bool {
     if let Some(pos) = state.timers.iter().position(|t| t.id == handle.0) {
         state.timers.remove(pos);
         TOTAL_CANCELLED.fetch_add(1, Ordering::Relaxed);
+        crate::ktrace::record(
+            crate::ktrace::Category::Timer,
+            crate::ktrace::event::TIMER_CANCEL,
+            handle.0,
+            0,
+        );
         true
     } else {
         // Try other CPUs (timer might have been scheduled from a different CPU
@@ -305,6 +311,14 @@ pub fn process_expired() -> u32 {
 
     if fired > 0 {
         TOTAL_FIRED.fetch_add(u64::from(fired), Ordering::Relaxed);
+
+        // Trace: timers fired (arg1 = count, arg2 = now_ns timestamp).
+        crate::ktrace::record(
+            crate::ktrace::Category::Timer,
+            crate::ktrace::event::TIMER_FIRE,
+            u64::from(fired),
+            now,
+        );
     }
 
     fired
@@ -349,6 +363,14 @@ fn schedule_absolute(
 
     insert_sorted(&mut state.timers, entry);
     TOTAL_SCHEDULED.fetch_add(1, Ordering::Relaxed);
+
+    // Trace: timer scheduled (arg1 = timer ID, arg2 = expiry_ns).
+    crate::ktrace::record(
+        crate::ktrace::Category::Timer,
+        crate::ktrace::event::TIMER_SCHEDULE,
+        id,
+        expiry_ns,
+    );
 
     HrTimerHandle(id)
 }

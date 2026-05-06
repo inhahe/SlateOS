@@ -195,6 +195,16 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] SYS_IO_RING_SETUP (260), SYS_IO_RING_ENTER (261), SYS_IO_RING_DESTROY (262)
   - [x] 3 self-tests: create/destroy, NOP submission, console write batch
 - [x] Futexes (for userspace synchronization without syscall in uncontended case)
+  - [x] Timed futex wait: SYS_FUTEX_WAIT_TIMEOUT (214) — nanosecond-precision deadline for pthread_mutex_timedlock/condvar
+- [x] Timeout variants for all blocking IPC:
+  - [x] channel::recv_timeout (SYS_CHANNEL_RECV_TIMEOUT 205)
+  - [x] pipe::read_timeout (SYS_PIPE_READ_TIMEOUT 226)
+  - [x] semaphore::wait_timeout (SYS_SEM_WAIT_TIMEOUT 275)
+- [x] Capability transfer through channel messages (Fuchsia-style):
+  - [x] SYS_CHANNEL_SEND_CAPS (206): move cap handles into message (sender loses access)
+  - [x] SYS_CHANNEL_RECV_CAPS (207): extract caps into receiver's table (new handles)
+  - [x] TransferredCap: detached entry in transit, MAX_CAPS_PER_MESSAGE = 64
+  - [x] All-or-nothing send semantics (invalid handle → nothing sent)
 - [x] Console I/O syscalls (SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR — bootstrap console for early userspace)
 - [x] Filesystem I/O syscalls (SYS_FS_READ_FILE through SYS_FS_STAT — stateless whole-file operations via VFS)
 - [x] Timer syscalls (SYS_CLOCK_MONOTONIC, SYS_SLEEP — lock-free sleep queue, 10ms resolution)

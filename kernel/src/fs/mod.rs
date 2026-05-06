@@ -41,6 +41,8 @@ pub mod procfs;
 pub mod sysfs;
 pub mod trash;
 pub mod vfs;
+#[allow(dead_code)]
+pub mod xz;
 
 pub use vfs::{
     DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, LockType, Timestamp, Vfs,

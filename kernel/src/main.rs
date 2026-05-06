@@ -762,6 +762,10 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::bzip2::self_test() {
                 serial_println!("WARNING: Bzip2 self-test failed: {:?}", e);
             }
+            // Run XZ/LZMA2 decompression self-test.
+            if let Err(e) = fs::xz::self_test() {
+                serial_println!("WARNING: XZ self-test failed: {:?}", e);
+            }
             // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
             if let Err(e) = fs::memfs::self_test() {
                 serial_println!("WARNING: MemFs self-test failed: {:?}", e);

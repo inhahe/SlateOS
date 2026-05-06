@@ -2752,9 +2752,18 @@ pub fn sleep_until_tick(wake_tick: u64) {
 /// Maximum pending deferred wakes (small: usually 0-2 in flight).
 const DEFERRED_WAKE_SLOTS: usize = 32;
 
-/// Deferred wake slot: 0 = empty, non-zero = task_id to wake.
+/// Sentinel value for empty deferred wake slots.
+///
+/// Must NOT be a valid task ID.  Using `u64::MAX` because task IDs
+/// start at 0 and never reach this value.  Previously used 0, which
+/// silently dropped deferred wakes for the boot task (tid=0) — the
+/// CAS succeeded but drain_deferred_wakes skipped the slot because
+/// it looked "empty."
+const DEFERRED_WAKE_EMPTY: u64 = u64::MAX;
+
+/// Deferred wake slot: `DEFERRED_WAKE_EMPTY` = empty, other = task_id to wake.
 static DEFERRED_WAKES: [AtomicU64; DEFERRED_WAKE_SLOTS] = {
-    const EMPTY: AtomicU64 = AtomicU64::new(0);
+    const EMPTY: AtomicU64 = AtomicU64::new(DEFERRED_WAKE_EMPTY);
     [EMPTY; DEFERRED_WAKE_SLOTS]
 };
 
@@ -2783,7 +2792,7 @@ pub fn defer_wake(task_id: TaskId) {
     for slot in &DEFERRED_WAKES {
         // CAS: claim an empty slot.
         if slot
-            .compare_exchange(0, task_id, Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(DEFERRED_WAKE_EMPTY, task_id, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
             // Signal that the drain loop should run on next schedule_inner.
@@ -2817,12 +2826,12 @@ pub fn process_deferred_wakes() {
     let mut any_remaining = false;
     for slot in &DEFERRED_WAKES {
         let task_id = slot.load(Ordering::Acquire);
-        if task_id == 0 {
+        if task_id == DEFERRED_WAKE_EMPTY {
             continue;
         }
         if try_wake(task_id) {
             // Success — clear the slot.
-            slot.store(0, Ordering::Release);
+            slot.store(DEFERRED_WAKE_EMPTY, Ordering::Release);
         } else {
             // try_wake failed again — slot stays occupied for next drain.
             any_remaining = true;
@@ -2850,7 +2859,7 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
 
     for slot in &DEFERRED_WAKES {
         let task_id = slot.load(Ordering::Acquire);
-        if task_id == 0 {
+        if task_id == DEFERRED_WAKE_EMPTY {
             continue;
         }
         // We already hold the lock — wake directly.
@@ -2866,7 +2875,7 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
         }
         // Clear the slot regardless (task might have already been woken
         // by another path, or may not exist anymore).
-        slot.store(0, Ordering::Release);
+        slot.store(DEFERRED_WAKE_EMPTY, Ordering::Release);
     }
 
     // All slots drained — clear the pending flag.
@@ -3158,6 +3167,14 @@ fn schedule_inner(requeue: bool) {
                     let Some(mut s) = SCHED.try_lock() else {
                         continue;
                     };
+
+                    // Drain deferred wakes while holding the SCHED lock.
+                    // Timer ISR callbacks call try_wake() which fails when
+                    // this idle loop holds the lock (the ISR interrupted
+                    // us between try_lock and drop).  Those wakes are
+                    // deferred and MUST be processed here — otherwise the
+                    // woken task is never enqueued and we spin forever.
+                    drain_deferred_wakes_locked(&mut *s, cpu);
 
                     let mut idle_migrated = priority_rr::MigratedTasks::new();
                     let ready_id = match PER_CPU_SCHED.pick_next_local(cpu) {

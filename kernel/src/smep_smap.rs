@@ -71,6 +71,9 @@ static SMEP_ENABLED: AtomicBool = AtomicBool::new(false);
 static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Whether UMIP is currently enabled.
 static UMIP_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Whether SMAP hardware is present (CPUID support for STAC/CLAC instructions).
+/// STAC/CLAC #UD if the CPU doesn't support SMAP, so we must guard them.
+static HW_SMAP: AtomicBool = AtomicBool::new(false);
 /// Count of intentional user-access windows opened (STAC/CLAC pairs).
 static USER_ACCESS_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -111,6 +114,10 @@ pub fn init() {
     // The infrastructure (stac/clac/with_user_access) is ready — enablement
     // is deferred until user access paths are properly annotated.
     if features.smap {
+        // Record that the hardware supports STAC/CLAC instructions (they
+        // #UD without CPUID SMAP support).  This gates their execution in
+        // stac()/clac()/with_user_access().
+        HW_SMAP.store(true, Ordering::Release);
         serial_println!("[smep_smap] SMAP supported (enablement deferred — needs STAC/CLAC instrumentation)");
         // Do NOT enable — leave SMAP_ENABLED = false.
     } else {
@@ -186,8 +193,14 @@ pub fn init_ap() {
 /// The AC flag window must be as short as possible to minimize the attack surface.
 #[inline(always)]
 pub unsafe fn stac() {
-    // SAFETY: STAC is always safe to execute; it sets EFLAGS.AC which only
-    // has an effect when CR4.SMAP is set.
+    // STAC requires CPUID SMAP support — it #UDs on CPUs without SMAP.
+    // When SMAP hardware is absent, the instruction is unnecessary (the
+    // CPU already allows kernel access to user pages unconditionally).
+    if !HW_SMAP.load(Ordering::Relaxed) {
+        return;
+    }
+    // SAFETY: SMAP hardware is present (checked above).  STAC sets
+    // EFLAGS.AC to suppress SMAP enforcement.
     unsafe {
         core::arch::asm!("stac", options(nomem, nostack, preserves_flags));
     }
@@ -205,7 +218,12 @@ pub unsafe fn stac() {
 /// leaves the kernel vulnerable until the next context switch or IRET.
 #[inline(always)]
 pub unsafe fn clac() {
-    // SAFETY: CLAC is always safe to execute; it clears EFLAGS.AC.
+    // CLAC requires CPUID SMAP support — it #UDs on CPUs without SMAP.
+    if !HW_SMAP.load(Ordering::Relaxed) {
+        return;
+    }
+    // SAFETY: SMAP hardware is present (checked above).  CLAC clears
+    // EFLAGS.AC to re-enable SMAP enforcement.
     unsafe {
         core::arch::asm!("clac", options(nomem, nostack, preserves_flags));
     }

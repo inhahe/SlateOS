@@ -595,6 +595,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Symlink/hardlink security (fs::symlink_security): Linux-style protected_symlinks/protected_hardlinks restrictions, lock-free AtomicBool config, TOCTOU protection (owner/directory checks), FIFO write protection; 7 self-tests
   - [x] Resource limits (fs::rlimit): ulimit-style per-UID soft/hard limits for open files (NOFILE), file size (FSIZE), advisory locks (LOCKS); privilege enforcement, global defaults with per-UID overrides; `ulimit` kshell command; TooManyOpenFiles/FileTooLarge error variants; 10 self-tests
   - [x] Overlay filesystem (fs::overlay): layered directory composition with copy-up, whiteout, and opaque directory semantics; read-only lower + read-write upper merge; reset (discard changes) and commit (merge to lower); `overlay` kshell command with 13 subcommands; 12 self-tests
+  - [x] Named pipes (fs::pipe): FIFO support with fixed-capacity ring buffer (default 64 KiB), reader/writer ref counting, EOF/broken-pipe detection, peek, anonymous pipes for shell | operator; `mkfifo`/`lspipe` kshell commands; 12 self-tests
+  - [x] Temporary file cleanup (fs::tmpwatch): age-based /tmp cleanup with configurable watch dirs, exclude prefixes, dry-run mode, cumulative stats; `tmpwatch` kshell command; 10 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

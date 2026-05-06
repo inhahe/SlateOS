@@ -44,6 +44,8 @@ pub mod lz4;
 pub mod memfs;
 pub mod notify;
 pub mod procfs;
+#[allow(dead_code)]
+pub mod rar;
 pub mod sysfs;
 pub mod tar;
 pub mod trash;

@@ -849,6 +849,61 @@ pub const SYS_SERVICE_ACCEPT_TIMEOUT: u64 = 284;
 pub const SYS_SERVICE_UNREGISTER: u64 = 285;
 
 // ---------------------------------------------------------------------------
+// Namespace syscalls (290–299) — per-process filesystem isolation
+// ---------------------------------------------------------------------------
+
+/// Create a new namespace.
+///
+/// `arg0`: clone_from (namespace ID to copy rules from, 0 = empty).
+///
+/// Returns: new namespace ID on success.
+pub const SYS_NS_CREATE: u64 = 290;
+
+/// Add a bind (path remapping) rule to a namespace.
+///
+/// `arg0`: namespace ID.
+/// `arg1`: pointer to source prefix string.
+/// `arg2`: source prefix length.
+/// `arg3`: pointer to target prefix string.
+/// `arg4`: target prefix length.
+///
+/// Returns: 0 on success.
+pub const SYS_NS_BIND: u64 = 291;
+
+/// Remove a bind rule from a namespace.
+///
+/// `arg0`: namespace ID.
+/// `arg1`: pointer to source prefix string.
+/// `arg2`: source prefix length.
+///
+/// Returns: 0 on success.
+pub const SYS_NS_UNBIND: u64 = 292;
+
+/// Add a hide rule to a namespace (blocks access to a path prefix).
+///
+/// `arg0`: namespace ID.
+/// `arg1`: pointer to prefix string.
+/// `arg2`: prefix length.
+///
+/// Returns: 0 on success.
+pub const SYS_NS_HIDE: u64 = 293;
+
+/// Attach a process to a namespace.
+///
+/// `arg0`: process ID (0 = current process).
+/// `arg1`: namespace ID (0 = root/default namespace).
+///
+/// Returns: 0 on success.
+pub const SYS_NS_ATTACH: u64 = 294;
+
+/// Query which namespace a process belongs to.
+///
+/// `arg0`: process ID (0 = current process).
+///
+/// Returns: namespace ID (0 = root namespace).
+pub const SYS_NS_QUERY: u64 = 295;
+
+// ---------------------------------------------------------------------------
 // Security syscalls (400–499)
 // ---------------------------------------------------------------------------
 

@@ -71,6 +71,8 @@ use super::number::{
     SYS_SEM_WAIT_TIMEOUT,
     SYS_SERVICE_REGISTER, SYS_SERVICE_CONNECT, SYS_SERVICE_ACCEPT,
     SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_UNREGISTER,
+    SYS_NS_CREATE, SYS_NS_BIND, SYS_NS_UNBIND, SYS_NS_HIDE,
+    SYS_NS_ATTACH, SYS_NS_QUERY,
     SYS_CHANNEL_RECV_TIMEOUT,
     SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_RECV_CAPS,
     SYS_PIPE_READ_TIMEOUT, SYS_PIPE_WRITE_TIMEOUT,
@@ -278,6 +280,14 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SERVICE_TRY_ACCEPT as usize] = Some(handlers::sys_service_try_accept);
     handlers[SYS_SERVICE_ACCEPT_TIMEOUT as usize] = Some(handlers::sys_service_accept_timeout);
     handlers[SYS_SERVICE_UNREGISTER as usize] = Some(handlers::sys_service_unregister);
+
+    // Namespace (290–295).
+    handlers[SYS_NS_CREATE as usize] = Some(handlers::sys_ns_create);
+    handlers[SYS_NS_BIND as usize] = Some(handlers::sys_ns_bind);
+    handlers[SYS_NS_UNBIND as usize] = Some(handlers::sys_ns_unbind);
+    handlers[SYS_NS_HIDE as usize] = Some(handlers::sys_ns_hide);
+    handlers[SYS_NS_ATTACH as usize] = Some(handlers::sys_ns_attach);
+    handlers[SYS_NS_QUERY as usize] = Some(handlers::sys_ns_query);
 
     // Time and timers (10–19).
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);

@@ -1304,6 +1304,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("[FATAL] Service registry self-test failed: {:?}", e);
     }
 
+    // Namespace self-test (pure in-memory, no dependencies beyond alloc).
+    if let Err(e) = ipc::namespace::self_test() {
+        serial_println!("[FATAL] Namespace self-test failed: {:?}", e);
+    }
+
     // Step 22e: CSPRNG self-test.
     // Verifies output quality now that we've accumulated some interrupt
     // entropy during the boot process (ISR timing mixed in).

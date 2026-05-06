@@ -11,6 +11,7 @@
 //! - **Completion port**: unified wait on heterogeneous kernel objects
 //!   (IOCP-style).
 //! - **Service registry**: named service discovery + connection brokering.
+//! - **Namespaces**: per-process filesystem path isolation and remapping.
 //!
 //! ## Performance Targets
 //!
@@ -23,6 +24,7 @@ pub mod completion;
 pub mod eventfd;
 pub mod futex;
 pub mod io_ring;
+pub mod namespace;
 pub mod pipe;
 pub mod semaphore;
 pub mod service;

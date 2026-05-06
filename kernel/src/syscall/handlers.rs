@@ -5544,6 +5544,172 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Namespace syscalls (290–295)
+// ---------------------------------------------------------------------------
+
+/// `SYS_NS_CREATE` — create a new namespace.
+///
+/// `arg0`: clone_from (namespace ID to copy rules from, 0 = empty).
+///
+/// Returns: new namespace ID.
+pub fn sys_ns_create(args: &SyscallArgs) -> SyscallResult {
+    let clone_from = args.arg0;
+
+    match crate::ipc::namespace::create(clone_from) {
+        Ok(id) => SyscallResult::ok(id as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NS_BIND` — add a path remapping rule to a namespace.
+///
+/// `arg0`: namespace ID.
+/// `arg1`: pointer to source prefix string.
+/// `arg2`: source prefix length.
+/// `arg3`: pointer to target prefix string.
+/// `arg4`: target prefix length.
+pub fn sys_ns_bind(args: &SyscallArgs) -> SyscallResult {
+    let ns_id = args.arg0;
+    let src_ptr = args.arg1 as *const u8;
+    let src_len = args.arg2 as usize;
+    let tgt_ptr = args.arg3 as *const u8;
+    let tgt_len = args.arg4 as usize;
+
+    if src_ptr.is_null() || src_len == 0 || tgt_ptr.is_null() || tgt_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_src_len = src_len.min(1024);
+    let safe_tgt_len = tgt_len.min(1024);
+
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, safe_src_len) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, safe_tgt_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated user pointers above.
+    let src_bytes = unsafe { core::slice::from_raw_parts(src_ptr, safe_src_len) };
+    let tgt_bytes = unsafe { core::slice::from_raw_parts(tgt_ptr, safe_tgt_len) };
+
+    let src_str = match core::str::from_utf8(src_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    let tgt_str = match core::str::from_utf8(tgt_bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::ipc::namespace::bind(ns_id, src_str, tgt_str) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NS_UNBIND` — remove a bind rule from a namespace.
+///
+/// `arg0`: namespace ID.
+/// `arg1`: pointer to source prefix string.
+/// `arg2`: source prefix length.
+pub fn sys_ns_unbind(args: &SyscallArgs) -> SyscallResult {
+    let ns_id = args.arg0;
+    let src_ptr = args.arg1 as *const u8;
+    let src_len = args.arg2 as usize;
+
+    if src_ptr.is_null() || src_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_len = src_len.min(1024);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, safe_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let bytes = unsafe { core::slice::from_raw_parts(src_ptr, safe_len) };
+    let prefix = match core::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::ipc::namespace::unbind(ns_id, prefix) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NS_HIDE` — block access to a path prefix in a namespace.
+///
+/// `arg0`: namespace ID.
+/// `arg1`: pointer to prefix string.
+/// `arg2`: prefix length.
+pub fn sys_ns_hide(args: &SyscallArgs) -> SyscallResult {
+    let ns_id = args.arg0;
+    let ptr = args.arg1 as *const u8;
+    let len = args.arg2 as usize;
+
+    if ptr.is_null() || len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let safe_len = len.min(1024);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, safe_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
+    let prefix = match core::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::ipc::namespace::hide(ns_id, prefix) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NS_ATTACH` — attach a process to a namespace.
+///
+/// `arg0`: process ID (0 = calling process).
+/// `arg1`: namespace ID (0 = root/default).
+pub fn sys_ns_attach(args: &SyscallArgs) -> SyscallResult {
+    let pid = if args.arg0 == 0 {
+        // Use the calling process's PID.
+        let task_id = sched::current_task_id();
+        crate::proc::thread::owner_process(task_id).unwrap_or(0)
+    } else {
+        args.arg0
+    };
+    let ns_id = args.arg1;
+
+    match crate::ipc::namespace::attach(pid, ns_id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_NS_QUERY` — query which namespace a process belongs to.
+///
+/// `arg0`: process ID (0 = calling process).
+///
+/// Returns: namespace ID (0 = root).
+pub fn sys_ns_query(args: &SyscallArgs) -> SyscallResult {
+    let pid = if args.arg0 == 0 {
+        let task_id = sched::current_task_id();
+        crate::proc::thread::owner_process(task_id).unwrap_or(0)
+    } else {
+        args.arg0
+    };
+
+    let ns_id = crate::ipc::namespace::query(pid);
+    SyscallResult::ok(ns_id as i64)
+}
+
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.
 ///
 /// `arg0`: pointer to hostname string.

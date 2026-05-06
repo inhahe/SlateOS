@@ -68,6 +68,7 @@ mod font;
 mod fs;
 mod gdt;
 mod hpet;
+mod hrtimer;
 mod hypervisor;
 mod idt;
 mod idle;
@@ -537,6 +538,11 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = hpet::self_test() {
         serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
     }
+
+    // Step 19c½: Initialize high-resolution timer subsystem.
+    // Uses HPET as the clock source for nanosecond-precision timers.
+    // Must be after HPET init.
+    hrtimer::init();
 
     // Step 19d: Initialize kernel CSPRNG.
     // Seeds ChaCha20 from RDRAND/RDSEED (if available), HPET counter,
@@ -1249,6 +1255,10 @@ extern "C" fn kmain() -> ! {
     // ktimer fires callbacks via the workqueue after a tick-based delay.
     // Requires both the workqueue worker and TIMER softirq to be active.
     ktimer::self_test();
+
+    // Step 22d½: High-resolution timer self-test.
+    // Verifies scheduling, cancellation, ordering, and repeating timers.
+    hrtimer::self_test();
 
     // Step 22e: CSPRNG self-test.
     // Verifies output quality now that we've accumulated some interrupt

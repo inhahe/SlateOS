@@ -234,6 +234,14 @@ fn all_suites() -> Vec<TestSuite> {
         category: "security",
     });
 
+    // Timers
+    suites.push(TestSuite {
+        name: "hrtimer",
+        description: "High-resolution timers (nanosecond scheduling, HPET-backed)",
+        run: || { crate::hrtimer::self_test(); true },
+        category: "kernel",
+    });
+
     suites
 }
 

@@ -3103,7 +3103,7 @@ const COMMANDS: &[&str] = &[
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
-    "fpu", "xsave", "spectre", "meltdown", "specmit",
+    "fpu", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4250,6 +4250,7 @@ fn dispatch(line: &str) {
         "smap" | "smep" => cmd_smep_smap(),
         "spectre" | "meltdown" | "specmit" => cmd_spectre(),
         "fpu" | "xsave" => cmd_fpu(),
+        "hrtimer" | "hrtimers" => cmd_hrtimer(),
         "fairness" | "jfi" => cmd_fairness(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
@@ -21650,6 +21651,30 @@ fn cmd_spectre() {
         shell_println!("    [5] MDS_NO:   {}", if s.arch_caps & 0x20 != 0 { "yes" } else { "-" });
         shell_println!("    [8] TAA_NO:   {}", if s.arch_caps & 0x100 != 0 { "yes" } else { "-" });
     }
+}
+
+/// `hrtimer` — show high-resolution timer status.
+fn cmd_hrtimer() {
+    use crate::hrtimer;
+
+    shell_println!("=== High-Resolution Timers ===");
+    shell_println!("");
+    shell_println!("  Clock source: {}", if crate::hpet::is_available() { "HPET" } else { "TSC" });
+    if crate::hpet::is_available() {
+        shell_println!("  HPET frequency: {} MHz", crate::hpet::frequency_hz() / 1_000_000);
+    }
+    shell_println!("  Current time: {} ns", hrtimer::now_ns());
+    shell_println!("");
+    shell_println!("  Pending (this CPU): {}", hrtimer::pending_count());
+    if let Some(next) = hrtimer::next_expiry_ns() {
+        let now = hrtimer::now_ns();
+        let delta = next.saturating_sub(now);
+        shell_println!("  Next expiry: {} ns (in {} ns)", next, delta);
+    }
+    shell_println!("");
+    shell_println!("  Statistics:");
+    shell_println!("    Scheduled: {}", hrtimer::scheduled_count());
+    shell_println!("    Fired:     {}", hrtimer::fired_count());
 }
 
 /// `fairness` — show scheduler fairness (Jain's Fairness Index).

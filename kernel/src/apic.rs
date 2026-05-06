@@ -961,6 +961,10 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // lock, O(1) time-slice decrement.
     let needs_reschedule = crate::sched::timer_tick();
 
+    // Fire any high-resolution timers that have expired.
+    // Checked every tick (~10 ms); actual precision depends on HPET timestamps.
+    crate::hrtimer::process_expired();
+
     // Send EOI before softirq processing — this allows the LAPIC to
     // deliver new interrupts (including on other CPUs).
     //

@@ -318,6 +318,23 @@ impl PiFutexTable {
 /// table lock, then call sched functions outside the lock).
 static PI_FUTEX_TABLE: Mutex<PiFutexTable> = Mutex::new(PiFutexTable::new());
 
+/// Look up the current owner of a PI futex address.
+///
+/// Used as the `find_owner` callback for transitive PI chain walking.
+/// Acquires `PI_FUTEX_TABLE` lock briefly.  Safe to call from
+/// `pi_chain_boost` since that function does not hold any locks
+/// (it alternates between PI_FUTEX_TABLE and SCHED without nesting).
+fn find_pi_owner(addr: u64) -> Option<TaskId> {
+    let table = PI_FUTEX_TABLE.lock();
+    let idx = FutexTable::bucket_index(addr);
+    // SAFETY: idx is masked to NUM_BUCKETS - 1.
+    #[allow(clippy::indexing_slicing)]
+    table.owners[idx]
+        .iter()
+        .find(|o| o.addr == addr)
+        .map(|o| o.owner_id)
+}
+
 /// Register a task as the PI futex owner for an address.
 fn register_pi_owner(addr: u64, owner_id: TaskId) {
     let mut table = PI_FUTEX_TABLE.lock();
@@ -470,13 +487,24 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
     // Set the WAITERS bit so the unlocker knows to enter the kernel.
     atomic.fetch_or(FUTEX_WAITERS_BIT, Ordering::Release);
 
-    // Boost the lock holder's priority if ours is higher (lower number).
+    // Boost the lock holder's priority if ours is higher (lower number),
+    // then propagate transitively through the PI chain.
     if owner_id != 0 {
         sched::boost_priority(owner_id, our_priority);
+        // Walk the chain: if owner_id is itself blocked on another PI
+        // futex, boost that futex's owner, and so on.
+        sched::pi_chain_boost(owner_id, our_priority, find_pi_owner);
     }
+
+    // Record that we're blocked on this PI address (enables transitive
+    // PI for tasks that later block on a lock we hold).
+    sched::set_blocked_on_pi_addr(current_id, Some(addr));
 
     // Block until unlock_pi transfers the lock to us.
     sched::block_current();
+
+    // We've been woken — we now own the lock.  Clear the blocked addr.
+    sched::set_blocked_on_pi_addr(current_id, None);
 
     Ok(())
 }

@@ -3085,7 +3085,7 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "base64", "bunzip2", "bzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
-    "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "du",
+    "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "flock", "fsck", "fsck.ext4", "fsck.fat", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "journal", "kill", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
@@ -4380,6 +4380,7 @@ fn dispatch(line: &str) {
         "un7z" => cmd_un7z(args),
         "cpio" => cmd_cpio(args),
         "ar" => cmd_ar(args),
+        "dpkg" => cmd_dpkg(args),
         "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
         "sed" => cmd_sed(args),
@@ -4612,6 +4613,7 @@ fn cmd_help() {
     crate::console_println!("  cpio -i|-t [-d DIR] < F.cpio  Extract or list CPIO archive (newc format)");
     crate::console_println!("  cpio -o F.cpio FILE..  Create CPIO archive from files");
     crate::console_println!("  ar t F.a | ar x F.a [-d DIR] | ar r F.a FILE..  List/extract/create ar archive");
+    crate::console_println!("  dpkg -I|-c|-x F.deb [-d DIR]  Inspect/list/extract Debian package");
     crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
     crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
@@ -12170,7 +12172,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "ar" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -19990,6 +19992,406 @@ fn cmd_ar_create(args: &[&str]) {
             crate::console_println!("ar: write '{}': {:?}", archive_path, e);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// dpkg — Debian package inspection and extraction
+// ---------------------------------------------------------------------------
+
+/// `dpkg` command — inspect or extract Debian (.deb) packages.
+///
+/// A .deb file is an ar archive containing:
+/// - `debian-binary` — version string (e.g., "2.0\n")
+/// - `control.tar.{gz,xz,zst}` — package metadata (Package, Version, etc.)
+/// - `data.tar.{gz,xz,zst,bz2}` — the actual files to install
+///
+/// Usage:
+///   dpkg -I pkg.deb          Show package info (control/control)
+///   dpkg -c pkg.deb          List data files
+///   dpkg -x pkg.deb [-d DIR] Extract data files
+fn cmd_dpkg(args: &str) {
+    use crate::fs::Vfs;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: dpkg -I pkg.deb          Show package info\n\
+             \x20      dpkg -c pkg.deb          List data files\n\
+             \x20      dpkg -x pkg.deb [-d DIR] Extract data files"
+        );
+        return;
+    }
+
+    let mode = parts.first().copied().unwrap_or("");
+    match mode {
+        "-I" | "--info" => cmd_dpkg_info(&parts[1..]),
+        "-c" | "--contents" => cmd_dpkg_contents(&parts[1..]),
+        "-x" | "--extract" => cmd_dpkg_extract(&parts[1..]),
+        _ => {
+            // Maybe the first arg is the file and no flag given.
+            crate::console_println!(
+                "dpkg: unknown flag '{}'. Use -I (info), -c (contents), or -x (extract)",
+                mode
+            );
+        }
+    }
+}
+
+/// Read a .deb file and parse it into ar members.
+fn dpkg_read_deb(path: &str) -> Option<alloc::vec::Vec<crate::fs::ar::ArEntry>> {
+    let data = match crate::fs::Vfs::read_file(path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("dpkg: '{}': {:?}", path, e);
+            return None;
+        }
+    };
+
+    match crate::fs::ar::unar(&data) {
+        Ok(entries) => Some(entries),
+        Err(e) => {
+            crate::console_println!("dpkg: '{}': not a valid .deb (ar parse error: {:?})", path, e);
+            None
+        }
+    }
+}
+
+/// Find an ar member by name prefix (e.g., "control.tar" or "data.tar").
+fn dpkg_find_member<'a>(
+    entries: &'a [crate::fs::ar::ArEntry],
+    prefix: &str,
+) -> Option<&'a crate::fs::ar::ArEntry> {
+    entries.iter().find(|e| e.name.starts_with(prefix))
+}
+
+/// Decompress a tar.{gz,xz,zst,bz2} member into raw tar data.
+fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Vec<u8>> {
+    let data = &member.data;
+    let name = &member.name;
+
+    if name.ends_with(".gz") || name.ends_with(".tgz") {
+        // Gzip-compressed.
+        if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B {
+            match crate::fs::compress::gunzip(data) {
+                Ok(d) => return Some(d),
+                Err(e) => {
+                    crate::console_println!("dpkg: gzip decompress of '{}' failed: {:?}", name, e);
+                    return None;
+                }
+            }
+        }
+    } else if name.ends_with(".xz") {
+        if data.get(..6) == Some(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
+            match crate::fs::xz::unxz(data) {
+                Ok(d) => return Some(d),
+                Err(e) => {
+                    crate::console_println!("dpkg: xz decompress of '{}' failed: {:?}", name, e);
+                    return None;
+                }
+            }
+        }
+    } else if name.ends_with(".zst") {
+        if data.len() >= 4 {
+            let magic = u32::from(data[0])
+                | (u32::from(data[1]) << 8)
+                | (u32::from(data[2]) << 16)
+                | (u32::from(data[3]) << 24);
+            if magic == 0xFD2F_B528 {
+                match crate::fs::zstd::unzstd(data) {
+                    Ok(d) => return Some(d),
+                    Err(e) => {
+                        crate::console_println!("dpkg: zstd decompress of '{}' failed: {:?}", name, e);
+                        return None;
+                    }
+                }
+            }
+        }
+    } else if name.ends_with(".bz2") {
+        if data.starts_with(b"BZh") {
+            match crate::fs::bzip2::bunzip2(data) {
+                Ok(d) => return Some(d),
+                Err(e) => {
+                    crate::console_println!("dpkg: bzip2 decompress of '{}' failed: {:?}", name, e);
+                    return None;
+                }
+            }
+        }
+    }
+
+    // Uncompressed tar (rare but possible).
+    Some(data.to_vec())
+}
+
+fn cmd_dpkg_info(args: &[&str]) {
+    let deb_path = match args.first() {
+        Some(&p) => resolve_path(p),
+        None => {
+            crate::console_println!("dpkg -I: no .deb file specified");
+            return;
+        }
+    };
+
+    let members = match dpkg_read_deb(&deb_path) {
+        Some(m) => m,
+        None => return,
+    };
+
+    // Show debian-binary version.
+    if let Some(version_member) = dpkg_find_member(&members, "debian-binary") {
+        let version = core::str::from_utf8(&version_member.data).unwrap_or("???");
+        crate::console_println!("  format: {}", version.trim());
+    }
+
+    // Show .deb members.
+    crate::console_println!("  members:");
+    for m in &members {
+        crate::console_println!("    {} ({} bytes)", m.name, m.data.len());
+    }
+
+    // Decompress and parse the control.tar to show package metadata.
+    let control_member = match dpkg_find_member(&members, "control.tar") {
+        Some(m) => m,
+        None => {
+            crate::console_println!("  (no control.tar found)");
+            return;
+        }
+    };
+
+    let tar_data = match dpkg_decompress_tar(control_member) {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Parse the tar and look for the "control" file.
+    let tar_entries = tar_parse_entries(&tar_data);
+    for entry in &tar_entries {
+        let name = entry.0.as_str();
+        // The control file is usually "./control" or "control".
+        let clean = name.strip_prefix("./").unwrap_or(name);
+        if clean == "control" {
+            crate::console_println!("  ---");
+            let content = core::str::from_utf8(&entry.1).unwrap_or("(binary data)");
+            for line in content.lines() {
+                crate::console_println!("  {}", line);
+            }
+            return;
+        }
+    }
+
+    crate::console_println!("  (control file not found in control.tar)");
+}
+
+fn cmd_dpkg_contents(args: &[&str]) {
+    let deb_path = match args.first() {
+        Some(&p) => resolve_path(p),
+        None => {
+            crate::console_println!("dpkg -c: no .deb file specified");
+            return;
+        }
+    };
+
+    let members = match dpkg_read_deb(&deb_path) {
+        Some(m) => m,
+        None => return,
+    };
+
+    let data_member = match dpkg_find_member(&members, "data.tar") {
+        Some(m) => m,
+        None => {
+            crate::console_println!("  (no data.tar found)");
+            return;
+        }
+    };
+
+    let tar_data = match dpkg_decompress_tar(data_member) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let entries = tar_parse_entries(&tar_data);
+    crate::console_println!("  {:>10}  Name", "Size");
+    crate::console_println!("  {}  {}", "-".repeat(10), "-".repeat(50));
+
+    let mut total_size: u64 = 0;
+    for (name, data) in &entries {
+        crate::console_println!("  {:>10}  {}", data.len(), name);
+        total_size = total_size.wrapping_add(data.len() as u64);
+    }
+
+    crate::console_println!(
+        "  {} file(s), {} bytes total",
+        entries.len(), total_size
+    );
+}
+
+fn cmd_dpkg_extract(args: &[&str]) {
+    use crate::fs::Vfs;
+
+    let mut deb_arg: Option<&str> = None;
+    let mut target_dir = alloc::string::String::from("/");
+    let mut skip_next = false;
+
+    for (i, &p) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-d" | "-C" => {
+                if let Some(&dir) = args.get(i.wrapping_add(1)) {
+                    target_dir = resolve_path(dir);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("dpkg -x: -d requires a directory argument");
+                    return;
+                }
+            }
+            _ => {
+                if deb_arg.is_none() {
+                    deb_arg = Some(p);
+                }
+            }
+        }
+    }
+
+    let deb_path = match deb_arg {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("dpkg -x: no .deb file specified");
+            return;
+        }
+    };
+
+    let members = match dpkg_read_deb(&deb_path) {
+        Some(m) => m,
+        None => return,
+    };
+
+    let data_member = match dpkg_find_member(&members, "data.tar") {
+        Some(m) => m,
+        None => {
+            crate::console_println!("dpkg: no data.tar found in '{}'", deb_path);
+            return;
+        }
+    };
+
+    let tar_data = match dpkg_decompress_tar(data_member) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let entries = tar_parse_entries(&tar_data);
+    let mut extracted = 0u64;
+    let mut errors = 0u64;
+
+    for (name, data) in &entries {
+        let clean = name.strip_prefix("./").unwrap_or(name);
+        if clean.is_empty() || clean == "." {
+            continue;
+        }
+
+        let dest = if target_dir == "/" {
+            alloc::format!("/{}", clean)
+        } else {
+            alloc::format!("{}/{}", target_dir, clean)
+        };
+
+        // Check if it's a directory (tar entries ending with / are dirs).
+        if clean.ends_with('/') {
+            let dir_path = String::from(dest.trim_end_matches('/'));
+            let _ = Vfs::mkdir(&dir_path);
+            continue;
+        }
+
+        // Ensure parent directory exists.
+        if let Some(slash_pos) = dest.rfind('/') {
+            if slash_pos > 0 {
+                let parent = &dest[..slash_pos];
+                let _ = Vfs::mkdir(parent);
+            }
+        }
+
+        match Vfs::write_file(&dest, data) {
+            Ok(()) => {
+                extracted = extracted.wrapping_add(1);
+            }
+            Err(e) => {
+                crate::console_println!("dpkg: write '{}': {:?}", dest, e);
+                errors = errors.wrapping_add(1);
+            }
+        }
+    }
+
+    crate::console_println!(
+        "dpkg: extracted {} file(s) from '{}'{}",
+        extracted,
+        deb_path,
+        if errors > 0 {
+            alloc::format!(" ({} errors)", errors)
+        } else {
+            alloc::string::String::new()
+        }
+    );
+}
+
+/// Simple tar entry parser: returns a list of (name, data) tuples.
+///
+/// This is a lightweight parser for the tar-inside-deb use case.
+/// For full tar functionality, use the main `tar` command.
+fn tar_parse_entries(tar_data: &[u8]) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)> {
+    const TAR_BLOCK: usize = 512;
+    let mut entries = alloc::vec::Vec::new();
+    let mut pos = 0usize;
+
+    while pos.wrapping_add(TAR_BLOCK) <= tar_data.len() {
+        let header = &tar_data[pos..pos.wrapping_add(TAR_BLOCK)];
+
+        // Check for zero block (end of archive).
+        if header.iter().all(|&b| b == 0) {
+            break;
+        }
+
+        // Parse name (bytes 0..100, null-terminated).
+        let name_end = header[..100].iter().position(|&b| b == 0).unwrap_or(100);
+        let name = core::str::from_utf8(&header[..name_end]).unwrap_or("");
+
+        // Check for USTAR prefix (bytes 345..500).
+        let prefix_end = header[345..500].iter().position(|&b| b == 0).unwrap_or(0);
+        let prefix = core::str::from_utf8(&header[345..345 + prefix_end]).unwrap_or("");
+
+        let full_name = if !prefix.is_empty() {
+            alloc::format!("{}/{}", prefix, name)
+        } else {
+            alloc::string::String::from(name)
+        };
+
+        // Parse size (bytes 124..136, octal ASCII).
+        let size_str = core::str::from_utf8(&header[124..136]).unwrap_or("0");
+        let size_str = size_str.trim().trim_end_matches('\0');
+        let mut size = 0u64;
+        for &b in size_str.as_bytes() {
+            if b < b'0' || b > b'7' { break; }
+            size = size.wrapping_mul(8).wrapping_add(u64::from(b - b'0'));
+        }
+
+        pos = pos.wrapping_add(TAR_BLOCK);
+
+        // Read data blocks.
+        let data_end = pos.wrapping_add(size as usize);
+        let data = if data_end <= tar_data.len() {
+            tar_data[pos..data_end].to_vec()
+        } else {
+            alloc::vec::Vec::new()
+        };
+
+        entries.push((full_name, data));
+
+        // Advance past data (rounded up to block boundary).
+        let data_blocks = (size as usize).wrapping_add(TAR_BLOCK - 1) / TAR_BLOCK;
+        pos = pos.wrapping_add(data_blocks.wrapping_mul(TAR_BLOCK));
+    }
+
+    entries
 }
 
 // ---------------------------------------------------------------------------

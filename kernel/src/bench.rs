@@ -621,6 +621,15 @@ pub fn run_all() {
     // then try_read (consume).
     bench_ipc_eventfd();
 
+    // --- io_ring NOP submission throughput ---
+    //
+    // Measures the per-SQE overhead for the io_ring submission path.
+    // This is the critical fast path for high-throughput async I/O.
+    //
+    // Target from baselines.toml: < 200 ns per SQE (Linux io_uring:
+    // 100-200 ns per SQE submission).
+    bench_io_ring_nop();
+
     // --- Page fault (demand-page anonymous fault) ---
     //
     // Measures the page fault handler's resolution path for a demand-
@@ -1050,6 +1059,120 @@ fn bench_ipc_eventfd() {
         serial_println!(
             "[bench]   eventfd_signal_read: ABOVE TARGET (min {}ns > target {}ns)",
             result.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// io_ring benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark io_ring NOP submission throughput.
+///
+/// Measures the per-SQE overhead of the io_ring submission path by
+/// submitting NOP operations in batches.  This captures:
+/// - Ring buffer pointer arithmetic (atomic loads/stores)
+/// - SQE read + opcode dispatch
+/// - CQE write
+/// - Completion port notification check (no CP registered)
+///
+/// NOP is used because it isolates the ring overhead from any actual
+/// I/O work.  Real opcodes add their own cost on top.
+fn bench_io_ring_nop() {
+    use crate::ipc::io_ring::{self, SqEntry, IoRingHeader, IO_OP_NOP};
+
+    // Create a ring with 64 entries.
+    let (ring_handle, base_virt, _frames) = match io_ring::setup(64, 64) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[bench]   io_ring_nop_submit: SKIP ({:?})", e);
+            return;
+        }
+    };
+
+    let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
+    #[allow(clippy::arithmetic_side_effects)]
+    let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
+
+    // Pre-fill the SQ with 32 NOP entries (batch size per iteration).
+    let batch_size: u32 = 32;
+    for i in 0..batch_size {
+        let sqe = SqEntry {
+            opcode: IO_OP_NOP,
+            flags: 0,
+            _pad0: [0; 2],
+            _pad1: 0,
+            user_data: i as u64,
+            handle: 0,
+            addr: 0,
+            len: 0,
+            _pad2: 0,
+            arg1: 0,
+            arg2: 0,
+        };
+        // SAFETY: sq_base points to a valid SQ array with 64 entries.
+        unsafe { *sq_base.add(i as usize) = sqe; }
+    }
+
+    // Warm up.
+    for _ in 0..5 {
+        header.sq_head.store(0, core::sync::atomic::Ordering::Release);
+        header.sq_tail.store(batch_size, core::sync::atomic::Ordering::Release);
+        header.cq_head.store(0, core::sync::atomic::Ordering::Release);
+        header.cq_tail.store(0, core::sync::atomic::Ordering::Release);
+        let _ = io_ring::enter(ring_handle, 0);
+    }
+
+    // Benchmark: submit 32 NOP SQEs per iteration.
+    // We measure the cost of the enter() call and divide by batch_size
+    // to get per-SQE cost.
+    let iterations: u32 = 500;
+    let mut min_cycles = u64::MAX;
+    let mut total_cycles = 0u64;
+
+    for _ in 0..iterations {
+        // Reset ring pointers for a fresh batch.
+        header.sq_head.store(0, core::sync::atomic::Ordering::Release);
+        header.sq_tail.store(batch_size, core::sync::atomic::Ordering::Release);
+        header.cq_head.store(0, core::sync::atomic::Ordering::Release);
+        header.cq_tail.store(0, core::sync::atomic::Ordering::Release);
+
+        let start = rdtsc();
+        let _ = io_ring::enter(ring_handle, 0);
+        let end = rdtsc();
+
+        let elapsed = end.wrapping_sub(start);
+        min_cycles = min_cycles.min(elapsed);
+        total_cycles = total_cycles.saturating_add(elapsed);
+    }
+
+    let _ = io_ring::destroy(ring_handle);
+
+    // Convert to per-SQE metrics.
+    #[allow(clippy::arithmetic_side_effects)]
+    let min_per_sqe = min_cycles / batch_size as u64;
+    #[allow(clippy::arithmetic_side_effects)]
+    let mean_per_sqe = total_cycles / (iterations as u64 * batch_size as u64);
+
+    let min_ns = cycles_to_ns(min_per_sqe);
+    let mean_ns = cycles_to_ns(mean_per_sqe);
+
+    serial_println!(
+        "[bench]   io_ring_nop_submit: min={}cy ({}ns) mean={}cy ({}ns) [per SQE, batch={}]",
+        min_per_sqe, min_ns, mean_per_sqe, mean_ns, batch_size
+    );
+
+    // Target: < 200ns per SQE (Linux io_uring: 100-200ns).
+    let target_ns = 200u64;
+    if min_ns <= target_ns {
+        serial_println!(
+            "[bench]   io_ring_nop_submit: PASS (min {}ns <= target {}ns)",
+            min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   io_ring_nop_submit: ABOVE TARGET (min {}ns > target {}ns)",
+            min_ns, target_ns
         );
     }
 }

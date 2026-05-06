@@ -266,7 +266,14 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
   - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
   - [ ] GUI security dialog integration
-- [ ] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
+- [x] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
+  - [x] CPUID detection of SHSTK and IBT support
+  - [x] MSR configuration (IA32_S_CET, IA32_U_CET, PL0/PL3 SSP)
+  - [x] CR4.CET master enable infrastructure
+  - [x] Per-task shadow stack management API
+  - [x] #CP exception handler (vector 21) with error code parsing
+  - [x] Self-test validating detection and API consistency
+  - Note: actual enablement gated on kernel compiled with -fcf-protection=full
 - [ ] Enable LLVM CFI as default for C/C++ compilation
 
 ### 1.6 Process management
@@ -636,7 +643,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] JSON-lines structured logging (text-based, not binary)
 - [x] "Service ready" notification API
 - [x] Startup app list (simple serial list, separate from service manager)
-  - [ ] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout)
+  - [x] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout via blkdev::is_idle_for)
   - [x] Explicit readiness notification API
 
 ### 2.7 Shell and basic userspace tools

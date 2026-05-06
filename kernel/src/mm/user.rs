@@ -234,6 +234,140 @@ fn page_flags(pml4_phys: u64, virt: VirtAddr) -> Option<PageFlags> {
 }
 
 // ---------------------------------------------------------------------------
+// SMAP-safe user memory copy primitives
+// ---------------------------------------------------------------------------
+
+/// Copy data from user-space into a kernel buffer (SMAP-safe).
+///
+/// Validates the source range, then copies `len` bytes from `user_src`
+/// into `kernel_dst`.  When SMAP is enabled, uses STAC/CLAC to
+/// temporarily permit kernel access to user pages.
+///
+/// # Arguments
+///
+/// - `user_src` — source pointer in user address space
+/// - `kernel_dst` — destination pointer in kernel address space
+/// - `len` — number of bytes to copy
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidAddress`] if the user range is invalid
+///
+/// # Safety
+///
+/// `kernel_dst` must point to a valid, writable kernel buffer of at
+/// least `len` bytes.
+#[allow(dead_code)]
+pub unsafe fn copy_from_user(
+    user_src: u64,
+    kernel_dst: *mut u8,
+    len: usize,
+) -> KernelResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    // Validate the user source range.
+    validate_user_read(user_src, len)?;
+
+    // SAFETY: We validated user_src is mapped and readable.
+    // STAC/CLAC provide SMAP-safe access.
+    unsafe {
+        crate::smep_smap::stac();
+        core::ptr::copy_nonoverlapping(user_src as *const u8, kernel_dst, len);
+        crate::smep_smap::clac();
+    }
+    Ok(())
+}
+
+/// Copy data from a kernel buffer to user-space (SMAP-safe).
+///
+/// Validates the destination range is writable, then copies `len` bytes
+/// from `kernel_src` into `user_dst`.  When SMAP is enabled, uses
+/// STAC/CLAC to temporarily permit kernel access to user pages.
+///
+/// # Arguments
+///
+/// - `kernel_src` — source pointer in kernel address space
+/// - `user_dst` — destination pointer in user address space
+/// - `len` — number of bytes to copy
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidAddress`] if the user range is invalid or read-only
+///
+/// # Safety
+///
+/// `kernel_src` must point to a valid, readable kernel buffer of at
+/// least `len` bytes.
+#[allow(dead_code)]
+pub unsafe fn copy_to_user(
+    kernel_src: *const u8,
+    user_dst: u64,
+    len: usize,
+) -> KernelResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    // Validate the user destination range (must be writable).
+    validate_user_write(user_dst, len)?;
+
+    // SAFETY: We validated user_dst is mapped and writable.
+    // STAC/CLAC provide SMAP-safe access.
+    unsafe {
+        crate::smep_smap::stac();
+        core::ptr::copy_nonoverlapping(kernel_src, user_dst as *mut u8, len);
+        crate::smep_smap::clac();
+    }
+    Ok(())
+}
+
+/// Read a single value from user-space (SMAP-safe).
+///
+/// Validates the pointer, then reads a `T`-sized value.  This is the
+/// preferred way to read individual syscall arguments from user buffers.
+///
+/// # Safety
+///
+/// The user pointer must be properly aligned for type `T`.
+#[allow(dead_code)]
+pub unsafe fn read_user<T: Copy>(user_ptr: u64) -> KernelResult<T> {
+    let len = core::mem::size_of::<T>();
+    validate_user_read(user_ptr, len)?;
+
+    // SAFETY: Validated above.  STAC/CLAC for SMAP.
+    let val = unsafe {
+        crate::smep_smap::stac();
+        let v = core::ptr::read(user_ptr as *const T);
+        crate::smep_smap::clac();
+        v
+    };
+    Ok(val)
+}
+
+/// Write a single value to user-space (SMAP-safe).
+///
+/// Validates the pointer is writable, then writes a `T`-sized value.
+///
+/// # Safety
+///
+/// The user pointer must be properly aligned for type `T`.
+#[allow(dead_code)]
+pub unsafe fn write_user<T: Copy>(user_ptr: u64, value: T) -> KernelResult<()> {
+    let len = core::mem::size_of::<T>();
+    validate_user_write(user_ptr, len)?;
+
+    // SAFETY: Validated above.  STAC/CLAC for SMAP.
+    unsafe {
+        crate::smep_smap::stac();
+        core::ptr::write(user_ptr as *mut T, value);
+        crate::smep_smap::clac();
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

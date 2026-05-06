@@ -108,6 +108,40 @@ impl Semaphore {
         }
     }
 
+    /// Wait with nanosecond-precision timeout (P / `down` with deadline).
+    ///
+    /// Returns `true` if the semaphore was acquired within `timeout_ns`
+    /// nanoseconds, `false` if the timeout expired.
+    pub fn wait_timeout_ns(&self, timeout_ns: u64) -> bool {
+        // Fast path: try to decrement immediately.
+        if self.try_wait() {
+            return true;
+        }
+        if timeout_ns == 0 {
+            return false;
+        }
+
+        // Decrement count to indicate we're waiting (may go negative).
+        self.count.fetch_sub(1, Ordering::AcqRel);
+
+        // Block with timeout until count becomes positive for us.
+        let acquired = self.waiters.wait_timeout_ns(
+            || {
+                // Try to "claim" our decrement by checking if count > our
+                // reservation.  When signaled, count is incremented.
+                let current = self.count.load(Ordering::Acquire);
+                current >= 0
+            },
+            timeout_ns,
+        );
+
+        if !acquired {
+            // Timeout expired — undo our decrement.
+            self.count.fetch_add(1, Ordering::AcqRel);
+        }
+        acquired
+    }
+
     /// Release the semaphore (V / `up` / `signal` / `post`).
     ///
     /// Increments the count.  If tasks are waiting (count was negative

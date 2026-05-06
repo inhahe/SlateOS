@@ -119,6 +119,55 @@ impl<T> KMutex<T> {
         }
     }
 
+    /// Try to acquire the mutex with a nanosecond-precision timeout.
+    ///
+    /// Returns `Some(guard)` if the lock was acquired within `timeout_ns`
+    /// nanoseconds, `None` if the timeout expired.  Uses hrtimer for
+    /// sub-10ms precision.
+    pub fn lock_timeout_ns(&self, timeout_ns: u64) -> Option<KMutexGuard<'_, T>> {
+        // Fast path: try immediate CAS.
+        if self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(KMutexGuard { mutex: self });
+        }
+
+        // Zero timeout = non-blocking try.
+        if timeout_ns == 0 {
+            return None;
+        }
+
+        // Brief adaptive spin (same as lock_slow).
+        for _ in 0..40 {
+            if self
+                .locked
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(KMutexGuard { mutex: self });
+            }
+            core::hint::spin_loop();
+        }
+
+        // Block with timeout.
+        let acquired = self.waiters.wait_timeout_ns(
+            || {
+                self.locked
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+            },
+            timeout_ns,
+        );
+
+        if acquired {
+            Some(KMutexGuard { mutex: self })
+        } else {
+            None
+        }
+    }
+
     /// Whether the mutex is currently locked.
     ///
     /// This is advisory only — the state may change immediately after

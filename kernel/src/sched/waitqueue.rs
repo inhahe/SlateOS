@@ -208,6 +208,85 @@ impl WaitQueue {
         }
     }
 
+    /// Block until a condition is true, with nanosecond-precision timeout.
+    ///
+    /// Like [`wait_timeout`] but uses the hrtimer subsystem for sub-10ms
+    /// precision.  Falls back to tick-based timeout for very long durations
+    /// (> 100ms).
+    ///
+    /// Returns `true` if the condition was met, `false` if the timeout
+    /// expired.  A timeout of 0 means "check once and return immediately."
+    pub fn wait_timeout_ns<F>(&self, condition: F, timeout_ns: u64) -> bool
+    where
+        F: Fn() -> bool,
+    {
+        if condition() {
+            return true;
+        }
+
+        if timeout_ns == 0 {
+            return false;
+        }
+
+        // For long timeouts (> 100ms), delegate to tick-based path.
+        if timeout_ns > 100_000_000 {
+            let ticks = timeout_ns
+                .saturating_add(9_999_999)
+                .saturating_div(10_000_000);
+            return self.wait_timeout(condition, ticks);
+        }
+
+        let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+
+        loop {
+            let task_id = super::current_task_id();
+
+            {
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
+                    *slot = task_id;
+                } else {
+                    // Queue full — yield and retry.
+                    drop(guard);
+                    super::yield_now();
+                    if crate::hrtimer::now_ns() >= deadline_ns {
+                        return condition();
+                    }
+                    continue;
+                }
+            }
+
+            // Compute remaining time and sleep with hrtimer precision.
+            let now_ns = crate::hrtimer::now_ns();
+            if now_ns >= deadline_ns {
+                // Already past deadline — remove from waiters and check.
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
+                    *slot = 0;
+                }
+                return condition();
+            }
+
+            let remaining_ns = deadline_ns.saturating_sub(now_ns);
+            super::sleep_ns(remaining_ns);
+
+            // Remove ourselves from the waiter list.
+            {
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
+                    *slot = 0;
+                }
+            }
+
+            if condition() {
+                return true;
+            }
+            if crate::hrtimer::now_ns() >= deadline_ns {
+                return false;
+            }
+        }
+    }
+
     /// Wake one waiting task (FIFO order).
     ///
     /// Returns `true` if a task was woken, `false` if the queue was empty.

@@ -278,6 +278,121 @@ impl<T: Copy, const N: usize> KChannel<T, N> {
         }
     }
 
+    /// Receive with nanosecond-precision timeout.
+    ///
+    /// Returns `Ok(msg)` if a message was received within `timeout_ns`,
+    /// `Err(RecvError)` if the channel is closed, or `None` inside the
+    /// Ok if the timeout expired without a message.
+    ///
+    /// This is a combined result: `Ok(Some(msg))` = success,
+    /// `Ok(None)` = timeout, `Err` = channel closed.
+    pub fn recv_timeout_ns(&self, timeout_ns: u64) -> Result<Option<T>, RecvError> {
+        // Fast path: try without blocking.
+        {
+            let mut buf = self.buffer.lock();
+            if let Some(item) = buf.pop() {
+                self.total_recv.fetch_add(1, Ordering::Relaxed);
+                drop(buf);
+                self.send_wq.wake_one();
+                return Ok(Some(item));
+            }
+            if buf.closed {
+                return Err(RecvError);
+            }
+        }
+
+        if timeout_ns == 0 {
+            return Ok(None); // Non-blocking, nothing available.
+        }
+
+        // Slow path: wait with timeout.
+        let result: Cell<Option<T>> = Cell::new(None);
+        let got_it = self.recv_wq.wait_timeout_ns(
+            || {
+                let mut buf = self.buffer.lock();
+                if let Some(item) = buf.pop() {
+                    result.set(Some(item));
+                    return true;
+                }
+                buf.closed
+            },
+            timeout_ns,
+        );
+
+        if let Some(item) = result.get() {
+            self.total_recv.fetch_add(1, Ordering::Relaxed);
+            self.send_wq.wake_one();
+            Ok(Some(item))
+        } else if got_it {
+            // Woke because channel closed (no message).
+            Err(RecvError)
+        } else {
+            // Timeout expired.
+            Ok(None)
+        }
+    }
+
+    /// Send with nanosecond-precision timeout.
+    ///
+    /// Returns `Ok(())` if the message was sent within `timeout_ns`,
+    /// `Err(SendError::Closed(msg))` if the channel is closed, or
+    /// `Err(SendError::Closed(msg))` if the timeout expired.
+    pub fn send_timeout_ns(&self, msg: T, timeout_ns: u64) -> Result<(), SendError<T>> {
+        // Fast path: try without blocking.
+        {
+            let mut buf = self.buffer.lock();
+            if buf.closed {
+                return Err(SendError::Closed(msg));
+            }
+            if !buf.is_full() {
+                buf.push(msg);
+                self.total_sent.fetch_add(1, Ordering::Relaxed);
+                drop(buf);
+                self.recv_wq.wake_one();
+                return Ok(());
+            }
+        }
+
+        if timeout_ns == 0 {
+            return Err(SendError::Closed(msg));
+        }
+
+        // Slow path: wait for space with timeout.
+        let msg_cell: Cell<Option<T>> = Cell::new(Some(msg));
+        let sent = Cell::new(false);
+        let _got_space = self.send_wq.wait_timeout_ns(
+            || {
+                let mut buf = self.buffer.lock();
+                if buf.closed {
+                    return true; // Exit wait (will return error).
+                }
+                if !buf.is_full() {
+                    if let Some(m) = msg_cell.replace(None) {
+                        buf.push(m);
+                        sent.set(true);
+                    }
+                    return true;
+                }
+                false
+            },
+            timeout_ns,
+        );
+
+        if sent.get() {
+            self.total_sent.fetch_add(1, Ordering::Relaxed);
+            self.recv_wq.wake_one();
+            Ok(())
+        } else {
+            // Timeout expired or channel closed — return the unsent message.
+            // If sent=false, the message was never moved out of msg_cell.
+            // unwrap is safe here: the only path that sets msg_cell to None
+            // also sets sent=true.
+            #[allow(clippy::unwrap_used)]
+            let leftover = msg_cell.replace(None).unwrap();
+            Err(SendError::Closed(leftover))
+        }
+    }
+
     /// Close the channel.
     ///
     /// After closing:

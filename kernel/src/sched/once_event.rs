@@ -106,6 +106,21 @@ impl OnceEvent {
             timeout_ticks,
         )
     }
+
+    /// Try to wait with a nanosecond-precision timeout.
+    ///
+    /// Returns `true` if the event fired within the timeout,
+    /// `false` if the timeout expired.  Uses hrtimer for sub-10ms precision.
+    pub fn wait_timeout_ns(&self, timeout_ns: u64) -> bool {
+        if self.fired.load(Ordering::Acquire) {
+            return true;
+        }
+
+        self.wq.wait_timeout_ns(
+            || self.fired.load(Ordering::Acquire),
+            timeout_ns,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

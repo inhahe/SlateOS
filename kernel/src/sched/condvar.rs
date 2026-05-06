@@ -137,6 +137,37 @@ impl CondVar {
         guard
     }
 
+    /// Block until notified or timeout expires, with nanosecond precision.
+    ///
+    /// Releases the mutex, blocks for up to `timeout_ns` nanoseconds,
+    /// then re-acquires the mutex.  Returns `(guard, timed_out)` where
+    /// `timed_out` is `true` if the timeout expired without notification.
+    ///
+    /// The caller should still check the predicate after waking — a
+    /// `false` `timed_out` could be a spurious wakeup.
+    pub fn wait_timeout_ns<'a, T>(
+        &self,
+        guard: KMutexGuard<'a, T>,
+        timeout_ns: u64,
+    ) -> (KMutexGuard<'a, T>, bool) {
+        let mutex = guard.mutex_ref();
+
+        // Release the mutex before blocking.
+        drop(guard);
+
+        // Block with timeout — the notify_count tracks notifications;
+        // we use it to detect whether a signal occurred during our wait.
+        let before = self.notify_count.load(Ordering::Acquire);
+        let woken = self.wq.wait_timeout_ns(
+            || self.notify_count.load(Ordering::Acquire) != before,
+            timeout_ns,
+        );
+
+        // Re-acquire the mutex before returning.
+        let new_guard = mutex.lock();
+        (new_guard, !woken)
+    }
+
     /// Wake one waiting task (if any).
     ///
     /// The woken task will re-acquire the mutex before proceeding.

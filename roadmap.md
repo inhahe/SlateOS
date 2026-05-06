@@ -388,7 +388,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Journaling (via ext4 jbd2)
   - [x] File metadata: owner, group, permissions, created/modified/accessed (relatime), immutable flag, append-only flag, extended attributes (key-value, 255-byte key / 64 KiB value)
   - [x] Symbolic links: create/readlink/lstat, iterative resolution (depth 40), follow-last semantics, circular detection (TooManyLinks), 3 syscalls (637-639), VFS-level cross-mount symlink resolution
-  - [-] File metadata: capabilities per file (needs security zone)
+  - [x] File metadata: capabilities per file (file_tags enforcement in VFS — check_file_tags on read/write/stat/open/remove/rename)
   - [x] Content hash (SHA-256 via Vfs::content_hash)
   - [x] Filesystem space query (statvfs: FsInfo struct, block/inode counts, FAT scan, ext4 superblock, memfs node count)
   - [x] Hard links (VFS link() with same-mount enforcement, ext4 impl with i_links_count, nlinks in FileMeta, comprehensive self-test)

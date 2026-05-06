@@ -148,6 +148,7 @@ pub fn set_config(config: HistoryConfig) {
 }
 
 /// Check if history tracking is enabled.
+#[allow(dead_code)]
 pub fn is_enabled() -> bool {
     HISTORY.lock().config.enabled
 }

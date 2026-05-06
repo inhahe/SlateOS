@@ -3086,7 +3086,7 @@ const COMMANDS: &[&str] = &[
     "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
@@ -4308,6 +4308,7 @@ fn dispatch(line: &str) {
         "locate" | "updatedb" => cmd_locate(args),
         "dedup" => cmd_dedup(args),
         "integrity" => cmd_integrity(args),
+        "fhist" | "filehist" => cmd_fhist(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4524,6 +4525,7 @@ fn cmd_help() {
     crate::console_println!("  locate [--update|--stats|--ext E|--size MIN-MAX] PATTERN");
     crate::console_println!("  dedup [--dry-run|--delete|--stats] [--min-size N] [--max-size N] [DIR]");
     crate::console_println!("  integrity [baseline|verify|stats|clear] [DIR]  File integrity monitoring");
+    crate::console_println!("  fhist [show|restore|record|clear|stats|list] [FILE]  File version history");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
     crate::console_println!("  mount     List all mounted filesystems");
@@ -8713,6 +8715,188 @@ fn run_dir_verify(dir: &str) {
         shell_println!("  Status: ALL CLEAR ✓");
     } else {
         shell_println!("  Status: CHANGES DETECTED");
+    }
+}
+
+/// `fhist [show|restore|clear|stats|enable|disable] [FILE] [VERSION]`
+///
+/// View and manage file version history.
+///
+/// - `fhist show FILE` — Show version history for a file.
+/// - `fhist restore FILE VERSION` — Restore file to a previous version.
+/// - `fhist record FILE` — Manually record current version of a file.
+/// - `fhist clear [FILE]` — Clear history (for file or all).
+/// - `fhist stats` — Show history system statistics.
+/// - `fhist list [PREFIX]` — List all tracked files.
+/// - `fhist enable` / `fhist disable` — Toggle tracking.
+fn cmd_fhist(args: &str) {
+    use crate::fs::history;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    if parts.is_empty() {
+        shell_println!("Usage: fhist <show|restore|record|clear|stats|list|enable|disable> [FILE] [VERSION]");
+        return;
+    }
+
+    let subcommand = parts.first().copied().unwrap_or("");
+    let target = parts.get(1).copied();
+
+    match subcommand {
+        "show" | "log" => {
+            let path = match target {
+                Some(p) => resolve_path(p),
+                None => {
+                    shell_println!("Usage: fhist show FILE");
+                    return;
+                }
+            };
+
+            let versions = history::get_history(&path);
+            if versions.is_empty() {
+                shell_println!("No version history for {}", path);
+                return;
+            }
+
+            shell_println!("Version history for {}:", path);
+            shell_println!("{:>4}  {:>12}  {:>10}  {}", "Ver", "Hash", "Size", "Time");
+            shell_println!("{}", "-".repeat(50));
+
+            for v in versions.iter().rev() {
+                let hex = crate::fs::cas::hash_to_hex(&v.hash);
+                let secs = v.timestamp_ns / 1_000_000_000;
+                shell_println!("{:>4}  {}  {:>10}  {}s",
+                    v.version,
+                    &hex[..12],
+                    v.size,
+                    secs);
+            }
+            shell_println!("({} versions)", versions.len());
+        }
+
+        "restore" => {
+            let path = match target {
+                Some(p) => resolve_path(p),
+                None => {
+                    shell_println!("Usage: fhist restore FILE VERSION_NUMBER");
+                    return;
+                }
+            };
+
+            // Get version number.
+            let version_num: u64 = match parts.get(2) {
+                Some(s) => match s.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        shell_println!("Invalid version number: {}", s);
+                        return;
+                    }
+                },
+                None => {
+                    // Default to latest version.
+                    let versions = history::get_history(&path);
+                    if versions.is_empty() {
+                        shell_println!("No version history for {}", path);
+                        return;
+                    }
+                    // Latest stored version.
+                    versions.last().map(|v| v.version).unwrap_or(0)
+                }
+            };
+
+            // Find the version with that number.
+            let versions = history::get_history(&path);
+            let version_entry = versions.iter().find(|v| v.version == version_num);
+
+            match version_entry {
+                Some(v) => {
+                    let hash = v.hash;
+                    match history::restore_version(&path, &hash) {
+                        Ok(()) => {
+                            let hex = crate::fs::cas::hash_to_hex(&hash);
+                            shell_println!("Restored {} to version {} ({}...)",
+                                path, version_num, &hex[..12]);
+                        }
+                        Err(e) => shell_println!("Error restoring: {:?}", e),
+                    }
+                }
+                None => {
+                    shell_println!("Version {} not found for {}. Use `fhist show {}` to see available versions.",
+                        version_num, path, path);
+                }
+            }
+        }
+
+        "record" => {
+            let path = match target {
+                Some(p) => resolve_path(p),
+                None => {
+                    shell_println!("Usage: fhist record FILE");
+                    return;
+                }
+            };
+
+            match history::record_version(&path) {
+                Ok(Some(hash)) => {
+                    let hex = crate::fs::cas::hash_to_hex(&hash);
+                    shell_println!("Recorded version of {} ({}...)", path, &hex[..12]);
+                }
+                Ok(None) => shell_println!("No version recorded (file not found or tracking disabled)."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "clear" => {
+            if let Some(path) = target {
+                let resolved = resolve_path(path);
+                history::clear_file(&resolved);
+                shell_println!("Cleared history for {}", resolved);
+            } else {
+                let count = history::tracked_files();
+                history::clear_all();
+                shell_println!("Cleared all history ({} files)", count);
+            }
+        }
+
+        "stats" | "st" => {
+            let st = history::stats();
+            shell_println!("=== File History Statistics ===");
+            shell_println!("  Tracked files:   {}", st.tracked_files);
+            shell_println!("  Total versions:  {}", st.total_versions);
+            shell_println!("  Records:         {}", st.record_count);
+            shell_println!("  Restores:        {}", st.restore_count);
+            shell_println!("  Evicted:         {}", st.evicted_versions);
+            shell_println!("  Enabled:         {}", st.enabled);
+        }
+
+        "list" | "ls" => {
+            let prefix = target.map(|p| resolve_path(p));
+            let tracked = history::list_tracked(prefix.as_deref(), 100);
+
+            if tracked.is_empty() {
+                shell_println!("No tracked files{}.",
+                    if prefix.is_some() { " matching prefix" } else { "" });
+            } else {
+                for (path, count) in &tracked {
+                    shell_println!("  {:>3} versions  {}", count, path);
+                }
+                shell_println!("({} tracked files)", tracked.len());
+            }
+        }
+
+        "enable" => {
+            history::set_enabled(true);
+            shell_println!("File version tracking enabled.");
+        }
+
+        "disable" => {
+            history::set_enabled(false);
+            shell_println!("File version tracking disabled.");
+        }
+
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Use: show, restore, record, clear, stats, list, enable, disable", subcommand);
+        }
     }
 }
 
@@ -13623,7 +13807,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

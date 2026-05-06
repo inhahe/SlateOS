@@ -38,6 +38,7 @@ pub mod devfs;
 pub mod ext4;
 pub mod fat;
 pub mod handle;
+pub mod history;
 pub mod index;
 pub mod integrity;
 pub mod iso9660;

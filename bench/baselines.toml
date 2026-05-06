@@ -101,6 +101,66 @@ linux_us    = 2.0
 target_us   = 5.0
 source      = "Linux 6.x published range: 1-3us"
 
+[ipc_channel_sync_roundtrip]
+description   = "Sync (rendezvous) channel send_blocking + recv"
+target_us     = 5.0
+source        = "Includes 2 context switches (sender→receiver→sender)"
+notes         = """
+L4/seL4 achieve 0.5-1us for pure IPC; our target includes full \
+context switch overhead under QEMU emulation. The bottleneck is \
+the context switch, not the IPC mechanism itself."""
+
+[ipc_pipe_roundtrip]
+description   = "Pipe write+read 64 bytes round-trip"
+target_ns     = 3000
+source        = "Comparable to channel round-trip plus ring buffer copy"
+
+[service_connect_accept]
+description   = "Service registry connect + accept cycle"
+target_ns     = 5000
+source        = "Channel pair create + queue push + dequeue"
+
+[eventfd_signal_read]
+description   = "Eventfd write (signal) + try_read (consume)"
+target_ns     = 1000
+source        = "Lighter than channels — single atomic counter"
+
+[semaphore_signal_wait]
+description   = "Semaphore signal + try_wait (uncontended)"
+target_ns     = 1000
+source        = "Similar to eventfd — counter increment + decrement"
+
+[futex_wake_empty]
+description   = "Futex wake with no waiters (fast path)"
+target_ns     = 500
+source        = "Linux uncontended futex_wake: ~200-500ns"
+notes         = "Hash bucket lookup + empty list check"
+
+[futex_wait_mismatch]
+description   = "Futex wait with value mismatch (immediate return)"
+target_ns     = 500
+source        = "Read + compare + return, no blocking"
+
+[shm_create_close]
+description   = "Shared memory region create + close (16 KiB)"
+target_ns     = 5000
+source        = "Handle + frame allocation + kernel mapping + cleanup"
+
+[shm_rw_64bytes]
+description   = "Shared memory write + read 64 bytes"
+target_ns     = 200
+source        = "Pure memset + read — no kernel overhead"
+
+[cp_try_wait_empty]
+description   = "Completion port try_wait (no events ready)"
+target_ns     = 500
+source        = "Lock acquire + empty queue check + return"
+
+[cp_notify_wait_roundtrip]
+description   = "Completion port notify + try_wait round-trip"
+target_ns     = 2000
+source        = "Eventfd write + CP notification + try_wait + drain"
+
 [iouring_sqe_submit]
 description = "io_uring single SQE submission"
 linux_ns    = 150

@@ -629,6 +629,35 @@ pub fn run_all() {
     // then try_read (consume).
     bench_ipc_eventfd();
 
+    // --- Semaphore signal+wait round-trip ---
+    //
+    // Measures counting semaphore overhead: signal() increments the
+    // counter, try_wait() decrements it.  Both are uncontended so
+    // this captures the lock acquisition + counter update cost.
+    bench_ipc_semaphore();
+
+    // --- Futex wake (uncontended) ---
+    //
+    // Measures the cost of futex_wake when nobody is waiting.  This
+    // is the fast path for userspace mutexes: unlock does an atomic
+    // store + futex_wake(1), which scans the empty wait list and
+    // returns immediately.
+    bench_ipc_futex();
+
+    // --- Shared memory create+close cycle ---
+    //
+    // Measures the overhead of creating and destroying a shared memory
+    // region (single 16 KiB frame).  This captures handle allocation,
+    // frame allocation, and cleanup.
+    bench_ipc_shm();
+
+    // --- Completion port try_wait (no events) ---
+    //
+    // Measures the cost of polling an empty completion port.  This is
+    // the fast path for event-driven servers: check for events, get
+    // none, go back to work.
+    bench_ipc_completion_port();
+
     // --- io_ring NOP submission throughput ---
     //
     // Measures the per-SQE overhead for the io_ring submission path.
@@ -1252,6 +1281,275 @@ fn bench_ipc_eventfd() {
             result.min_ns, target_ns
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Semaphore benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark semaphore signal + try_wait round-trip (uncontended).
+///
+/// Creates a semaphore with count 0 and max 1000, then repeatedly
+/// signals (increment) and try_waits (decrement).  Both operations
+/// are uncontended — no other task is involved — so this measures
+/// pure lock acquisition + atomic counter manipulation.
+fn bench_ipc_semaphore() {
+    use crate::ipc::semaphore;
+
+    let sem = semaphore::create(0, 1000);
+
+    // Warm up.
+    for _ in 0..10 {
+        semaphore::signal(sem, 1).expect("bench: sem warmup signal");
+        semaphore::try_wait(sem).expect("bench: sem warmup wait");
+    }
+
+    let result = run("semaphore_signal_wait", 2000, || {
+        semaphore::signal(sem, 1).expect("bench: sem signal");
+        semaphore::try_wait(sem).expect("bench: sem wait");
+    });
+
+    semaphore::close(sem);
+
+    // Target: < 1 µs (similar to eventfd — both are counter-based).
+    let target_ns = 1000u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   semaphore_signal_wait: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   semaphore_signal_wait: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Futex benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark futex wake on empty wait list (uncontended fast path).
+///
+/// The critical performance requirement for futex-based userspace mutexes
+/// is that unlock (atomic store + futex_wake) is fast when nobody is
+/// waiting.  This measures just the kernel side: futex_wake scans the
+/// hash bucket, finds no waiters, returns 0.
+///
+/// Also benchmarks futex_wait with a value mismatch (the other fast
+/// path: CAS fails, return immediately without blocking).
+fn bench_ipc_futex() {
+    use crate::ipc::futex;
+
+    // Use a stack-allocated u32 as the futex address.
+    // The address must be 4-byte aligned (guaranteed for stack u32).
+    let futex_var: u32 = 42;
+    let futex_addr = &futex_var as *const u32 as u64;
+
+    // Warm up.
+    for _ in 0..10 {
+        let _ = futex::futex_wake(futex_addr, 1);
+    }
+
+    // Benchmark: wake with no waiters.
+    let result = run("futex_wake_empty", 2000, || {
+        let woken = futex::futex_wake(futex_addr, 1);
+        core::hint::black_box(woken);
+    });
+
+    // Target: < 500 ns.  This is a hash lookup + empty list check.
+    // Linux uncontended futex_wake: ~200-500ns.
+    let target_ns = 500u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   futex_wake_empty: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   futex_wake_empty: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+
+    // Benchmark: wait with value mismatch (immediate return, no block).
+    // We pass expected=0 but the actual value is 42 → returns false
+    // immediately.
+    let result2 = run("futex_wait_mismatch", 2000, || {
+        // Value is 42 but expected=0 → immediate return (Ok(false)).
+        let r = futex::futex_wait(futex_addr, 0);
+        core::hint::black_box(r);
+    });
+
+    // Target: < 500 ns.  Compare + return, no blocking.
+    if result2.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   futex_wait_mismatch: PASS (min {}ns <= target {}ns)",
+            result2.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   futex_wait_mismatch: ABOVE TARGET (min {}ns > target {}ns)",
+            result2.min_ns, target_ns
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared memory benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark shared memory create + close cycle.
+///
+/// Measures the overhead of creating and destroying a shared memory
+/// region.  The create path allocates a handle, allocates physical
+/// frames, and maps them into the kernel address space.  Close
+/// unmaps and frees everything.
+///
+/// This is the setup cost for any shared-memory IPC interaction.
+fn bench_ipc_shm() {
+    use crate::ipc::shm;
+
+    // Warm up.
+    for _ in 0..5 {
+        let h = shm::create(16384).expect("bench: shm warmup create");
+        shm::close(h);
+    }
+
+    let result = run("shm_create_close_16k", 500, || {
+        let h = shm::create(16384).expect("bench: shm create");
+        core::hint::black_box(h);
+        shm::close(h);
+    });
+
+    // Target: < 5 µs.  Includes frame allocation, handle management,
+    // and kernel mapping/unmapping.
+    let target_ns = 5000u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   shm_create_close: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   shm_create_close: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+
+    // Also benchmark a read/write cycle through shared memory.
+    // Create once, write 64 bytes, read them back.
+    {
+        let h = shm::create(16384).expect("bench: shm bench create");
+        let ptr = shm::kernel_addr(h).expect("bench: shm addr");
+
+        let result_rw = run("shm_rw_64bytes", 2000, || {
+            // SAFETY: ptr is valid kernel memory from shm::create,
+            // exclusively ours, 16 KiB region is large enough for 64 bytes.
+            unsafe {
+                core::ptr::write_bytes(ptr, 0xAB, 64);
+                let val = core::ptr::read_volatile(ptr);
+                core::hint::black_box(val);
+            }
+        });
+
+        shm::close(h);
+
+        // Target: < 200 ns.  This is just a memset + memory read.
+        let rw_target_ns = 200u64;
+        if result_rw.min_ns <= rw_target_ns {
+            serial_println!(
+                "[bench]   shm_rw_64bytes: PASS (min {}ns <= target {}ns)",
+                result_rw.min_ns, rw_target_ns
+            );
+        } else {
+            serial_println!(
+                "[bench]   shm_rw_64bytes: ABOVE TARGET (min {}ns > target {}ns)",
+                result_rw.min_ns, rw_target_ns
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Completion port benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark completion port try_wait on empty port (no events).
+///
+/// Measures the fast-path polling cost when no events are ready.
+/// Event-driven servers call this in their main loop to check for
+/// new completions.  The try_wait path acquires a lock, checks the
+/// event queue, and returns an empty Vec.
+fn bench_ipc_completion_port() {
+    use crate::ipc::completion;
+
+    let cp = completion::create();
+
+    // Warm up.
+    for _ in 0..10 {
+        let _ = completion::try_wait(cp);
+    }
+
+    let result = run("cp_try_wait_empty", 2000, || {
+        let events = completion::try_wait(cp);
+        core::hint::black_box(events);
+    });
+
+    // Target: < 500 ns.  Lock acquire, check empty queue, return.
+    let target_ns = 500u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   cp_try_wait_empty: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   cp_try_wait_empty: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+
+    // Also benchmark notify + try_wait (post an event and consume it).
+    {
+        use crate::ipc::eventfd;
+        use crate::ipc::completion::WaitSource;
+
+        let efd = eventfd::create(0);
+        completion::register(cp, WaitSource::EventFd(efd.raw()), 0x1234)
+            .expect("bench: cp register");
+
+        // Each iteration: signal the eventfd (which notifies the CP),
+        // then try_wait to consume the event, then consume the eventfd.
+        let result_rt = run("cp_notify_wait_rt", 1000, || {
+            eventfd::write(efd, 1).expect("bench: cp efd write");
+            let events = completion::try_wait(cp).expect("bench: cp wait");
+            core::hint::black_box(&events);
+            // Drain the eventfd so the next iteration starts clean.
+            let _ = eventfd::try_read(efd);
+        });
+
+        completion::unregister(cp, WaitSource::EventFd(efd.raw()))
+            .expect("bench: cp unregister");
+        eventfd::close(efd);
+
+        // Target: < 2 µs.  Eventfd write + CP notification + try_wait.
+        let rt_target_ns = 2000u64;
+        if result_rt.min_ns <= rt_target_ns {
+            serial_println!(
+                "[bench]   cp_notify_wait_rt: PASS (min {}ns <= target {}ns)",
+                result_rt.min_ns, rt_target_ns
+            );
+        } else {
+            serial_println!(
+                "[bench]   cp_notify_wait_rt: ABOVE TARGET (min {}ns > target {}ns)",
+                result_rt.min_ns, rt_target_ns
+            );
+        }
+    }
+
+    completion::close(cp);
 }
 
 // ---------------------------------------------------------------------------

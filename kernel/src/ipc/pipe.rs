@@ -473,6 +473,113 @@ pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
     result
 }
 
+/// Read bytes from a pipe with a timeout (nanoseconds).
+///
+/// Blocks up to `timeout_ns` nanoseconds waiting for data.
+/// Returns `Err(TimedOut)` if the timeout expires before any data
+/// arrives.  Returns immediately if data is available or the writer
+/// has closed (EOF).
+///
+/// `timeout_ns = 0` is equivalent to `try_read()` (immediate check),
+/// returning `Err(TimedOut)` instead of `Err(WouldBlock)` when empty.
+///
+/// # Returns
+///
+/// - `Ok(n)` where `n > 0` — read `n` bytes.
+/// - `Ok(0)` — write end is closed and no data remains (EOF).
+/// - `Err(TimedOut)` — no data arrived within the deadline.
+/// - `Err(InvalidHandle)` — not a read handle or pipe doesn't exist.
+pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> KernelResult<usize> {
+    if handle.end() != PipeEnd::Read {
+        return Err(KernelError::InvalidHandle);
+    }
+    if buf.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Fast path: try without blocking.
+    {
+        let mut table = PIPES.lock();
+        let pipe = table
+            .get_mut(&handle.pipe_id())
+            .ok_or(KernelError::InvalidHandle)?;
+
+        let n = pipe.read_bytes(buf);
+        if n > 0 {
+            let writer_id = pipe.writer_waiter.take();
+            drop(table);
+            if let Some(task_id) = writer_id {
+                sched::wake(task_id);
+            }
+            return Ok(n);
+        }
+
+        if pipe.write_closed {
+            return Ok(0);
+        }
+    }
+
+    // Non-blocking mode.
+    if timeout_ns == 0 {
+        return Err(KernelError::TimedOut);
+    }
+
+    // Schedule a timer to wake us at the deadline.
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    let timer_handle = crate::hrtimer::schedule_ns(
+        timeout_ns,
+        timeout_wake,
+        sched::current_task_id(),
+    );
+
+    // Block loop.
+    loop {
+        {
+            let mut table = PIPES.lock();
+            let pipe = table
+                .get_mut(&handle.pipe_id())
+                .ok_or_else(|| {
+                    crate::hrtimer::cancel(timer_handle);
+                    KernelError::InvalidHandle
+                })?;
+
+            let n = pipe.read_bytes(buf);
+            if n > 0 {
+                let writer_id = pipe.writer_waiter.take();
+                crate::hrtimer::cancel(timer_handle);
+                drop(table);
+                if let Some(task_id) = writer_id {
+                    sched::wake(task_id);
+                }
+                return Ok(n);
+            }
+
+            if pipe.write_closed {
+                crate::hrtimer::cancel(timer_handle);
+                return Ok(0);
+            }
+
+            // Check timeout.
+            if crate::hrtimer::now_ns() >= deadline_ns {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::TimedOut);
+            }
+
+            // Register as waiter.
+            pipe.reader_waiter = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+    }
+}
+
 /// Close a pipe handle.
 ///
 /// If the read end is closed, any blocked writer is woken (it will

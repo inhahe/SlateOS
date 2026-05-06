@@ -856,6 +856,54 @@ pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_CHANNEL_RECV_TIMEOUT` — receive with a deadline.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: message length on success, `TimedOut` if deadline expires.
+pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = ChannelHandle::from_raw(args.arg0);
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+    let timeout_ns = args.arg3;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    match channel::recv_timeout(handle, timeout_ns) {
+        Ok(msg) => {
+            let data = msg.data();
+            let copy_len = data.len().min(buf_cap);
+
+            if copy_len > 0 {
+                // SAFETY: Buffer validated above — in user space, mapped, writable.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        buf_ptr,
+                        copy_len,
+                    );
+                }
+            }
+
+            #[allow(clippy::cast_possible_wrap)]
+            let len = data.len() as i64;
+            SyscallResult::ok(len)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FUTEX_WAIT` — block if `*addr == expected`.
 ///
 /// `arg0`: pointer to 32-bit futex word (4-byte aligned).
@@ -1115,6 +1163,47 @@ pub fn sys_pipe_close(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
     pipe::close(handle);
     SyscallResult::ok(0)
+}
+
+/// `SYS_PIPE_READ_TIMEOUT` — read from a pipe with a deadline.
+///
+/// `arg0`: pipe handle (read end).
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: bytes read, 0 if EOF, `TimedOut` if deadline expires.
+pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+    let timeout_ns = args.arg3;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let buf = if buf_cap == 0 {
+        &mut []
+    } else {
+        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
+        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
+    };
+
+    match pipe::read_timeout(handle, buf, timeout_ns) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let read_bytes = n as i64;
+            SyscallResult::ok(read_bytes)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4976,6 +5065,24 @@ pub fn sys_sem_close(args: &SyscallArgs) -> SyscallResult {
     let handle = SemHandle::from_raw(args.arg0);
     semaphore::close(handle);
     SyscallResult::ok(0)
+}
+
+/// `SYS_SEM_WAIT_TIMEOUT` — wait (acquire) with a deadline.
+///
+/// `arg0`: semaphore handle.
+/// `arg1`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: 0 on success, `TimedOut` if deadline expires.
+pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::semaphore::{self, SemHandle};
+
+    let handle = SemHandle::from_raw(args.arg0);
+    let timeout_ns = args.arg1;
+
+    match semaphore::wait_timeout(handle, timeout_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.

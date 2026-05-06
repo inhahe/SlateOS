@@ -400,6 +400,86 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
     }
 }
 
+/// Receive a message with a timeout (nanoseconds).
+///
+/// Blocks up to `timeout_ns` nanoseconds waiting for a message.
+/// Returns `Err(TimedOut)` if the timeout expires before a message
+/// arrives.  Returns immediately if a message is already queued.
+///
+/// `timeout_ns = 0` is equivalent to `try_recv()` (immediate check).
+///
+/// # Errors
+///
+/// - [`TimedOut`] — no message arrived within the deadline.
+/// - [`ChannelClosed`] — the peer closed and no messages remain.
+/// - [`InvalidHandle`] — the channel does not exist.
+///
+/// [`TimedOut`]: KernelError::TimedOut
+/// [`ChannelClosed`]: KernelError::ChannelClosed
+/// [`InvalidHandle`]: KernelError::InvalidHandle
+pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Message> {
+    // Fast path: try without blocking.
+    match try_recv(handle) {
+        Ok(Some(msg)) => return Ok(msg),
+        Ok(None) => {}
+        Err(e) => return Err(e),
+    }
+
+    // timeout_ns == 0 means non-blocking.
+    if timeout_ns == 0 {
+        return Err(KernelError::TimedOut);
+    }
+
+    // Schedule a timer to wake us at the deadline.
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+    let task_id = sched::current_task_id();
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, u64::from(task_id));
+
+    // Block loop: try to receive, block if empty, re-check on wake.
+    loop {
+        {
+            let mut channels = CHANNELS.lock();
+            let ch = channels.get_mut(&handle.channel_id())
+                .ok_or(KernelError::InvalidHandle)?;
+
+            let our_side = handle.side();
+
+            if let Some(msg) = ch.queues[our_side].pop_front() {
+                // Got a message — cancel timer and return.
+                crate::hrtimer::cancel(timer_handle);
+                return Ok(msg);
+            }
+
+            // Queue empty — check if peer is closed.
+            if ch.closed[handle.peer_side()] {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::ChannelClosed);
+            }
+
+            // Check timeout.
+            if crate::hrtimer::now_ns() >= deadline_ns {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::TimedOut);
+            }
+
+            // Register ourselves as a waiter.
+            ch.waiters[our_side] = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+
+        // We woke up — either from send/close or from the timer.
+        // Loop back to check which.
+    }
+}
+
 /// Close a channel endpoint.
 ///
 /// Any task blocked on `recv` on the peer side is woken (it will
@@ -458,6 +538,15 @@ pub fn self_test() -> KernelResult<()> {
     test_backpressure()?;
 
     serial_println!("[ipc] Channel self-test PASSED");
+    Ok(())
+}
+
+/// Run channel timeout tests (requires hrtimer to be initialized).
+///
+/// Called separately from `self_test()` because it uses `sleep_ms`
+/// which depends on the high-resolution timer subsystem.
+pub fn self_test_timeout() -> KernelResult<()> {
+    test_recv_timeout()?;
     Ok(())
 }
 
@@ -638,5 +727,133 @@ fn test_backpressure() -> KernelResult<()> {
     close(ep0);
     close(ep1);
     serial_println!("[ipc]   Backpressure (queue full): OK");
+    Ok(())
+}
+
+/// Result storage for the timeout recv self-test.
+static TIMEOUT_RESULT: AtomicU64 = AtomicU64::new(0);
+
+/// Task that calls `recv_timeout` on an empty channel — should time out.
+extern "C" fn timeout_recv_task(handle_raw: u64) {
+    let handle = ChannelHandle(handle_raw);
+    // 5 ms timeout — should expire since nobody sends.
+    match recv_timeout(handle, 5_000_000) {
+        Err(KernelError::TimedOut) => {
+            TIMEOUT_RESULT.store(1, Ordering::SeqCst);
+        }
+        Ok(_) => {
+            TIMEOUT_RESULT.store(2, Ordering::SeqCst);
+        }
+        Err(_) => {
+            TIMEOUT_RESULT.store(3, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Task that calls `recv_timeout` but gets a message before the deadline.
+static TIMEOUT_EARLY_RESULT: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn timeout_recv_early_task(handle_raw: u64) {
+    let handle = ChannelHandle(handle_raw);
+    // 500 ms timeout — should receive before it expires.
+    match recv_timeout(handle, 500_000_000) {
+        Ok(msg) => {
+            if msg.data() == b"early" {
+                TIMEOUT_EARLY_RESULT.store(1, Ordering::SeqCst);
+            } else {
+                TIMEOUT_EARLY_RESULT.store(4, Ordering::SeqCst);
+            }
+        }
+        Err(KernelError::TimedOut) => {
+            TIMEOUT_EARLY_RESULT.store(2, Ordering::SeqCst);
+        }
+        Err(_) => {
+            TIMEOUT_EARLY_RESULT.store(3, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Test 6: `recv_timeout` — both timeout expiry and early-message paths.
+fn test_recv_timeout() -> KernelResult<()> {
+    // --- Part A: Timeout expires (no sender) ---
+    TIMEOUT_RESULT.store(0, Ordering::SeqCst);
+    let (ep0, ep1) = create();
+
+    sched::spawn(b"recv-to-test", 16, timeout_recv_task, ep1.0, 0)?;
+
+    // Let the receiver run and block.  Wait a bit more than 5ms to ensure
+    // the timer fires.  We yield several times because yield_now only
+    // gives up the current timeslice (~10ms tick), not a wall-clock delay.
+    sched::sleep_ms(20);
+
+    let result = TIMEOUT_RESULT.load(Ordering::SeqCst);
+    if result != 1 {
+        serial_println!("[ipc]   FAIL: recv_timeout didn't time out (result={})", result);
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    close(ep0);
+    close(ep1);
+
+    // --- Part B: Message arrives before timeout ---
+    TIMEOUT_EARLY_RESULT.store(0, Ordering::SeqCst);
+    let (ep0, ep1) = create();
+
+    sched::spawn(b"recv-to-early", 16, timeout_recv_early_task, ep1.0, 0)?;
+
+    // Yield to let receiver start blocking.
+    sched::yield_now();
+    sched::yield_now();
+
+    // Send a message — should wake receiver before 500ms deadline.
+    let msg = Message::from_bytes(b"early")?;
+    send(ep0, msg)?;
+
+    // Let receiver process the message.
+    sched::yield_now();
+    sched::yield_now();
+
+    let result = TIMEOUT_EARLY_RESULT.load(Ordering::SeqCst);
+    if result != 1 {
+        serial_println!("[ipc]   FAIL: recv_timeout early-msg (result={})", result);
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    close(ep0);
+    close(ep1);
+
+    // --- Part C: Zero timeout = immediate try ---
+    let (ep0, ep1) = create();
+    match recv_timeout(ep1, 0) {
+        Err(KernelError::TimedOut) => {}
+        other => {
+            serial_println!("[ipc]   FAIL: recv_timeout(0) returned {:?}", other);
+            close(ep0);
+            close(ep1);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // With a message queued, zero timeout should still succeed.
+    let msg = Message::from_bytes(b"instant")?;
+    send(ep0, msg)?;
+    match recv_timeout(ep1, 0) {
+        Ok(m) if m.data() == b"instant" => {}
+        other => {
+            serial_println!("[ipc]   FAIL: recv_timeout(0) with msg returned {:?}", other);
+            close(ep0);
+            close(ep1);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(ep0);
+    close(ep1);
+
+    serial_println!("[ipc]   Receive with timeout: OK");
     Ok(())
 }

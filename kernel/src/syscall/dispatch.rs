@@ -65,6 +65,9 @@ use super::number::{
     SYS_THREAD_SUSPEND, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
     SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
     SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_WAIT, SYS_SEM_TRY_WAIT, SYS_SEM_CLOSE,
+    SYS_SEM_WAIT_TIMEOUT,
+    SYS_CHANNEL_RECV_TIMEOUT,
+    SYS_PIPE_READ_TIMEOUT,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_DNS_RESOLVE,
     SYS_YIELD,
@@ -215,6 +218,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CHANNEL_RECV as usize] = Some(handlers::sys_channel_recv);
     handlers[SYS_CHANNEL_TRY_RECV as usize] = Some(handlers::sys_channel_try_recv);
     handlers[SYS_CHANNEL_CLOSE as usize] = Some(handlers::sys_channel_close);
+    handlers[SYS_CHANNEL_RECV_TIMEOUT as usize] = Some(handlers::sys_channel_recv_timeout);
     handlers[SYS_FUTEX_WAIT as usize] = Some(handlers::sys_futex_wait);
     handlers[SYS_FUTEX_WAKE as usize] = Some(handlers::sys_futex_wake);
     handlers[SYS_FUTEX_LOCK_PI as usize] = Some(handlers::sys_futex_lock_pi);
@@ -225,6 +229,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PIPE_TRY_WRITE as usize] = Some(handlers::sys_pipe_try_write);
     handlers[SYS_PIPE_TRY_READ as usize] = Some(handlers::sys_pipe_try_read);
     handlers[SYS_PIPE_CLOSE as usize] = Some(handlers::sys_pipe_close);
+    handlers[SYS_PIPE_READ_TIMEOUT as usize] = Some(handlers::sys_pipe_read_timeout);
     handlers[SYS_SHM_CREATE as usize] = Some(handlers::sys_shm_create);
     handlers[SYS_SHM_SIZE as usize] = Some(handlers::sys_shm_size);
     handlers[SYS_SHM_CLOSE as usize] = Some(handlers::sys_shm_close);
@@ -252,6 +257,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SEM_WAIT as usize] = Some(handlers::sys_sem_wait);
     handlers[SYS_SEM_TRY_WAIT as usize] = Some(handlers::sys_sem_try_wait);
     handlers[SYS_SEM_CLOSE as usize] = Some(handlers::sys_sem_close);
+    handlers[SYS_SEM_WAIT_TIMEOUT as usize] = Some(handlers::sys_sem_wait_timeout);
 
     // Time and timers (10–19).
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);

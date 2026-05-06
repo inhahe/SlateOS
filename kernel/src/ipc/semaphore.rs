@@ -316,6 +316,127 @@ pub fn try_wait(handle: SemHandle) -> KernelResult<()> {
     }
 }
 
+/// Wait (acquire) with a timeout — decrement if count > 0, or block
+/// up to `timeout_ns` nanoseconds.
+///
+/// Returns `Err(TimedOut)` if the timeout expires before a signal
+/// occurs.  `timeout_ns = 0` is equivalent to `try_wait()` (returns
+/// `Err(TimedOut)` instead of `Err(WouldBlock)` when count is 0).
+///
+/// # Returns
+///
+/// - `Ok(())` — unit acquired.
+/// - `Err(TimedOut)` — no signal within the deadline.
+/// - `Err(ChannelClosed)` — semaphore closed while waiting.
+/// - `Err(InvalidHandle)` — not found.
+pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
+    // Fast path: try without blocking.
+    {
+        let mut table = SEM_TABLE.lock();
+        let sem = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
+
+        if sem.count > 0 {
+            sem.count = sem.count.saturating_sub(1);
+            return Ok(());
+        }
+
+        if sem.closed {
+            return Err(KernelError::ChannelClosed);
+        }
+    }
+
+    // Non-blocking mode.
+    if timeout_ns == 0 {
+        return Err(KernelError::TimedOut);
+    }
+
+    // Schedule a timer to wake us at the deadline.
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+    let task_id = sched::current_task_id();
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task_id);
+
+    // Block loop.
+    loop {
+        {
+            let mut table = SEM_TABLE.lock();
+            let sem = table
+                .get_mut(&handle.id())
+                .ok_or_else(|| {
+                    crate::hrtimer::cancel(timer_handle);
+                    KernelError::ChannelClosed
+                })?;
+
+            if sem.closed {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::ChannelClosed);
+            }
+
+            if sem.count > 0 {
+                sem.count = sem.count.saturating_sub(1);
+                crate::hrtimer::cancel(timer_handle);
+                return Ok(());
+            }
+
+            // Check timeout.
+            if crate::hrtimer::now_ns() >= deadline_ns {
+                // Remove ourselves from the waiter queue if present.
+                if let Some(pos) = sem.waiters.iter().position(|&id| id == task_id) {
+                    sem.waiters.remove(pos);
+                }
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::TimedOut);
+            }
+
+            // Register as a waiter.
+            if sem.waiters.len() >= MAX_WAITERS {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::WouldBlock);
+            }
+            // Only add if not already in the queue (re-entry from loop).
+            if !sem.waiters.iter().any(|&id| id == task_id) {
+                sem.waiters.push_back(task_id);
+            }
+        }
+
+        sched::block_current();
+
+        // Woken by either signal() or timer.
+        // If signal() woke us, it already removed us from the queue
+        // and consumed a unit on our behalf → check the table.
+        {
+            let table = SEM_TABLE.lock();
+            match table.get(&handle.id()) {
+                None => {
+                    crate::hrtimer::cancel(timer_handle);
+                    return Err(KernelError::ChannelClosed);
+                }
+                Some(sem) if sem.closed => {
+                    crate::hrtimer::cancel(timer_handle);
+                    return Err(KernelError::ChannelClosed);
+                }
+                Some(sem) => {
+                    // If we're no longer in the waiter queue, signal()
+                    // consumed a unit for us.
+                    if !sem.waiters.iter().any(|&id| id == task_id) {
+                        crate::hrtimer::cancel(timer_handle);
+                        return Ok(());
+                    }
+                    // Otherwise, timer woke us — loop back to check timeout.
+                }
+            }
+        }
+    }
+}
+
 /// Get the current count (non-consuming peek).
 ///
 /// Returns the current count, or `Err(InvalidHandle)`.

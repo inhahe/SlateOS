@@ -2767,15 +2767,19 @@ static DEFERRED_WAKES_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Queue a deferred wake for a task.
 ///
-/// Called from ISR context when `try_wake` fails (scheduler lock
+/// Called from ISR context when [`try_wake`] fails (scheduler lock
 /// contended by the interrupted code path).  The deferred wake will
 /// be processed on the next timer tick by [`process_deferred_wakes`].
+///
+/// This is public because timer callbacks (hrtimer) fire from ISR
+/// context and need the `try_wake` → `defer_wake` fallback pattern
+/// to reliably wake blocked tasks.
 ///
 /// If the queue is full (extremely unlikely — 32 slots), the wake is
 /// dropped.  The task will remain blocked until another explicit wake
 /// occurs.  This should never happen in practice because the queue
 /// drains every tick (10ms).
-fn defer_wake(task_id: TaskId) {
+pub fn defer_wake(task_id: TaskId) {
     for slot in &DEFERRED_WAKES {
         // CAS: claim an empty slot.
         if slot

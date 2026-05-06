@@ -392,6 +392,17 @@ pub const SYS_CHANNEL_TRY_RECV: u64 = 203;
 /// `arg0`: channel handle.
 pub const SYS_CHANNEL_CLOSE: u64 = 204;
 
+/// Receive a message with a timeout (nanoseconds).
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to caller-provided buffer for the message.
+/// `arg2`: buffer size.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: message length on success, `TimedOut` if deadline expires,
+/// `ChannelClosed` if peer closed.
+pub const SYS_CHANNEL_RECV_TIMEOUT: u64 = 205;
+
 /// Block the current task if `*addr == expected`.
 ///
 /// `arg0`: pointer to a 32-bit futex word (must be 4-byte aligned).
@@ -471,6 +482,16 @@ pub const SYS_PIPE_TRY_READ: u64 = 224;
 ///
 /// `arg0`: pipe handle.
 pub const SYS_PIPE_CLOSE: u64 = 225;
+
+/// Read from a pipe with a timeout (nanoseconds).
+///
+/// `arg0`: pipe handle (read end).
+/// `arg1`: pointer to caller-provided buffer.
+/// `arg2`: buffer size.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: bytes read, 0 if EOF, `TimedOut` if deadline expires.
+pub const SYS_PIPE_READ_TIMEOUT: u64 = 226;
 
 /// Create a shared memory region.
 ///
@@ -666,6 +687,14 @@ pub const SYS_SEM_TRY_WAIT: u64 = 273;
 ///
 /// Returns: 0 on success.
 pub const SYS_SEM_CLOSE: u64 = 274;
+
+/// Wait (acquire) a semaphore with a timeout (nanoseconds).
+///
+/// `arg0`: semaphore handle.
+/// `arg1`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: 0 on success, `TimedOut` if deadline expires.
+pub const SYS_SEM_WAIT_TIMEOUT: u64 = 275;
 
 // ---------------------------------------------------------------------------
 // Security syscalls (400–499)

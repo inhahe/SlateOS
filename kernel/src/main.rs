@@ -1278,6 +1278,11 @@ extern "C" fn kmain() -> ! {
     // Verifies scheduling, cancellation, ordering, and repeating timers.
     hrtimer::self_test();
 
+    // Channel recv_timeout self-test (requires hrtimer for sleep_ms).
+    if let Err(e) = ipc::channel::self_test_timeout() {
+        serial_println!("[FATAL] Channel timeout self-test failed: {:?}", e);
+    }
+
     // Step 22e: CSPRNG self-test.
     // Verifies output quality now that we've accumulated some interrupt
     // entropy during the boot process (ISR timing mixed in).

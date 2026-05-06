@@ -28,6 +28,7 @@
 pub mod acl;
 #[allow(dead_code)]
 pub mod ar;
+pub mod audit;
 pub mod associations;
 #[allow(dead_code)]
 pub mod bzip2;

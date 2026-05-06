@@ -3103,6 +3103,7 @@ const COMMANDS: &[&str] = &[
     "overlay",
     "mkfifo", "lspipe", "pipes",
     "tmpwatch",
+    "audit",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4324,6 +4325,7 @@ fn dispatch(line: &str) {
         "mkfifo" => cmd_mkfifo(args),
         "lspipe" | "pipes" => cmd_lspipe(args),
         "tmpwatch" => cmd_tmpwatch(args),
+        "audit" => cmd_audit(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -10070,6 +10072,215 @@ fn cmd_tmpwatch(args: &str) {
     }
 }
 
+/// `audit` — filesystem audit logging.
+///
+/// Usage:
+///   audit                          - show status
+///   audit enable / disable         - toggle
+///   audit log [-n N]               - show recent entries
+///   audit add-rule [PATH_PREFIX] [--writes|--security|--all] [--uid UID] [--failures]
+///   audit rm-rule ID               - remove rule
+///   audit rules                    - list rules
+///   audit search [--op OP] [--path PREFIX] [--uid UID] [--failures]
+///   audit clear                    - clear log buffer
+///   audit stats                    - show statistics
+fn cmd_audit(args: &str) {
+    use crate::fs::audit;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        // Show status.
+        let s = audit::stats();
+        shell_println!("Audit: {}", if s.enabled { "enabled" } else { "disabled" });
+        shell_println!("  Rules:        {}", s.rules_count);
+        shell_println!("  Buffer:       {}/{}", s.buffer_used, s.buffer_size);
+        shell_println!("  Total events: {}", s.total_events);
+        shell_println!("  Dropped:      {}", s.dropped_events);
+        return;
+    }
+
+    match parts[0] {
+        "enable" => {
+            audit::enable();
+            shell_println!("Audit logging enabled.");
+        }
+        "disable" => {
+            audit::disable();
+            shell_println!("Audit logging disabled.");
+        }
+
+        "log" | "show" => {
+            let n = if parts.len() > 1 {
+                if parts[1] == "-n" && parts.len() > 2 {
+                    parts[2].parse::<usize>().unwrap_or(20)
+                } else {
+                    parts[1].parse::<usize>().unwrap_or(20)
+                }
+            } else {
+                20
+            };
+            let entries = audit::recent(n);
+            if entries.is_empty() {
+                shell_println!("No audit entries.");
+                return;
+            }
+            shell_println!("{:<6} {:<10} {:<8} {:>5} {:<5} {}",
+                "Seq", "Timestamp", "Op", "UID", "OK?", "Path");
+            shell_println!("{}", "-".repeat(70));
+            for e in &entries {
+                let ok = if e.success { "OK" } else { "FAIL" };
+                let path_display = if let Some(p2) = &e.path2 {
+                    alloc::format!("{} -> {}", e.path, p2)
+                } else {
+                    e.path.clone()
+                };
+                shell_println!("{:<6} {:<10} {:<8} {:>5} {:<5} {}",
+                    e.seq, e.timestamp, e.op.name(), e.uid, ok, path_display);
+            }
+        }
+
+        "add-rule" => {
+            let mut prefix = "";
+            let mut mask = audit::AuditMask::ALL;
+            let mut uid: Option<u32> = None;
+            let mut failures = false;
+
+            let mut i = 1;
+            while i < parts.len() {
+                match parts[i] {
+                    "--writes" => mask = audit::AuditMask::WRITES,
+                    "--security" => mask = audit::AuditMask::SECURITY,
+                    "--all" => mask = audit::AuditMask::ALL,
+                    "--failures" => failures = true,
+                    "--uid" => {
+                        if i + 1 < parts.len() {
+                            i += 1;
+                            uid = parts[i].parse::<u32>().ok();
+                        }
+                    }
+                    _ => prefix = parts[i],
+                }
+                i += 1;
+            }
+
+            let id = audit::add_rule(prefix, mask, uid, failures);
+            shell_println!("Audit rule {} added (prefix='{}', mask=0x{:X}, uid={:?}, failures_only={})",
+                id, prefix, mask.0, uid, failures);
+        }
+
+        "rm-rule" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: audit rm-rule ID");
+                return;
+            }
+            if let Ok(id) = parts[1].parse::<u64>() {
+                if audit::remove_rule(id) {
+                    shell_println!("Rule {} removed.", id);
+                } else {
+                    shell_println!("Rule {} not found.", id);
+                }
+            } else {
+                shell_println!("Invalid rule ID: {}", parts[1]);
+            }
+        }
+
+        "rules" => {
+            let rules = audit::list_rules();
+            if rules.is_empty() {
+                shell_println!("No audit rules configured.");
+                return;
+            }
+            shell_println!("{:<4} {:<6} {:<24} {:>10} {:>6} {}",
+                "ID", "Active", "Path prefix", "Mask", "UID", "Flags");
+            shell_println!("{}", "-".repeat(60));
+            for r in &rules {
+                let flags = if r.failures_only { "fail-only" } else { "" };
+                let uid_str = r.uid.map(|u| alloc::format!("{}", u)).unwrap_or_else(|| String::from("*"));
+                shell_println!("{:<4} {:<6} {:<24} 0x{:>08X} {:>6} {}",
+                    r.id, if r.enabled { "yes" } else { "no" },
+                    if r.path_prefix.is_empty() { "(all)" } else { &r.path_prefix },
+                    r.mask.0, uid_str, flags);
+            }
+        }
+
+        "search" => {
+            let mut op_filter: Option<audit::AuditOp> = None;
+            let mut path_prefix: Option<&str> = None;
+            let mut uid_filter: Option<u32> = None;
+            let mut failures = false;
+
+            let mut i = 1;
+            while i < parts.len() {
+                match parts[i] {
+                    "--op" => {
+                        if i + 1 < parts.len() {
+                            i += 1;
+                            op_filter = match parts[i].to_uppercase().as_str() {
+                                "READ" => Some(audit::AuditOp::Read),
+                                "WRITE" => Some(audit::AuditOp::Write),
+                                "DELETE" => Some(audit::AuditOp::Delete),
+                                "RENAME" => Some(audit::AuditOp::Rename),
+                                "CHMOD" => Some(audit::AuditOp::Chmod),
+                                "CHOWN" => Some(audit::AuditOp::Chown),
+                                "MKDIR" => Some(audit::AuditOp::Mkdir),
+                                "RMDIR" => Some(audit::AuditOp::Rmdir),
+                                _ => None,
+                            };
+                        }
+                    }
+                    "--path" => {
+                        if i + 1 < parts.len() {
+                            i += 1;
+                            path_prefix = Some(parts[i]);
+                        }
+                    }
+                    "--uid" => {
+                        if i + 1 < parts.len() {
+                            i += 1;
+                            uid_filter = parts[i].parse::<u32>().ok();
+                        }
+                    }
+                    "--failures" => failures = true,
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            let results = audit::search(50, op_filter, path_prefix, uid_filter, failures);
+            if results.is_empty() {
+                shell_println!("No matching entries.");
+                return;
+            }
+            for e in &results {
+                let ok = if e.success { "OK" } else { "FAIL" };
+                shell_println!("[{}] {} uid={} {} {} {}",
+                    e.seq, e.op.name(), e.uid, ok, e.path,
+                    e.path2.as_deref().unwrap_or(""));
+            }
+            shell_println!("({} results)", results.len());
+        }
+
+        "clear" => {
+            audit::clear();
+            shell_println!("Audit log cleared.");
+        }
+
+        "stats" => {
+            let s = audit::stats();
+            shell_println!("Audit statistics:");
+            shell_println!("  Enabled:      {}", s.enabled);
+            shell_println!("  Rules:        {}", s.rules_count);
+            shell_println!("  Buffer:       {}/{} entries", s.buffer_used, s.buffer_size);
+            shell_println!("  Total events: {}", s.total_events);
+            shell_println!("  Dropped:      {}", s.dropped_events);
+        }
+
+        _ => {
+            shell_println!("Usage: audit [enable|disable|log|add-rule|rm-rule|rules|search|clear|stats]");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -15205,7 +15416,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

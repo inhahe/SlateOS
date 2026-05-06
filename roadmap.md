@@ -182,6 +182,8 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Syscall dispatch (many specialized syscalls, not few generic ones)
 - [x] Versioned syscall tables
 - [x] Channel IPC (Fuchsia-style, structured message-passing with capability transfer)
+  - [x] Synchronous (rendezvous) channel mode (L4/seL4-style, zero-buffer, CHANNEL_FLAG_SYNC on SYS_CHANNEL_CREATE)
+  - [x] Process death IPC resource cleanup (track handles in PCB, release on reap)
 - [x] One-way pipes (byte streams)
 - [x] Shared memory regions
 - [x] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)

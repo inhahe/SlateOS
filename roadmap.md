@@ -213,6 +213,11 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Console I/O syscalls (SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR — bootstrap console for early userspace)
 - [x] Filesystem I/O syscalls (SYS_FS_READ_FILE through SYS_FS_STAT — stateless whole-file operations via VFS)
 - [x] Timer syscalls (SYS_CLOCK_MONOTONIC, SYS_SLEEP — lock-free sleep queue, 10ms resolution)
+- [x] Service registry (named service discovery + connection brokering):
+  - [x] register(name) → listener handle, connect(name) → client channel
+  - [x] accept / try_accept / accept_timeout for server-side connection pickup
+  - [x] Unregister closes pending connections, wakes blocked acceptors
+  - [x] SYS_SERVICE_REGISTER (280) through SYS_SERVICE_UNREGISTER (285)
 - [ ] Per-process namespace support (mount table remapping for sandboxing)
 
 ### 1.5 Capability / security model

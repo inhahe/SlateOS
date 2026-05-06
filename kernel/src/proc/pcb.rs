@@ -666,9 +666,14 @@ pub fn destroy(pid: ProcessId) {
 
     let mut table = PROCESS_TABLE.lock();
     if let Some(proc) = table.remove(&pid) {
-        // Free the entire user address space (mapped frames,
-        // intermediate page tables, and the PML4 page).
         if proc.pml4_phys != 0 {
+            // Free DMA buffers allocated for this process before
+            // destroying the address space (DMA buffers are tracked
+            // separately from normal page table entries).
+            crate::mm::dma::free_all_for_process(proc.pml4_phys);
+
+            // Free the entire user address space (mapped frames,
+            // intermediate page tables, and the PML4 page).
             // SAFETY: The process is being destroyed — no threads
             // are running in this address space, and no CPU has
             // this PML4 loaded in CR3.  All user-half pages were

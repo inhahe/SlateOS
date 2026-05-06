@@ -651,6 +651,29 @@ pub fn irq_unregister_task(irq: u32) {
     }
 }
 
+/// Release all IRQ registrations belonging to a specific task.
+///
+/// Called during task cleanup (e.g., driver process exit) to ensure
+/// no dangling registrations remain.  Scans all 24 IRQ lines — O(1)
+/// for the fixed-size table.
+///
+/// For each IRQ owned by `task_id`, unmasks are NOT reversed (the
+/// device may need re-initialization by the replacement driver).
+/// Only the wait-task registration is cleared so the dead task won't
+/// be spuriously woken.
+pub fn release_irqs_for_task(task_id: u64) {
+    for slot in &IRQ_WAIT_TASK {
+        // CAS to avoid clearing a slot that was re-registered by
+        // another task between load and store.
+        let _ = slot.compare_exchange(
+            task_id,
+            u64::MAX,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+}
+
 /// Process deferred IRQ wake-ups.
 ///
 /// Scans all IRQ lines for pending notifications and tries to wake

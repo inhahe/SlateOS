@@ -373,6 +373,10 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         owners.remove(&task_id)?
     };
 
+    // Clean up any IRQ registrations owned by this task.
+    // This prevents dangling registrations when a driver process crashes.
+    crate::ioapic::release_irqs_for_task(task_id);
+
     // Remove from the process's thread list.
     match pcb::remove_thread(pid, task_id) {
         Ok((is_zombie, wake_task)) => {

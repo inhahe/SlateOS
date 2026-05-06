@@ -269,7 +269,13 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] Interrupt delivery from kernel to driver (IOAPIC + IRQ syscalls)
   - [x] Port I/O syscalls for legacy devices (SYS_PORT_READ/WRITE)
   - [x] DMA mapping setup syscalls (mm::dma — alloc/free, user mapping, constraint support)
-  - [ ] Driver crash detection and automatic restart
+  - [x] Driver crash detection and automatic restart
+    - [x] CrashInfo struct: exception code, faulting RIP, aux, thread ID
+    - [x] Negative exit code convention: crash = -(exception_code)
+    - [x] IDT exception handler records crash info before process death
+    - [x] try_reap returns ExitInfo (exit_code + optional CrashInfo)
+    - [x] SYS_PROCESS_CRASH_INFO (516) syscall for crash diagnostics
+    - [x] Init service manager already has auto-restart with exponential backoff
 - [ ] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing

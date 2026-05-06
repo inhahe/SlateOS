@@ -403,6 +403,35 @@ pub const SYS_CHANNEL_CLOSE: u64 = 204;
 /// `ChannelClosed` if peer closed.
 pub const SYS_CHANNEL_RECV_TIMEOUT: u64 = 205;
 
+/// Send a message with capability transfer.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message data.
+/// `arg2`: message data length.
+/// `arg3`: pointer to array of capability handle u64s.
+/// `arg4`: number of capability handles.
+///
+/// Caps are moved from the sender's process table into the message
+/// (move semantics — sender loses the handles).
+///
+/// Returns: 0 on success, negative error code on failure.
+/// All-or-nothing: if any cap handle is invalid, nothing is sent.
+pub const SYS_CHANNEL_SEND_CAPS: u64 = 206;
+
+/// Receive a message with capability transfer (blocking).
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message receive buffer.
+/// `arg2`: message buffer capacity.
+/// `arg3`: pointer to output array for new capability handle u64s.
+/// `arg4`: capacity of the cap handle output array.
+///
+/// Returns (in rax): message data length.
+/// Returns (in rdx): number of capability handles received.
+///
+/// The received cap handles are new values in the receiver's table.
+pub const SYS_CHANNEL_RECV_CAPS: u64 = 207;
+
 /// Block the current task if `*addr == expected`.
 ///
 /// `arg0`: pointer to a 32-bit futex word (must be 4-byte aligned).

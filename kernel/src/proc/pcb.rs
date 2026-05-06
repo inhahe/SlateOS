@@ -315,6 +315,76 @@ pub fn check_capability(
     Ok(())
 }
 
+/// Remove capability entries from a process table (for cap transfer).
+///
+/// Validates all handles first (all-or-nothing).  If any handle is
+/// invalid, no changes are made.  On success, returns the detached
+/// entries in the same order as `handles`.
+///
+/// # Errors
+///
+/// - `NoSuchProcess` — PID not found.
+/// - `InvalidCapability` — one of the handles is invalid or revoked.
+pub fn remove_caps(
+    pid: ProcessId,
+    handles: &[u64],
+) -> KernelResult<Vec<cap::table::CapEntry>> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    // Validate all first.
+    for &raw in handles {
+        let h = cap::table::CapHandle::from_raw(raw);
+        proc.cap_table.lookup(h)?;
+    }
+
+    // Remove all (guaranteed to succeed since we just validated).
+    let mut entries = Vec::new();
+    for &raw in handles {
+        let h = cap::table::CapHandle::from_raw(raw);
+        if let Some(entry) = proc.cap_table.remove(h) {
+            entries.push(entry);
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Insert capability entries into a process table (for cap transfer).
+///
+/// Used by the IPC layer when delivering messages that carry
+/// transferred capabilities.
+///
+/// # Returns
+///
+/// A vector of the new handle values assigned in the receiver's table.
+/// If the table is full for some entries, those are dropped (lost) and
+/// a shorter vector is returned.
+pub fn insert_caps(
+    pid: ProcessId,
+    entries: &[(crate::cap::ResourceType, u64, Rights)],
+) -> KernelResult<Vec<u64>> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    let mut new_handles = Vec::new();
+    for &(resource_type, resource_id, rights) in entries {
+        match proc.cap_table.insert(resource_type, resource_id, rights) {
+            Ok(h) => new_handles.push(h.raw()),
+            Err(_) => {
+                // Table full — silently drop this entry.
+                // The caller can detect this by comparing counts.
+            }
+        }
+    }
+
+    Ok(new_handles)
+}
+
 /// Set the exit code for a process.
 ///
 /// Typically called before the process transitions to Zombie state

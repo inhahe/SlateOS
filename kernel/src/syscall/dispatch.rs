@@ -67,6 +67,7 @@ use super::number::{
     SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_WAIT, SYS_SEM_TRY_WAIT, SYS_SEM_CLOSE,
     SYS_SEM_WAIT_TIMEOUT,
     SYS_CHANNEL_RECV_TIMEOUT,
+    SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_RECV_CAPS,
     SYS_PIPE_READ_TIMEOUT,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_DNS_RESOLVE,
@@ -219,6 +220,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CHANNEL_TRY_RECV as usize] = Some(handlers::sys_channel_try_recv);
     handlers[SYS_CHANNEL_CLOSE as usize] = Some(handlers::sys_channel_close);
     handlers[SYS_CHANNEL_RECV_TIMEOUT as usize] = Some(handlers::sys_channel_recv_timeout);
+    handlers[SYS_CHANNEL_SEND_CAPS as usize] = Some(handlers::sys_channel_send_caps);
+    handlers[SYS_CHANNEL_RECV_CAPS as usize] = Some(handlers::sys_channel_recv_caps);
     handlers[SYS_FUTEX_WAIT as usize] = Some(handlers::sys_futex_wait);
     handlers[SYS_FUTEX_WAKE as usize] = Some(handlers::sys_futex_wake);
     handlers[SYS_FUTEX_LOCK_PI as usize] = Some(handlers::sys_futex_lock_pi);

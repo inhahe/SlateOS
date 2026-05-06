@@ -131,10 +131,35 @@ impl ChannelHandle {
 // Message
 // ---------------------------------------------------------------------------
 
-/// A channel message: a variable-length byte buffer.
+/// Maximum number of capability handles per message.
 ///
-/// In the future, this will also carry capability handles for
-/// cross-process capability transfer.
+/// Limits memory pressure from a single message.  Fuchsia channels
+/// allow 64 handles per message — we match that.
+const MAX_CAPS_PER_MESSAGE: usize = 64;
+
+/// A capability entry in transit (detached from any process table).
+///
+/// When a sender transfers capabilities through a channel, the kernel
+/// removes the entries from the sender's cap table and stores them
+/// inside the message until the receiver dequeues it.  At that point,
+/// the entries are inserted into the receiver's cap table.
+#[derive(Debug, Clone)]
+pub struct TransferredCap {
+    /// What type of resource this refers to.
+    pub resource_type: crate::cap::ResourceType,
+    /// The kernel-internal identifier for the resource.
+    pub resource_id: u64,
+    /// Permitted operations on this resource.
+    pub rights: crate::cap::Rights,
+}
+
+/// A channel message: a variable-length byte buffer with optional
+/// capability transfers.
+///
+/// Messages carry both data (arbitrary bytes) and optionally one or
+/// more capability handles.  Transferred capabilities are moved from
+/// the sender's process table into the message and then into the
+/// receiver's table on delivery — move semantics, no duplication.
 pub struct Message {
     /// Message payload.
     ///
@@ -142,16 +167,21 @@ pub struct Message {
     /// their contents in debug output is rarely useful.  Use
     /// `msg.len()` and `msg.data()` for inspection.
     data: Vec<u8>,
+
+    /// Capability entries in transit (transferred from sender to receiver).
+    ///
+    /// Empty if no capabilities are being transferred.
+    caps: Vec<TransferredCap>,
 }
 
 impl core::fmt::Debug for Message {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Message({} bytes)", self.data.len())
+        write!(f, "Message({} bytes, {} caps)", self.data.len(), self.caps.len())
     }
 }
 
 impl Message {
-    /// Create a message from a byte slice.
+    /// Create a message from a byte slice (no capabilities).
     ///
     /// The data is copied into a heap-allocated buffer.
     pub fn from_bytes(data: &[u8]) -> KernelResult<Self> {
@@ -160,6 +190,25 @@ impl Message {
         }
         Ok(Self {
             data: Vec::from(data),
+            caps: Vec::new(),
+        })
+    }
+
+    /// Create a message with both data and capability transfers.
+    ///
+    /// `caps` contains capability entries that have been detached from
+    /// the sender's table and will be inserted into the receiver's
+    /// table on delivery.
+    pub fn from_bytes_and_caps(data: &[u8], caps: Vec<TransferredCap>) -> KernelResult<Self> {
+        if data.len() > MAX_MESSAGE_SIZE {
+            return Err(KernelError::MessageTooLarge);
+        }
+        if caps.len() > MAX_CAPS_PER_MESSAGE {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(Self {
+            data: Vec::from(data),
+            caps,
         })
     }
 
@@ -179,6 +228,27 @@ impl Message {
     #[must_use]
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    /// Number of capability entries in transit.
+    #[must_use]
+    pub fn cap_count(&self) -> usize {
+        self.caps.len()
+    }
+
+    /// Take the transferred capabilities out of the message.
+    ///
+    /// After this call, the message no longer carries any capabilities.
+    /// The caller (typically `recv_with_caps`) is responsible for
+    /// inserting them into the receiver's table.
+    pub fn take_caps(&mut self) -> Vec<TransferredCap> {
+        core::mem::take(&mut self.caps)
+    }
+
+    /// Read-only view of transferred capabilities.
+    #[must_use]
+    pub fn caps(&self) -> &[TransferredCap] {
+        &self.caps
     }
 }
 
@@ -298,6 +368,141 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
     }
 
     Ok(())
+}
+
+/// Send a message with capability transfer.
+///
+/// This is the primary mechanism for passing kernel object access
+/// between processes.  The `cap_handles` are removed from the
+/// sender's capability table (move semantics) and attached to the
+/// message.  When the receiver calls `recv_with_caps`, the capabilities
+/// are inserted into their table with new handles.
+///
+/// # Arguments
+///
+/// - `handle`: the channel endpoint to send on.
+/// - `data`: message payload bytes.
+/// - `cap_handles`: raw capability handle values from the sender's table.
+/// - `sender_pid`: the PID of the sending process (for cap table access).
+///
+/// # Errors
+///
+/// - [`ChannelClosed`] — peer endpoint closed.
+/// - [`ChannelFull`] — peer's queue is full.
+/// - [`InvalidHandle`] — channel doesn't exist.
+/// - [`InvalidCapability`] — one of the cap handles is invalid.
+/// - [`InvalidArgument`] — too many caps (> 64).
+///
+/// On error, no caps are transferred (all-or-nothing).
+///
+/// [`ChannelClosed`]: KernelError::ChannelClosed
+/// [`ChannelFull`]: KernelError::ChannelFull
+/// [`InvalidHandle`]: KernelError::InvalidHandle
+/// [`InvalidCapability`]: KernelError::InvalidCapability
+pub fn send_with_caps(
+    handle: ChannelHandle,
+    data: &[u8],
+    cap_handles: &[u64],
+    sender_pid: u64,
+) -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    if cap_handles.len() > MAX_CAPS_PER_MESSAGE {
+        return Err(KernelError::InvalidArgument);
+    }
+    if data.len() > MAX_MESSAGE_SIZE {
+        return Err(KernelError::MessageTooLarge);
+    }
+
+    // Phase 1: Extract caps from sender's table (all-or-nothing).
+    let transferred: Vec<TransferredCap> = if cap_handles.is_empty() {
+        Vec::new()
+    } else {
+        let entries = pcb::remove_caps(sender_pid, cap_handles)?;
+        entries
+            .into_iter()
+            .map(|e| TransferredCap {
+                resource_type: e.resource_type,
+                resource_id: e.resource_id,
+                rights: e.rights,
+            })
+            .collect()
+    };
+
+    // Phase 2: Build message and enqueue.
+    let msg = Message::from_bytes_and_caps(data, transferred)?;
+    send(handle, msg)
+}
+
+/// Receive a message and extract transferred capabilities.
+///
+/// Dequeues a message, inserts any transferred capability entries
+/// into the receiver's process table, and returns the data + new
+/// capability handles.
+///
+/// # Arguments
+///
+/// - `handle`: the channel endpoint to receive on.
+/// - `receiver_pid`: the PID of the receiving process.
+///
+/// # Returns
+///
+/// - `Ok((msg_data, cap_handles))` — the payload and new handle values.
+/// - `Err(ChannelClosed)` — peer closed and queue drained.
+/// - `Err(InvalidHandle)` — channel doesn't exist.
+pub fn recv_with_caps(
+    handle: ChannelHandle,
+    receiver_pid: u64,
+) -> KernelResult<(Vec<u8>, Vec<u64>)> {
+    use crate::proc::pcb;
+
+    // Use blocking recv to get the message.
+    let mut msg = recv(handle)?;
+
+    // Extract caps and insert into receiver's table.
+    let caps = msg.take_caps();
+    let new_handles = if caps.is_empty() {
+        Vec::new()
+    } else {
+        let entries: Vec<_> = caps
+            .iter()
+            .map(|c| (c.resource_type, c.resource_id, c.rights))
+            .collect();
+        // insert_caps returns only successfully inserted handles;
+        // caps dropped due to table-full are silently lost.
+        pcb::insert_caps(receiver_pid, &entries)?
+    };
+
+    Ok((msg.into_data(), new_handles))
+}
+
+/// Try to receive a message with capability extraction (non-blocking).
+///
+/// Same as [`recv_with_caps`] but returns immediately if no message
+/// is available.
+pub fn try_recv_with_caps(
+    handle: ChannelHandle,
+    receiver_pid: u64,
+) -> KernelResult<Option<(Vec<u8>, Vec<u64>)>> {
+    use crate::proc::pcb;
+
+    let mut msg = match try_recv(handle)? {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let caps = msg.take_caps();
+    let new_handles = if caps.is_empty() {
+        Vec::new()
+    } else {
+        let entries: Vec<_> = caps
+            .iter()
+            .map(|c| (c.resource_type, c.resource_id, c.rights))
+            .collect();
+        pcb::insert_caps(receiver_pid, &entries)?
+    };
+
+    Ok(Some((msg.into_data(), new_handles)))
 }
 
 /// Check if a channel has pending messages (non-consuming).
@@ -547,6 +752,7 @@ pub fn self_test() -> KernelResult<()> {
 /// which depends on the high-resolution timer subsystem.
 pub fn self_test_timeout() -> KernelResult<()> {
     test_recv_timeout()?;
+    test_cap_transfer_message()?;
     Ok(())
 }
 
@@ -855,5 +1061,92 @@ fn test_recv_timeout() -> KernelResult<()> {
     close(ep1);
 
     serial_println!("[ipc]   Receive with timeout: OK");
+    Ok(())
+}
+
+/// Test 7: Capability transfer in messages — verifies Message can carry
+/// `TransferredCap` entries and they survive send/recv through a channel.
+fn test_cap_transfer_message() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+
+    // Create a channel pair.
+    let (ep0, ep1) = create();
+
+    // Build a message with caps attached.
+    let caps = alloc::vec![
+        TransferredCap {
+            resource_type: ResourceType::Channel,
+            resource_id: 42,
+            rights: Rights::READ,
+        },
+        TransferredCap {
+            resource_type: ResourceType::File,
+            resource_id: 100,
+            rights: Rights::ALL,
+        },
+    ];
+    let msg = Message::from_bytes_and_caps(b"hello-caps", caps)?;
+
+    // Verify message state before send.
+    if msg.cap_count() != 2 {
+        serial_println!("[ipc]   FAIL: cap_count before send = {}", msg.cap_count());
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    // Send the message.
+    send(ep0, msg)?;
+
+    // Receive it on the other side.
+    let mut received = try_recv(ep1)?
+        .ok_or(KernelError::InternalError)?;
+
+    // Verify data.
+    if received.data() != b"hello-caps" {
+        serial_println!("[ipc]   FAIL: cap transfer data mismatch");
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify caps survived the transfer.
+    if received.cap_count() != 2 {
+        serial_println!("[ipc]   FAIL: cap_count after recv = {}", received.cap_count());
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    // Take the caps and verify contents.
+    let received_caps = received.take_caps();
+    if received_caps.len() != 2 {
+        serial_println!("[ipc]   FAIL: take_caps len = {}", received_caps.len());
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    if received_caps[0].resource_id != 42
+        || received_caps[1].resource_id != 100
+    {
+        serial_println!("[ipc]   FAIL: cap resource_id mismatch");
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    // After take_caps, message should have 0 caps.
+    if received.cap_count() != 0 {
+        serial_println!("[ipc]   FAIL: cap_count after take = {}", received.cap_count());
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    close(ep0);
+    close(ep1);
+
+    serial_println!("[ipc]   Capability transfer in message: OK");
     Ok(())
 }

@@ -904,6 +904,151 @@ pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_CHANNEL_SEND_CAPS` — send a message with capability transfer.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message data.
+/// `arg2`: message data length.
+/// `arg3`: pointer to array of u64 cap handles.
+/// `arg4`: number of cap handles.
+///
+/// Returns: 0 on success.
+pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
+    let handle = ChannelHandle::from_raw(args.arg0);
+    let data_ptr = args.arg1 as *const u8;
+    let data_len = args.arg2 as usize;
+    let caps_ptr = args.arg3 as *const u64;
+    let caps_count = args.arg4 as usize;
+
+    // Validate data buffer.
+    if data_ptr.is_null() && data_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Validate caps array.
+    if caps_ptr.is_null() && caps_count > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if caps_count > 0 {
+        let caps_bytes = caps_count.saturating_mul(8); // Each handle is u64 = 8 bytes.
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, caps_bytes) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above.
+        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    };
+
+    let cap_handles = if caps_count == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above.
+        unsafe { core::slice::from_raw_parts(caps_ptr, caps_count) }
+    };
+
+    // Get sender PID.
+    let sender_pid = match caller_pid() {
+        Some(pid) => pid,
+        None => 0, // Kernel task — no cap table management needed.
+    };
+
+    match channel::send_with_caps(handle, data, cap_handles, sender_pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_CHANNEL_RECV_CAPS` — receive a message with capability transfer.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message receive buffer.
+/// `arg2`: message buffer capacity.
+/// `arg3`: pointer to output array for u64 cap handles.
+/// `arg4`: capacity of the cap handle output array.
+///
+/// Returns (rax): message data length.
+/// Returns (rdx): number of capability handles received.
+pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
+    let handle = ChannelHandle::from_raw(args.arg0);
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+    let caps_out_ptr = args.arg3 as *mut u64;
+    let caps_out_cap = args.arg4 as usize;
+
+    // Validate message buffer.
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Validate caps output array.
+    if caps_out_ptr.is_null() && caps_out_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if caps_out_cap > 0 {
+        let caps_bytes = caps_out_cap.saturating_mul(8);
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, caps_bytes) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Get receiver PID.
+    let receiver_pid = match caller_pid() {
+        Some(pid) => pid,
+        None => 0,
+    };
+
+    match channel::recv_with_caps(handle, receiver_pid) {
+        Ok((data, new_handles)) => {
+            // Copy message data to user buffer.
+            let copy_len = data.len().min(buf_cap);
+            if copy_len > 0 {
+                // SAFETY: Buffer validated above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        buf_ptr,
+                        copy_len,
+                    );
+                }
+            }
+
+            // Copy cap handles to user output array.
+            let caps_copy = new_handles.len().min(caps_out_cap);
+            if caps_copy > 0 {
+                // SAFETY: Buffer validated above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        new_handles.as_ptr(),
+                        caps_out_ptr,
+                        caps_copy,
+                    );
+                }
+            }
+
+            #[allow(clippy::cast_possible_wrap)]
+            let msg_len = data.len() as i64;
+            #[allow(clippy::cast_possible_wrap)]
+            let caps_received = caps_copy as i64;
+            SyscallResult::ok2(msg_len, caps_received)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FUTEX_WAIT` — block if `*addr == expected`.
 ///
 /// `arg0`: pointer to 32-bit futex word (4-byte aligned).

@@ -212,7 +212,15 @@ pub fn record(op: AuditOp, pid: u32, handle: u32, rights: u8, target_pid: u16, r
     // Update counters.
     TOTAL_EVENTS.fetch_add(1, Ordering::Relaxed);
     match op {
-        AuditOp::Deny => { TOTAL_DENIALS.fetch_add(1, Ordering::Relaxed); }
+        AuditOp::Deny => {
+            TOTAL_DENIALS.fetch_add(1, Ordering::Relaxed);
+            // Security-relevant: log denials to the structured klog.
+            crate::klog::log_fmt(
+                crate::klog::Level::Warn,
+                "cap_audit",
+                format_args!("DENY pid={} handle={} rights={:#x}", pid, handle, rights),
+            );
+        }
         AuditOp::Grant => { TOTAL_GRANTS.fetch_add(1, Ordering::Relaxed); }
         AuditOp::Revoke => { TOTAL_REVOKES.fetch_add(1, Ordering::Relaxed); }
         _ => {}

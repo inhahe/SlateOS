@@ -904,6 +904,48 @@ pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_CHANNEL_SEND_TIMEOUT` — send with a deadline.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message data.
+/// `arg2`: message data length.
+/// `arg3`: timeout in nanoseconds (0 = return TimedOut if full).
+///
+/// Returns: 0 on success, `TimedOut` if deadline expires.
+pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = ChannelHandle::from_raw(args.arg0);
+    let data_ptr = args.arg1 as *const u8;
+    let data_len = args.arg2 as usize;
+    let timeout_ns = args.arg3;
+
+    if data_ptr.is_null() && data_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above — data_ptr is in user space, mapped, readable.
+        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    };
+
+    let msg = match Message::from_bytes(data) {
+        Ok(m) => m,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match channel::send_timeout(handle, msg, timeout_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_CHANNEL_SEND_CAPS` — send a message with capability transfer.
 ///
 /// `arg0`: channel handle.

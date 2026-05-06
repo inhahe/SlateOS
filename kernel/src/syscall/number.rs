@@ -403,6 +403,20 @@ pub const SYS_CHANNEL_CLOSE: u64 = 204;
 /// `ChannelClosed` if peer closed.
 pub const SYS_CHANNEL_RECV_TIMEOUT: u64 = 205;
 
+/// Send a message with a timeout (nanoseconds).
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message data.
+/// `arg2`: length of message data.
+/// `arg3`: timeout in nanoseconds (0 = return TimedOut if full).
+///
+/// Unlike `SYS_CHANNEL_SEND` which returns `ChannelFull` immediately,
+/// this variant blocks until queue space is available or the deadline
+/// expires.
+///
+/// Returns: 0 on success, `TimedOut` if deadline expires.
+pub const SYS_CHANNEL_SEND_TIMEOUT: u64 = 208;
+
 /// Send a message with capability transfer.
 ///
 /// `arg0`: channel handle.

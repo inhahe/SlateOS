@@ -27,9 +27,15 @@
 //! Channel round-trip: < 2 µs (Fuchsia: 1–2 µs, L4: 0.5–1 µs).
 //! See `bench/baselines.toml`.
 //!
+//! ## Blocking Send
+//!
+//! `send_blocking` blocks when the peer's queue is full (unlike `send`
+//! which returns [`ChannelFull`] immediately).  `send_timeout` adds a
+//! nanosecond deadline to the blocking behavior.  When the peer consumes
+//! a message, a blocked sender is woken.
+//!
 //! ## Future Optimizations (NOT YET IMPLEMENTED)
 //!
-//! - Capability handle transfer in messages.
 //! - Page flipping for large messages (zero-copy).
 //! - Fast-path register passing for tiny messages (L4-style).
 //! - Synchronous (rendezvous) mode.
@@ -273,6 +279,13 @@ struct Channel {
     /// its ID is stored here.  When the peer sends a message, the
     /// waiter is woken.
     waiters: [Option<TaskId>; 2],
+
+    /// Task blocked on send for each side (if any).
+    ///
+    /// When a task calls `send_blocking` or `send_timeout` and the
+    /// peer's queue is full, its ID is stored here.  When the peer
+    /// consumes a message (via recv/try_recv), the sender is woken.
+    sender_waiters: [Option<TaskId>; 2],
 }
 
 impl Channel {
@@ -281,6 +294,7 @@ impl Channel {
             queues: [VecDeque::new(), VecDeque::new()],
             closed: [false, false],
             waiters: [None, None],
+            sender_waiters: [None, None],
         }
     }
 }
@@ -368,6 +382,176 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
     }
 
     Ok(())
+}
+
+/// Send a message (blocking when queue is full).
+///
+/// Unlike [`send`], which returns [`ChannelFull`] immediately when the
+/// peer's queue is at capacity, this variant blocks the calling task
+/// until space becomes available.
+///
+/// # Errors
+///
+/// - [`ChannelClosed`] — the peer endpoint has been closed.
+/// - [`InvalidHandle`] — the channel does not exist.
+///
+/// [`ChannelFull`]: KernelError::ChannelFull
+/// [`ChannelClosed`]: KernelError::ChannelClosed
+/// [`InvalidHandle`]: KernelError::InvalidHandle
+pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
+    // Wrap the message in an Option so we can retry without cloning.
+    let mut pending = Some(msg);
+
+    loop {
+        let wake_task: Option<TaskId>;
+
+        {
+            let mut channels = CHANNELS.lock();
+            let ch = channels.get_mut(&handle.channel_id())
+                .ok_or(KernelError::InvalidHandle)?;
+
+            let our_side = handle.side();
+            if ch.closed[our_side] {
+                return Err(KernelError::ChannelClosed);
+            }
+
+            let peer = handle.peer_side();
+            if ch.closed[peer] {
+                return Err(KernelError::ChannelClosed);
+            }
+
+            // Check queue capacity.
+            if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
+                // Space available — enqueue.
+                if let Some(m) = pending.take() {
+                    ch.queues[peer].push_back(m);
+                }
+                wake_task = ch.waiters[peer].take();
+                drop(channels);
+
+                if let Some(task_id) = wake_task {
+                    sched::wake(task_id);
+                }
+                return Ok(());
+            }
+
+            // Queue full — register as sender waiter and block.
+            ch.sender_waiters[our_side] = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+    }
+}
+
+/// Send a message with a timeout (nanoseconds).
+///
+/// Blocks up to `timeout_ns` nanoseconds waiting for queue space.
+/// Returns `Err(TimedOut)` if the deadline expires.
+///
+/// `timeout_ns = 0` is equivalent to `send()` (returns `ChannelFull`
+/// remapped to `TimedOut` if no space).
+///
+/// # Errors
+///
+/// - [`TimedOut`] — no space within the deadline.
+/// - [`ChannelClosed`] — the peer has been closed.
+/// - [`InvalidHandle`] — the channel does not exist.
+///
+/// [`TimedOut`]: KernelError::TimedOut
+/// [`ChannelClosed`]: KernelError::ChannelClosed
+/// [`InvalidHandle`]: KernelError::InvalidHandle
+pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> KernelResult<()> {
+    // Fast path: try immediately.
+    {
+        let mut channels = CHANNELS.lock();
+        let ch = channels.get_mut(&handle.channel_id())
+            .ok_or(KernelError::InvalidHandle)?;
+
+        let our_side = handle.side();
+        if ch.closed[our_side] {
+            return Err(KernelError::ChannelClosed);
+        }
+
+        let peer = handle.peer_side();
+        if ch.closed[peer] {
+            return Err(KernelError::ChannelClosed);
+        }
+
+        if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
+            ch.queues[peer].push_back(msg);
+            let wake_task = ch.waiters[peer].take();
+            drop(channels);
+            if let Some(task_id) = wake_task {
+                sched::wake(task_id);
+            }
+            return Ok(());
+        }
+    }
+
+    // Non-blocking mode.
+    if timeout_ns == 0 {
+        return Err(KernelError::TimedOut);
+    }
+
+    // Schedule timer.
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    let timer_handle = crate::hrtimer::schedule_ns(
+        timeout_ns,
+        timeout_wake,
+        sched::current_task_id(),
+    );
+
+    // Wrap in Option for retry without clone.
+    let mut pending = Some(msg);
+
+    loop {
+        {
+            let mut channels = CHANNELS.lock();
+            let ch = channels.get_mut(&handle.channel_id())
+                .ok_or_else(|| {
+                    crate::hrtimer::cancel(timer_handle);
+                    KernelError::InvalidHandle
+                })?;
+
+            let our_side = handle.side();
+            if ch.closed[our_side] || ch.closed[handle.peer_side()] {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::ChannelClosed);
+            }
+
+            let peer = handle.peer_side();
+            if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
+                if let Some(m) = pending.take() {
+                    ch.queues[peer].push_back(m);
+                }
+                let wake_task = ch.waiters[peer].take();
+                crate::hrtimer::cancel(timer_handle);
+                drop(channels);
+                if let Some(task_id) = wake_task {
+                    sched::wake(task_id);
+                }
+                return Ok(());
+            }
+
+            // Check timeout.
+            if crate::hrtimer::now_ns() >= deadline_ns {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::TimedOut);
+            }
+
+            // Register as sender waiter.
+            ch.sender_waiters[our_side] = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+    }
 }
 
 /// Send a message with capability transfer.
@@ -546,6 +730,13 @@ pub fn try_recv(handle: ChannelHandle) -> KernelResult<Option<Message>> {
 
     // Try to dequeue a message.
     if let Some(msg) = ch.queues[our_side].pop_front() {
+        // We consumed a message — wake any sender blocked on full queue.
+        let wake_sender = ch.sender_waiters[handle.peer_side()].take();
+        drop(channels);
+
+        if let Some(task_id) = wake_sender {
+            sched::wake(task_id);
+        }
         return Ok(Some(msg));
     }
 
@@ -582,6 +773,12 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
             let our_side = handle.side();
 
             if let Some(msg) = ch.queues[our_side].pop_front() {
+                // Wake any sender blocked on full queue.
+                let wake_sender = ch.sender_waiters[handle.peer_side()].take();
+                drop(channels);
+                if let Some(task_id) = wake_sender {
+                    sched::wake(task_id);
+                }
                 return Ok(msg);
             }
 
@@ -657,8 +854,13 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
             let our_side = handle.side();
 
             if let Some(msg) = ch.queues[our_side].pop_front() {
-                // Got a message — cancel timer and return.
+                // Got a message — cancel timer, wake blocked sender, return.
                 crate::hrtimer::cancel(timer_handle);
+                let wake_sender = ch.sender_waiters[handle.peer_side()].take();
+                drop(channels);
+                if let Some(sid) = wake_sender {
+                    sched::wake(sid);
+                }
                 return Ok(msg);
             }
 
@@ -694,7 +896,7 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
 /// Closing an already-closed endpoint or an invalid handle is a
 /// no-op.
 pub fn close(handle: ChannelHandle) {
-    let wake_task: Option<TaskId>;
+    let mut wake_tasks: [Option<TaskId>; 2] = [None, None];
 
     {
         let mut channels = CHANNELS.lock();
@@ -708,7 +910,11 @@ pub fn close(handle: ChannelHandle) {
         // Wake the peer if it's blocked on recv — it will get
         // ChannelClosed on its next attempt.
         let peer = handle.peer_side();
-        wake_task = ch.waiters[peer].take();
+        wake_tasks[0] = ch.waiters[peer].take();
+
+        // Also wake any sender blocked trying to send to the peer's
+        // queue — they'll see ChannelClosed on retry.
+        wake_tasks[1] = ch.sender_waiters[peer].take();
 
         // If both sides are closed, remove the channel entirely.
         if ch.closed[0] && ch.closed[1] {
@@ -716,8 +922,8 @@ pub fn close(handle: ChannelHandle) {
         }
     }
 
-    if let Some(task_id) = wake_task {
-        sched::wake(task_id);
+    for task_id in wake_tasks.iter().flatten() {
+        sched::wake(*task_id);
     }
 }
 

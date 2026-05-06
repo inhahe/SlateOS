@@ -875,6 +875,11 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::mime::self_test() {
         serial_println!("WARNING: MIME detection self-test failed: {:?}", e);
     }
+    // Register default file type associations, then self-test.
+    fs::associations::register_defaults();
+    if let Err(e) = fs::associations::self_test() {
+        serial_println!("WARNING: File associations self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

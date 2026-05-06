@@ -27,6 +27,7 @@
 
 #[allow(dead_code)]
 pub mod ar;
+pub mod associations;
 #[allow(dead_code)]
 pub mod bzip2;
 pub mod cache;

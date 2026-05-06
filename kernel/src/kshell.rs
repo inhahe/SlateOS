@@ -3082,7 +3082,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
+    "alias", "append", "assoc", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
@@ -4310,6 +4310,7 @@ fn dispatch(line: &str) {
         "integrity" => cmd_integrity(args),
         "fhist" | "filehist" => cmd_fhist(args),
         "mime" | "mimetype" => cmd_mime(args),
+        "assoc" | "openwith" => cmd_assoc(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -8949,6 +8950,128 @@ fn cmd_mime(args: &str) {
 
 /// `file PATH` — identify a file's type and basic info.
 ///
+/// `assoc` — manage file type associations.
+///
+/// Subcommands:
+///   assoc list             - list all MIME types with associations
+///   assoc show MIME        - show apps registered for a MIME type
+///   assoc add MIME APP NAME [PRIO] - register an app
+///   assoc remove MIME APP  - unregister an app
+///   assoc lookup FILE      - show default app for a file
+///   assoc stats            - show registry statistics
+fn cmd_assoc(args: &str) {
+    use crate::fs::associations;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    if parts.is_empty() {
+        shell_println!("Usage: assoc <list|show|add|remove|lookup|stats> [args...]");
+        return;
+    }
+
+    match parts.first().copied().unwrap_or("") {
+        "list" | "ls" => {
+            let types = associations::list_types();
+            if types.is_empty() {
+                shell_println!("No file type associations registered.");
+            } else {
+                shell_println!("{:>3}  {}", "Apps", "MIME Type");
+                shell_println!("{}", "-".repeat(50));
+                for (mime, count) in &types {
+                    shell_println!("{:>3}  {}", count, mime);
+                }
+                shell_println!("({} types)", types.len());
+            }
+        }
+
+        "show" => {
+            let mime = match parts.get(1) {
+                Some(m) => *m,
+                None => {
+                    shell_println!("Usage: assoc show <MIME_TYPE>");
+                    return;
+                }
+            };
+
+            let apps = associations::apps_for(mime);
+            if apps.is_empty() {
+                shell_println!("No applications registered for '{}'.", mime);
+            } else {
+                shell_println!("Applications for '{}':", mime);
+                for (i, app) in apps.iter().enumerate() {
+                    let default_marker = if i == 0 { " [default]" } else { "" };
+                    let user_marker = if app.user_set { " (user)" } else { "" };
+                    shell_println!("  {:>3}  {} — {}{}{}", app.priority, app.app_path, app.app_name, default_marker, user_marker);
+                }
+            }
+        }
+
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: assoc add <MIME> <APP_PATH> <APP_NAME> [PRIORITY]");
+                return;
+            }
+            let mime = parts[1];
+            let app_path = parts[2];
+            let app_name = parts[3];
+            let priority: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(100);
+
+            associations::register(mime, app_path, app_name, priority, true);
+            shell_println!("Registered '{}' for {} (priority {})", app_name, mime, priority);
+        }
+
+        "remove" | "rm" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: assoc remove <MIME> <APP_PATH>");
+                return;
+            }
+            let mime = parts[1];
+            let app_path = parts[2];
+
+            if associations::unregister(mime, app_path) {
+                shell_println!("Removed '{}' from {}", app_path, mime);
+            } else {
+                shell_println!("No association found for '{}' in {}", app_path, mime);
+            }
+        }
+
+        "lookup" => {
+            let path = match parts.get(1) {
+                Some(p) => resolve_path(p),
+                None => {
+                    shell_println!("Usage: assoc lookup <FILE>");
+                    return;
+                }
+            };
+
+            let mime = crate::fs::mime::detect(&path).unwrap_or("unknown");
+            shell_println!("File:     {}", path);
+            shell_println!("MIME:     {}", mime);
+
+            match associations::default_app_for_file(&path) {
+                Some(app) => {
+                    shell_println!("Open with: {} ({})", app.app_name, app.app_path);
+                }
+                None => {
+                    shell_println!("Open with: (no application registered)");
+                }
+            }
+        }
+
+        "stats" | "st" => {
+            let st = associations::stats();
+            shell_println!("=== File Association Statistics ===");
+            shell_println!("  MIME types:     {}", st.mime_types);
+            shell_println!("  Total entries:  {}", st.total_entries);
+            shell_println!("  User entries:   {}", st.user_entries);
+        }
+
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Use: list, show, add, remove, lookup, stats", parts[0]);
+        }
+    }
+}
+
 /// Similar to the Unix `file` command.  Uses `lstat` to avoid following
 /// symlinks, then reports the entry type with additional detail:
 /// - Directories: "directory"
@@ -13864,7 +13987,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

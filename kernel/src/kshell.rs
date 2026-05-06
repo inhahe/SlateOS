@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "irq", "journal", "kill", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -3099,7 +3099,7 @@ const COMMANDS: &[&str] = &[
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
-    "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "uptime", "ver", "version", "vmstat",
+    "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
@@ -4305,6 +4305,7 @@ fn dispatch(line: &str) {
         "du" => cmd_du(args),
         "find" => cmd_find(args),
         "file" => cmd_file(args),
+        "locate" | "updatedb" => cmd_locate(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4516,6 +4517,7 @@ fn cmd_help() {
     crate::console_println!("  tree [D]  Show directory tree recursively");
     crate::console_println!("  du [-s] [-dN] [D]  Show disk usage (-s summary, -dN max depth)");
     crate::console_println!("  find [D] [-name PAT] [-type f|d|l] [-size +N|-N] [-maxdepth N] [-empty]");
+    crate::console_println!("  locate [--update|--stats|--ext E|--size MIN-MAX] PATTERN");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
     crate::console_println!("  mount     List all mounted filesystems");
@@ -8001,6 +8003,182 @@ fn parse_size_predicate(s: &str) -> (i64, char) {
 
     let value = num_str.parse::<i64>().unwrap_or(0) * multiplier;
     (value, sign)
+}
+
+/// `locate` — fast file search using the filesystem index.
+///
+/// Usage:
+///   `locate --update`               Rebuild the full index
+///   `locate --stats`                Show index statistics
+///   `locate PATTERN`                Search by name (case-insensitive substring)
+///   `locate --ext EXT`              Search by file extension
+///   `locate --ext EXT PATTERN`      Search by extension + name
+///   `locate --size MIN-MAX`         Search by file size range
+///   `locate --path PATTERN`         Search in full path, not just filename
+///   `updatedb`                      Alias for `locate --update`
+#[allow(clippy::too_many_lines)]
+fn cmd_locate(args: &str) {
+    use crate::fs::index;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+
+    // `updatedb` with no args → rebuild
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: locate [--update|--stats|--ext E|--size MIN-MAX|--path] PATTERN"
+        );
+        return;
+    }
+
+    let mut do_update = false;
+    let mut do_stats = false;
+    let mut ext_filter: Option<&str> = None;
+    let mut size_min: Option<u64> = None;
+    let mut size_max: Option<u64> = None;
+    let mut path_mode = false;
+    let mut pattern: Option<&str> = None;
+    let mut i = 0;
+
+    while i < parts.len() {
+        match parts.get(i).copied().unwrap_or("") {
+            "--update" | "-u" => do_update = true,
+            "--stats" | "-s" => do_stats = true,
+            "--path" | "-p" => path_mode = true,
+            "--ext" | "-e" => {
+                i = i.saturating_add(1);
+                ext_filter = parts.get(i).copied();
+            }
+            "--size" => {
+                i = i.saturating_add(1);
+                if let Some(range_str) = parts.get(i).copied() {
+                    if let Some(dash) = range_str.find('-') {
+                        let min_s = &range_str[..dash];
+                        let max_s = &range_str[dash.saturating_add(1)..];
+                        size_min = parse_size_value(min_s);
+                        size_max = parse_size_value(max_s);
+                    }
+                }
+            }
+            s => {
+                if !s.starts_with('-') {
+                    pattern = Some(s);
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+
+    // Handle --update.
+    if do_update {
+        let st = index::stats();
+        if !st.initialized {
+            index::init(index::default_config());
+        }
+        crate::console_println!("Rebuilding file index...");
+        match index::rebuild() {
+            Ok(()) => {
+                let st = index::stats();
+                crate::console_println!(
+                    "Done: {} entries indexed ({} bytes, {} extensions){}",
+                    st.total_entries,
+                    st.total_size,
+                    st.extension_count,
+                    if st.truncated { " [truncated]" } else { "" }
+                );
+            }
+            Err(e) => crate::console_println!("Error rebuilding index: {:?}", e),
+        }
+        return;
+    }
+
+    // Handle --stats.
+    if do_stats {
+        let st = index::stats();
+        if !st.initialized {
+            crate::console_println!("Index not initialized. Run `locate --update` first.");
+            return;
+        }
+        crate::console_println!("=== File Index Statistics ===");
+        crate::console_println!("  Entries:     {}", st.total_entries);
+        crate::console_println!("  Total size:  {} bytes", st.total_size);
+        crate::console_println!("  Extensions:  {}", st.extension_count);
+        crate::console_println!("  Rebuilds:    {}", st.rebuild_count);
+        crate::console_println!("  Truncated:   {}", st.truncated);
+        crate::console_println!("  Initialized: {}", st.initialized);
+        return;
+    }
+
+    // Ensure index is built.
+    let st = index::stats();
+    if !st.initialized || st.total_entries == 0 {
+        crate::console_println!("Index empty or not built. Run `locate --update` first.");
+        return;
+    }
+
+    // Perform search.
+    let results = if ext_filter.is_some() || size_min.is_some() || pattern.is_some() {
+        if path_mode {
+            // --path mode: search in full path.
+            if let Some(q) = pattern {
+                index::search_path(q)
+            } else {
+                // Extension/size only.
+                index::search(None, ext_filter, size_min, size_max)
+            }
+        } else {
+            index::search(pattern, ext_filter, size_min, size_max)
+        }
+    } else {
+        crate::console_println!("No search pattern given.");
+        return;
+    };
+
+    if results.is_empty() {
+        crate::console_println!("No matches found.");
+        return;
+    }
+
+    // Print results.
+    let max_display = 100;
+    for (i, entry) in results.iter().enumerate() {
+        if i >= max_display {
+            crate::console_println!(
+                "... and {} more ({} total)",
+                results.len().saturating_sub(max_display),
+                results.len()
+            );
+            break;
+        }
+        let type_char = match entry.entry_type {
+            crate::fs::EntryType::File => ' ',
+            crate::fs::EntryType::Directory => 'd',
+            crate::fs::EntryType::Symlink => 'l',
+            _ => '?',
+        };
+        crate::console_println!("{} {:>8}  {}", type_char, entry.size, entry.path);
+    }
+
+    if results.len() <= max_display {
+        crate::console_println!("({} match{})", results.len(), if results.len() == 1 { "" } else { "es" });
+    }
+}
+
+/// Parse a human-readable size value like "1024", "10k", "2M".
+fn parse_size_value(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let s_trimmed = s.trim();
+    let (num_part, multiplier) = if s_trimmed.ends_with('k') || s_trimmed.ends_with('K') {
+        (&s_trimmed[..s_trimmed.len().saturating_sub(1)], 1024u64)
+    } else if s_trimmed.ends_with('m') || s_trimmed.ends_with('M') {
+        (&s_trimmed[..s_trimmed.len().saturating_sub(1)], 1024u64 * 1024)
+    } else if s_trimmed.ends_with('g') || s_trimmed.ends_with('G') {
+        (&s_trimmed[..s_trimmed.len().saturating_sub(1)], 1024u64 * 1024 * 1024)
+    } else {
+        (s_trimmed, 1u64)
+    };
+    num_part.parse::<u64>().ok().map(|n| n.saturating_mul(multiplier))
 }
 
 /// `file PATH` — identify a file's type and basic info.
@@ -12742,7 +12920,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

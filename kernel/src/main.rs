@@ -72,6 +72,7 @@ mod hrtimer;
 mod hypervisor;
 mod idt;
 mod idle;
+mod iommu;
 mod invariant;
 mod ioapic;
 mod irq_storm;
@@ -560,6 +561,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("[hpet] WARNING: Self-test failed: {:?}", e);
     }
 
+    // Step 19c¼: Detect IOMMU hardware (Intel VT-d / AMD-Vi).
+    // Probes for DMAR/IVRS ACPI tables.  Detection only — actual DMA
+    // remapping will be enabled when driver sandboxing is implemented.
+    // Must be after ACPI init (uses acpi::find_table).
+    iommu::init();
+
     // Step 19c½: Initialize high-resolution timer subsystem.
     // Uses HPET as the clock source for nanosecond-precision timers.
     // Must be after HPET init.
@@ -838,6 +845,9 @@ extern "C" fn kmain() -> ! {
     }
     if let Err(e) = fs::rar::self_test() {
         serial_println!("WARNING: RAR self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::index::self_test() {
+        serial_println!("WARNING: File index self-test failed: {:?}", e);
     }
 
     // Run cryptographic self-tests.
@@ -1134,6 +1144,12 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞+++++c: Spectre/Meltdown mitigation self-test.
     // Verifies IBRS/STIBP/SSBD MSRs are set and IBPB barrier works.
     spectre::self_test();
+
+    // Step 22e⅞+++++d: IOMMU detection self-test.
+    // Verifies API consistency (available ↔ vendor ↔ unit_count).
+    if let Err(e) = iommu::self_test() {
+        serial_println!("[WARN] IOMMU self-test failed: {:?}", e);
+    }
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
@@ -1605,6 +1621,20 @@ fn print_security_posture() {
         active.push_str(" CET-IBT");
     } else if cet_status.hw_ibt {
         deferred.push_str(" CET-IBT(needs-toolchain)");
+    }
+
+    // IOMMU — DMA sandboxing for driver isolation.
+    if iommu::is_available() {
+        let vendor_str = match iommu::vendor() {
+            iommu::IommuVendor::IntelVtd => "VT-d",
+            iommu::IommuVendor::AmdVi => "AMD-Vi",
+            iommu::IommuVendor::None => "?",
+        };
+        active.push_str(" IOMMU(");
+        active.push_str(vendor_str);
+        active.push(')');
+    } else {
+        deferred.push_str(" IOMMU(not-detected)");
     }
 
     serial_println!("[security] Active:{}", active);

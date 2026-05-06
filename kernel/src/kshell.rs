@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4401,6 +4401,7 @@ fn dispatch(line: &str) {
         "captags" | "ct" => cmd_cap_tags(args),
         "sockact" | "sa" => cmd_socket_activation(args),
         "slimit" | "sl" => cmd_service_limits(args),
+        "iommu" => cmd_iommu(),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
@@ -10703,6 +10704,32 @@ fn cmd_reboot() {
     crate::power::reboot();
 }
 
+/// `iommu` — display IOMMU detection status.
+fn cmd_iommu() {
+    use crate::iommu;
+
+    crate::console_println!("=== IOMMU Status ===");
+    crate::console_println!("{}", iommu::status_summary());
+
+    if !iommu::is_available() {
+        crate::console_println!();
+        crate::console_println!("TIP: Enable Intel VT-d or AMD-Vi in BIOS/UEFI");
+        return;
+    }
+
+    let units = iommu::unit_count();
+    crate::console_println!();
+    crate::console_println!("Hardware units:");
+    for i in 0..units as usize {
+        if let Some(unit) = iommu::get_unit(i) {
+            crate::console_println!(
+                "  Unit {}: base={:#x} seg={} include_all={}",
+                i, unit.register_base, unit.segment, unit.include_all
+            );
+        }
+    }
+}
+
 fn cmd_version() {
     shell_println!("Kernel v0.1.0 (x86_64, microkernel)");
     shell_println!("Built with Rust, AI-developed");
@@ -12928,7 +12955,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "sockact" | "sa" | "slimit" | "sl" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

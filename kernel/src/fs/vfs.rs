@@ -2488,15 +2488,23 @@ impl Vfs {
     /// - `/tmp/*.txt` — all .txt files in /tmp
     /// - `/proc/*/status` — status file for all PIDs
     /// - `/sys/params/mm.*` — all mm. params
-    /// - `/**/*.rs` — all .rs files recursively (not yet supported)
+    /// - `/**/*.rs` — all .rs files recursively
+    /// - `/home/**` — all files under /home recursively
+    ///
+    /// The `**` pattern matches zero or more directory levels.  It can
+    /// appear at any position in the path:
+    /// - `/**/foo.txt` — find foo.txt anywhere
+    /// - `/tmp/**/*.log` — all .log files under /tmp at any depth
     ///
     /// Returns a list of absolute paths that match.  Directories are not
-    /// recursed into unless the pattern explicitly has deeper components.
+    /// recursed into unless the pattern explicitly has deeper components
+    /// or uses `**`.
     ///
     /// ## Limits
     ///
     /// - Maximum 1000 results to prevent runaway expansion.
     /// - Maximum pattern depth of 32 components.
+    /// - Maximum recursion depth of 16 for `**` patterns.
     pub fn glob(pattern: &str) -> KernelResult<Vec<String>> {
         let components: Vec<&str> = pattern
             .split('/')
@@ -2810,6 +2818,9 @@ pub fn normalize_path(path: &str) -> String {
 /// `depth` is the current component index being matched.
 /// `results` collects matching paths.
 /// `max_results` caps the output to prevent runaway expansion.
+/// Maximum directory recursion depth for `**` patterns.
+const GLOBSTAR_MAX_DEPTH: usize = 16;
+
 fn glob_recurse(
     base: &str,
     components: &[&str],
@@ -2828,6 +2839,26 @@ fn glob_recurse(
     };
 
     let is_last = depth + 1 == components.len();
+
+    // Handle `**` (globstar): matches zero or more directory levels.
+    if component == "**" {
+        // `**` as the last component: match everything under base recursively.
+        if is_last {
+            glob_collect_recursive(base, results, max_results, 0);
+            return;
+        }
+
+        // `**` followed by more components: try matching remaining pattern
+        // at current level (zero directories) and at every subdirectory level.
+
+        // Zero directories: skip `**` and try remaining components from base.
+        glob_recurse(base, components, depth + 1, results, max_results);
+
+        // One or more directories: for each subdirectory of base, try `**`
+        // again (which will recurse deeper) and the remaining pattern.
+        globstar_recurse(base, components, depth, results, max_results, 0);
+        return;
+    }
 
     // Check if this component contains glob metacharacters.
     let is_glob = component.contains('*') || component.contains('?') || component.contains('[');
@@ -2881,6 +2912,92 @@ fn glob_recurse(
                 }
                 _ => {} // Not a directory or doesn't exist — skip.
             }
+        }
+    }
+}
+
+/// Recursively descend into subdirectories for a `**` pattern component.
+///
+/// At each level, tries matching the remaining pattern components (after `**`)
+/// from each subdirectory, then recurses deeper into their subdirectories.
+fn globstar_recurse(
+    base: &str,
+    components: &[&str],
+    star_depth: usize,  // Index of `**` in components.
+    results: &mut Vec<String>,
+    max_results: usize,
+    recurse_depth: usize,
+) {
+    if results.len() >= max_results || recurse_depth >= GLOBSTAR_MAX_DEPTH {
+        return;
+    }
+
+    let entries = match Vfs::readdir(base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in &entries {
+        if entry.entry_type != EntryType::Directory {
+            continue;
+        }
+
+        let child_path = if base == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", base, entry.name)
+        };
+
+        // Try matching remaining components (after **) from this subdir.
+        glob_recurse(
+            &child_path,
+            components,
+            star_depth + 1,
+            results,
+            max_results,
+        );
+
+        // Continue recursing deeper.
+        globstar_recurse(
+            &child_path,
+            components,
+            star_depth,
+            results,
+            max_results,
+            recurse_depth + 1,
+        );
+    }
+}
+
+/// Collect all entries under a directory recursively (for `**` as last component).
+fn glob_collect_recursive(
+    base: &str,
+    results: &mut Vec<String>,
+    max_results: usize,
+    depth: usize,
+) {
+    if results.len() >= max_results || depth >= GLOBSTAR_MAX_DEPTH {
+        return;
+    }
+
+    let entries = match Vfs::readdir(base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in &entries {
+        let child_path = if base == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", base, entry.name)
+        };
+
+        if results.len() < max_results {
+            results.push(child_path.clone());
+        }
+
+        if entry.entry_type == EntryType::Directory {
+            glob_collect_recursive(&child_path, results, max_results, depth + 1);
         }
     }
 }
@@ -3831,7 +3948,84 @@ pub fn self_test() -> KernelResult<()> {
     // ── Glob pattern matching tests ──
     glob_self_test()?;
 
+    // ── Globstar (**) recursive glob test ──
+    if has_tmp {
+        serial_println!("[vfs]   Testing ** (globstar) recursive glob...");
+
+        // Create a small directory tree for testing.
+        let _ = Vfs::mkdir("/tmp/_glob_test");
+        let _ = Vfs::mkdir("/tmp/_glob_test/sub");
+        let _ = Vfs::mkdir("/tmp/_glob_test/sub/deep");
+        Vfs::write_file("/tmp/_glob_test/a.txt", b"a")?;
+        Vfs::write_file("/tmp/_glob_test/b.rs", b"b")?;
+        Vfs::write_file("/tmp/_glob_test/sub/c.txt", b"c")?;
+        Vfs::write_file("/tmp/_glob_test/sub/deep/d.txt", b"d")?;
+        Vfs::write_file("/tmp/_glob_test/sub/deep/e.rs", b"e")?;
+
+        // Test 1: /**/*.txt should find all .txt files recursively.
+        let txt_results = Vfs::glob("/tmp/_glob_test/**/*.txt")?;
+        let txt_count = txt_results.iter()
+            .filter(|p| p.ends_with(".txt"))
+            .count();
+        if txt_count < 3 {
+            serial_println!(
+                "[vfs]   FAIL: **/*.txt found {} .txt files, expected >= 3",
+                txt_count
+            );
+            // Clean up.
+            let _ = cleanup_glob_test();
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     **/*.txt found {} .txt files (>= 3) OK", txt_count);
+
+        // Test 2: /** should find everything under the dir.
+        let all_results = Vfs::glob("/tmp/_glob_test/**")?;
+        // Should find at least: sub, sub/deep, a.txt, b.rs, sub/c.txt,
+        // sub/deep/d.txt, sub/deep/e.rs = 7 entries.
+        if all_results.len() < 7 {
+            serial_println!(
+                "[vfs]   FAIL: /** found {} entries, expected >= 7",
+                all_results.len()
+            );
+            let _ = cleanup_glob_test();
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     /** found {} entries (>= 7) OK", all_results.len());
+
+        // Test 3: /**/*.rs should find .rs files at any depth.
+        let rs_results = Vfs::glob("/tmp/_glob_test/**/*.rs")?;
+        let rs_count = rs_results.iter()
+            .filter(|p| p.ends_with(".rs"))
+            .count();
+        if rs_count < 2 {
+            serial_println!(
+                "[vfs]   FAIL: **/*.rs found {} .rs files, expected >= 2",
+                rs_count
+            );
+            let _ = cleanup_glob_test();
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     **/*.rs found {} .rs files (>= 2) OK", rs_count);
+
+        // Clean up.
+        let _ = cleanup_glob_test();
+        serial_println!("[vfs]     globstar (**) test PASSED");
+    }
+
     serial_println!("[vfs] Self-test PASSED");
+    Ok(())
+}
+
+/// Clean up globstar test directory tree.
+fn cleanup_glob_test() -> KernelResult<()> {
+    let _ = Vfs::remove("/tmp/_glob_test/sub/deep/e.rs");
+    let _ = Vfs::remove("/tmp/_glob_test/sub/deep/d.txt");
+    let _ = Vfs::remove("/tmp/_glob_test/sub/c.txt");
+    let _ = Vfs::remove("/tmp/_glob_test/b.rs");
+    let _ = Vfs::remove("/tmp/_glob_test/a.txt");
+    let _ = Vfs::rmdir("/tmp/_glob_test/sub/deep");
+    let _ = Vfs::rmdir("/tmp/_glob_test/sub");
+    let _ = Vfs::rmdir("/tmp/_glob_test");
     Ok(())
 }
 

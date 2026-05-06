@@ -581,6 +581,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Content-addressed store (fs::cas): in-memory CAS with SHA-256 content hashing, automatic deduplication (same content → same hash, refcount increment), reference counting, garbage collection (GC removes refcount-0 blobs), bounded max_bytes capacity, integrity verification on read (recomputes hash), hex serialization helpers; foundation for package manager content-addressed packages and file deduplication; 6 self-tests (QEMU boot-verified)
   - [x] File integrity monitoring (fs::integrity): baseline-and-verify file integrity checking with SHA-256 content hashes; baseline_file/baseline_dir store per-file hashes, verify_file/verify_dir compare against baseline detecting MODIFIED/MISSING/NEW/ERROR states; configurable max entries (50K) and max file size (64 MiB); `integrity` kshell command (baseline/verify/stats/clear/list subcommands); `dedup` kshell command for finding duplicate files by size+hash two-phase scan; 6 self-tests
   - [x] File version history (fs::history): CAS-backed automatic file versioning; record_version() saves previous content to CAS before modification, get_history() retrieves version chain, restore_version() rolls back with undo support; per-file limit (16 versions) and global limit (10K entries) with automatic eviction; `fhist`/`filehist` kshell command (show/restore/record/clear/stats/list/enable/disable); procfs /proc/cas and /proc/integrity virtual files; 6 self-tests
+  - [x] VFS auto-versioning: transparent history recording on write_file/remove, configurable auto_version toggle, path exclusion (virtual filesystems, /tmp, metadata files), try_auto_record() + should_auto_version() API; procfs /proc/fhistory virtual file; 8 self-tests
+  - [x] File indexer VFS hooks: automatic incremental index updates via on_file_changed/on_file_deleted/on_file_renamed called from VFS write/remove/rename/mkdir/symlink/link operations; is_live()/is_watched() guards
+  - [x] Atomic file writes (Vfs::atomic_write): write-temp-sync-rename pattern with HPET+TSC unique temp naming, atomic_write_preserve() for metadata retention, stale temp cleanup on failure; self-tests
+  - [x] MIME type detection (fs::mime): magic byte signatures (~40 formats) + extension database (~100 types), detect() combines both, from_bytes/from_extension/text_or_binary/category API; `mime` kshell command; 6 self-tests
+  - [x] File type associations (fs::associations): priority-based MIME→application registry with system/user layers, extension overrides, register_defaults() for ~50 MIME types; `assoc` kshell command (list/show/add/remove/lookup/stats); 5 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)
@@ -752,7 +757,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [ ] Sound history (which apps played/are playing sound)
 
 ### 3.7 File type associations
-- [ ] Extension → default app mapping
+- [x] Extension → default app mapping (fs::associations registry with MIME→app priority system, extension override, kshell `assoc` command)
+- [x] MIME type detection (fs::mime: ~40 magic signatures, ~100 extensions, from_bytes/from_extension/detect/category API, kshell `mime` command)
 - [ ] Per-app icons per extension
 - [ ] Easily discoverable UI to change associations
 - [ ] Fallback to previous app when handler is uninstalled

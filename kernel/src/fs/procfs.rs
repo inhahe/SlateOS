@@ -31,6 +31,7 @@
 //! ├── fsstats        Per-filesystem debug statistics
 //! ├── cas            Content-addressed store statistics
 //! ├── integrity      File integrity monitoring statistics
+//! ├── fhistory       File version history statistics
 //! └── <pid>/         Per-process directories
 //!     ├── status     Process name, state, priority, credentials
 //!     ├── cmdline    Process command name (null-terminated)
@@ -101,6 +102,7 @@ const ROOT_FILES: &[&str] = &[
     "bcache",
     "cas",
     "integrity",
+    "fhistory",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1036,6 +1038,35 @@ fn gen_integrity() -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `/proc/fhistory` — File version history statistics.
+///
+/// Shows tracked file count, total versions, eviction stats,
+/// and operation counters.
+fn gen_fhistory() -> Vec<u8> {
+    let st = super::history::stats();
+
+    let mut s = String::with_capacity(512);
+    s.push_str("File Version History\n");
+    s.push_str("--------------------\n");
+
+    s.push_str(&format!(
+        "enabled:            {}\n\
+         tracked_files:      {}\n\
+         total_versions:     {}\n\
+         evicted_versions:   {}\n\
+         record_operations:  {}\n\
+         restore_operations: {}\n",
+        if st.enabled { "yes" } else { "no" },
+        st.tracked_files,
+        st.total_versions,
+        st.evicted_versions,
+        st.record_count,
+        st.restore_count,
+    ));
+
+    s.into_bytes()
+}
+
 /// `/proc/<pid>/status` — per-task status information (human-readable).
 ///
 /// Includes both task-level (scheduler) and process-level (PCB) data
@@ -1307,6 +1338,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "bcache" => Ok(gen_bcache()),
         "cas" => Ok(gen_cas()),
         "integrity" => Ok(gen_integrity()),
+        "fhistory" => Ok(gen_fhistory()),
         _ => Err(KernelError::NotFound),
     }
 }

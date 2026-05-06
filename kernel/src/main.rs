@@ -684,6 +684,10 @@ extern "C" fn kmain() -> ! {
     // Registers devices as sda, sdb, etc.  No-op in QEMU without SATA.
     ahci::init(boot_info.hhdm_offset);
 
+    // NVMe driver: detect and initialize NVMe SSDs.
+    // Registers devices as nvme0n1, nvme1n1, etc.  No-op without NVMe hardware.
+    nvme::init(boot_info.hhdm_offset);
+
     // Step 20e-2: Add disk-backed swap alongside zram.
     // Multi-device swap: zram (priority 100) handles most evictions with
     // zero I/O latency; disk (priority 0) catches overflow when zram is full.
@@ -1209,6 +1213,9 @@ extern "C" fn kmain() -> ! {
 
     // AHCI/SATA driver self-test.
     ahci::self_test();
+
+    // NVMe driver self-test.
+    nvme::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

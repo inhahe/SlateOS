@@ -3103,6 +3103,7 @@ const COMMANDS: &[&str] = &[
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
+    "fpu", "xsave",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4247,6 +4248,7 @@ fn dispatch(line: &str) {
         "hypervisor" | "vminfo" => cmd_hypervisor(),
         "cet" | "cfi" => cmd_cet(),
         "smap" | "smep" => cmd_smep_smap(),
+        "fpu" | "xsave" => cmd_fpu(),
         "fairness" | "jfi" => cmd_fairness(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
@@ -21578,6 +21580,41 @@ fn cmd_cet() {
         shell_println!("");
         shell_println!("  Note: This CPU does not support CET.");
         shell_println!("  CET requires Intel 11th gen+ or AMD Zen 3+.");
+    }
+}
+
+/// `fpu` / `xsave` — show FPU/SSE/AVX state management info.
+fn cmd_fpu() {
+    use crate::sched::fpu;
+
+    shell_println!("=== FPU/SSE/AVX State Management ===");
+    shell_println!("");
+    shell_println!("  Save strategy: {}", fpu::strategy_name());
+    shell_println!("  Save area size: {} bytes", fpu::xsave_area_size());
+    shell_println!("  XSAVE active: {}", if fpu::xsave_active() { "yes" } else { "no" });
+    shell_println!("  Active XCR0: {:#x}", fpu::active_xcr0());
+
+    let features = crate::cpu::features();
+    if let Some(f) = features {
+        shell_println!("");
+        shell_println!("  CPU capabilities:");
+        shell_println!("    XSAVE: {}", if f.xsave { "yes" } else { "no" });
+        shell_println!("    XSAVEOPT: {}", if f.xsaveopt { "yes" } else { "no" });
+        shell_println!("    XSAVEC: {}", if f.xsavec { "yes" } else { "no" });
+        shell_println!("    XSAVES: {}", if f.xsaves { "yes" } else { "no" });
+        shell_println!("    AVX: {}", if f.avx { "yes" } else { "no" });
+        shell_println!("    AVX2: {}", if f.avx2 { "yes" } else { "no" });
+        shell_println!("    AVX-512F: {}", if f.avx512f { "yes" } else { "no" });
+        shell_println!("");
+        shell_println!("  XCR0 bits:");
+
+        let xcr0 = fpu::active_xcr0();
+        shell_println!("    [0] x87:    {}", if xcr0 & 1 != 0 { "enabled" } else { "-" });
+        shell_println!("    [1] SSE:    {}", if xcr0 & 2 != 0 { "enabled" } else { "-" });
+        shell_println!("    [2] AVX:    {}", if xcr0 & 4 != 0 { "enabled" } else { "-" });
+        shell_println!("    [5] opmask: {}", if xcr0 & 0x20 != 0 { "enabled" } else { "-" });
+        shell_println!("    [6] ZMM_Hi: {}", if xcr0 & 0x40 != 0 { "enabled" } else { "-" });
+        shell_println!("    [7] Hi16_ZMM: {}", if xcr0 & 0x80 != 0 { "enabled" } else { "-" });
     }
 }
 

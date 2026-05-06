@@ -2,11 +2,24 @@
 //!
 //! ## `switch_context`
 //!
-//! Saves the current task's callee-saved registers and RFLAGS into
-//! `old_ctx`, then restores them from `new_ctx`.  The `ret` at the
-//! end pops the return address from the **new** task's stack, resuming
-//! execution where that task last called `switch_context` (or, for a
-//! new task, jumping to `task_entry_trampoline`).
+//! Saves the current task's callee-saved registers, RFLAGS, and FPU/SSE/AVX
+//! state into `old_ctx`/`old_fpu`, then restores them from
+//! `new_ctx`/`new_fpu`.  The `ret` at the end pops the return address
+//! from the **new** task's stack, resuming execution where that task last
+//! called `switch_context` (or, for a new task, jumping to
+//! `task_entry_trampoline`).
+//!
+//! ### FPU Strategy
+//!
+//! FPU/SSE/AVX save/restore dispatches at runtime based on a global
+//! strategy byte set during boot:
+//!
+//! - Strategy 2 (XSAVEOPT64): only saves modified state components
+//! - Strategy 1 (XSAVE64): saves all enabled components
+//! - Strategy 0 (FXSAVE64): legacy x87 + SSE only
+//!
+//! The assembly reads `FPU_STRATEGY` and branches accordingly.  The
+//! mask for XSAVE/XSAVEOPT is read from `XSAVE_MASK_LO`/`XSAVE_MASK_HI`.
 //!
 //! Callee-saved registers (`rbx`, `rbp`, `r12`–`r15`, `rsp`) plus
 //! RFLAGS are saved.  Caller-saved registers are already handled by
@@ -31,8 +44,41 @@
 //! [`Task::prepare_context`]: super::task::Task::prepare_context
 
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use super::task::Context;
+
+// ---------------------------------------------------------------------------
+// Strategy dispatch variables (written once during boot, read by assembly)
+// ---------------------------------------------------------------------------
+
+/// FPU save strategy used by the context switch assembly.
+///
+/// - 0 = FXSAVE64/FXRSTOR64
+/// - 1 = XSAVE64/XRSTOR64
+/// - 2 = XSAVEOPT64/XRSTOR64
+///
+/// Set by `fpu::init_bsp()` during boot.  Read by the assembly on
+/// every context switch.
+#[unsafe(no_mangle)]
+pub static FPU_STRATEGY: AtomicU8 = AtomicU8::new(0);
+
+/// Low 32 bits of the XSAVE state-component bitmap (EDX:EAX mask).
+/// Set by `fpu::init_bsp()`.
+#[unsafe(no_mangle)]
+pub static XSAVE_MASK_LO: AtomicU32 = AtomicU32::new(0x3); // x87 + SSE
+
+/// High 32 bits of the XSAVE state-component bitmap.
+/// Set by `fpu::init_bsp()`.
+#[unsafe(no_mangle)]
+pub static XSAVE_MASK_HI: AtomicU32 = AtomicU32::new(0);
+
+/// Set the FPU strategy and mask (called from `fpu::init_bsp()`).
+pub fn set_fpu_strategy(strategy: u8, mask_lo: u32, mask_hi: u32) {
+    XSAVE_MASK_LO.store(mask_lo, Ordering::Release);
+    XSAVE_MASK_HI.store(mask_hi, Ordering::Release);
+    FPU_STRATEGY.store(strategy, Ordering::Release);
+}
 
 // ---------------------------------------------------------------------------
 // switch_context assembly
@@ -43,8 +89,8 @@ global_asm!(
     //                   old_fpu: *mut FpuState, new_fpu: *const FpuState)
     //   rdi = old context pointer
     //   rsi = new context pointer
-    //   rdx = old FPU state pointer (16-byte aligned, 512 bytes)
-    //   rcx = new FPU state pointer (16-byte aligned, 512 bytes)
+    //   rdx = old FPU state pointer (64-byte aligned)
+    //   rcx = new FPU state pointer (64-byte aligned)
     //
     // Context layout (must match task.rs Context struct):
     //   offset 0x00: rbx
@@ -58,14 +104,40 @@ global_asm!(
     ".global switch_context",
     "switch_context:",
 
-    // --- Save old task's FPU/SSE state ---
+    // --- Save old task's FPU/SSE/AVX state ---
     //
-    // fxsave64 saves x87, MMX, and XMM0-XMM15 (512 bytes) to [rdx].
-    // This is non-destructive: the FPU registers are unchanged after
-    // the save.  We do this FIRST so the FPU state is captured before
-    // any potential clobbering by subsequent instructions (though the
-    // GPR save instructions don't touch FPU registers).
+    // Dispatch based on FPU_STRATEGY global:
+    //   0 → fxsave64, 1 → xsave64, 2 → xsaveopt64
+    "movzx eax, byte ptr [rip + FPU_STRATEGY]",
+    "cmp al, 2",
+    "je 2f",
+    "cmp al, 1",
+    "je 1f",
+    // Strategy 0: FXSAVE64 (legacy, 512 bytes)
     "fxsave64 [rdx]",
+    "jmp 3f",
+    "1:",
+    // Strategy 1: XSAVE64
+    "push rdx",       // save old_fpu pointer
+    "push rcx",       // save new_fpu pointer
+    "mov r8, rdx",    // save fpu pointer in r8
+    "mov eax, dword ptr [rip + XSAVE_MASK_LO]",
+    "mov edx, dword ptr [rip + XSAVE_MASK_HI]",
+    "xsave64 [r8]",
+    "pop rcx",
+    "pop rdx",
+    "jmp 3f",
+    "2:",
+    // Strategy 2: XSAVEOPT64
+    "push rdx",
+    "push rcx",
+    "mov r8, rdx",
+    "mov eax, dword ptr [rip + XSAVE_MASK_LO]",
+    "mov edx, dword ptr [rip + XSAVE_MASK_HI]",
+    "xsaveopt64 [r8]",
+    "pop rcx",
+    "pop rdx",
+    "3:",
 
     // --- Save callee-saved GPRs to old context ---
     "mov [rdi + 0x00], rbx",
@@ -76,9 +148,6 @@ global_asm!(
     "mov [rdi + 0x28], r15",
     "mov [rdi + 0x30], rsp",
     // Save RFLAGS — preserves the interrupt flag (IF) per-task.
-    // Without this, a task preempted after CLI would leak IF=0
-    // into the next task, permanently disabling interrupts on
-    // that CPU.
     "pushfq",
     "pop rax",
     "mov [rdi + 0x38], rax",
@@ -86,9 +155,8 @@ global_asm!(
     // --- Restore callee-saved GPRs from new context ---
     //
     // After this sequence, we're on the NEW task's stack (rsp loaded
-    // from new context).  rdi and rsi are caller-saved, so they're
-    // stale — but rcx still holds new_fpu (untouched by the restore
-    // sequence since we only load rbx, rbp, r12-r15, rsp).
+    // from new context).  rcx still holds new_fpu (untouched by the
+    // GPR restore since we only load rbx, rbp, r12-r15, rsp).
     "mov rbx, [rsi + 0x00]",
     "mov rbp, [rsi + 0x08]",
     "mov r12, [rsi + 0x10]",
@@ -97,27 +165,25 @@ global_asm!(
     "mov r15, [rsi + 0x28]",
     "mov rsp, [rsi + 0x30]",
 
-    // --- Restore new task's FPU/SSE state ---
+    // --- Restore new task's FPU/SSE/AVX state ---
     //
-    // fxrstor64 loads x87, MMX, and XMM0-XMM15 from [rcx].
-    // Done BEFORE restoring RFLAGS because popfq may enable interrupts
-    // (IF=1).  By restoring FPU first, any interrupt that fires after
-    // popfq sees the correct FPU state for the new task.
-    //
-    // rcx is still valid here: the GPR restore above only writes to
-    // rbx, rbp, r12-r15, rsp — it does not touch rcx.
+    // Dispatch based on strategy (same as save, but always use XRSTOR
+    // for strategies 1 and 2 — there's no xrstoropt).
+    "movzx eax, byte ptr [rip + FPU_STRATEGY]",
+    "cmp al, 0",
+    "je 4f",
+    // Strategy 1 or 2: XRSTOR64
+    "mov r8, rcx",    // save new_fpu in r8 (rcx clobbered by mask load)
+    "mov eax, dword ptr [rip + XSAVE_MASK_LO]",
+    "mov edx, dword ptr [rip + XSAVE_MASK_HI]",
+    "xrstor64 [r8]",
+    "jmp 5f",
+    "4:",
+    // Strategy 0: FXRSTOR64
     "fxrstor64 [rcx]",
+    "5:",
 
     // Restore RFLAGS from the target task's saved state.
-    // For new tasks, rflags is set to 0x202 (IF=1, reserved bit 1=1)
-    // by prepare_context(), ensuring interrupts are enabled when the
-    // task first runs.
-    //
-    // WARNING: After popfq, interrupts may be enabled.  The CPU's
-    // one-instruction interrupt deferral after STI does NOT apply to
-    // popfq — an interrupt can fire between popfq and ret.  This is
-    // safe because the new task's full state (GPRs + FPU) is already
-    // restored at this point.
     "mov rax, [rsi + 0x38]",
     "push rax",
     "popfq",
@@ -148,19 +214,19 @@ global_asm!(
 
 // Import the assembly symbols so Rust can reference them.
 unsafe extern "C" {
-    /// Switch CPU context from `old` to `new`, including FPU/SSE state.
+    /// Switch CPU context from `old` to `new`, including FPU/SSE/AVX state.
     ///
-    /// Saves `rbx`, `rbp`, `r12`–`r15`, `rsp`, RFLAGS, and FPU/SSE
-    /// (via `fxsave64`) into `old`/`old_fpu`, then restores them from
-    /// `new`/`new_fpu` (via `fxrstor64`), and returns (into the new task).
+    /// Saves `rbx`, `rbp`, `r12`–`r15`, `rsp`, RFLAGS, and FPU/SSE/AVX
+    /// (via XSAVEOPT/XSAVE/FXSAVE) into `old`/`old_fpu`, then restores
+    /// from `new`/`new_fpu`, and returns (into the new task).
     ///
     /// # Safety
     ///
     /// - Both `old` and `new` must point to valid `Context` structs.
-    /// - `old_fpu` must point to a valid, writable, 16-byte-aligned
-    ///   512-byte buffer for FXSAVE.
-    /// - `new_fpu` must point to a valid, readable, 16-byte-aligned
-    ///   512-byte buffer containing a valid FXSAVE image.
+    /// - `old_fpu` must point to a valid, writable, 64-byte-aligned
+    ///   buffer for XSAVE/FXSAVE (size = `fpu::xsave_area_size()`).
+    /// - `new_fpu` must point to a valid, readable, 64-byte-aligned
+    ///   buffer containing a valid XSAVE/FXSAVE image.
     /// - `new.rsp` must point to a valid stack with a return address
     ///   at the top (either from a previous `switch_context` call or
     ///   from [`Task::prepare_context`]).

@@ -832,6 +832,14 @@ pub struct CpuFeatures {
     /// XCR0 supported feature bits (low 32 bits).
     pub xcr0_supported: u64,
 
+    // --- CPUID leaf 0xD, subleaf 1 (XSAVE extensions) ---
+    /// XSAVEOPT — optimized XSAVE (only saves modified components).
+    pub xsaveopt: bool,
+    /// XSAVEC — compact XSAVE (no gaps between state components).
+    pub xsavec: bool,
+    /// XSAVES/XRSTORS — supervisor-mode XSAVE (IA32_XSS MSR support).
+    pub xsaves: bool,
+
     // --- CPUID leaf 0x0A (Architectural Performance Monitoring) ---
     /// Performance monitoring version (0 = unsupported).
     pub pmu_version: u8,
@@ -854,6 +862,7 @@ impl CpuFeatures {
             umip: false, vaes: false, rdpid: false, cet_ss: false, cet_ibt: false,
             rdtscp: false, page_1g: false,
             xsave_area_size: 0, xcr0_supported: 0,
+            xsaveopt: false, xsavec: false, xsaves: false,
             pmu_version: 0, pmu_counters: 0, pmu_counter_width: 0,
         }
     }
@@ -928,6 +937,12 @@ pub fn detect_features() {
         let (eax_d, _ebx_d, ecx_d, edx_d) = cpuid_leaf_d_sub0();
         f.xcr0_supported = u64::from(eax_d) | (u64::from(edx_d) << 32);
         f.xsave_area_size = ecx_d; // Maximum size for all features.
+
+        // --- Leaf 0xD, subleaf 1: XSAVE extensions ---
+        let eax_d1 = cpuid_leaf_d_sub1_eax();
+        f.xsaveopt = eax_d1 & (1 << 0) != 0; // XSAVEOPT available
+        f.xsavec   = eax_d1 & (1 << 1) != 0; // XSAVEC available
+        f.xsaves   = eax_d1 & (1 << 3) != 0; // XSAVES/XRSTORS available
     }
 
     // --- Leaf 0x0A: Architectural Performance Monitoring ---
@@ -982,6 +997,10 @@ pub fn log_features() {
         crate::serial_println!(
             "[cpu]   XSAVE area: {} bytes, XCR0 supported: {:#x}",
             f.xsave_area_size, f.xcr0_supported
+        );
+        crate::serial_println!(
+            "[cpu]   XSAVEOPT={} XSAVEC={} XSAVES={}",
+            f.xsaveopt, f.xsavec, f.xsaves
         );
     }
     crate::serial_println!(
@@ -1162,6 +1181,32 @@ fn cpuid_leaf_d_sub0() -> (u32, u32, u32, u32) {
         );
     }
     (eax, ebx, ecx, edx)
+}
+
+/// CPUID leaf 0xD, subleaf 1: XSAVE feature flags.
+///
+/// Returns EAX:
+/// - Bit 0: XSAVEOPT available
+/// - Bit 1: XSAVEC available (compacted form)
+/// - Bit 2: XGETBV with ECX=1 support
+/// - Bit 3: XSAVES/XRSTORS available (supervisor state)
+fn cpuid_leaf_d_sub1_eax() -> u32 {
+    let eax: u32;
+    // SAFETY: Caller verified xsave is supported and max_leaf >= 0xD.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0xD",
+            "mov ecx, 1",
+            "cpuid",
+            "pop rbx",
+            out("eax") eax,
+            out("ecx") _,
+            out("edx") _,
+            options(nomem, nostack),
+        );
+    }
+    eax
 }
 
 // ---------------------------------------------------------------------------

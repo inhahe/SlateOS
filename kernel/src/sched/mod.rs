@@ -3035,8 +3035,8 @@ fn schedule_inner(requeue: bool) {
                         // SAFETY: Both context and FPU pointers valid (from
                         // task table under lock).  old is &mut (exclusive),
                         // new is & (shared), pointing to different tasks.
-                        // FPU pointers are 16-byte aligned (FpuState has
-                        // repr(align(16))).
+                        // FPU pointers are 64-byte aligned (FpuState has
+                        // repr(align(64))).
                         unsafe { switch_context(&mut *old_p, &*new_p, old_fpu, new_fpu); }
 
                         // NOTE: After switch_context returns, we're now
@@ -3181,7 +3181,7 @@ fn schedule_inner(requeue: bool) {
     //   other code runs on this CPU until switch_context returns.
     // - old_ctx_ptr is &mut (exclusive write) and new_ctx_ptr is &
     //   (shared read), pointing to different tasks' contexts.
-    // - FPU pointers are 16-byte aligned (FpuState has repr(align(16))).
+    // - FPU pointers are 64-byte aligned (FpuState has repr(align(64))).
     // Increment context switch counter for this CPU.
     if let Some(ctr) = CTX_SWITCHES.get(cpu) {
         ctr.fetch_add(1, Ordering::Relaxed);

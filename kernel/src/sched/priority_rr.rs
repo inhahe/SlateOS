@@ -37,6 +37,107 @@ use spin::Mutex;
 use super::task::{TaskId, NUM_PRIORITIES};
 
 // ---------------------------------------------------------------------------
+// Stack-allocated steal buffer (avoids heap allocation under SCHED lock)
+// ---------------------------------------------------------------------------
+
+/// Maximum tasks stolen in one work-steal operation.
+///
+/// OPT: Capped at 16 to avoid excessive cache thrashing and to enable
+/// a stack-allocated buffer (no heap allocation during context switch).
+/// In practice, stealing more than 8 tasks at once is rarely beneficial
+/// because the cache advantage of the original CPU is lost.
+pub const MAX_STEAL: usize = 16;
+
+/// Fixed-capacity stack buffer for stolen task/priority pairs.
+///
+/// Replaces `Vec<(TaskId, u8)>` in the steal path to eliminate heap
+/// allocation from inside the scheduler critical section.
+pub struct StolenTasks {
+    data: [(TaskId, u8); MAX_STEAL],
+    len: usize,
+}
+
+impl StolenTasks {
+    /// Create an empty buffer.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            data: [(0, 0); MAX_STEAL],
+            len: 0,
+        }
+    }
+
+    /// Push a stolen task.  Silently drops if full (saturates at MAX_STEAL).
+    #[inline]
+    fn push(&mut self, id: TaskId, priority: u8) {
+        if self.len < MAX_STEAL {
+            self.data[self.len] = (id, priority);
+            self.len += 1;
+        }
+    }
+
+    /// Number of entries.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the buffer is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Iterate over stolen (task_id, priority) pairs.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &(TaskId, u8)> {
+        self.data[..self.len].iter()
+    }
+}
+
+/// Fixed-capacity stack buffer for migrated task IDs.
+///
+/// Used by `try_steal` callers to collect stolen task IDs for
+/// `last_cpu` updates without heap allocation.
+pub struct MigratedTasks {
+    data: [TaskId; MAX_STEAL],
+    len: usize,
+}
+
+impl MigratedTasks {
+    /// Create an empty buffer.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            data: [0; MAX_STEAL],
+            len: 0,
+        }
+    }
+
+    /// Push a task ID.  Saturates at MAX_STEAL.
+    #[inline]
+    fn push(&mut self, id: TaskId) {
+        if self.len < MAX_STEAL {
+            self.data[self.len] = id;
+            self.len += 1;
+        }
+    }
+
+    /// Iterate over stored task IDs.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &TaskId> {
+        self.data[..self.len].iter()
+    }
+
+    /// Number of entries.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -382,13 +483,16 @@ impl PriorityRoundRobin {
     /// Steals from the back (most recently enqueued) to minimize
     /// cache disruption — the front tasks are likely cache-warm on
     /// the victim CPU.
-    pub fn steal(&mut self, count: usize) -> alloc::vec::Vec<(super::task::TaskId, u8)> {
-        let mut stolen = alloc::vec::Vec::new();
+    pub fn steal(&mut self, count: usize) -> StolenTasks {
+        let mut stolen = StolenTasks::new();
         if count == 0 || self.bitmap == 0 {
             return stolen;
         }
 
-        let mut remaining = count;
+        // OPT: Cap at MAX_STEAL to avoid cache thrashing and keep the
+        // result on the stack (no heap allocation).
+        let capped = count.min(MAX_STEAL);
+        let mut remaining = capped;
         let mut bits = self.bitmap;
         while bits != 0 && remaining > 0 {
             let level = bits.trailing_zeros() as usize;
@@ -397,7 +501,7 @@ impl PriorityRoundRobin {
                 while remaining > 0 && !q.is_empty() {
                     if let Some(id) = q.pop_back() {
                         #[allow(clippy::cast_possible_truncation)]
-                        stolen.push((id, level as u8));
+                        stolen.push(id, level as u8);
                         remaining = remaining.saturating_sub(1);
                     }
                 }
@@ -568,18 +672,22 @@ impl PerCpuScheduler {
     /// Try to steal work from another CPU.
     ///
     /// Scans all other CPUs (using `try_lock` to avoid blocking),
-    /// finds the most loaded one, and steals half its tasks.  The
-    /// first stolen task is returned directly (ready to run); remaining
-    /// tasks are enqueued on the thief's local queue.
+    /// finds the most loaded one, and steals half its tasks (up to
+    /// [`MAX_STEAL`]).  The first stolen task is returned directly
+    /// (ready to run); remaining tasks are enqueued on the thief's
+    /// local queue.
     ///
     /// Also returns the IDs of ALL stolen tasks (via `migrated_out`)
     /// so the caller can update their `last_cpu` in the task table.
+    ///
+    /// OPT: Uses a stack-allocated buffer for `migrated_out` to avoid
+    /// heap allocation inside the scheduler critical section.
     ///
     /// Returns the first stolen task's ID, or `None` if nothing stolen.
     pub fn try_steal(
         &self,
         cpu: usize,
-        migrated_out: &mut alloc::vec::Vec<super::task::TaskId>,
+        migrated_out: &mut MigratedTasks,
     ) -> Option<super::task::TaskId> {
         let n = self.num_cpus.load(Ordering::Relaxed);
         if n <= 1 {
@@ -623,7 +731,7 @@ impl PerCpuScheduler {
         let mut first = None;
         {
             let mut our_rq = self.queues[cpu].lock();
-            for (i, (id, priority)) in stolen.into_iter().enumerate() {
+            for (i, &(id, priority)) in stolen.iter().enumerate() {
                 migrated_out.push(id);
                 if i == 0 {
                     first = Some(id);
@@ -738,13 +846,13 @@ impl PerCpuScheduler {
         if let Some(mut target_guard) = self.queues.get(lightest_cpu).and_then(|m| m.try_lock()) {
             // Success: move tasks to target.
             drop(local_guard); // Release local before doing work.
-            for &(id, priority) in &stolen {
+            for &(id, priority) in stolen.iter() {
                 target_guard.enqueue(id, priority);
                 migrations.push((id, lightest_cpu));
             }
         } else {
             // Target lock contended — put tasks back locally.
-            for &(id, priority) in &stolen {
+            for &(id, priority) in stolen.iter() {
                 local_guard.enqueue(id, priority);
             }
             // migrations stays empty — no migration happened.
@@ -757,10 +865,26 @@ impl PerCpuScheduler {
     ///
     /// Used during CPU hotplug offline to move all queued tasks off
     /// the target CPU.  Returns (task_id, priority) pairs.
+    ///
+    /// Note: This rare path (CPU hotplug) returns a Vec for unbounded
+    /// capacity.  The normal work-stealing path uses stack-allocated
+    /// `StolenTasks` to avoid heap allocation.
     pub fn drain_all(&self, cpu: usize) -> alloc::vec::Vec<(super::task::TaskId, u8)> {
         if let Some(q) = self.queues.get(cpu) {
-            // Steal everything (1024 is effectively "all").
-            q.lock().steal(1024)
+            // Steal everything (up to MAX_STEAL per call — drain in
+            // batches if needed).
+            let mut result = alloc::vec::Vec::new();
+            let mut guard = q.lock();
+            loop {
+                let batch = guard.steal(MAX_STEAL);
+                if batch.is_empty() {
+                    break;
+                }
+                for &(id, prio) in batch.iter() {
+                    result.push((id, prio));
+                }
+            }
+            result
         } else {
             alloc::vec::Vec::new()
         }

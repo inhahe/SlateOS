@@ -3088,7 +3088,10 @@ fn schedule_inner(requeue: bool) {
         // If local queue is empty, try work stealing from other CPUs.
         // Stolen tasks need their last_cpu updated so wake()/kill_task()
         // dequeue from the correct (new) CPU queue, not the stale one.
-        let mut migrated = alloc::vec::Vec::new();
+        //
+        // OPT: MigratedTasks is stack-allocated (no heap allocation under
+        // the SCHED lock on the work-stealing path).
+        let mut migrated = priority_rr::MigratedTasks::new();
         let _pick_t = crate::kprofile::begin(crate::kprofile::Slot::SchedPickNext);
         let picked = match PER_CPU_SCHED.pick_next_local(cpu) {
             Some(id) => Some(id),
@@ -3104,7 +3107,7 @@ fn schedule_inner(requeue: bool) {
         // Update last_cpu for stolen tasks.  If a stolen task's affinity
         // forbids this CPU, put it back on its original (or first allowed)
         // CPU.  This is rare — most tasks have CPU_AFFINITY_ALL.
-        for &id in &migrated {
+        for &id in migrated.iter() {
             if let Some(task) = state.tasks.get_mut(&id) {
                 if task.can_run_on(cpu) {
                     task.last_cpu = cpu;
@@ -3152,7 +3155,7 @@ fn schedule_inner(requeue: bool) {
                         continue;
                     };
 
-                    let mut idle_migrated = alloc::vec::Vec::new();
+                    let mut idle_migrated = priority_rr::MigratedTasks::new();
                     let ready_id = match PER_CPU_SCHED.pick_next_local(cpu) {
                         Some(id) => id,
                         None => match PER_CPU_SCHED.try_steal(cpu, &mut idle_migrated) {
@@ -3165,7 +3168,7 @@ fn schedule_inner(requeue: bool) {
                     };
                     // Update last_cpu for stolen tasks (same affinity
                     // check as the main path above).
-                    for &id in &idle_migrated {
+                    for &id in idle_migrated.iter() {
                         if let Some(task) = s.tasks.get_mut(&id) {
                             if task.can_run_on(cpu) {
                                 task.last_cpu = cpu;
@@ -4225,20 +4228,20 @@ fn test_per_cpu_work_stealing() -> KernelResult<()> {
     }
 
     // CPU 0 steals from the most-loaded CPU (CPU 1 has 8 tasks).
-    let mut migrated = alloc::vec::Vec::new();
+    let mut migrated = priority_rr::MigratedTasks::new();
     let stolen = sched.try_steal(0, &mut migrated);
     if stolen.is_none() {
         serial_println!("[sched]   FAIL: work stealing returned None");
         return Err(KernelError::InternalError);
     }
 
-    // The migrated vec should contain all stolen task IDs.
+    // The migrated buffer should contain all stolen task IDs.
     // The first one is also in `stolen`; the rest were enqueued on CPU 0.
-    if migrated.is_empty() {
-        serial_println!("[sched]   FAIL: migrated vec empty after steal");
+    if migrated.len() == 0 {
+        serial_println!("[sched]   FAIL: migrated buffer empty after steal");
         return Err(KernelError::InternalError);
     }
-    if migrated.first().copied() != stolen {
+    if migrated.iter().next().copied() != stolen {
         serial_println!("[sched]   FAIL: migrated[0] should match stolen return value");
         return Err(KernelError::InternalError);
     }

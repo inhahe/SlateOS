@@ -32,7 +32,6 @@ pub mod shm;
 pub mod stats;
 pub mod timer;
 
-// TODO: Synchronous (rendezvous) channel mode.
 // TODO: Splice/vmsplice for pipes.
 // TODO: Benchmark all IPC paths.
 

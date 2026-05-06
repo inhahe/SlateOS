@@ -355,6 +355,9 @@ pub const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
 
 /// Create a new IPC channel.
 ///
+/// `arg0`: flags (bit 0 = `CHANNEL_FLAG_SYNC` — synchronous/rendezvous
+///   mode with no internal message buffer).
+///
 /// Returns two handles packed into a single u128:
 /// - bits 0–63:  endpoint 0 handle
 /// - bits 64–127: endpoint 1 handle

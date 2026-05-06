@@ -34,11 +34,26 @@
 //! nanosecond deadline to the blocking behavior.  When the peer consumes
 //! a message, a blocked sender is woken.
 //!
+//! ## Synchronous (Rendezvous) Mode
+//!
+//! `create_sync()` returns a channel pair with no internal message
+//! buffer.  A sender parks its message in a rendezvous slot and
+//! blocks until a receiver takes it (or uses `send()` / `send_timeout()`
+//! for non-blocking / deadline semantics).  This mirrors L4/seL4
+//! synchronous IPC where the kernel copies directly from sender to
+//! receiver — no intermediate queue allocation.
+//!
+//! Semantics differences from async channels:
+//! - `send()` returns [`ChannelFull`] unless a receiver is already
+//!   waiting (the queue is effectively size 0).
+//! - `send_blocking()` parks until a receiver takes the message.
+//! - `recv()` checks for a parked sender first, then blocks.
+//! - `try_recv()` returns `Ok(Some(msg))` only if a sender is parked.
+//!
 //! ## Future Optimizations (NOT YET IMPLEMENTED)
 //!
 //! - Page flipping for large messages (zero-copy).
 //! - Fast-path register passing for tiny messages (L4-style).
-//! - Synchronous (rendezvous) mode.
 //!
 //! [`ChannelFull`]: crate::error::KernelError::ChannelFull
 //! [`ChannelClosed`]: crate::error::KernelError::ChannelClosed
@@ -264,10 +279,13 @@ impl Message {
 
 /// Internal state of a channel, shared between both endpoints.
 struct Channel {
-    /// Message queues, indexed by side.
+    /// Message queues, indexed by side (async channels only).
     ///
     /// `queues[0]` holds messages for side 0 to receive (sent by side 1).
     /// `queues[1]` holds messages for side 1 to receive (sent by side 0).
+    ///
+    /// For sync (rendezvous) channels, queues are unused — messages go
+    /// through `rendezvous_slots` instead.
     queues: [VecDeque<Message>; 2],
 
     /// Whether each side has been closed.
@@ -286,6 +304,20 @@ struct Channel {
     /// peer's queue is full, its ID is stored here.  When the peer
     /// consumes a message (via recv/try_recv), the sender is woken.
     sender_waiters: [Option<TaskId>; 2],
+
+    /// Whether this is a synchronous (rendezvous) channel.
+    ///
+    /// Sync channels have no internal message buffer.  A sender parks
+    /// its message in `rendezvous_slots[side]` and blocks until the
+    /// receiver takes it.
+    sync: bool,
+
+    /// Rendezvous slots (sync channels only).
+    ///
+    /// `rendezvous_slots[side]` holds the message parked by side `side`
+    /// waiting for its peer to take it.  The sender blocks until the
+    /// peer calls recv/try_recv and takes the message.
+    rendezvous_slots: [Option<Message>; 2],
 }
 
 impl Channel {
@@ -295,6 +327,19 @@ impl Channel {
             closed: [false, false],
             waiters: [None, None],
             sender_waiters: [None, None],
+            sync: false,
+            rendezvous_slots: [None, None],
+        }
+    }
+
+    fn new_sync() -> Self {
+        Self {
+            queues: [VecDeque::new(), VecDeque::new()],
+            closed: [false, false],
+            waiters: [None, None],
+            sender_waiters: [None, None],
+            sync: true,
+            rendezvous_slots: [None, None],
         }
     }
 }
@@ -327,15 +372,54 @@ pub fn create() -> (ChannelHandle, ChannelHandle) {
     (ChannelHandle::new(id, 0), ChannelHandle::new(id, 1))
 }
 
+/// Create a new synchronous (rendezvous) channel pair.
+///
+/// Returns two handles like [`create`], but the channel has no
+/// internal message buffer.  Sends block until a receiver takes
+/// the message (L4/seL4-style synchronous IPC).
+///
+/// # Semantics
+///
+/// - `send()`: succeeds only if a receiver is already waiting;
+///   otherwise returns [`ChannelFull`] (the 0-element queue is full).
+/// - `send_blocking()`: parks the message and blocks until a
+///   receiver takes it.
+/// - `recv()`: if a sender is parked, takes the message immediately
+///   and wakes the sender; otherwise blocks for a sender.
+/// - `try_recv()`: takes from a parked sender or returns `None`.
+///
+/// [`ChannelFull`]: KernelError::ChannelFull
+pub fn create_sync() -> (ChannelHandle, ChannelHandle) {
+    let id = alloc_channel_id();
+    CHANNELS.lock().insert(id, Channel::new_sync());
+    (ChannelHandle::new(id, 0), ChannelHandle::new(id, 1))
+}
+
+/// Query whether a channel is synchronous (rendezvous).
+///
+/// Returns `None` if the handle is invalid.
+#[allow(dead_code)]
+pub fn is_sync(handle: ChannelHandle) -> Option<bool> {
+    CHANNELS.lock().get(&handle.channel_id()).map(|ch| ch.sync)
+}
+
 /// Send a message to the peer endpoint.
 ///
-/// The message is placed in the peer's receive queue.  If a task is
-/// blocked on `recv` on the peer side, it is woken.
+/// **Async channels:** the message is placed in the peer's receive
+/// queue.  If a task is blocked on `recv` on the peer side, it is
+/// woken.
+///
+/// **Sync (rendezvous) channels:** succeeds only if a receiver is
+/// already blocked waiting.  The message is placed in the rendezvous
+/// slot and the receiver is woken immediately.  If no receiver is
+/// waiting, returns [`ChannelFull`] (use `send_blocking()` for
+/// blocking send on sync channels).
 ///
 /// # Errors
 ///
 /// - [`ChannelClosed`] — the peer endpoint has been closed.
-/// - [`ChannelFull`] — the peer's queue is full (backpressure).
+/// - [`ChannelFull`] — the peer's queue is full (async) or no
+///   receiver waiting (sync).
 /// - [`InvalidHandle`] — the channel does not exist.
 ///
 /// [`ChannelClosed`]: KernelError::ChannelClosed
@@ -361,16 +445,25 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
             return Err(KernelError::ChannelClosed);
         }
 
-        // Check queue capacity (backpressure).
-        if ch.queues[peer].len() >= MAX_QUEUE_DEPTH {
-            return Err(KernelError::ChannelFull);
+        if ch.sync {
+            // Sync channel: succeed only if a receiver is waiting.
+            if ch.waiters[peer].is_some() {
+                // Receiver is blocked — place message in rendezvous
+                // slot and wake receiver.
+                ch.rendezvous_slots[our_side] = Some(msg);
+                wake_task = ch.waiters[peer].take();
+            } else {
+                // No receiver waiting — cannot buffer.
+                return Err(KernelError::ChannelFull);
+            }
+        } else {
+            // Async channel: enqueue in peer's queue.
+            if ch.queues[peer].len() >= MAX_QUEUE_DEPTH {
+                return Err(KernelError::ChannelFull);
+            }
+            ch.queues[peer].push_back(msg);
+            wake_task = ch.waiters[peer].take();
         }
-
-        // Enqueue the message for the peer to receive.
-        ch.queues[peer].push_back(msg);
-
-        // If the peer has a task blocked on recv, wake it.
-        wake_task = ch.waiters[peer].take();
 
         // Lock is dropped here.
     }
@@ -420,40 +513,81 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
                 return Err(KernelError::ChannelClosed);
             }
 
-            // Check queue capacity.
-            if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
-                // Space available — enqueue.
-                if let Some(m) = pending.take() {
-                    ch.queues[peer].push_back(m);
+            if ch.sync {
+                // Sync channel: check if receiver is waiting.
+                if ch.waiters[peer].is_some() {
+                    // Receiver blocked — hand off directly.
+                    if let Some(m) = pending.take() {
+                        ch.rendezvous_slots[our_side] = Some(m);
+                    }
+                    wake_task = ch.waiters[peer].take();
+                    drop(channels);
+                    if let Some(task_id) = wake_task {
+                        sched::wake(task_id);
+                    }
+                    return Ok(());
                 }
-                wake_task = ch.waiters[peer].take();
-                drop(channels);
 
-                if let Some(task_id) = wake_task {
-                    sched::wake(task_id);
+                // No receiver — check if our slot is already occupied
+                // (shouldn't be, but guard against double-park).
+                if ch.rendezvous_slots[our_side].is_none() {
+                    // Park message in rendezvous slot and block.
+                    if let Some(m) = pending.take() {
+                        ch.rendezvous_slots[our_side] = Some(m);
+                    }
                 }
-                return Ok(());
+                ch.sender_waiters[our_side] = Some(sched::current_task_id());
+            } else {
+                // Async channel: enqueue if space available.
+                if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
+                    if let Some(m) = pending.take() {
+                        ch.queues[peer].push_back(m);
+                    }
+                    wake_task = ch.waiters[peer].take();
+                    drop(channels);
+                    if let Some(task_id) = wake_task {
+                        sched::wake(task_id);
+                    }
+                    return Ok(());
+                }
+
+                // Queue full — register as sender waiter and block.
+                ch.sender_waiters[our_side] = Some(sched::current_task_id());
             }
-
-            // Queue full — register as sender waiter and block.
-            ch.sender_waiters[our_side] = Some(sched::current_task_id());
         }
 
         sched::block_current();
+
+        // For sync channels: on wake, check if the receiver took our
+        // message (rendezvous slot was cleared).
+        {
+            let channels = CHANNELS.lock();
+            if let Some(ch) = channels.get(&handle.channel_id()) {
+                let our_side = handle.side();
+                if ch.sync && ch.rendezvous_slots[our_side].is_none() {
+                    // Receiver took the message — we're done.
+                    return Ok(());
+                }
+            } else {
+                return Err(KernelError::InvalidHandle);
+            }
+        }
+        // If we get here on a sync channel, the wake was spurious
+        // (or the channel was closed) — loop back to re-check.
     }
 }
 
 /// Send a message with a timeout (nanoseconds).
 ///
-/// Blocks up to `timeout_ns` nanoseconds waiting for queue space.
-/// Returns `Err(TimedOut)` if the deadline expires.
+/// Blocks up to `timeout_ns` nanoseconds waiting for queue space (async)
+/// or a receiver (sync).  Returns `Err(TimedOut)` if the deadline expires.
 ///
-/// `timeout_ns = 0` is equivalent to `send()` (returns `ChannelFull`
-/// remapped to `TimedOut` if no space).
+/// `timeout_ns = 0` is equivalent to `send()` (returns `TimedOut`
+/// instead of `ChannelFull` if no space / no receiver).
 ///
 /// # Errors
 ///
-/// - [`TimedOut`] — no space within the deadline.
+/// - [`TimedOut`] — no space / no receiver within the deadline.
 /// - [`ChannelClosed`] — the peer has been closed.
 /// - [`InvalidHandle`] — the channel does not exist.
 ///
@@ -477,14 +611,28 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
             return Err(KernelError::ChannelClosed);
         }
 
-        if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
-            ch.queues[peer].push_back(msg);
-            let wake_task = ch.waiters[peer].take();
-            drop(channels);
-            if let Some(task_id) = wake_task {
-                sched::wake(task_id);
+        if ch.sync {
+            // Sync: succeed if receiver waiting.
+            if ch.waiters[peer].is_some() {
+                ch.rendezvous_slots[our_side] = Some(msg);
+                let wake_task = ch.waiters[peer].take();
+                drop(channels);
+                if let Some(task_id) = wake_task {
+                    sched::wake(task_id);
+                }
+                return Ok(());
             }
-            return Ok(());
+        } else {
+            // Async: succeed if queue has space.
+            if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
+                ch.queues[peer].push_back(msg);
+                let wake_task = ch.waiters[peer].take();
+                drop(channels);
+                if let Some(task_id) = wake_task {
+                    sched::wake(task_id);
+                }
+                return Ok(());
+            }
         }
     }
 
@@ -522,32 +670,69 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
 
             let our_side = handle.side();
             if ch.closed[our_side] || ch.closed[handle.peer_side()] {
+                // Clean up rendezvous slot if we parked a message.
+                if ch.sync {
+                    ch.rendezvous_slots[our_side] = None;
+                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::ChannelClosed);
             }
 
             let peer = handle.peer_side();
-            if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
-                if let Some(m) = pending.take() {
-                    ch.queues[peer].push_back(m);
+
+            if ch.sync {
+                // Sync: check if our slot was taken (receiver came).
+                if ch.rendezvous_slots[our_side].is_none() && pending.is_none() {
+                    // Message was taken — success.
+                    crate::hrtimer::cancel(timer_handle);
+                    return Ok(());
                 }
-                let wake_task = ch.waiters[peer].take();
-                crate::hrtimer::cancel(timer_handle);
-                drop(channels);
-                if let Some(task_id) = wake_task {
-                    sched::wake(task_id);
+                // Try to place message if receiver is now waiting.
+                if ch.waiters[peer].is_some() {
+                    if let Some(m) = pending.take() {
+                        ch.rendezvous_slots[our_side] = Some(m);
+                    }
+                    let wake_task = ch.waiters[peer].take();
+                    crate::hrtimer::cancel(timer_handle);
+                    drop(channels);
+                    if let Some(task_id) = wake_task {
+                        sched::wake(task_id);
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                // Park message and block.
+                if pending.is_some() && ch.rendezvous_slots[our_side].is_none() {
+                    if let Some(m) = pending.take() {
+                        ch.rendezvous_slots[our_side] = Some(m);
+                    }
+                }
+                ch.sender_waiters[our_side] = Some(sched::current_task_id());
+            } else {
+                // Async: try to enqueue.
+                if ch.queues[peer].len() < MAX_QUEUE_DEPTH {
+                    if let Some(m) = pending.take() {
+                        ch.queues[peer].push_back(m);
+                    }
+                    let wake_task = ch.waiters[peer].take();
+                    crate::hrtimer::cancel(timer_handle);
+                    drop(channels);
+                    if let Some(task_id) = wake_task {
+                        sched::wake(task_id);
+                    }
+                    return Ok(());
+                }
+                ch.sender_waiters[our_side] = Some(sched::current_task_id());
             }
 
             // Check timeout.
             if crate::hrtimer::now_ns() >= deadline_ns {
+                // Clean up any parked message.
+                if ch.sync {
+                    ch.rendezvous_slots[our_side] = None;
+                }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::TimedOut);
             }
-
-            // Register as sender waiter.
-            ch.sender_waiters[our_side] = Some(sched::current_task_id());
         }
 
         sched::block_current();
@@ -702,21 +887,31 @@ pub fn has_pending(handle: ChannelHandle) -> bool {
         return false;
     };
     let our_side = handle.side();
+    let peer = handle.peer_side();
 
-    // SAFETY: our_side is 0 or 1 (from the handle encoding).
-    #[allow(clippy::indexing_slicing)]
-    !ch.queues[our_side].is_empty()
+    if ch.sync {
+        // Sync channel: pending if the peer has a parked message.
+        ch.rendezvous_slots[peer].is_some()
+    } else {
+        // Async channel: pending if our receive queue is non-empty.
+        // SAFETY: our_side is 0 or 1 (from the handle encoding).
+        #[allow(clippy::indexing_slicing)]
+        !ch.queues[our_side].is_empty()
+    }
 }
 
 /// Try to receive a message (non-blocking).
 ///
-/// Returns `Ok(Some(msg))` if a message was available, `Ok(None)` if
-/// the queue was empty, or `Err(ChannelClosed)` if the peer is
-/// closed and no messages remain.
+/// **Async channels:** returns `Ok(Some(msg))` if a message was in
+/// the queue, `Ok(None)` if the queue was empty.
+///
+/// **Sync channels:** returns `Ok(Some(msg))` if a sender has parked
+/// a message in the rendezvous slot, `Ok(None)` if no sender is
+/// waiting.  Taking the message wakes the blocked sender.
 ///
 /// # Errors
 ///
-/// - [`ChannelClosed`] — the peer is closed and the queue is empty.
+/// - [`ChannelClosed`] — the peer is closed and no messages remain.
 /// - [`InvalidHandle`] — the channel does not exist.
 ///
 /// [`ChannelClosed`]: KernelError::ChannelClosed
@@ -727,22 +922,36 @@ pub fn try_recv(handle: ChannelHandle) -> KernelResult<Option<Message>> {
         .ok_or(KernelError::InvalidHandle)?;
 
     let our_side = handle.side();
+    let peer = handle.peer_side();
 
-    // Try to dequeue a message.
-    if let Some(msg) = ch.queues[our_side].pop_front() {
-        // We consumed a message — wake any sender blocked on full queue.
-        let wake_sender = ch.sender_waiters[handle.peer_side()].take();
-        drop(channels);
+    if ch.sync {
+        // Sync channel: check if the peer parked a message.
+        if let Some(msg) = ch.rendezvous_slots[peer].take() {
+            // Wake the sender — its message was taken.
+            let wake_sender = ch.sender_waiters[peer].take();
+            drop(channels);
 
-        if let Some(task_id) = wake_sender {
-            sched::wake(task_id);
+            if let Some(task_id) = wake_sender {
+                sched::wake(task_id);
+            }
+            return Ok(Some(msg));
         }
-        return Ok(Some(msg));
+    } else {
+        // Async channel: dequeue from our queue.
+        if let Some(msg) = ch.queues[our_side].pop_front() {
+            let wake_sender = ch.sender_waiters[peer].take();
+            drop(channels);
+
+            if let Some(task_id) = wake_sender {
+                sched::wake(task_id);
+            }
+            return Ok(Some(msg));
+        }
     }
 
-    // Queue is empty.  If the peer is closed, there will never be
-    // more messages.
-    if ch.closed[handle.peer_side()] {
+    // No messages available.  If the peer is closed, there will
+    // never be more.
+    if ch.closed[peer] {
         return Err(KernelError::ChannelClosed);
     }
 
@@ -771,19 +980,32 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
                 .ok_or(KernelError::InvalidHandle)?;
 
             let our_side = handle.side();
+            let peer = handle.peer_side();
 
-            if let Some(msg) = ch.queues[our_side].pop_front() {
-                // Wake any sender blocked on full queue.
-                let wake_sender = ch.sender_waiters[handle.peer_side()].take();
-                drop(channels);
-                if let Some(task_id) = wake_sender {
-                    sched::wake(task_id);
+            if ch.sync {
+                // Sync channel: check for a parked message from peer.
+                if let Some(msg) = ch.rendezvous_slots[peer].take() {
+                    let wake_sender = ch.sender_waiters[peer].take();
+                    drop(channels);
+                    if let Some(task_id) = wake_sender {
+                        sched::wake(task_id);
+                    }
+                    return Ok(msg);
                 }
-                return Ok(msg);
+            } else {
+                // Async channel: dequeue from our queue.
+                if let Some(msg) = ch.queues[our_side].pop_front() {
+                    let wake_sender = ch.sender_waiters[peer].take();
+                    drop(channels);
+                    if let Some(task_id) = wake_sender {
+                        sched::wake(task_id);
+                    }
+                    return Ok(msg);
+                }
             }
 
-            // Queue empty — check if peer is closed.
-            if ch.closed[handle.peer_side()] {
+            // No message — check if peer is closed.
+            if ch.closed[peer] {
                 return Err(KernelError::ChannelClosed);
             }
 
@@ -852,11 +1074,19 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
                 .ok_or(KernelError::InvalidHandle)?;
 
             let our_side = handle.side();
+            let peer = handle.peer_side();
 
-            if let Some(msg) = ch.queues[our_side].pop_front() {
-                // Got a message — cancel timer, wake blocked sender, return.
+            // Try to get a message (sync vs async).
+            let got_msg = if ch.sync {
+                ch.rendezvous_slots[peer].take()
+            } else {
+                ch.queues[our_side].pop_front()
+            };
+
+            if let Some(msg) = got_msg {
+                // Got a message — cancel timer, wake blocked sender.
                 crate::hrtimer::cancel(timer_handle);
-                let wake_sender = ch.sender_waiters[handle.peer_side()].take();
+                let wake_sender = ch.sender_waiters[peer].take();
                 drop(channels);
                 if let Some(sid) = wake_sender {
                     sched::wake(sid);
@@ -864,8 +1094,8 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
                 return Ok(msg);
             }
 
-            // Queue empty — check if peer is closed.
-            if ch.closed[handle.peer_side()] {
+            // No message — check if peer is closed.
+            if ch.closed[peer] {
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::ChannelClosed);
             }
@@ -916,6 +1146,14 @@ pub fn close(handle: ChannelHandle) {
         // queue — they'll see ChannelClosed on retry.
         wake_tasks[1] = ch.sender_waiters[peer].take();
 
+        // For sync channels: drop any parked message from our side
+        // (no one will ever take it).  Also drop the peer's parked
+        // message since we're closing — the peer's sender_waiter was
+        // already woken above.
+        if ch.sync {
+            ch.rendezvous_slots[our_side] = None;
+        }
+
         // If both sides are closed, remove the channel entirely.
         if ch.closed[0] && ch.closed[1] {
             channels.remove(&handle.channel_id());
@@ -939,6 +1177,9 @@ pub fn close(handle: ChannelHandle) {
 /// 3. Channel close detection.
 /// 4. Blocking receive (with scheduler integration).
 /// 5. Backpressure (queue full).
+/// 8. Sync channel: non-blocking send fails without receiver.
+/// 9. Sync channel: blocking send/recv rendezvous.
+/// 10. Sync channel: close detection.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[ipc] Running channel self-test...");
 
@@ -947,6 +1188,9 @@ pub fn self_test() -> KernelResult<()> {
     test_close_detection()?;
     test_blocking_recv()?;
     test_backpressure()?;
+    test_sync_send_no_receiver()?;
+    test_sync_rendezvous()?;
+    test_sync_close()?;
 
     serial_println!("[ipc] Channel self-test PASSED");
     Ok(())
@@ -1353,5 +1597,144 @@ fn test_cap_transfer_message() -> KernelResult<()> {
     close(ep1);
 
     serial_println!("[ipc]   Capability transfer in message: OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sync (rendezvous) channel tests
+// ---------------------------------------------------------------------------
+
+/// Test 8: Sync send fails without a receiver (ChannelFull).
+fn test_sync_send_no_receiver() -> KernelResult<()> {
+    let (ep0, ep1) = create_sync();
+
+    // Non-blocking send should fail — no receiver waiting.
+    let msg = Message::from_bytes(b"sync-msg")?;
+    match send(ep0, msg) {
+        Err(KernelError::ChannelFull) => {}
+        other => {
+            serial_println!("[ipc]   FAIL: sync send without receiver returned {:?}", other);
+            close(ep0);
+            close(ep1);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // try_recv should return None (no sender parked).
+    match try_recv(ep1)? {
+        None => {}
+        Some(_) => {
+            serial_println!("[ipc]   FAIL: sync try_recv returned message with no sender");
+            close(ep0);
+            close(ep1);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Verify is_sync returns true.
+    if is_sync(ep0) != Some(true) || is_sync(ep1) != Some(true) {
+        serial_println!("[ipc]   FAIL: is_sync() returned unexpected value");
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    close(ep0);
+    close(ep1);
+    serial_println!("[ipc]   Sync send no receiver: OK");
+    Ok(())
+}
+
+/// Result storage for sync rendezvous test.
+static SYNC_RECV_RESULT: AtomicU64 = AtomicU64::new(0);
+
+/// Receiver task for sync rendezvous test.
+///
+/// Calls blocking recv on a sync channel.  Stores 42 if the expected
+/// message arrives.
+extern "C" fn sync_recv_task(handle_raw: u64) {
+    let handle = ChannelHandle(handle_raw);
+    match recv(handle) {
+        Ok(msg) => {
+            if msg.data() == b"rendezvous" {
+                SYNC_RECV_RESULT.store(42, Ordering::SeqCst);
+            } else {
+                SYNC_RECV_RESULT.store(99, Ordering::SeqCst);
+            }
+        }
+        Err(_) => {
+            SYNC_RECV_RESULT.store(88, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Test 9: Sync blocking send/recv rendezvous.
+///
+/// Spawns a receiver task that blocks on recv, then the main task
+/// does a send_blocking.  Since the receiver is waiting, the message
+/// should be handed off directly.
+fn test_sync_rendezvous() -> KernelResult<()> {
+    SYNC_RECV_RESULT.store(0, Ordering::SeqCst);
+
+    let (ep0, ep1) = create_sync();
+
+    // Spawn receiver that blocks on recv(ep1).
+    sched::spawn(b"sync-recv", 16, sync_recv_task, ep1.0, 0)?;
+
+    // Yield to let receiver block.
+    sched::yield_now();
+    sched::yield_now();
+
+    // Now send_blocking — receiver is waiting, so should succeed immediately.
+    let msg = Message::from_bytes(b"rendezvous")?;
+    send_blocking(ep0, msg)?;
+
+    // Yield to let receiver process.
+    sched::yield_now();
+    sched::yield_now();
+
+    let result = SYNC_RECV_RESULT.load(Ordering::SeqCst);
+    if result != 42 {
+        serial_println!("[ipc]   FAIL: sync rendezvous result={}, expected 42", result);
+        close(ep0);
+        close(ep1);
+        return Err(KernelError::InternalError);
+    }
+
+    close(ep0);
+    close(ep1);
+    serial_println!("[ipc]   Sync rendezvous: OK");
+    Ok(())
+}
+
+/// Test 10: Sync close detection.
+fn test_sync_close() -> KernelResult<()> {
+    let (ep0, ep1) = create_sync();
+
+    // Close ep0, try to send from ep1.
+    close(ep0);
+
+    let msg = Message::from_bytes(b"should fail")?;
+    match send(ep1, msg) {
+        Err(KernelError::ChannelClosed) => {}
+        other => {
+            serial_println!("[ipc]   FAIL: sync send to closed peer returned {:?}", other);
+            close(ep1);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // recv on closed channel should return ChannelClosed.
+    match try_recv(ep1) {
+        Err(KernelError::ChannelClosed) => {}
+        other => {
+            serial_println!("[ipc]   FAIL: sync recv on closed channel returned {:?}", other);
+            close(ep1);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(ep1);
+    serial_println!("[ipc]   Sync close detection: OK");
     Ok(())
 }

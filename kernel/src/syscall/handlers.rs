@@ -34,6 +34,17 @@ use crate::serial_println;
 use super::dispatch::{SyscallArgs, SyscallResult};
 
 // ---------------------------------------------------------------------------
+// Channel creation flags
+// ---------------------------------------------------------------------------
+
+/// Create a synchronous (rendezvous) channel — no internal buffer.
+///
+/// Sends block until a receiver takes the message.  Used for
+/// low-latency, L4-style IPC where the kernel copies directly
+/// from sender to receiver.
+pub const CHANNEL_FLAG_SYNC: u64 = 1;
+
+// ---------------------------------------------------------------------------
 // Capability enforcement helpers
 // ---------------------------------------------------------------------------
 
@@ -700,10 +711,22 @@ fn mmap_alloc_vaddr(size: u64) -> u64 {
 
 /// `SYS_CHANNEL_CREATE` — create a new IPC channel pair.
 ///
+/// `arg0`: flags (bit 0 = sync/rendezvous mode).
+///
 /// Returns both handles: `value` = ep0, `value2` = ep1.
+///
+/// If `CHANNEL_FLAG_SYNC` (bit 0) is set, creates a synchronous
+/// (rendezvous) channel with no internal buffer.  Sends block until
+/// a receiver takes the message (L4/seL4-style synchronous IPC).
 pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
-    let _ = args;
-    let (ep0, ep1) = channel::create();
+    let flags = args.arg0;
+    let sync = flags & CHANNEL_FLAG_SYNC != 0;
+
+    let (ep0, ep1) = if sync {
+        channel::create_sync()
+    } else {
+        channel::create()
+    };
 
     // Register both endpoints for cleanup on process death.
     if let Some(pid) = caller_pid() {

@@ -567,5 +567,75 @@ pub fn self_test() {
     }
     serial_println!("[kchannel]   Multi-task producer-consumer: OK");
 
+    // --- 6. recv_timeout_ns succeeds with available message ---
+    {
+        let ch: KChannel<u64, 4> = KChannel::new();
+        assert!(ch.try_send(42).is_ok());
+        let result = ch.recv_timeout_ns(1_000_000); // 1ms
+        assert!(matches!(result, Ok(Some(42))));
+    }
+    serial_println!("[kchannel]   recv_timeout_ns (available): OK");
+
+    // --- 7. recv_timeout_ns returns None on timeout ---
+    {
+        let ch: KChannel<u64, 4> = KChannel::new();
+        let result = ch.recv_timeout_ns(500_000); // 500µs, empty channel
+        assert!(matches!(result, Ok(None)));
+    }
+    serial_println!("[kchannel]   recv_timeout_ns (timeout): OK");
+
+    // --- 8. recv_timeout_ns returns Err on closed channel ---
+    {
+        let ch: KChannel<u64, 4> = KChannel::new();
+        ch.close();
+        let result = ch.recv_timeout_ns(1_000_000);
+        assert!(matches!(result, Err(RecvError)));
+    }
+    serial_println!("[kchannel]   recv_timeout_ns (closed): OK");
+
+    // --- 9. recv_timeout_ns with zero timeout (non-blocking) ---
+    {
+        let ch: KChannel<u64, 4> = KChannel::new();
+        // Empty channel, zero timeout → Ok(None).
+        assert!(matches!(ch.recv_timeout_ns(0), Ok(None)));
+        // Put something in, zero timeout → Ok(Some(val)).
+        assert!(ch.try_send(77).is_ok());
+        assert!(matches!(ch.recv_timeout_ns(0), Ok(Some(77))));
+    }
+    serial_println!("[kchannel]   recv_timeout_ns (zero timeout): OK");
+
+    // --- 10. send_timeout_ns succeeds with space ---
+    {
+        let ch: KChannel<u64, 4> = KChannel::new();
+        let result = ch.send_timeout_ns(99, 1_000_000); // 1ms
+        assert!(result.is_ok());
+        assert_eq!(ch.try_recv(), Some(99));
+    }
+    serial_println!("[kchannel]   send_timeout_ns (space available): OK");
+
+    // --- 11. send_timeout_ns returns error on closed channel ---
+    {
+        let ch: KChannel<u64, 4> = KChannel::new();
+        ch.close();
+        let result = ch.send_timeout_ns(55, 1_000_000);
+        assert!(matches!(result, Err(SendError::Closed(55))));
+    }
+    serial_println!("[kchannel]   send_timeout_ns (closed): OK");
+
+    // --- 12. send_timeout_ns returns error on full channel timeout ---
+    {
+        let ch: KChannel<u64, 2> = KChannel::new();
+        assert!(ch.try_send(1).is_ok());
+        assert!(ch.try_send(2).is_ok());
+        // Channel full, 500µs timeout → should fail.
+        let result = ch.send_timeout_ns(3, 500_000);
+        // Returns the message back on failure.
+        match result {
+            Err(SendError::Closed(3)) => {} // Expected.
+            other => panic!("Expected SendError::Closed(3), got {:?}", other),
+        }
+    }
+    serial_println!("[kchannel]   send_timeout_ns (full, timeout): OK");
+
     serial_println!("[kchannel] Self-test PASSED");
 }

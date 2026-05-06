@@ -256,5 +256,29 @@ pub fn self_test() {
     }
     serial_println!("[condvar]   wait_until (no-block): OK");
 
+    // --- 6. wait_timeout_ns — timeout expires (no notification) ---
+    {
+        let cv2 = CondVar::new();
+        let mutex = KMutex::new(123u64);
+        let guard = mutex.lock();
+        // Nobody will notify, so timeout should expire.
+        let (guard, timed_out) = cv2.wait_timeout_ns(guard, 500_000); // 500µs
+        assert!(timed_out, "wait_timeout_ns should report timeout when not notified");
+        assert_eq!(*guard, 123); // Data intact.
+    }
+    serial_println!("[condvar]   wait_timeout_ns (expired): OK");
+
+    // --- 7. wait_timeout_ns with zero timeout ---
+    {
+        let cv3 = CondVar::new();
+        let mutex = KMutex::new(456u64);
+        let guard = mutex.lock();
+        let (guard, timed_out) = cv3.wait_timeout_ns(guard, 0);
+        // Zero timeout = immediate return, counts as timed out.
+        assert!(timed_out);
+        assert_eq!(*guard, 456);
+    }
+    serial_println!("[condvar]   wait_timeout_ns (zero): OK");
+
     serial_println!("[condvar] Self-test PASSED");
 }

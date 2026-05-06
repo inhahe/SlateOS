@@ -306,5 +306,39 @@ pub fn self_test() {
     assert!(!m3.is_locked());
     serial_println!("[kmutex]   is_locked: OK");
 
+    // --- 4. lock_timeout_ns succeeds when unlocked ---
+    {
+        let m4: KMutex<u64> = KMutex::new(77);
+        let guard = m4.lock_timeout_ns(1_000_000); // 1ms
+        assert!(guard.is_some(), "lock_timeout_ns should succeed on unlocked mutex");
+        assert_eq!(*guard.unwrap(), 77);
+    }
+    serial_println!("[kmutex]   lock_timeout_ns (unlocked): OK");
+
+    // --- 5. lock_timeout_ns with zero timeout (non-blocking try) ---
+    {
+        let m5: KMutex<u64> = KMutex::new(88);
+        // Acquire normally first.
+        let _guard = m5.lock();
+        // Zero timeout while held → should fail.
+        let result = m5.lock_timeout_ns(0);
+        assert!(result.is_none(), "lock_timeout_ns(0) should fail when locked");
+    }
+    serial_println!("[kmutex]   lock_timeout_ns (zero, locked): OK");
+
+    // --- 6. lock_timeout_ns succeeds immediately after release ---
+    {
+        let m6: KMutex<u64> = KMutex::new(99);
+        {
+            let _guard = m6.lock();
+            // Lock held here.
+        }
+        // Lock released — timeout acquire should succeed instantly.
+        let guard = m6.lock_timeout_ns(5_000_000); // 5ms
+        assert!(guard.is_some());
+        assert_eq!(*guard.unwrap(), 99);
+    }
+    serial_println!("[kmutex]   lock_timeout_ns (after release): OK");
+
     serial_println!("[kmutex] Self-test PASSED");
 }

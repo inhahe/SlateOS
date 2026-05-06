@@ -208,6 +208,33 @@ pub fn self_test() {
     }
     serial_println!("[once_event]   Timeout (already set): OK");
 
+    // --- 6b. wait_timeout_ns returns true if already signaled ---
+    {
+        let e = OnceEvent::new();
+        e.signal();
+        let result = e.wait_timeout_ns(1_000_000); // 1ms
+        assert!(result, "wait_timeout_ns should return true when already fired");
+    }
+    serial_println!("[once_event]   wait_timeout_ns (already set): OK");
+
+    // --- 6c. wait_timeout_ns expires when event never fires ---
+    {
+        let e = OnceEvent::new();
+        let result = e.wait_timeout_ns(500_000); // 500µs
+        assert!(!result, "wait_timeout_ns should return false on timeout");
+        assert!(!e.is_set());
+    }
+    serial_println!("[once_event]   wait_timeout_ns (expired): OK");
+
+    // --- 6d. wait_timeout_ns with zero timeout ---
+    {
+        let e = OnceEvent::new();
+        assert!(!e.wait_timeout_ns(0));
+        e.signal();
+        assert!(e.wait_timeout_ns(0)); // Already set → returns true even with 0.
+    }
+    serial_println!("[once_event]   wait_timeout_ns (zero): OK");
+
     // --- 7. Multi-task wait/signal ---
     {
         use core::sync::atomic::AtomicBool;

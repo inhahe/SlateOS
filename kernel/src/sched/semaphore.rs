@@ -254,5 +254,29 @@ pub fn self_test() {
     assert!(!sem4.try_wait());
     serial_println!("[semaphore]   Over-signal: OK");
 
+    // --- 5. wait_timeout_ns succeeds with available permit ---
+    let sem5 = Semaphore::new(2);
+    assert!(sem5.wait_timeout_ns(1_000_000)); // 1ms, count: 2 → 1
+    assert_eq!(sem5.count(), 1);
+    assert!(sem5.wait_timeout_ns(1_000_000)); // 1ms, count: 1 → 0
+    assert_eq!(sem5.count(), 0);
+    serial_println!("[semaphore]   wait_timeout_ns (available): OK");
+
+    // --- 6. wait_timeout_ns times out with zero permits ---
+    let sem6 = Semaphore::new(0);
+    let result = sem6.wait_timeout_ns(500_000); // 500µs, no permits
+    assert!(!result, "wait_timeout_ns should timeout on empty semaphore");
+    // Count should be back at 0 (undone decrement).
+    assert_eq!(sem6.count(), 0);
+    serial_println!("[semaphore]   wait_timeout_ns (timeout): OK");
+
+    // --- 7. wait_timeout_ns with zero timeout is non-blocking ---
+    let sem7 = Semaphore::new(0);
+    assert!(!sem7.wait_timeout_ns(0));
+    // Signal, then zero-timeout should succeed.
+    sem7.signal();
+    assert!(sem7.wait_timeout_ns(0));
+    serial_println!("[semaphore]   wait_timeout_ns (zero timeout): OK");
+
     serial_println!("[semaphore] Self-test PASSED");
 }

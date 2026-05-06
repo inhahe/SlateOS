@@ -433,5 +433,42 @@ pub fn self_test() {
     assert!(!result, "wait_timeout(0) with false condition should timeout");
     serial_println!("[waitqueue]   wait_timeout (immediate timeout): OK");
 
+    // --- 6. wait_timeout_ns with already-true condition ---
+    TEST_FLAG.store(1, Ordering::Relaxed);
+    let wq3 = WaitQueue::new();
+    let result = wq3.wait_timeout_ns(
+        || TEST_FLAG.load(Ordering::Relaxed) != 0,
+        1_000_000, // 1ms
+    );
+    assert!(result, "wait_timeout_ns should return true when condition is met");
+    serial_println!("[waitqueue]   wait_timeout_ns (already true): OK");
+
+    // --- 7. wait_timeout_ns with false condition (immediate timeout) ---
+    TEST_FLAG.store(0, Ordering::Relaxed);
+    let result = wq3.wait_timeout_ns(
+        || TEST_FLAG.load(Ordering::Relaxed) != 0,
+        0,
+    );
+    assert!(!result, "wait_timeout_ns(0) with false condition should timeout");
+    serial_println!("[waitqueue]   wait_timeout_ns (zero timeout): OK");
+
+    // --- 8. wait_timeout_ns with false condition (real ns timeout) ---
+    let result = wq3.wait_timeout_ns(
+        || TEST_FLAG.load(Ordering::Relaxed) != 0,
+        500_000, // 500µs — should expire
+    );
+    assert!(!result, "wait_timeout_ns should return false when timeout expires");
+    serial_println!("[waitqueue]   wait_timeout_ns (expired): OK");
+
+    // --- 9. wait_timeout_ns falls back for long timeouts (>100ms) ---
+    // Just test the already-true fast path with a >100ms value.
+    TEST_FLAG.store(1, Ordering::Relaxed);
+    let result = wq3.wait_timeout_ns(
+        || TEST_FLAG.load(Ordering::Relaxed) != 0,
+        200_000_000, // 200ms — triggers tick-based fallback, but condition is true
+    );
+    assert!(result, "wait_timeout_ns long timeout should return true if condition is met");
+    serial_println!("[waitqueue]   wait_timeout_ns (long, already true): OK");
+
     serial_println!("[waitqueue] Self-test PASSED");
 }

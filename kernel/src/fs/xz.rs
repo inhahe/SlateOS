@@ -789,17 +789,24 @@ fn read_vli(data: &[u8], start: usize) -> KernelResult<(u64, usize)> {
 /// Parse LZMA2 dictionary size from the properties byte.
 ///
 /// `byte` encodes the dictionary size as `(2 | (byte & 1)) << (byte/2 + 11)`,
-/// with special case: byte=0 → 4096.
+/// with special cases: byte=0 → 4096, byte=40 → u32::MAX (per xz-utils).
+/// Values above 40 are invalid per the XZ spec.
 fn lzma2_dict_size(byte: u8) -> u32 {
     if byte == 0 {
         return MIN_DICT_SIZE;
+    }
+    // Byte 40 is the maximum dictionary (4 GiB - 1).  The formula
+    // `2 << 31` overflows u32, so handle it as a special case
+    // (matches xz-utils behavior).
+    if byte >= 40 {
+        return u32::MAX;
     }
     let mantissa = 2u32 | u32::from(byte & 1);
     let exponent = (u32::from(byte) >> 1).saturating_add(11);
     if exponent >= 32 {
         return u32::MAX;
     }
-    mantissa << exponent
+    mantissa.checked_shl(exponent).unwrap_or(u32::MAX)
 }
 
 /// Decompress XZ-compressed data.
@@ -1136,10 +1143,10 @@ fn test_dict_size() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // byte 40 → (2|0) << (20+11) = 2 << 31 = 2^32 → should be 2147483648
-    // Actually byte 40: mantissa=2, exponent=20+11=31, 2<<31 = 2147483648
+    // byte 40 → special case: 4 GiB - 1 = u32::MAX (per xz-utils spec).
+    // The formula 2<<31 overflows u32, so byte 40 is handled explicitly.
     let d40 = lzma2_dict_size(40);
-    if d40 != 2_147_483_648 {
+    if d40 != u32::MAX {
         serial_println!("[xz]   FAIL: dict_size(40) = {}", d40);
         return Err(KernelError::InternalError);
     }

@@ -128,13 +128,20 @@ pub fn sys_yield(args: &SyscallArgs) -> SyscallResult {
 /// Notifies the thread/process system before terminating.  If this
 /// was the last thread in a process, the process becomes a zombie.
 pub fn sys_exit(args: &SyscallArgs) -> SyscallResult {
-    // TODO: Store exit code (args.arg0) for parent to retrieve.
-    let _ = args;
+    let exit_code = args.arg0 as i32;
+    let task_id = sched::current_task_id();
+
+    // Store exit code in the PCB before on_thread_exit transitions
+    // the process to Zombie.  remove_thread() has a guard that only
+    // sets exit_code=0 when None, so our explicit code wins.
+    // Bare kernel tasks (no owning process) simply skip this.
+    if let Some(pid) = crate::proc::thread::owner_process(task_id) {
+        let _ = crate::proc::pcb::set_exit_code(pid, exit_code);
+    }
 
     // Notify the thread system so the owning process can transition
     // to Zombie when its last thread exits.  For bare kernel tasks
     // (not owned by any process), this is a harmless no-op.
-    let task_id = sched::current_task_id();
     crate::proc::thread::on_thread_exit(task_id);
 
     sched::task_exit();
@@ -392,7 +399,7 @@ pub fn sys_port_write(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+    use crate::mm::frame::{PhysFrame, FRAME_SIZE};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
     use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_WRITE};
@@ -466,11 +473,6 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::OutOfMemory);
     }
 
-    let hhdm = match page_table::hhdm() {
-        Some(h) => h,
-        None => return SyscallResult::err(KernelError::InternalError),
-    };
-
     if flags & MAP_MMIO != 0 {
         // MMIO mapping: map specific physical address.
         if phys_addr % frame_size != 0 {
@@ -485,7 +487,16 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
             let phys = match PhysFrame::from_addr(pa) {
                 Some(f) => f,
-                None => return SyscallResult::err(KernelError::BadAlignment),
+                None => {
+                    // Rollback: unmap frames 0..i (don't free — device memory).
+                    for j in 0..i {
+                        #[allow(clippy::arithmetic_side_effects)]
+                        let rv = base_vaddr + (j as u64) * frame_size;
+                        // SAFETY: we mapped these frames successfully above.
+                        let _ = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(rv)) };
+                    }
+                    return SyscallResult::err(KernelError::BadAlignment);
+                }
             };
 
             // SAFETY: pml4_phys is valid, phys is a device MMIO address
@@ -497,7 +508,13 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
                     "[mmap] MMIO map failed at va={:#x} pa={:#x}: {:?}",
                     va, pa, e
                 );
-                // TODO: unmap already-mapped frames on partial failure.
+                // Rollback: unmap frames 0..i (don't free — device memory).
+                for j in 0..i {
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let rv = base_vaddr + (j as u64) * frame_size;
+                    // SAFETY: we mapped these frames successfully above.
+                    let _ = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(rv)) };
+                }
                 return SyscallResult::err(e);
             }
         }
@@ -539,38 +556,22 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         );
     } else {
         // Committed anonymous mapping (default): allocate and map
-        // fresh zeroed frames immediately.
-        for i in 0..num_frames {
-            let phys = match frame::alloc_frame() {
-                Ok(f) => f,
-                Err(e) => {
-                    serial_println!("[mmap] Frame alloc failed at frame {}: {:?}", i, e);
-                    // TODO: free already-allocated frames on partial failure.
-                    return SyscallResult::err(e);
-                }
-            };
-
-            // Zero the frame.
-            let frame_virt = phys.to_virt(hhdm);
-            // SAFETY: frame_virt is the HHDM mapping of a freshly allocated frame.
-            unsafe {
-                core::ptr::write_bytes(frame_virt as *mut u8, 0, FRAME_SIZE);
-            }
-
-            #[allow(clippy::arithmetic_side_effects)]
-            let va = base_vaddr + (i as u64) * frame_size;
-
-            // SAFETY: pml4_phys is valid, phys is freshly allocated.
-            if let Err(e) = unsafe {
-                page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags)
-            } {
-                serial_println!(
-                    "[mmap] Anonymous map failed at va={:#x}: {:?}",
-                    va, e
-                );
-                // Leak the allocated frame rather than risk double-free.
-                return SyscallResult::err(e);
-            }
+        // fresh zeroed frames immediately.  map_committed_range handles
+        // alloc + zero + map atomically with full rollback on partial failure.
+        // SAFETY: pml4_phys is a valid page table for this process.
+        if let Err(e) = unsafe {
+            page_table::map_committed_range(
+                pml4_phys,
+                VirtAddr::new(base_vaddr),
+                num_frames,
+                page_flags,
+            )
+        } {
+            serial_println!(
+                "[mmap] Committed map failed at {:#x} ({} frames): {:?}",
+                base_vaddr, num_frames, e
+            );
+            return SyscallResult::err(e);
         }
 
         serial_println!(

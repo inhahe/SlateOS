@@ -56,17 +56,15 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   Combined with the journal byte order fix, ext4 compatibility is
   now fully resolved.
 
-- kernel-ipc: Wire SYS_CLOCK_MONOTONIC (syscall/handlers.rs) to use
-  hpet::elapsed_ns() when HPET is available, falling back to the APIC tick
-  counter if not.  The HPET gives 10 ns resolution vs 10 ms from the APIC
-  timer.  hpet::is_available() and hpet::elapsed_ns() are the public API.
+- (DONE) kernel-ipc: Wire SYS_CLOCK_MONOTONIC to use hrtimer::now_ns()
+  (HPET with TSC fallback).  10ns resolution.
 
-- kernel-ipc: Wire SYS_SLEEP (syscall/handlers.rs) to use HPET-based
-  timing for sub-10ms sleep accuracy.  Currently rounds up to 10 ms ticks.
+- (DONE) kernel-ipc: Wire SYS_SLEEP to use sched::sleep_ns() with
+  HPET-based hrtimer for sub-10ms accuracy.
 
-- kernel-ipc: Store exit code from SYS_EXIT (handlers.rs:131) in PCB
-  state so SYS_PROCESS_WAIT can retrieve it.  Currently the exit code
-  argument is accepted but discarded.
+- (DONE) kernel-ipc: Store exit code from SYS_EXIT in PCB before
+  on_thread_exit() zombie transition.  set_exit_code(pid, args.arg0)
+  called via owner_process() lookup.
 
 - kernel-ipc: Fix mmap partial failure recovery (handlers.rs:500, 548).
   If mmap region partially maps then alloc_frame fails, already-mapped
@@ -75,8 +73,8 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   which does alloc+zero+map atomically with full rollback on partial failure.
   For MMIO path, use a similar pattern with `unmap_committed_range()` for cleanup.
 
-- kernel-ipc: Verify SYS_PROCESS_ID (handlers.rs:1549) returns the
-  owning process PID, not just the task ID.  Has a TODO comment.
+- (DONE) kernel-ipc: SYS_PROCESS_ID already returns owner process PID
+  via thread::owner_process(task_id).  Verified correct.
 
 - kernel-ipc: Wire transitive priority inheritance into futex_lock_pi /
   futex_unlock_pi (ipc/futex.rs).  The scheduler-side infrastructure is

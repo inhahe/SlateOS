@@ -274,6 +274,7 @@ pub fn create() -> (PipeHandle, PipeHandle) {
     let read_handle = PipeHandle::new(id, PipeEnd::Read);
     let write_handle = PipeHandle::new(id, PipeEnd::Write);
 
+    super::stats::pipe_created();
     (read_handle, write_handle)
 }
 
@@ -319,6 +320,7 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
                 if let Some(task_id) = reader_id {
                     sched::wake(task_id);
                 }
+                super::stats::pipe_write(written as u64);
                 return Ok(written);
             }
 
@@ -327,6 +329,7 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
         }
 
         // Block.  The reader will wake us when it drains some data.
+        super::stats::pipe_write_block();
         sched::block_current();
 
         // Re-check on wake (loop back to top).
@@ -374,6 +377,9 @@ pub fn try_write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
     if let Some(task_id) = wake_reader {
         sched::wake(task_id);
     }
+    if let Ok(n) = result {
+        super::stats::pipe_write(n as u64);
+    }
     result
 }
 
@@ -414,6 +420,7 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
                 if let Some(task_id) = writer_id {
                     sched::wake(task_id);
                 }
+                super::stats::pipe_read(n as u64);
                 return Ok(n);
             }
 
@@ -427,6 +434,7 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
         }
 
         // Block.  The writer will wake us when it writes data.
+        super::stats::pipe_read_block();
         sched::block_current();
     }
 }
@@ -470,6 +478,11 @@ pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
     if let Some(task_id) = wake_writer {
         sched::wake(task_id);
     }
+    if let Ok(n) = result {
+        if n > 0 {
+            super::stats::pipe_read(n as u64);
+        }
+    }
     result
 }
 
@@ -511,6 +524,7 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
             if let Some(task_id) = writer_id {
                 sched::wake(task_id);
             }
+            super::stats::pipe_read(n as u64);
             return Ok(n);
         }
 
@@ -558,6 +572,7 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
                 if let Some(task_id) = writer_id {
                     sched::wake(task_id);
                 }
+                super::stats::pipe_read(n as u64);
                 return Ok(n);
             }
 
@@ -576,6 +591,7 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
             pipe.reader_waiter = Some(sched::current_task_id());
         }
 
+        super::stats::pipe_read_block();
         sched::block_current();
     }
 }
@@ -620,6 +636,7 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
             if let Some(task_id) = reader_id {
                 sched::wake(task_id);
             }
+            super::stats::pipe_write(written as u64);
             return Ok(written);
         }
     }
@@ -668,6 +685,7 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
                 if let Some(task_id) = reader_id {
                     sched::wake(task_id);
                 }
+                super::stats::pipe_write(written as u64);
                 return Ok(written);
             }
 
@@ -681,6 +699,7 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
             pipe.writer_waiter = Some(sched::current_task_id());
         }
 
+        super::stats::pipe_write_block();
         sched::block_current();
     }
 }

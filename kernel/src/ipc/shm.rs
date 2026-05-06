@@ -185,6 +185,7 @@ pub fn create(size: usize) -> KernelResult<ShmHandle> {
     let mut table = SHM_TABLE.lock();
     table.insert(id, region);
 
+    super::stats::shm_created(actual_size as u64);
     Ok(ShmHandle(id))
 }
 
@@ -267,6 +268,7 @@ pub fn close(handle: ShmHandle) {
     if should_remove
         && let Some(region) = table.remove(&handle.region_id())
     {
+        super::stats::shm_destroyed(region.size as u64);
         // Free all physical frames.
         for f in region.frames {
             // SAFETY: We're the last handle — no other references

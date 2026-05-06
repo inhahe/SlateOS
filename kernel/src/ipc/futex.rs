@@ -195,9 +195,11 @@ pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
         // If the value changed, don't block — the condition the caller
         // was waiting for may already be satisfied.
         if actual != expected {
+            super::stats::futex_spurious();
             return Ok(false);
         }
 
+        super::stats::futex_wait();
         // Value matches — add to wait queue and block.
         let idx = FutexTable::bucket_index(addr, addr_space);
 
@@ -255,8 +257,11 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
         };
 
         if actual != expected {
+            super::stats::futex_spurious();
             return Ok(false);
         }
+
+        super::stats::futex_wait();
 
         // Non-blocking mode: if timeout is 0, treat as "try".
         if timeout_ns == 0 {
@@ -379,6 +384,7 @@ pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
 
     #[allow(clippy::cast_possible_truncation)]
     let result = wake_count as u32;
+    super::stats::futex_wake(result);
     result
 }
 

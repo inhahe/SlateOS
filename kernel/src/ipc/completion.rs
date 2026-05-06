@@ -294,6 +294,7 @@ pub fn create() -> CpHandle {
     let mut table = CP_TABLE.lock();
     table.insert(id, cp);
 
+    super::stats::completion_created();
     CpHandle(id)
 }
 
@@ -404,6 +405,8 @@ pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
 pub fn notify(cp: CpHandle, source: WaitSource) {
     let wake_task;
 
+    super::stats::completion_post();
+
     {
         let mut table = CP_TABLE.lock();
         let Some(port) = table.get_mut(&cp.id()) else {
@@ -461,6 +464,7 @@ pub fn wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
                 let drain_count = port.event_queue.len().min(MAX_EVENTS_PER_WAIT);
                 let events: Vec<CompletionEvent> =
                     port.event_queue.drain(..drain_count).collect();
+                super::stats::completion_wait();
                 return Ok(events);
             }
 
@@ -500,12 +504,14 @@ pub fn wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
                         port.waiter = None;
                     }
                 }
+                super::stats::completion_wait();
                 return Ok(events);
             }
 
             // Nothing ready — fall through to block.
         }
 
+        super::stats::completion_wait_block();
         sched::block_current();
     }
 }
@@ -538,6 +544,7 @@ pub fn try_wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
             let drain_count = port.event_queue.len().min(MAX_EVENTS_PER_WAIT);
             let events: Vec<CompletionEvent> =
                 port.event_queue.drain(..drain_count).collect();
+            super::stats::completion_wait();
             return Ok(events);
         }
 
@@ -566,6 +573,7 @@ pub fn try_wait(cp: CpHandle) -> KernelResult<Vec<CompletionEvent>> {
     if events.is_empty() {
         Err(KernelError::WouldBlock)
     } else {
+        super::stats::completion_wait();
         Ok(events)
     }
 }

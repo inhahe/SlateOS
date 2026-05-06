@@ -369,6 +369,7 @@ static CHANNELS: Mutex<BTreeMap<ChannelId, Channel>> = Mutex::new(BTreeMap::new(
 pub fn create() -> (ChannelHandle, ChannelHandle) {
     let id = alloc_channel_id();
     CHANNELS.lock().insert(id, Channel::new());
+    super::stats::channel_created();
     (ChannelHandle::new(id, 0), ChannelHandle::new(id, 1))
 }
 
@@ -392,6 +393,7 @@ pub fn create() -> (ChannelHandle, ChannelHandle) {
 pub fn create_sync() -> (ChannelHandle, ChannelHandle) {
     let id = alloc_channel_id();
     CHANNELS.lock().insert(id, Channel::new_sync());
+    super::stats::channel_created();
     (ChannelHandle::new(id, 0), ChannelHandle::new(id, 1))
 }
 
@@ -426,6 +428,7 @@ pub fn is_sync(handle: ChannelHandle) -> Option<bool> {
 /// [`ChannelFull`]: KernelError::ChannelFull
 /// [`InvalidHandle`]: KernelError::InvalidHandle
 pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
+    let msg_len = msg.len() as u64;
     let wake_task: Option<TaskId>;
 
     {
@@ -474,6 +477,7 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
         sched::wake(task_id);
     }
 
+    super::stats::channel_send(msg_len);
     Ok(())
 }
 
@@ -492,6 +496,7 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
 /// [`ChannelClosed`]: KernelError::ChannelClosed
 /// [`InvalidHandle`]: KernelError::InvalidHandle
 pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
+    let msg_len = msg.len() as u64;
     // Wrap the message in an Option so we can retry without cloning.
     let mut pending = Some(msg);
 
@@ -525,6 +530,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    super::stats::channel_send(msg_len);
                     return Ok(());
                 }
 
@@ -548,6 +554,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    super::stats::channel_send(msg_len);
                     return Ok(());
                 }
 
@@ -556,6 +563,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
             }
         }
 
+        super::stats::channel_send_block();
         sched::block_current();
 
         // For sync channels: on wake, check if the receiver took our
@@ -566,6 +574,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
                 let our_side = handle.side();
                 if ch.sync && ch.rendezvous_slots[our_side].is_none() {
                     // Receiver took the message — we're done.
+                    super::stats::channel_send(msg_len);
                     return Ok(());
                 }
             } else {
@@ -595,6 +604,7 @@ pub fn send_blocking(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
 /// [`ChannelClosed`]: KernelError::ChannelClosed
 /// [`InvalidHandle`]: KernelError::InvalidHandle
 pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> KernelResult<()> {
+    let msg_len = msg.len() as u64;
     // Fast path: try immediately.
     {
         let mut channels = CHANNELS.lock();
@@ -620,6 +630,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                 if let Some(task_id) = wake_task {
                     sched::wake(task_id);
                 }
+                super::stats::channel_send(msg_len);
                 return Ok(());
             }
         } else {
@@ -631,6 +642,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                 if let Some(task_id) = wake_task {
                     sched::wake(task_id);
                 }
+                super::stats::channel_send(msg_len);
                 return Ok(());
             }
         }
@@ -685,6 +697,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                 if ch.rendezvous_slots[our_side].is_none() && pending.is_none() {
                     // Message was taken — success.
                     crate::hrtimer::cancel(timer_handle);
+                    super::stats::channel_send(msg_len);
                     return Ok(());
                 }
                 // Try to place message if receiver is now waiting.
@@ -698,6 +711,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    super::stats::channel_send(msg_len);
                     return Ok(());
                 }
                 // Park message and block.
@@ -719,6 +733,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
                     if let Some(task_id) = wake_task {
                         sched::wake(task_id);
                     }
+                    super::stats::channel_send(msg_len);
                     return Ok(());
                 }
                 ch.sender_waiters[our_side] = Some(sched::current_task_id());
@@ -735,6 +750,7 @@ pub fn send_timeout(handle: ChannelHandle, msg: Message, timeout_ns: u64) -> Ker
             }
         }
 
+        super::stats::channel_send_block();
         sched::block_current();
     }
 }
@@ -934,6 +950,7 @@ pub fn try_recv(handle: ChannelHandle) -> KernelResult<Option<Message>> {
             if let Some(task_id) = wake_sender {
                 sched::wake(task_id);
             }
+            super::stats::channel_recv();
             return Ok(Some(msg));
         }
     } else {
@@ -945,6 +962,7 @@ pub fn try_recv(handle: ChannelHandle) -> KernelResult<Option<Message>> {
             if let Some(task_id) = wake_sender {
                 sched::wake(task_id);
             }
+            super::stats::channel_recv();
             return Ok(Some(msg));
         }
     }
@@ -990,6 +1008,7 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
                     if let Some(task_id) = wake_sender {
                         sched::wake(task_id);
                     }
+                    super::stats::channel_recv();
                     return Ok(msg);
                 }
             } else {
@@ -1000,6 +1019,7 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
                     if let Some(task_id) = wake_sender {
                         sched::wake(task_id);
                     }
+                    super::stats::channel_recv();
                     return Ok(msg);
                 }
             }
@@ -1016,6 +1036,7 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
         }
 
         // Block until woken by a send or close.
+        super::stats::channel_recv_block();
         sched::block_current();
 
         // When we wake up, loop back and try to receive again.
@@ -1091,6 +1112,7 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
                 if let Some(sid) = wake_sender {
                     sched::wake(sid);
                 }
+                super::stats::channel_recv();
                 return Ok(msg);
             }
 
@@ -1110,6 +1132,7 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
             ch.waiters[our_side] = Some(sched::current_task_id());
         }
 
+        super::stats::channel_recv_block();
         sched::block_current();
 
         // We woke up — either from send/close or from the timer.
@@ -1157,6 +1180,7 @@ pub fn close(handle: ChannelHandle) {
         // If both sides are closed, remove the channel entirely.
         if ch.closed[0] && ch.closed[1] {
             channels.remove(&handle.channel_id());
+            super::stats::channel_destroyed();
         }
     }
 

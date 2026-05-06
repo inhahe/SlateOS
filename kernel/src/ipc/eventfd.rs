@@ -147,6 +147,7 @@ pub fn create(initial: u64) -> EventFdHandle {
     let mut table = EVENTFD_TABLE.lock();
     table.insert(id, efd);
 
+    super::stats::eventfd_created();
     EventFdHandle(id)
 }
 
@@ -186,7 +187,9 @@ pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
                 let reader = efd.reader_waiter.take();
                 drop(table);
 
+                super::stats::eventfd_signal();
                 if let Some(task_id) = reader {
+                    super::stats::eventfd_wakeup();
                     sched::wake(task_id);
                 }
                 return Ok(());
@@ -234,7 +237,9 @@ pub fn try_write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
         }
     }
 
+    super::stats::eventfd_signal();
     if let Some(task_id) = wake_reader {
+        super::stats::eventfd_wakeup();
         sched::wake(task_id);
     }
     Ok(())
@@ -277,7 +282,9 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
             efd.counter = new_val;
             let reader = efd.reader_waiter.take();
             drop(table);
+            super::stats::eventfd_signal();
             if let Some(task_id) = reader {
+                super::stats::eventfd_wakeup();
                 sched::wake(task_id);
             }
             return Ok(());
@@ -327,7 +334,9 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
                 let reader = efd.reader_waiter.take();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
+                super::stats::eventfd_signal();
                 if let Some(task_id) = reader {
+                    super::stats::eventfd_wakeup();
                     sched::wake(task_id);
                 }
                 return Ok(());
@@ -373,6 +382,7 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
                 let writer = efd.writer_waiter.take();
                 drop(table);
 
+                super::stats::eventfd_read();
                 if let Some(task_id) = writer {
                     sched::wake(task_id);
                 }
@@ -419,6 +429,7 @@ pub fn try_read(handle: EventFdHandle) -> KernelResult<u64> {
         }
     }
 
+    super::stats::eventfd_read();
     if let Some(task_id) = wake_writer {
         sched::wake(task_id);
     }
@@ -452,6 +463,7 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
             efd.counter = 0;
             let writer = efd.writer_waiter.take();
             drop(table);
+            super::stats::eventfd_read();
             if let Some(task_id) = writer {
                 sched::wake(task_id);
             }
@@ -500,6 +512,7 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                 let writer = efd.writer_waiter.take();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
+                super::stats::eventfd_read();
                 if let Some(task_id) = writer {
                     sched::wake(task_id);
                 }

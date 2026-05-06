@@ -233,13 +233,21 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Capability check: caller must hold a DeviceIrq capability.
-    // Currently type-level (any DeviceIrq cap with WRITE grants access).
-    // Future: per-IRQ capabilities with resource_id = IRQ number.
-    if let Err(e) = require_cap_type(
+    // First try per-IRQ check (resource_id = IRQ number), fall back
+    // to type-level check (any DeviceIrq cap with WRITE grants access
+    // to all IRQs — for drivers with broad hardware access).
+    if let Err(_) = require_cap(
         crate::cap::ResourceType::DeviceIrq,
+        irq,
         crate::cap::Rights::WRITE,
     ) {
-        return SyscallResult::err(e);
+        // Per-IRQ check failed — try type-level (any DeviceIrq cap).
+        if let Err(e) = require_cap_type(
+            crate::cap::ResourceType::DeviceIrq,
+            crate::cap::Rights::WRITE,
+        ) {
+            return SyscallResult::err(e);
+        }
     }
 
     let task_id = sched::current_task_id();
@@ -340,14 +348,18 @@ pub fn sys_port_read(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Capability check: caller must hold a PortIo capability.
-    // Currently type-level (any PortIo cap with READ grants access).
-    // Future: per-port capabilities with resource_id = port number.
-    if let Err(e) = require_cap_type(
+    // Capability check: per-port first, then type-level fallback.
+    if let Err(_) = require_cap(
         crate::cap::ResourceType::PortIo,
+        port,
         crate::cap::Rights::READ,
     ) {
-        return SyscallResult::err(e);
+        if let Err(e) = require_cap_type(
+            crate::cap::ResourceType::PortIo,
+            crate::cap::Rights::READ,
+        ) {
+            return SyscallResult::err(e);
+        }
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -382,14 +394,18 @@ pub fn sys_port_write(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Capability check: caller must hold a PortIo capability.
-    // Currently type-level (any PortIo cap with WRITE grants access).
-    // Future: per-port capabilities with resource_id = port number.
-    if let Err(e) = require_cap_type(
+    // Capability check: per-port first, then type-level fallback.
+    if let Err(_) = require_cap(
         crate::cap::ResourceType::PortIo,
+        port,
         crate::cap::Rights::WRITE,
     ) {
-        return SyscallResult::err(e);
+        if let Err(e) = require_cap_type(
+            crate::cap::ResourceType::PortIo,
+            crate::cap::Rights::WRITE,
+        ) {
+            return SyscallResult::err(e);
+        }
     }
 
     #[allow(clippy::cast_possible_truncation)]

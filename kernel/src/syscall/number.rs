@@ -110,8 +110,7 @@ pub const SYS_MUNMAP: u64 = 21;
 ///
 /// Returns: 0 on success, negative error.
 ///
-/// TODO: Require a DeviceIrq capability once the cap system covers
-/// hardware resources.
+/// Requires: DeviceIrq capability (per-IRQ or type-level).
 pub const SYS_IRQ_REGISTER: u64 = 30;
 
 /// Wait for an interrupt on a registered IRQ line (blocking).
@@ -141,8 +140,7 @@ pub const SYS_IRQ_RELEASE: u64 = 32;
 ///
 /// Returns: the value read from the port.
 ///
-/// TODO: Require a PortIo capability once the cap system covers
-/// hardware resources.
+/// Requires: PortIo capability (per-port or type-level) with READ.
 pub const SYS_PORT_READ: u64 = 40;
 
 /// Write to an I/O port.
@@ -153,8 +151,7 @@ pub const SYS_PORT_READ: u64 = 40;
 ///
 /// Returns: 0 on success.
 ///
-/// TODO: Require a PortIo capability once the cap system covers
-/// hardware resources.
+/// Requires: PortIo capability (per-port or type-level) with WRITE.
 pub const SYS_PORT_WRITE: u64 = 41;
 
 /// Allocate a DMA buffer and map it into the calling process.

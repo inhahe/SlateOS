@@ -1716,6 +1716,16 @@ pub fn push_balance() {
     // their next reschedule/wake, they'll land on the wrong CPU
     // but self-correct on the following balance pass.
 
+    // Record migration events for diagnostics.
+    for &(task_id, target_cpu) in &migrations {
+        crate::sched_migrate::record(
+            task_id as u32,
+            cpu as u8,
+            target_cpu as u8,
+            crate::sched_migrate::MigrateReason::WorkSteal,
+        );
+    }
+
     // Wake target CPUs that might be idle (HLTing).
     // Deduplicate: all migrations go to the same target CPU.
     if let Some(&(_, target_cpu)) = migrations.first() {

@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4240,6 +4240,7 @@ fn dispatch(line: &str) {
         "snapshot" | "snap" => cmd_snapshot(args),
         "ripsample" | "perf" => cmd_rip_sample(args),
         "invariant" | "invar" => cmd_invariant(args),
+        "migrate" | "migrations" => cmd_migrate(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -21185,5 +21186,104 @@ fn cmd_invariant(args: &str) {
         shell_println!("All {} invariants PASSED", results.total);
     } else {
         shell_println!("{} PASSED, {} FAILED", results.passed, results.failed);
+    }
+}
+
+/// `migrate` — show task migration statistics between CPUs.
+///
+/// Usage:
+///   migrate           — show aggregate migration stats
+///   migrate recent    — show recent migration events
+///   migrate hot       — show hottest migration path
+///   migrate reset     — clear all migration data
+fn cmd_migrate(args: &str) {
+    use crate::sched_migrate;
+
+    let sub = args.trim();
+
+    match sub {
+        "recent" => {
+            let mut buf = [sched_migrate::MigrateEvent::empty(); 16];
+            let n = sched_migrate::recent(&mut buf);
+            if n == 0 {
+                shell_println!("No migration events recorded");
+                return;
+            }
+            shell_println!("=== Recent Task Migrations ({} events) ===", n);
+            shell_println!("");
+            shell_println!("  {:>6}  {:>4}  {:>4}  {:>8}  {:>8}",
+                "TASK", "FROM", "TO", "REASON", "TICK");
+            for i in 0..n {
+                let e = &buf[i];
+                shell_println!("  {:>6}  {:>4}  {:>4}  {:>8}  {:>8}",
+                    e.task_id, e.from_cpu, e.to_cpu, e.reason.name(), e.tick);
+            }
+        }
+        "hot" => {
+            match sched_migrate::hottest_path() {
+                Some((from, to, count)) => {
+                    let s = sched_migrate::stats();
+                    let pct = if s.total > 0 {
+                        (count as u64) * 100 / s.total
+                    } else {
+                        0
+                    };
+                    shell_println!("Hottest migration path: CPU{} → CPU{}", from, to);
+                    shell_println!("  {} migrations ({}% of total {})",
+                        count, pct, s.total);
+                }
+                None => {
+                    shell_println!("No migration events recorded");
+                }
+            }
+        }
+        "reset" => {
+            sched_migrate::reset();
+            shell_println!("Migration statistics cleared");
+        }
+        _ => {
+            // Default: show aggregate stats.
+            let s = sched_migrate::stats();
+            let cpu_count = crate::smp::cpu_count();
+
+            shell_println!("=== Task Migration Statistics ===");
+            shell_println!("");
+            shell_println!("  Total migrations: {}", s.total);
+            shell_println!("");
+
+            // Per-reason breakdown.
+            shell_println!("  By reason:");
+            let reasons = [
+                (sched_migrate::MigrateReason::WorkSteal, "Work steal"),
+                (sched_migrate::MigrateReason::PushBalance, "Push balance"),
+                (sched_migrate::MigrateReason::AffinityChange, "Affinity change"),
+                (sched_migrate::MigrateReason::Explicit, "Explicit"),
+                (sched_migrate::MigrateReason::WakeUp, "Wake-up"),
+            ];
+            for (reason, label) in &reasons {
+                let count = s.by_reason[*reason as usize];
+                if count > 0 {
+                    shell_println!("    {:<16} {}", label, count);
+                }
+            }
+
+            // Per-CPU breakdown.
+            shell_println!("");
+            shell_println!("  Per-CPU:");
+            shell_println!("    {:>4}  {:>8}  {:>8}", "CPU", "IN", "OUT");
+            for i in 0..cpu_count {
+                let in_c = s.per_cpu_in[i];
+                let out_c = s.per_cpu_out[i];
+                if in_c > 0 || out_c > 0 {
+                    shell_println!("    {:>4}  {:>8}  {:>8}", i, in_c, out_c);
+                }
+            }
+
+            // Hottest path.
+            if let Some((from, to, count)) = sched_migrate::hottest_path() {
+                shell_println!("");
+                shell_println!("  Hottest path: CPU{} → CPU{} ({}x)", from, to, count);
+            }
+        }
     }
 }

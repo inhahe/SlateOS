@@ -185,6 +185,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::invariant::self_test(); true },
         category: "kernel",
     });
+    suites.push(TestSuite {
+        name: "sched_migrate",
+        description: "Scheduler task migration tracker",
+        run: || { crate::sched_migrate::self_test(); true },
+        category: "sched",
+    });
 
     suites
 }

@@ -107,6 +107,7 @@ mod rip_sample;
 mod rng;
 mod rtc;
 mod sched;
+mod sched_migrate;
 mod sclatency;
 mod security;
 mod selftest;
@@ -1000,6 +1001,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++u: Invariant checker self-test.
     // Verifies system-wide consistency properties (memory, scheduler, objects).
     invariant::self_test();
+
+    // Step 22e⅞++++v: Scheduler migration tracker self-test.
+    // Records and analyzes task migration events between CPUs.
+    sched_migrate::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

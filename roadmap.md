@@ -328,7 +328,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] PS/2 keyboard driver (scan code set 1, IRQ 1, modifier tracking, ASCII echo)
 - [x] Framebuffer / basic display (UEFI GOP framebuffer initially)
   - [x] 8x16 VGA bitmap font, framebuffer text console (160x50 @ 1280x800)
-- [ ] Storage (NVMe, AHCI/SATA)
+- [x] Storage (NVMe, AHCI/SATA)
+  - [x] AHCI/SATA driver: PCI detection, BAR5 MMIO, per-port init, IDENTIFY, READ/WRITE DMA EXT, multi-sector batching
+  - [x] NVMe driver: PCI detection, BAR0 64-bit MMIO, admin/IO queue pairs, IDENTIFY ctrl/ns, PRP-based READ/WRITE, polling completion
 - [ ] USB host controller (xHCI)
 - [ ] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
 - [x] Timer (HPET, APIC timer)

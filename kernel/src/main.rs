@@ -903,6 +903,10 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::intercept::self_test() {
         serial_println!("WARNING: FS interceptor self-test failed: {:?}", e);
     }
+    // Symlink/hardlink security self-test.
+    if let Err(e) = fs::symlink_security::self_test() {
+        serial_println!("WARNING: Symlink security self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

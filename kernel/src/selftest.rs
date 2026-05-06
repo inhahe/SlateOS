@@ -179,6 +179,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::rip_sample::self_test(); true },
         category: "kernel",
     });
+    suites.push(TestSuite {
+        name: "invariant",
+        description: "System-wide consistency invariant checker",
+        run: || { crate::invariant::self_test(); true },
+        category: "kernel",
+    });
 
     suites
 }

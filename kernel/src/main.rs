@@ -69,6 +69,7 @@ mod gdt;
 mod hpet;
 mod idt;
 mod idle;
+mod invariant;
 mod ioapic;
 mod irq_storm;
 mod irqbalance;
@@ -995,6 +996,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++t: RIP sampler self-test.
     // Statistical profiler — samples instruction pointer on timer ticks.
     rip_sample::self_test();
+
+    // Step 22e⅞++++u: Invariant checker self-test.
+    // Verifies system-wide consistency properties (memory, scheduler, objects).
+    invariant::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

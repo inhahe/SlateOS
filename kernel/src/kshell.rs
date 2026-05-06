@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4239,6 +4239,7 @@ fn dispatch(line: &str) {
         "watch" => cmd_watchpoint(args),
         "snapshot" | "snap" => cmd_snapshot(args),
         "ripsample" | "perf" => cmd_rip_sample(args),
+        "invariant" | "invar" => cmd_invariant(args),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -21137,4 +21138,52 @@ fn awk_eval_expr(
 
     // Bare word — treat as literal.
     alloc::string::String::from(expr)
+}
+
+/// `invariant` — check kernel invariants (system-wide consistency).
+///
+/// Usage:
+///   invariant         — check all invariants
+///   invariant mm      — check only memory invariants
+///   invariant sched   — check only scheduler invariants
+///   invariant kernel  — check only kernel object invariants
+///   invariant ipc     — check only IPC invariants
+///   invariant cap     — check only capability invariants
+fn cmd_invariant(args: &str) {
+    use crate::invariant;
+
+    let category = args.trim();
+
+    let results = if category.is_empty() {
+        invariant::check_all()
+    } else {
+        invariant::check_category(category)
+    };
+
+    if results.total == 0 {
+        shell_println!("No invariants found for category '{}'", category);
+        shell_println!("Available: mm, sched, kernel, ipc, cap");
+        return;
+    }
+
+    let title = if category.is_empty() {
+        alloc::format!("=== Kernel Invariant Check ({} total) ===", results.total)
+    } else {
+        alloc::format!("=== Invariant Check [{}] ({} total) ===", category, results.total)
+    };
+    shell_println!("{}", title);
+    shell_println!("");
+
+    for r in &results.results {
+        let status = if r.passed { " OK " } else { "FAIL" };
+        let msg = r.message.as_deref().unwrap_or("");
+        shell_println!("  [{}] {:<20} {}", status, r.name, msg);
+    }
+
+    shell_println!("");
+    if results.failed == 0 {
+        shell_println!("All {} invariants PASSED", results.total);
+    } else {
+        shell_println!("{} PASSED, {} FAILED", results.passed, results.failed);
+    }
 }

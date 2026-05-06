@@ -907,6 +907,10 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::symlink_security::self_test() {
         serial_println!("WARNING: Symlink security self-test failed: {:?}", e);
     }
+    // Resource limits self-test.
+    if let Err(e) = fs::rlimit::self_test() {
+        serial_println!("WARNING: Resource limits self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

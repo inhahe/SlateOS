@@ -3099,6 +3099,7 @@ const COMMANDS: &[&str] = &[
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
+    "ulimit",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4315,6 +4316,7 @@ fn dispatch(line: &str) {
         "getfacl" => cmd_getfacl(args),
         "setfacl" => cmd_setfacl(args),
         "intercept" => cmd_intercept(args),
+        "ulimit" => cmd_ulimit(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -9468,6 +9470,121 @@ fn cmd_intercept(args: &str) {
     }
 }
 
+/// `ulimit` — display and set resource limits.
+///
+/// Usage:
+///   ulimit            - show all limits
+///   ulimit -n         - show max open files
+///   ulimit -f         - show max file size
+///   ulimit -n VALUE   - set soft limit for open files
+///   ulimit -n hard VALUE - set hard limit (requires root)
+///   ulimit -S/-H      - show soft/hard limits
+fn cmd_ulimit(args: &str) {
+    use crate::fs::rlimit;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let uid = 0u32; // kshell runs as root
+
+    if parts.is_empty() {
+        // Show all limits.
+        let limits = rlimit::get_limits(uid);
+        shell_println!("Resource     Soft               Hard");
+        shell_println!("{}", "-".repeat(50));
+        shell_println!("{:<12} {:>18} {:>18}",
+            "nofile", rlimit::Rlimit::format_value(limits.nofile.soft), rlimit::Rlimit::format_value(limits.nofile.hard));
+        shell_println!("{:<12} {:>18} {:>18}",
+            "fsize", rlimit::Rlimit::format_value(limits.fsize.soft), rlimit::Rlimit::format_value(limits.fsize.hard));
+        shell_println!("{:<12} {:>18} {:>18}",
+            "locks", rlimit::Rlimit::format_value(limits.locks.soft), rlimit::Rlimit::format_value(limits.locks.hard));
+        return;
+    }
+
+    match parts[0] {
+        "-n" | "nofile" => {
+            if parts.len() == 1 {
+                let limit = rlimit::get_limit(uid, rlimit::Resource::NoFile);
+                shell_println!("open files: soft={}, hard={}",
+                    rlimit::Rlimit::format_value(limit.soft),
+                    rlimit::Rlimit::format_value(limit.hard));
+            } else if parts.get(1) == Some(&"hard") {
+                if let Some(val) = parts.get(2).and_then(|s| parse_limit_value(s)) {
+                    match rlimit::set_hard(uid, rlimit::Resource::NoFile, val, 0) {
+                        Ok(()) => shell_println!("nofile hard limit set to {}", rlimit::Rlimit::format_value(val)),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Usage: ulimit -n hard <value|unlimited>");
+                }
+            } else if let Some(val) = parse_limit_value(parts[1]) {
+                match rlimit::set_soft(uid, rlimit::Resource::NoFile, val, 0) {
+                    Ok(()) => shell_println!("nofile soft limit set to {}", rlimit::Rlimit::format_value(val)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid value: {}", parts[1]);
+            }
+        }
+
+        "-f" | "fsize" => {
+            if parts.len() == 1 {
+                let limit = rlimit::get_limit(uid, rlimit::Resource::FileSize);
+                shell_println!("file size: soft={}, hard={}",
+                    rlimit::Rlimit::format_value(limit.soft),
+                    rlimit::Rlimit::format_value(limit.hard));
+            } else if let Some(val) = parse_limit_value(parts[1]) {
+                match rlimit::set_soft(uid, rlimit::Resource::FileSize, val, 0) {
+                    Ok(()) => shell_println!("fsize soft limit set to {}", rlimit::Rlimit::format_value(val)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid value: {}", parts[1]);
+            }
+        }
+
+        "-l" | "locks" => {
+            if parts.len() == 1 {
+                let limit = rlimit::get_limit(uid, rlimit::Resource::Locks);
+                shell_println!("file locks: soft={}, hard={}",
+                    rlimit::Rlimit::format_value(limit.soft),
+                    rlimit::Rlimit::format_value(limit.hard));
+            } else if let Some(val) = parse_limit_value(parts[1]) {
+                match rlimit::set_soft(uid, rlimit::Resource::Locks, val, 0) {
+                    Ok(()) => shell_println!("locks soft limit set to {}", rlimit::Rlimit::format_value(val)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid value: {}", parts[1]);
+            }
+        }
+
+        "-a" | "all" => {
+            let limits = rlimit::get_limits(uid);
+            shell_println!("Resource     Soft               Hard");
+            shell_println!("{}", "-".repeat(50));
+            shell_println!("{:<12} {:>18} {:>18}",
+                "nofile", rlimit::Rlimit::format_value(limits.nofile.soft), rlimit::Rlimit::format_value(limits.nofile.hard));
+            shell_println!("{:<12} {:>18} {:>18}",
+                "fsize", rlimit::Rlimit::format_value(limits.fsize.soft), rlimit::Rlimit::format_value(limits.fsize.hard));
+            shell_println!("{:<12} {:>18} {:>18}",
+                "locks", rlimit::Rlimit::format_value(limits.locks.soft), rlimit::Rlimit::format_value(limits.locks.hard));
+        }
+
+        _ => {
+            shell_println!("Usage: ulimit [-n|-f|-l|-a] [value|unlimited]");
+        }
+    }
+}
+
+/// Parse "unlimited" or a numeric value for limit setting.
+fn parse_limit_value(s: &str) -> Option<u64> {
+    if s == "unlimited" || s == "infinity" || s == "inf" {
+        Some(crate::fs::rlimit::RLIM_INFINITY)
+    } else {
+        // Support K/M/G suffixes for file size.
+        parse_size_suffix(s)
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -14603,7 +14720,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

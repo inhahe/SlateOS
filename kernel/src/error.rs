@@ -90,6 +90,10 @@ pub enum KernelError {
     CorruptedData = -508,
     /// The filesystem is mounted read-only; write operations are denied.
     ReadOnlyFilesystem = -509,
+    /// Too many open file descriptors (EMFILE).
+    TooManyOpenFiles = -510,
+    /// File size exceeds the allowed limit (EFBIG).
+    FileTooLarge = -511,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -138,6 +142,8 @@ impl KernelError {
             Self::NotEmpty => "directory not empty",
             Self::CorruptedData => "data integrity check failed",
             Self::ReadOnlyFilesystem => "read-only filesystem",
+            Self::TooManyOpenFiles => "too many open files",
+            Self::FileTooLarge => "file too large",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

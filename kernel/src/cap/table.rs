@@ -294,6 +294,23 @@ impl CapTable {
         })
     }
 
+    /// Drain all valid entries from the table, consuming them.
+    ///
+    /// Returns a list of `(resource_type, resource_id)` pairs for all
+    /// valid entries.  Used during process cleanup to identify all IPC
+    /// resources that need to be released.
+    #[allow(dead_code)]
+    pub fn drain_valid(&mut self) -> Vec<(ResourceType, u64)> {
+        let mut result = Vec::new();
+        for entry in self.entries.values() {
+            if entry.valid {
+                result.push((entry.resource_type, entry.resource_id));
+            }
+        }
+        self.entries.clear();
+        result
+    }
+
     /// Revoke all entries referencing a specific resource.
     ///
     /// Called when a kernel object is destroyed (e.g., channel closed).

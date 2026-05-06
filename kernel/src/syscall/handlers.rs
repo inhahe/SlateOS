@@ -18,6 +18,7 @@
 // usize is 64 bits, so u64→usize casts cannot truncate.
 #![allow(clippy::cast_possible_truncation)]
 
+use crate::cap::ResourceType;
 use crate::error::KernelError;
 use crate::ipc::channel::{self, ChannelHandle, Message};
 use crate::ipc::completion::{self, CpHandle, WaitSource};
@@ -26,6 +27,7 @@ use crate::ipc::futex;
 use crate::ipc::pipe::{self, PipeHandle};
 use crate::ipc::service::{self, ServiceListenerHandle};
 use crate::ipc::shm::{self, ShmHandle};
+use crate::proc::pcb;
 use crate::sched;
 use crate::serial_println;
 
@@ -703,6 +705,12 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
     let (ep0, ep1) = channel::create();
 
+    // Register both endpoints for cleanup on process death.
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, ResourceType::Channel, ep0.raw());
+        pcb::register_ipc_handle(pid, ResourceType::Channel, ep1.raw());
+    }
+
     // Pack handles into the two return registers.
     #[allow(clippy::cast_possible_wrap)]
     let r0 = ep0.raw() as i64;
@@ -853,6 +861,9 @@ pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: channel handle.
 pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::Channel, handle.raw());
+    }
     channel::close(handle);
     SyscallResult::ok(0)
 }
@@ -1252,6 +1263,11 @@ pub fn sys_pipe_create(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
     let (read_handle, write_handle) = pipe::create();
 
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, ResourceType::Pipe, read_handle.raw());
+        pcb::register_ipc_handle(pid, ResourceType::Pipe, write_handle.raw());
+    }
+
     #[allow(clippy::cast_possible_wrap)]
     let r0 = read_handle.raw() as i64;
     #[allow(clippy::cast_possible_wrap)]
@@ -1412,6 +1428,9 @@ pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: pipe handle (either end).
 pub fn sys_pipe_close(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::Pipe, handle.raw());
+    }
     pipe::close(handle);
     SyscallResult::ok(0)
 }
@@ -1512,6 +1531,9 @@ pub fn sys_shm_create(args: &SyscallArgs) -> SyscallResult {
 
     match shm::create(size) {
         Ok(handle) => {
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::SharedMemory, handle.raw());
+            }
             #[allow(clippy::cast_possible_wrap)]
             let h = handle.raw() as i64;
             SyscallResult::ok(h)
@@ -1543,6 +1565,9 @@ pub fn sys_shm_size(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: shared memory handle.
 pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
     let handle = ShmHandle::from_raw(args.arg0);
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::SharedMemory, handle.raw());
+    }
     shm::close(handle);
     SyscallResult::ok(0)
 }
@@ -1559,6 +1584,10 @@ pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_eventfd_create(args: &SyscallArgs) -> SyscallResult {
     let initial = args.arg0;
     let handle = eventfd::create(initial);
+
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, ResourceType::EventFd, handle.raw());
+    }
 
     #[allow(clippy::cast_possible_wrap)]
     let h = handle.raw() as i64;
@@ -1622,6 +1651,9 @@ pub fn sys_eventfd_try_read(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: eventfd handle.
 pub fn sys_eventfd_close(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::EventFd, handle.raw());
+    }
     eventfd::close(handle);
     SyscallResult::ok(0)
 }
@@ -1689,6 +1721,10 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
 pub fn sys_cp_create(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
     let handle = completion::create();
+
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, ResourceType::CompletionPort, handle.raw());
+    }
 
     #[allow(clippy::cast_possible_wrap)]
     let h = handle.raw() as i64;
@@ -1865,6 +1901,9 @@ pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: CP handle.
 pub fn sys_cp_close(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::CompletionPort, cp.raw());
+    }
     completion::close(cp);
     SyscallResult::ok(0)
 }
@@ -2434,6 +2473,9 @@ pub fn sys_timer_create(args: &SyscallArgs) -> SyscallResult {
 
     match crate::ipc::timer::create(duration_ns, flags) {
         Ok(handle) => {
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::Timer, handle);
+            }
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)
         }
@@ -2453,6 +2495,9 @@ pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::Timer, handle);
+    }
     if crate::ipc::timer::cancel(handle) {
         SyscallResult::ok(0)
     } else {

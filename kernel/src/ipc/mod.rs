@@ -35,3 +35,52 @@ pub mod timer;
 // TODO: Synchronous (rendezvous) channel mode.
 // TODO: Splice/vmsplice for pipes.
 // TODO: Benchmark all IPC paths.
+
+use crate::cap::ResourceType;
+
+/// Release all IPC handles in the given list.
+///
+/// Called during process reaping to clean up any handles the process
+/// didn't explicitly close before dying.  Dispatches to the appropriate
+/// IPC subsystem based on the resource type.
+///
+/// Handles that refer to shared resources (channels, pipes) will close
+/// the dying process's end — the peer will observe a "closed" status
+/// on subsequent operations.
+pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
+    for &(resource_type, handle_raw) in handles {
+        match resource_type {
+            ResourceType::Channel => {
+                channel::close(channel::ChannelHandle::from_raw(handle_raw));
+            }
+            ResourceType::Pipe => {
+                pipe::close(pipe::PipeHandle::from_raw(handle_raw));
+            }
+            ResourceType::SharedMemory => {
+                shm::close(shm::ShmHandle::from_raw(handle_raw));
+            }
+            ResourceType::EventFd => {
+                eventfd::close(eventfd::EventFdHandle::from_raw(handle_raw));
+            }
+            ResourceType::CompletionPort => {
+                completion::close(completion::CpHandle::from_raw(handle_raw));
+            }
+            ResourceType::Timer => {
+                timer::cancel(handle_raw);
+            }
+            // No cleanup needed for these types — they're either
+            // permission tokens (PortIo, DeviceIrq, IoScheduler) or
+            // managed by other subsystems (File, Socket, Service,
+            // Namespace).
+            ResourceType::Process
+            | ResourceType::Thread
+            | ResourceType::PortIo
+            | ResourceType::DeviceIrq
+            | ResourceType::File
+            | ResourceType::Socket
+            | ResourceType::IoScheduler
+            | ResourceType::Service
+            | ResourceType::Namespace => {}
+        }
+    }
+}

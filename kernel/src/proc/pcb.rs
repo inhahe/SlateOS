@@ -161,6 +161,12 @@ pub struct Process {
     /// `SYS_MUNMAP`.  Stack growth is handled separately by the IDT
     /// handler — it doesn't use this VMA list.
     pub vmas: Vec<Vma>,
+    /// Owned IPC handles — cleaned up when the process is reaped.
+    ///
+    /// Each entry is `(ResourceType, handle_raw)`.  IPC create syscalls
+    /// register handles here; IPC close syscalls deregister them.
+    /// On process death, all remaining handles are released.
+    pub ipc_handles: Vec<(crate::cap::ResourceType, u64)>,
 }
 
 impl Process {
@@ -179,6 +185,7 @@ impl Process {
             wait_task: None,
             ready: false,
             vmas: Vec::new(),
+            ipc_handles: Vec::new(),
         }
     }
 }
@@ -402,7 +409,8 @@ pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
 /// Try to reap (wait for) a zombie child process.
 ///
 /// If the child process `child_pid` is a zombie:
-/// - Returns `Ok(Some(exit_code))` and destroys the process.
+/// - Returns `Ok(Some(exit_code))` and destroys the process (frees
+///   address space, DMA buffers, IPC handles, capability table).
 ///
 /// If the child process exists but is still running:
 /// - Returns `Ok(None)` (non-blocking — caller should block and retry).
@@ -416,22 +424,47 @@ pub fn try_reap(
     parent_pid: ProcessId,
     child_pid: ProcessId,
 ) -> KernelResult<Option<i32>> {
-    let mut table = PROCESS_TABLE.lock();
-    let proc = table
-        .get(&child_pid)
-        .ok_or(KernelError::NoSuchProcess)?;
+    // Phase 1: Under PROCESS_TABLE lock — verify state, extract
+    // process info, and remove from table.  We must extract all
+    // fields needed for cleanup before dropping the lock.
+    let reaped: Option<(i32, u64, Vec<(crate::cap::ResourceType, u64)>)>;
 
-    // Verify parent relationship.
-    if proc.parent != parent_pid {
-        return Err(KernelError::PermissionDenied);
-    }
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table
+            .get(&child_pid)
+            .ok_or(KernelError::NoSuchProcess)?;
 
-    if proc.state == ProcessState::Zombie {
+        // Verify parent relationship.
+        if proc.parent != parent_pid {
+            return Err(KernelError::PermissionDenied);
+        }
+
+        if proc.state != ProcessState::Zombie {
+            return Ok(None); // Still running.
+        }
+
         let exit_code = proc.exit_code.unwrap_or(0);
-        table.remove(&child_pid);
+        let pml4_phys = proc.pml4_phys;
+
+        // Extract the IPC handle list before removing.
+        let mut removed = table.remove(&child_pid);
+        let ipc_handles = removed
+            .as_mut()
+            .map(|p| core::mem::take(&mut p.ipc_handles))
+            .unwrap_or_default();
+
+        reaped = Some((exit_code, pml4_phys, ipc_handles));
+    }
+    // PROCESS_TABLE lock dropped here.
+
+    if let Some((exit_code, pml4_phys, ipc_handles)) = reaped {
+        // Phase 2: Cleanup without holding PROCESS_TABLE lock.
+        // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
+        destroy_process_resources(child_pid, pml4_phys, &ipc_handles);
         Ok(Some(exit_code))
     } else {
-        Ok(None) // Still running.
+        Ok(None)
     }
 }
 
@@ -724,34 +757,69 @@ pub fn parent(pid: ProcessId) -> Option<ProcessId> {
     table.get(&pid).map(|p| p.parent)
 }
 
-/// Destroy a process, removing it from the table.
+/// Internal: release all resources associated with a process.
+///
+/// Called from `try_reap()` after the process has been removed from
+/// `PROCESS_TABLE`.  Must NOT hold `PROCESS_TABLE` lock (this function
+/// acquires locks in other subsystems).
+///
+/// Releases:
+/// - Exception handler registration
+/// - IPC handles (channels, pipes, eventfds, etc.)
+/// - Namespace attachment (idempotent — already detached in `on_thread_exit`)
+/// - DMA buffers
+/// - User address space (page tables + physical frames)
+fn destroy_process_resources(
+    pid: ProcessId,
+    pml4_phys: u64,
+    ipc_handles: &[(crate::cap::ResourceType, u64)],
+) {
+    // Remove exception handler registration (if any).
+    crate::proc::exception::remove_handler(pid);
+
+    // Close all IPC handles owned by this process.
+    crate::ipc::cleanup_handles(ipc_handles);
+
+    // Detach from namespace (idempotent — may already be done
+    // during zombie transition, but safe to call again).
+    crate::ipc::namespace::detach(pid);
+
+    // Free address space resources.
+    if pml4_phys != 0 {
+        // Free DMA buffers allocated for this process before
+        // destroying the address space (DMA buffers are tracked
+        // separately from normal page table entries).
+        crate::mm::dma::free_all_for_process(pml4_phys);
+
+        // Free the entire user address space (mapped frames,
+        // intermediate page tables, and the PML4 page).
+        // SAFETY: The process is being destroyed — no threads
+        // are running in this address space, and no CPU has
+        // this PML4 loaded in CR3.  All user-half pages were
+        // allocated specifically for this process.
+        unsafe {
+            crate::mm::page_table::destroy_user_address_space(pml4_phys);
+        }
+    }
+}
+
+/// Destroy a process, removing it from the table and freeing resources.
 ///
 /// Called when the parent has reaped the zombie, or when the process
 /// is forcefully killed.  Reclaims all physical memory used by the
 /// process's address space (mapped frames, intermediate page tables,
-/// and the PML4 itself).
+/// and the PML4 itself), plus IPC handles and exception registrations.
 pub fn destroy(pid: ProcessId) {
-    // Remove exception handler registration (if any).
-    crate::proc::exception::remove_handler(pid);
+    // Extract the process from the table.
+    let removed;
+    {
+        let mut table = PROCESS_TABLE.lock();
+        removed = table.remove(&pid);
+    }
+    // PROCESS_TABLE lock dropped — safe to acquire other locks.
 
-    let mut table = PROCESS_TABLE.lock();
-    if let Some(proc) = table.remove(&pid) {
-        if proc.pml4_phys != 0 {
-            // Free DMA buffers allocated for this process before
-            // destroying the address space (DMA buffers are tracked
-            // separately from normal page table entries).
-            crate::mm::dma::free_all_for_process(proc.pml4_phys);
-
-            // Free the entire user address space (mapped frames,
-            // intermediate page tables, and the PML4 page).
-            // SAFETY: The process is being destroyed — no threads
-            // are running in this address space, and no CPU has
-            // this PML4 loaded in CR3.  All user-half pages were
-            // allocated specifically for this process.
-            unsafe {
-                crate::mm::page_table::destroy_user_address_space(proc.pml4_phys);
-            }
-        }
+    if let Some(proc) = removed {
+        destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles);
     }
 }
 
@@ -760,6 +828,36 @@ pub fn destroy(pid: ProcessId) {
 pub fn name(pid: ProcessId) -> Option<String> {
     let table = PROCESS_TABLE.lock();
     table.get(&pid).map(|p| p.name.clone())
+}
+
+// ---------------------------------------------------------------------------
+// IPC handle tracking
+// ---------------------------------------------------------------------------
+
+/// Register an IPC handle as owned by a process.
+///
+/// Called by IPC create syscalls so the kernel can release the handle
+/// if the process dies without explicitly closing it.
+pub fn register_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.ipc_handles.push((resource_type, handle_raw));
+    }
+}
+
+/// Deregister an IPC handle from a process (handle was explicitly closed).
+///
+/// Removes the first matching `(resource_type, handle_raw)` entry.
+/// No-op if the handle isn't found (e.g., kernel-owned handles).
+pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        if let Some(pos) = proc.ipc_handles.iter().position(|&(rt, h)| {
+            rt == resource_type && h == handle_raw
+        }) {
+            proc.ipc_handles.swap_remove(pos);
+        }
+    }
 }
 
 /// Get the PML4 physical address for a process's address space.

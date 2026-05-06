@@ -1108,6 +1108,23 @@ fn gen_security() -> Vec<u8> {
     }
     s.push('\n');
 
+    // --- CET (Control-flow Enforcement) ---
+    let cet = crate::cet::status();
+    s.push_str("[Control-flow Enforcement (CET)]\n");
+    s.push_str(&format!(
+        "  shadow_stack_hw:    {}\n\
+           ibt_hw:             {}\n\
+           supervisor_shstk:   {}\n\
+           supervisor_ibt:     {}\n\
+           cp_exceptions:      {}\n",
+        if cet.hw_shstk { "supported" } else { "not available" },
+        if cet.hw_ibt { "supported" } else { "not available" },
+        if cet.supervisor_shstk { "active" } else { "inactive" },
+        if cet.supervisor_ibt { "active" } else { "inactive" },
+        cet.cp_exceptions,
+    ));
+    s.push('\n');
+
     // --- Capability Audit ---
     let audit = crate::cap::audit::stats();
     s.push_str("[Capability Audit]\n");
@@ -1172,6 +1189,12 @@ fn gen_security() -> Vec<u8> {
     if !audit.enabled {
         s.push_str("  WARNING: Capability auditing disabled\n");
         issues += 1;
+    }
+    if !cet.supervisor_shstk && cet.hw_shstk {
+        s.push_str("  NOTE: CET shadow stacks available but not enabled\n");
+    }
+    if !cet.hw_shstk {
+        s.push_str("  INFO: Hardware CET not available (pre-11th gen or QEMU)\n");
     }
     if audit.total_denials > 0 {
         s.push_str(&format!(

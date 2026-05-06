@@ -29,6 +29,8 @@
 pub mod bzip2;
 pub mod cache;
 pub mod compress;
+#[allow(dead_code)]
+pub mod cpio;
 pub mod devfs;
 pub mod ext4;
 pub mod fat;

@@ -806,6 +806,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::sevenz::self_test() {
         serial_println!("WARNING: 7z self-test failed: {:?}", e);
     }
+    if let Err(e) = fs::cpio::self_test() {
+        serial_println!("WARNING: CPIO self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

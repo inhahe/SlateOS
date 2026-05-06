@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "base64", "bunzip2", "bzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp",
+    "base64", "bunzip2", "bzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
@@ -4378,6 +4378,7 @@ fn dispatch(line: &str) {
         "zstd" => cmd_zstd(args),
         "unzip" => cmd_unzip(args),
         "un7z" => cmd_un7z(args),
+        "cpio" => cmd_cpio(args),
         "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
         "sed" => cmd_sed(args),
@@ -4607,6 +4608,8 @@ fn cmd_help() {
     crate::console_println!("  zstd [-s] F [-o OUT]   Compress file with Zstandard (-s = store mode)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
     crate::console_println!("  un7z [-l] F [-d DIR]   List or extract 7-zip archive");
+    crate::console_println!("  cpio -i|-t [-d DIR] < F.cpio  Extract or list CPIO archive (newc format)");
+    crate::console_println!("  cpio -o F.cpio FILE..  Create CPIO archive from files");
     crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
     crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
@@ -8168,6 +8171,19 @@ fn detect_magic(header: &[u8]) -> Option<&'static str> {
         return Some("7-zip archive");
     }
 
+    // CPIO newc (070701 or 070702)
+    if header.starts_with(b"070701") || header.starts_with(b"070702") {
+        return Some("CPIO archive (newc)");
+    }
+
+    // CPIO old binary (0o070707 in either byte order)
+    if header.len() >= 2 {
+        let magic16 = u16::from_le_bytes([header[0], header[1]]);
+        if magic16 == 0o070707 || magic16 == 0o070707u16.swap_bytes() {
+            return Some("CPIO archive (binary)");
+        }
+    }
+
     // Zstandard
     if header.len() >= 4 {
         let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
@@ -8368,6 +8384,7 @@ fn extension_hint(path: &str) -> &'static str {
         "tbz2" | "tbz" => "bzip2 compressed tar archive",
         "zip" => "ZIP archive",
         "7z" => "7-zip archive",
+        "cpio" => "CPIO archive",
         "xz" => "XZ compressed",
         "zst" | "zstd" => "Zstandard compressed",
         "tzst" => "Zstandard compressed tar archive",
@@ -12139,7 +12156,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -19400,6 +19417,334 @@ fn cmd_unzip(args: &str) {
         },
         archive_path
     );
+}
+
+// ---------------------------------------------------------------------------
+// cpio — CPIO archive creation, extraction, and listing
+// ---------------------------------------------------------------------------
+
+/// `cpio` command — create, list, or extract CPIO (newc) archives.
+///
+/// Usage:
+///   cpio -t archive.cpio         List archive contents
+///   cpio -i archive.cpio [-d DIR]  Extract archive
+///   cpio -o archive.cpio FILE..  Create archive from files
+fn cmd_cpio(args: &str) {
+    use crate::fs::Vfs;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: cpio -t archive.cpio       List archive contents\n\
+             \x20      cpio -i archive.cpio [-d DIR]  Extract archive\n\
+             \x20      cpio -o archive.cpio FILE..    Create archive from files"
+        );
+        return;
+    }
+
+    // Parse mode flag.
+    let mode = parts.first().copied().unwrap_or("");
+    match mode {
+        "-t" | "--list" => cmd_cpio_list(&parts[1..]),
+        "-i" | "-x" | "--extract" => cmd_cpio_extract(&parts[1..]),
+        "-o" | "-c" | "--create" => cmd_cpio_create(&parts[1..]),
+        _ => {
+            // If no flag, try to auto-detect: if the arg is an existing file,
+            // list it.
+            crate::console_println!(
+                "cpio: unknown mode '{}'. Use -t (list), -i (extract), or -o (create)",
+                mode
+            );
+        }
+    }
+}
+
+fn cmd_cpio_list(args: &[&str]) {
+    use crate::fs::Vfs;
+
+    let archive_path = match args.first() {
+        Some(&p) => resolve_path(p),
+        None => {
+            crate::console_println!("cpio -t: no archive file specified");
+            return;
+        }
+    };
+
+    let data = match Vfs::read_file(&archive_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("cpio: '{}': {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let entries = match crate::fs::cpio::uncpio(&data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("cpio: '{}': parse failed: {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    crate::console_println!(
+        "  {:>4}  {:>5}:{:<5}  {:>10}  {:>4}  Name",
+        "Mode", "UID", "GID", "Size", "Type"
+    );
+    crate::console_println!(
+        "  {}  {}  {}  {}  {}",
+        "-".repeat(4), "-".repeat(11), "-".repeat(10), "-".repeat(4), "-".repeat(40)
+    );
+
+    let mut total_size: u64 = 0;
+    let mut file_count = 0u64;
+    let mut dir_count = 0u64;
+    let mut link_count = 0u64;
+
+    for entry in &entries {
+        let type_str = match entry.entry_type {
+            crate::fs::cpio::CpioEntryType::File => "file",
+            crate::fs::cpio::CpioEntryType::Directory => "dir",
+            crate::fs::cpio::CpioEntryType::Symlink => "link",
+            crate::fs::cpio::CpioEntryType::BlockDevice => "blk",
+            crate::fs::cpio::CpioEntryType::CharDevice => "chr",
+            crate::fs::cpio::CpioEntryType::Fifo => "fifo",
+            crate::fs::cpio::CpioEntryType::Socket => "sock",
+            crate::fs::cpio::CpioEntryType::Unknown => "???",
+        };
+
+        let display_name = if entry.entry_type == crate::fs::cpio::CpioEntryType::Symlink
+            && !entry.link_target.is_empty()
+        {
+            alloc::format!("{} -> {}", entry.name, entry.link_target)
+        } else {
+            entry.name.clone()
+        };
+
+        crate::console_println!(
+            "  {:>4o}  {:>5}:{:<5}  {:>10}  {:>4}  {}",
+            entry.mode, entry.uid, entry.gid,
+            entry.data.len(), type_str, display_name
+        );
+
+        total_size = total_size.wrapping_add(entry.data.len() as u64);
+        match entry.entry_type {
+            crate::fs::cpio::CpioEntryType::Directory => dir_count = dir_count.wrapping_add(1),
+            crate::fs::cpio::CpioEntryType::Symlink => link_count = link_count.wrapping_add(1),
+            _ => file_count = file_count.wrapping_add(1),
+        }
+    }
+
+    crate::console_println!(
+        "  {} file(s), {} dir(s), {} link(s), {} bytes total",
+        file_count, dir_count, link_count, total_size
+    );
+}
+
+fn cmd_cpio_extract(args: &[&str]) {
+    use crate::fs::Vfs;
+
+    let mut archive_arg: Option<&str> = None;
+    let mut target_dir = alloc::string::String::from("/");
+    let mut skip_next = false;
+
+    for (i, &p) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-d" | "-C" => {
+                if let Some(&dir) = args.get(i.wrapping_add(1)) {
+                    target_dir = resolve_path(dir);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("cpio -i: -d requires a directory argument");
+                    return;
+                }
+            }
+            _ => {
+                if archive_arg.is_none() {
+                    archive_arg = Some(p);
+                }
+            }
+        }
+    }
+
+    let archive_path = match archive_arg {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("cpio -i: no archive file specified");
+            return;
+        }
+    };
+
+    let data = match Vfs::read_file(&archive_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("cpio: '{}': {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let entries = match crate::fs::cpio::uncpio(&data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("cpio: '{}': extraction failed: {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let mut extracted = 0u64;
+    let mut errors = 0u64;
+
+    for entry in &entries {
+        let dest = if target_dir == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", target_dir, entry.name)
+        };
+
+        match entry.entry_type {
+            crate::fs::cpio::CpioEntryType::Directory => {
+                let _ = Vfs::mkdir(&dest);
+            }
+            crate::fs::cpio::CpioEntryType::Symlink => {
+                match Vfs::symlink(&dest, &entry.link_target) {
+                    Ok(()) => {
+                        extracted = extracted.wrapping_add(1);
+                    }
+                    Err(e) => {
+                        crate::console_println!("cpio: symlink '{}': {:?}", dest, e);
+                        errors = errors.wrapping_add(1);
+                    }
+                }
+            }
+            crate::fs::cpio::CpioEntryType::File => {
+                // Ensure parent directory exists.
+                if let Some(slash_pos) = dest.rfind('/') {
+                    if slash_pos > 0 {
+                        let parent = &dest[..slash_pos];
+                        let _ = Vfs::mkdir(parent);
+                    }
+                }
+
+                match Vfs::write_file(&dest, &entry.data) {
+                    Ok(()) => {
+                        extracted = extracted.wrapping_add(1);
+                    }
+                    Err(e) => {
+                        crate::console_println!("cpio: write '{}': {:?}", dest, e);
+                        errors = errors.wrapping_add(1);
+                    }
+                }
+            }
+            _ => {
+                // Skip special files (devices, fifos, sockets).
+            }
+        }
+    }
+
+    crate::console_println!(
+        "cpio: extracted {} item(s) from '{}'{}",
+        extracted,
+        archive_path,
+        if errors > 0 {
+            alloc::format!(" ({} errors)", errors)
+        } else {
+            alloc::string::String::new()
+        }
+    );
+}
+
+fn cmd_cpio_create(args: &[&str]) {
+    use crate::fs::Vfs;
+
+    if args.len() < 2 {
+        crate::console_println!("cpio -o: need archive name and at least one file");
+        return;
+    }
+
+    let archive_path = resolve_path(args[0]);
+    let mut entries = alloc::vec::Vec::new();
+
+    for &file_arg in &args[1..] {
+        let path = resolve_path(file_arg);
+        match Vfs::metadata(&path) {
+            Ok(meta) => {
+                let etype = match meta.entry_type {
+                    crate::fs::vfs::EntryType::Directory => crate::fs::cpio::CpioEntryType::Directory,
+                    crate::fs::vfs::EntryType::Symlink => crate::fs::cpio::CpioEntryType::Symlink,
+                    _ => crate::fs::cpio::CpioEntryType::File,
+                };
+
+                let data = if etype == crate::fs::cpio::CpioEntryType::File {
+                    match Vfs::read_file(&path) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            crate::console_println!("cpio: read '{}': {:?}", path, e);
+                            continue;
+                        }
+                    }
+                } else {
+                    alloc::vec::Vec::new()
+                };
+
+                let link_target = if etype == crate::fs::cpio::CpioEntryType::Symlink {
+                    match Vfs::readlink(&path) {
+                        Ok(t) => t,
+                        Err(_) => alloc::string::String::new(),
+                    }
+                } else {
+                    alloc::string::String::new()
+                };
+
+                // Use relative name (strip leading /).
+                let name = path.strip_prefix('/').unwrap_or(&path);
+
+                // Convert nanosecond timestamp to seconds for CPIO mtime.
+                let mtime_secs = (meta.modified_ns / 1_000_000_000) as u32;
+
+                entries.push(crate::fs::cpio::CpioEntry {
+                    name: alloc::string::String::from(name),
+                    data,
+                    entry_type: etype,
+                    mode: 0o644, // Default mode
+                    uid: meta.uid,
+                    gid: meta.gid,
+                    mtime: mtime_secs,
+                    link_target,
+                });
+            }
+            Err(e) => {
+                crate::console_println!("cpio: '{}': {:?}", path, e);
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        crate::console_println!("cpio -o: no valid files to archive");
+        return;
+    }
+
+    let archive = match crate::fs::cpio::mkcpio(&entries) {
+        Ok(a) => a,
+        Err(e) => {
+            crate::console_println!("cpio: create failed: {:?}", e);
+            return;
+        }
+    };
+
+    match Vfs::write_file(&archive_path, &archive) {
+        Ok(()) => {
+            crate::console_println!(
+                "cpio: created '{}' ({} entries, {} bytes)",
+                archive_path, entries.len(), archive.len()
+            );
+        }
+        Err(e) => {
+            crate::console_println!("cpio: write '{}': {:?}", archive_path, e);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,8 @@ use super::number::{
     SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
     SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_WAIT, SYS_SEM_TRY_WAIT, SYS_SEM_CLOSE,
     SYS_SEM_WAIT_TIMEOUT,
+    SYS_SERVICE_REGISTER, SYS_SERVICE_CONNECT, SYS_SERVICE_ACCEPT,
+    SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_UNREGISTER,
     SYS_CHANNEL_RECV_TIMEOUT,
     SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_RECV_CAPS,
     SYS_PIPE_READ_TIMEOUT, SYS_PIPE_WRITE_TIMEOUT,
@@ -269,6 +271,12 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SEM_TRY_WAIT as usize] = Some(handlers::sys_sem_try_wait);
     handlers[SYS_SEM_CLOSE as usize] = Some(handlers::sys_sem_close);
     handlers[SYS_SEM_WAIT_TIMEOUT as usize] = Some(handlers::sys_sem_wait_timeout);
+    handlers[SYS_SERVICE_REGISTER as usize] = Some(handlers::sys_service_register);
+    handlers[SYS_SERVICE_CONNECT as usize] = Some(handlers::sys_service_connect);
+    handlers[SYS_SERVICE_ACCEPT as usize] = Some(handlers::sys_service_accept);
+    handlers[SYS_SERVICE_TRY_ACCEPT as usize] = Some(handlers::sys_service_try_accept);
+    handlers[SYS_SERVICE_ACCEPT_TIMEOUT as usize] = Some(handlers::sys_service_accept_timeout);
+    handlers[SYS_SERVICE_UNREGISTER as usize] = Some(handlers::sys_service_unregister);
 
     // Time and timers (10–19).
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);

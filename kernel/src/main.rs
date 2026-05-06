@@ -1301,6 +1301,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("[FATAL] Eventfd timeout self-test failed: {:?}", e);
     }
 
+    // Service registry self-test (requires scheduler + channels).
+    if let Err(e) = ipc::service::self_test() {
+        serial_println!("[FATAL] Service registry self-test failed: {:?}", e);
+    }
+
     // Step 22e: CSPRNG self-test.
     // Verifies output quality now that we've accumulated some interrupt
     // entropy during the boot process (ISR timing mixed in).

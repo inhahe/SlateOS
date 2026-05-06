@@ -783,6 +783,60 @@ pub const SYS_SEM_CLOSE: u64 = 274;
 pub const SYS_SEM_WAIT_TIMEOUT: u64 = 275;
 
 // ---------------------------------------------------------------------------
+// Service registry syscalls (280–289)
+// ---------------------------------------------------------------------------
+
+/// Register a named service.
+///
+/// `arg0`: pointer to service name (bytes).
+/// `arg1`: name length.
+///
+/// Returns: listener handle on success, negative error.
+pub const SYS_SERVICE_REGISTER: u64 = 280;
+
+/// Connect to a named service.
+///
+/// `arg0`: pointer to service name (bytes).
+/// `arg1`: name length.
+///
+/// Creates a channel pair, queues one end for the service to accept,
+/// returns the other end to the caller.
+///
+/// Returns: channel handle for the client endpoint.
+pub const SYS_SERVICE_CONNECT: u64 = 281;
+
+/// Accept a pending connection on a service listener (blocking).
+///
+/// `arg0`: listener handle.
+///
+/// Returns: channel handle for the server endpoint.
+pub const SYS_SERVICE_ACCEPT: u64 = 282;
+
+/// Accept a connection (non-blocking).
+///
+/// `arg0`: listener handle.
+///
+/// Returns: channel handle, or `WouldBlock` if no connections pending.
+pub const SYS_SERVICE_TRY_ACCEPT: u64 = 283;
+
+/// Accept a connection with a timeout (nanoseconds).
+///
+/// `arg0`: listener handle.
+/// `arg1`: timeout in nanoseconds.
+///
+/// Returns: channel handle, or `TimedOut` if deadline expires.
+pub const SYS_SERVICE_ACCEPT_TIMEOUT: u64 = 284;
+
+/// Unregister a service (close its listener).
+///
+/// `arg0`: listener handle.
+///
+/// All pending connections are closed.
+///
+/// Returns: 0 on success.
+pub const SYS_SERVICE_UNREGISTER: u64 = 285;
+
+// ---------------------------------------------------------------------------
 // Security syscalls (400–499)
 // ---------------------------------------------------------------------------
 

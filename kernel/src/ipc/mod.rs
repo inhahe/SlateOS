@@ -10,6 +10,7 @@
 //! - **Eventfd counters**: lightweight wake-up notifications.
 //! - **Completion port**: unified wait on heterogeneous kernel objects
 //!   (IOCP-style).
+//! - **Service registry**: named service discovery + connection brokering.
 //!
 //! ## Performance Targets
 //!
@@ -24,6 +25,7 @@ pub mod futex;
 pub mod io_ring;
 pub mod pipe;
 pub mod semaphore;
+pub mod service;
 pub mod shm;
 pub mod stats;
 pub mod timer;

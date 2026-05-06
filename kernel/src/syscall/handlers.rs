@@ -24,6 +24,7 @@ use crate::ipc::completion::{self, CpHandle, WaitSource};
 use crate::ipc::eventfd::{self, EventFdHandle};
 use crate::ipc::futex;
 use crate::ipc::pipe::{self, PipeHandle};
+use crate::ipc::service::{self, ServiceListenerHandle};
 use crate::ipc::shm::{self, ShmHandle};
 use crate::sched;
 use crate::serial_println;
@@ -5366,6 +5367,138 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
     let timeout_ns = args.arg1;
 
     match semaphore::wait_timeout(handle, timeout_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service registry handlers (280–289)
+// ---------------------------------------------------------------------------
+
+/// `SYS_SERVICE_REGISTER` — register a named service.
+///
+/// `arg0`: pointer to service name (bytes).
+/// `arg1`: name length.
+///
+/// Returns: listener handle.
+pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
+    let name_ptr = args.arg0 as *const u8;
+    let name_len = args.arg1 as usize;
+
+    if name_ptr.is_null() || name_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, name_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — ptr is in user space, mapped, readable.
+    let name = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+
+    match service::register(name) {
+        Ok(listener) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(listener.raw() as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SERVICE_CONNECT` — connect to a named service.
+///
+/// `arg0`: pointer to service name (bytes).
+/// `arg1`: name length.
+///
+/// Returns: client channel handle.
+pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
+    let name_ptr = args.arg0 as *const u8;
+    let name_len = args.arg1 as usize;
+
+    if name_ptr.is_null() || name_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, name_len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above.
+    let name = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+
+    match service::connect(name) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle.raw() as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SERVICE_ACCEPT` — accept a connection (blocking).
+///
+/// `arg0`: listener handle.
+///
+/// Returns: server-side channel handle.
+pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
+    let listener = ServiceListenerHandle::from_raw(args.arg0);
+
+    match service::accept(listener) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle.raw() as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SERVICE_TRY_ACCEPT` — accept a connection (non-blocking).
+///
+/// `arg0`: listener handle.
+///
+/// Returns: server-side channel handle, or `WouldBlock`.
+pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
+    let listener = ServiceListenerHandle::from_raw(args.arg0);
+
+    match service::try_accept(listener) {
+        Ok(Some(handle)) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle.raw() as i64)
+        }
+        Ok(None) => SyscallResult::err(KernelError::WouldBlock),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SERVICE_ACCEPT_TIMEOUT` — accept with timeout.
+///
+/// `arg0`: listener handle.
+/// `arg1`: timeout in nanoseconds.
+///
+/// Returns: server-side channel handle, or `TimedOut`.
+pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
+    let listener = ServiceListenerHandle::from_raw(args.arg0);
+    let timeout_ns = args.arg1;
+
+    match service::accept_timeout(listener, timeout_ns) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle.raw() as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SERVICE_UNREGISTER` — unregister a service.
+///
+/// `arg0`: listener handle.
+///
+/// Returns: 0 on success.
+pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
+    let listener = ServiceListenerHandle::from_raw(args.arg0);
+
+    match service::unregister(listener) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

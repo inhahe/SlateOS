@@ -155,6 +155,75 @@ impl BlockDevice for crate::virtio::blk::VirtioBlkDevice {
 }
 
 // ---------------------------------------------------------------------------
+// I/O activity tracking (for disk-idle heuristic)
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Total read operations across all block devices.
+static TOTAL_READS: AtomicU64 = AtomicU64::new(0);
+/// Total write operations across all block devices.
+static TOTAL_WRITES: AtomicU64 = AtomicU64::new(0);
+/// Timestamp (APIC ticks) of the most recent I/O operation.
+static LAST_IO_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// Record that a block I/O operation occurred.
+///
+/// Called from `with_device()` and directly by the cache layer.
+/// Updates the activity counters and last-I/O timestamp.
+#[inline]
+pub fn record_io(is_write: bool) {
+    if is_write {
+        TOTAL_WRITES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        TOTAL_READS.fetch_add(1, Ordering::Relaxed);
+    }
+    LAST_IO_TICK.store(crate::apic::tick_count(), Ordering::Release);
+}
+
+/// Check whether all block devices have been idle for at least `ticks`.
+///
+/// Used by the service manager to detect when an application has finished
+/// loading from disk (disk goes quiet after initial read burst).
+///
+/// A reasonable threshold is 200–300 ticks at 100 Hz timer = 2–3 seconds
+/// of disk silence.
+#[must_use]
+pub fn is_idle_for(ticks: u64) -> bool {
+    let last = LAST_IO_TICK.load(Ordering::Acquire);
+    if last == 0 {
+        // No I/O ever recorded — trivially idle.
+        return true;
+    }
+    let now = crate::apic::tick_count();
+    now.saturating_sub(last) >= ticks
+}
+
+/// Get the tick count of the most recent I/O operation.
+#[must_use]
+pub fn last_io_tick() -> u64 {
+    LAST_IO_TICK.load(Ordering::Relaxed)
+}
+
+/// Block I/O statistics.
+#[derive(Debug, Clone, Copy)]
+pub struct IoStats {
+    pub total_reads: u64,
+    pub total_writes: u64,
+    pub last_io_tick: u64,
+}
+
+/// Get block I/O statistics.
+#[must_use]
+pub fn io_stats() -> IoStats {
+    IoStats {
+        total_reads: TOTAL_READS.load(Ordering::Relaxed),
+        total_writes: TOTAL_WRITES.load(Ordering::Relaxed),
+        last_io_tick: LAST_IO_TICK.load(Ordering::Relaxed),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Device registry
 // ---------------------------------------------------------------------------
 

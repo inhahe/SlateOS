@@ -565,6 +565,19 @@ fn gen_diskstats() -> Vec<u8> {
         cache_stats.hits, cache_stats.reads, hit_rate, cache_stats.readaheads,
     ));
 
+    // Device I/O activity tracking.
+    let io = crate::blkdev::io_stats();
+    let idle_secs = if io.last_io_tick > 0 {
+        let elapsed = crate::apic::tick_count().saturating_sub(io.last_io_tick);
+        elapsed / 100 // ~100 Hz timer
+    } else {
+        0
+    };
+    text.push_str(&format!(
+        "Device I/O: {} reads, {} writes, idle {} sec\n",
+        io.total_reads, io.total_writes, idle_secs,
+    ));
+
     text.into_bytes()
 }
 

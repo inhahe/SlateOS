@@ -447,6 +447,7 @@ impl BufferCacheInner {
 
         match result {
             Some(Ok(())) => {
+                blkdev::record_io(true); // Track write for disk-idle heuristic.
                 if self.entries[idx].dirty {
                     self.dirty_count = self.dirty_count.saturating_sub(1);
                 }
@@ -598,7 +599,9 @@ pub fn read_sector(
         dev.read_sector(lba, buf)
     });
     match result {
-        Some(Ok(())) => {}
+        Some(Ok(())) => {
+            blkdev::record_io(false); // Track read for disk-idle heuristic.
+        }
         Some(Err(e)) => return Err(e),
         None => return Err(KernelError::NoSuchDevice),
     }

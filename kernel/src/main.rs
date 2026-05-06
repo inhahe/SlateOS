@@ -812,6 +812,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::ar::self_test() {
         serial_println!("WARNING: ar self-test failed: {:?}", e);
     }
+    if let Err(e) = fs::zip::self_test() {
+        serial_println!("WARNING: ZIP self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

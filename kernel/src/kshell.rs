@@ -19076,151 +19076,19 @@ fn tar_mkdir_p(path: &str) -> crate::error::KernelResult<()> {
 // ---------------------------------------------------------------------------
 // crc32 — CRC32C file checksum
 // ---------------------------------------------------------------------------
-// unzip — ZIP archive extraction and listing
+// unzip — ZIP archive extraction and listing (uses fs::zip module)
 // ---------------------------------------------------------------------------
 
-/// ZIP local file header signature.
-const ZIP_LOCAL_SIG: u32 = 0x0403_4B50;
-/// ZIP central directory file header signature.
-const ZIP_CENTRAL_SIG: u32 = 0x0201_4B50;
-/// ZIP end of central directory signature.
-const ZIP_EOCD_SIG: u32 = 0x0605_4B50;
-
-/// Read a little-endian u16 from a byte slice at `off`.
-fn zip_u16(data: &[u8], off: usize) -> u16 {
-    let lo = *data.get(off).unwrap_or(&0);
-    let hi = *data.get(off.wrapping_add(1)).unwrap_or(&0);
-    u16::from(lo) | (u16::from(hi) << 8)
-}
-
-/// Read a little-endian u32 from a byte slice at `off`.
-fn zip_u32(data: &[u8], off: usize) -> u32 {
-    let b0 = u32::from(*data.get(off).unwrap_or(&0));
-    let b1 = u32::from(*data.get(off.wrapping_add(1)).unwrap_or(&0));
-    let b2 = u32::from(*data.get(off.wrapping_add(2)).unwrap_or(&0));
-    let b3 = u32::from(*data.get(off.wrapping_add(3)).unwrap_or(&0));
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-}
-
-/// A parsed ZIP central directory entry.
-struct ZipEntry {
-    /// Filename (relative path inside the archive).
-    name: alloc::string::String,
-    /// Compression method: 0=stored, 8=deflated.
-    method: u16,
-    /// CRC-32 of uncompressed data.
-    crc32: u32,
-    /// Compressed size.
-    compressed_size: u32,
-    /// Uncompressed size.
-    uncompressed_size: u32,
-    /// Offset of local file header in the archive.
-    local_header_offset: u32,
-}
-
-/// Find the End of Central Directory record by scanning backwards.
-///
-/// The EOCD is at most 22 + 65535 bytes from the end (22 bytes fixed +
-/// up to 65535 bytes of comment).  We scan from the end for the signature.
-fn zip_find_eocd(data: &[u8]) -> Option<usize> {
-    if data.len() < 22 {
-        return None;
-    }
-    // Scan backwards from the end, up to 65557 bytes back.
-    let search_start = data.len().saturating_sub(65557);
-    let mut pos = data.len().saturating_sub(22);
-    loop {
-        if zip_u32(data, pos) == ZIP_EOCD_SIG {
-            return Some(pos);
-        }
-        if pos == search_start {
-            return None;
-        }
-        pos = pos.saturating_sub(1);
-    }
-}
-
-/// Parse the central directory and return a list of entries.
-fn zip_parse_central_dir(data: &[u8]) -> Option<alloc::vec::Vec<ZipEntry>> {
-    let eocd_off = zip_find_eocd(data)?;
-
-    let total_entries = zip_u16(data, eocd_off.wrapping_add(10)) as usize;
-    let cd_offset = zip_u32(data, eocd_off.wrapping_add(16)) as usize;
-
-    let mut entries = alloc::vec::Vec::with_capacity(total_entries);
-    let mut off = cd_offset;
-
-    for _ in 0..total_entries {
-        if off.wrapping_add(46) > data.len() {
-            break;
-        }
-        let sig = zip_u32(data, off);
-        if sig != ZIP_CENTRAL_SIG {
-            break;
-        }
-
-        let method = zip_u16(data, off.wrapping_add(10));
-        let crc32 = zip_u32(data, off.wrapping_add(16));
-        let compressed_size = zip_u32(data, off.wrapping_add(20));
-        let uncompressed_size = zip_u32(data, off.wrapping_add(24));
-        let name_len = zip_u16(data, off.wrapping_add(28)) as usize;
-        let extra_len = zip_u16(data, off.wrapping_add(30)) as usize;
-        let comment_len = zip_u16(data, off.wrapping_add(32)) as usize;
-        let local_header_offset = zip_u32(data, off.wrapping_add(42));
-
-        let name_start = off.wrapping_add(46);
-        let name_end = name_start.wrapping_add(name_len).min(data.len());
-        let name_bytes = data.get(name_start..name_end).unwrap_or(&[]);
-        let name = core::str::from_utf8(name_bytes)
-            .map(alloc::string::String::from)
-            .unwrap_or_else(|_| alloc::format!("<invalid-utf8@{}>", off));
-
-        entries.push(ZipEntry {
-            name,
-            method,
-            crc32,
-            compressed_size,
-            uncompressed_size,
-            local_header_offset,
-        });
-
-        off = off.wrapping_add(46)
-            .wrapping_add(name_len)
-            .wrapping_add(extra_len)
-            .wrapping_add(comment_len);
-    }
-
-    Some(entries)
-}
-
-/// Extract the compressed data for a ZIP entry from the archive.
-///
-/// Reads the local file header to find the actual data start (the
-/// local header may have different extra field lengths than the
-/// central directory entry).
-fn zip_entry_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Option<&'a [u8]> {
-    let off = entry.local_header_offset as usize;
-    if off.wrapping_add(30) > data.len() {
-        return None;
-    }
-    let sig = zip_u32(data, off);
-    if sig != ZIP_LOCAL_SIG {
-        return None;
-    }
-    let name_len = zip_u16(data, off.wrapping_add(26)) as usize;
-    let extra_len = zip_u16(data, off.wrapping_add(28)) as usize;
-    let data_start = off.wrapping_add(30).wrapping_add(name_len).wrapping_add(extra_len);
-    let data_end = data_start.wrapping_add(entry.compressed_size as usize);
-    data.get(data_start..data_end.min(data.len()))
-}
-
 /// `unzip` command — list or extract ZIP archives.
+///
+/// Uses the `fs::zip` module for parsing and decompression.
 ///
 /// - `unzip -l archive.zip`        — list contents
 /// - `unzip archive.zip`           — extract all files
 /// - `unzip archive.zip -d DIR`    — extract to directory
 fn cmd_unzip(args: &str) {
     use crate::fs::Vfs;
+    use crate::fs::zip;
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
@@ -19277,9 +19145,9 @@ fn cmd_unzip(args: &str) {
         }
     };
 
-    let entries = match zip_parse_central_dir(&data) {
-        Some(e) => e,
-        None => {
+    let entries = match zip::parse(&data) {
+        Ok(e) => e,
+        Err(_) => {
             crate::console_println!("unzip: '{}': not a valid ZIP archive", archive_path);
             return;
         }
@@ -19290,7 +19158,7 @@ fn cmd_unzip(args: &str) {
             "  {:>10}  {:>10}  {:>6}  Name",
             "Size", "Compressed", "Method"
         );
-        crate::console_println!("  {}  {}  {}  {}", "-" .repeat(10), "-".repeat(10), "-".repeat(6), "-".repeat(30));
+        crate::console_println!("  {}  {}  {}  {}", "-".repeat(10), "-".repeat(10), "-".repeat(6), "-".repeat(30));
 
         let mut total_size: u64 = 0;
         let mut total_compressed: u64 = 0;
@@ -19305,8 +19173,8 @@ fn cmd_unzip(args: &str) {
                 entry.uncompressed_size, entry.compressed_size,
                 method_str, entry.name
             );
-            total_size = total_size.saturating_add(u64::from(entry.uncompressed_size));
-            total_compressed = total_compressed.saturating_add(u64::from(entry.compressed_size));
+            total_size = total_size.saturating_add(entry.uncompressed_size);
+            total_compressed = total_compressed.saturating_add(entry.compressed_size);
         }
         crate::console_println!("  {}  {}  {}  {}", "-".repeat(10), "-".repeat(10), "-".repeat(6), "-".repeat(30));
         crate::console_println!(
@@ -19334,7 +19202,7 @@ fn cmd_unzip(args: &str) {
         };
 
         // Directory entries end with '/'.
-        if entry.name.ends_with('/') {
+        if entry.is_dir {
             match Vfs::mkdir(&out_path) {
                 Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                 Err(e) => {
@@ -19354,58 +19222,15 @@ fn cmd_unzip(args: &str) {
             }
         }
 
-        // Get the compressed data.
-        let compressed_data = match zip_entry_data(&data, &entry) {
-            Some(d) => d,
-            None => {
-                crate::console_println!("  unzip: '{}': could not read data", entry.name);
+        // Extract and decompress (with CRC-32 verification).
+        let file_data = match zip::extract_entry(&data, &entry) {
+            Ok(d) => d,
+            Err(e) => {
+                crate::console_println!("  unzip: '{}': {:?}", entry.name, e);
                 errors = errors.saturating_add(1);
                 continue;
             }
         };
-
-        // Decompress based on method.
-        let file_data = match entry.method {
-            0 => {
-                // Stored — data is uncompressed.
-                compressed_data.to_vec()
-            }
-            8 => {
-                // Deflated — decompress.
-                match crate::fs::compress::inflate(compressed_data) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        crate::console_println!(
-                            "  unzip: '{}': inflate failed: {:?}",
-                            entry.name, e
-                        );
-                        errors = errors.saturating_add(1);
-                        continue;
-                    }
-                }
-            }
-            _ => {
-                crate::console_println!(
-                    "  unzip: '{}': unsupported compression method {}",
-                    entry.name, entry.method
-                );
-                errors = errors.saturating_add(1);
-                continue;
-            }
-        };
-
-        // Verify CRC-32 if non-zero.
-        if entry.crc32 != 0 {
-            let actual_crc = crate::fs::compress::crc32_iso_pub(&file_data);
-            if actual_crc != entry.crc32 {
-                crate::console_println!(
-                    "  unzip: '{}': CRC mismatch (expected {:#010x}, got {:#010x})",
-                    entry.name, entry.crc32, actual_crc
-                );
-                errors = errors.saturating_add(1);
-                continue;
-            }
-        }
 
         // Write the file.
         match Vfs::write_file(&out_path, &file_data) {
@@ -20550,103 +20375,8 @@ fn cmd_un7z(args: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// zip — ZIP archive creation
+// zip — ZIP archive creation (uses fs::zip module)
 // ---------------------------------------------------------------------------
-
-/// Write a little-endian u16 to a byte vector.
-fn zip_write_u16(buf: &mut Vec<u8>, val: u16) {
-    buf.extend_from_slice(&val.to_le_bytes());
-}
-
-/// Write a little-endian u32 to a byte vector.
-fn zip_write_u32(buf: &mut Vec<u8>, val: u32) {
-    buf.extend_from_slice(&val.to_le_bytes());
-}
-
-/// One entry prepared for writing into a ZIP archive.
-struct ZipWriteEntry {
-    /// Relative path inside the archive.
-    name: String,
-    /// Uncompressed CRC-32 (ISO 3309).
-    crc32: u32,
-    /// Compressed data (method 8) or raw data (method 0).
-    data: Vec<u8>,
-    /// Compression method: 0=stored, 8=deflated.
-    method: u16,
-    /// Original (uncompressed) size.
-    uncompressed_size: u32,
-}
-
-/// Build a ZIP archive in memory from a list of prepared entries.
-///
-/// Produces a valid ZIP file: local file headers, central directory,
-/// and end of central directory record.
-#[allow(clippy::arithmetic_side_effects)]
-fn zip_build_archive(entries: &[ZipWriteEntry]) -> Vec<u8> {
-    let mut archive = Vec::new();
-
-    // Offsets of each local file header (needed for central directory).
-    let mut local_offsets: Vec<u32> = Vec::with_capacity(entries.len());
-
-    // --- Local file headers + file data ---
-    for entry in entries {
-        local_offsets.push(archive.len() as u32);
-
-        // Local file header (30 bytes + name + data).
-        zip_write_u32(&mut archive, ZIP_LOCAL_SIG); // signature
-        zip_write_u16(&mut archive, 20);            // version needed (2.0)
-        zip_write_u16(&mut archive, 0);             // general purpose bit flag
-        zip_write_u16(&mut archive, entry.method);  // compression method
-        zip_write_u16(&mut archive, 0);             // mod time (unused)
-        zip_write_u16(&mut archive, 0x0021);        // mod date (1980-01-01, minimum valid DOS date)
-        zip_write_u32(&mut archive, entry.crc32);   // CRC-32
-        zip_write_u32(&mut archive, entry.data.len() as u32); // compressed size
-        zip_write_u32(&mut archive, entry.uncompressed_size); // uncompressed size
-        zip_write_u16(&mut archive, entry.name.len() as u16); // file name length
-        zip_write_u16(&mut archive, 0);             // extra field length
-        archive.extend_from_slice(entry.name.as_bytes());
-        archive.extend_from_slice(&entry.data);
-    }
-
-    // --- Central directory ---
-    let cd_start = archive.len() as u32;
-
-    for (i, entry) in entries.iter().enumerate() {
-        zip_write_u32(&mut archive, ZIP_CENTRAL_SIG); // signature
-        zip_write_u16(&mut archive, 20);              // version made by (2.0)
-        zip_write_u16(&mut archive, 20);              // version needed (2.0)
-        zip_write_u16(&mut archive, 0);               // general purpose bit flag
-        zip_write_u16(&mut archive, entry.method);    // compression method
-        zip_write_u16(&mut archive, 0);               // mod time
-        zip_write_u16(&mut archive, 0x0021);          // mod date
-        zip_write_u32(&mut archive, entry.crc32);     // CRC-32
-        zip_write_u32(&mut archive, entry.data.len() as u32); // compressed size
-        zip_write_u32(&mut archive, entry.uncompressed_size); // uncompressed size
-        zip_write_u16(&mut archive, entry.name.len() as u16); // file name length
-        zip_write_u16(&mut archive, 0);               // extra field length
-        zip_write_u16(&mut archive, 0);               // file comment length
-        zip_write_u16(&mut archive, 0);               // disk number start
-        zip_write_u16(&mut archive, 0);               // internal file attributes
-        zip_write_u32(&mut archive, 0);               // external file attributes
-        zip_write_u32(&mut archive, local_offsets[i]); // local header offset
-        archive.extend_from_slice(entry.name.as_bytes());
-    }
-
-    let cd_end = archive.len() as u32;
-    let cd_size = cd_end.wrapping_sub(cd_start);
-
-    // --- End of central directory ---
-    zip_write_u32(&mut archive, ZIP_EOCD_SIG);
-    zip_write_u16(&mut archive, 0);                       // disk number
-    zip_write_u16(&mut archive, 0);                       // disk with central dir
-    zip_write_u16(&mut archive, entries.len() as u16);    // entries on this disk
-    zip_write_u16(&mut archive, entries.len() as u16);    // total entries
-    zip_write_u32(&mut archive, cd_size);                 // central dir size
-    zip_write_u32(&mut archive, cd_start);                // central dir offset
-    zip_write_u16(&mut archive, 0);                       // comment length
-
-    archive
-}
 
 /// Recursively collect all files under a directory, returning
 /// (relative_path, absolute_path) pairs.
@@ -20688,9 +20418,7 @@ fn zip_collect_files(
         };
 
         if entry.entry_type == crate::fs::vfs::EntryType::Directory {
-            // Add directory marker (trailing /).
             files.push((alloc::format!("{}/", rel_path), String::new()));
-            // Recurse.
             zip_collect_files(&abs_path, &rel_path, files, depth.saturating_add(1));
         } else {
             files.push((rel_path, abs_path));
@@ -20700,6 +20428,8 @@ fn zip_collect_files(
 
 /// `zip archive.zip file1 [file2 ...] [-0]` — create a ZIP archive.
 ///
+/// Uses the `fs::zip` module for archive creation.
+///
 /// - `zip archive.zip file1 file2`    — compress files into archive
 /// - `zip archive.zip dir/`           — recursively add directory
 /// - `zip -0 archive.zip file1`       — store without compression
@@ -20707,6 +20437,7 @@ fn zip_collect_files(
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_zip(args: &str) {
     use crate::fs::Vfs;
+    use crate::fs::zip;
 
     if args.trim().is_empty() || args.trim() == "--help" || args.trim() == "-h" {
         crate::console_println!(
@@ -20727,7 +20458,6 @@ fn cmd_zip(args: &str) {
             "-0" => store_only = true,
             "-r" => recursive = true,
             _ if token.starts_with('-') && positional.is_empty() => {
-                // Handle combined flags like -0r.
                 for ch in token.chars().skip(1) {
                     match ch {
                         '0' => store_only = true,
@@ -20756,15 +20486,12 @@ fn cmd_zip(args: &str) {
     for &token in positional.iter().skip(1) {
         let abs = resolve_path(token);
 
-        // Check if it's a directory.
         match Vfs::lstat(&abs) {
             Ok(meta) if meta.entry_type == crate::fs::vfs::EntryType::Directory => {
                 if recursive {
-                    // Use the directory's base name as the archive prefix.
                     let dir_name = token.rsplit('/').next()
                         .unwrap_or(token)
                         .trim_end_matches('/');
-                    // Add directory marker.
                     input_files.push((alloc::format!("{}/", dir_name), String::new()));
                     zip_collect_files(&abs, dir_name, &mut input_files, 0);
                 } else {
@@ -20772,7 +20499,6 @@ fn cmd_zip(args: &str) {
                 }
             }
             Ok(_) => {
-                // Regular file — use the filename (last component) as name in archive.
                 let name = token.rsplit('/').next().unwrap_or(token);
                 input_files.push((String::from(name), abs));
             }
@@ -20789,21 +20515,18 @@ fn cmd_zip(args: &str) {
         return;
     }
 
-    // Build ZIP entries.
-    let mut entries: Vec<ZipWriteEntry> = Vec::with_capacity(input_files.len());
+    // Build ZipWriteEntry list using the module type.
+    let mut entries: Vec<zip::ZipWriteEntry> = Vec::with_capacity(input_files.len());
     let mut total_in: u64 = 0;
-    let mut total_out: u64 = 0;
     let mut errors: usize = 0;
 
     for (name, abs_path) in &input_files {
         if abs_path.is_empty() {
-            // Directory marker — no data.
-            entries.push(ZipWriteEntry {
+            // Directory marker.
+            entries.push(zip::ZipWriteEntry {
                 name: name.clone(),
-                crc32: 0,
                 data: Vec::new(),
-                method: 0,
-                uncompressed_size: 0,
+                store_only: true,
             });
             continue;
         }
@@ -20817,36 +20540,17 @@ fn cmd_zip(args: &str) {
             }
         };
 
-        let crc32 = crate::fs::compress::crc32_iso_pub(&raw_data);
-        let uncompressed_size = raw_data.len() as u32;
-
-        let (data, method) = if store_only || raw_data.is_empty() {
-            (raw_data.clone(), 0u16)
-        } else {
-            let compressed = crate::fs::compress::deflate(&raw_data);
-            // Only use compression if it actually saves space.
-            if compressed.len() < raw_data.len() {
-                (compressed, 8u16)
-            } else {
-                (raw_data.clone(), 0u16)
-            }
-        };
-
-        let method_label = if method == 8 { "deflated" } else { "stored" };
         crate::console_println!(
-            "  adding: {} ({}, {} → {} bytes)",
-            name, method_label, uncompressed_size, data.len()
+            "  adding: {} ({} bytes)",
+            name, raw_data.len()
         );
 
-        total_in = total_in.wrapping_add(u64::from(uncompressed_size));
-        total_out = total_out.wrapping_add(data.len() as u64);
+        total_in = total_in.wrapping_add(raw_data.len() as u64);
 
-        entries.push(ZipWriteEntry {
+        entries.push(zip::ZipWriteEntry {
             name: name.clone(),
-            crc32,
-            data,
-            method,
-            uncompressed_size,
+            data: raw_data,
+            store_only,
         });
     }
 
@@ -20855,17 +20559,19 @@ fn cmd_zip(args: &str) {
         return;
     }
 
-    // Build and write the archive.
-    let archive = zip_build_archive(&entries);
+    // Build and write the archive via the fs::zip module.
+    let archive = zip::create(&entries);
+
     match Vfs::write_file(&archive_path, &archive) {
         Ok(()) => {
+            let total_out = archive.len() as u64;
             let ratio = if total_in > 0 {
                 100u64.saturating_sub(total_out.saturating_mul(100) / total_in)
             } else {
                 0
             };
             crate::console_println!(
-                "zip: created '{}' ({} bytes, {} entries, {}% compression{})",
+                "zip: created '{}' ({} bytes, {} entries, ~{}% compression{})",
                 archive_path,
                 archive.len(),
                 entries.len(),

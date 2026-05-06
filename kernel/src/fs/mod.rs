@@ -50,6 +50,8 @@ pub mod sevenz;
 #[allow(dead_code)]
 pub mod xz;
 #[allow(dead_code)]
+pub mod zip;
+#[allow(dead_code)]
 pub mod zstd;
 
 pub use vfs::{

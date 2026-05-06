@@ -1574,6 +1574,12 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
+        // Intercept: let pre-operation handlers approve/deny before proceeding.
+        // Called before VFS lock to avoid deadlock (interceptors must not call VFS).
+        super::intercept::pre_write(&path)?;
+        // Quota: check whether this write would exceed the user's quota.
+        // uid 0 is the default until per-process identity is wired up.
+        enforce_quota_write(&path, data.len() as u64)?;
         // Auto-version: save the old content before overwriting.
         // Called before taking the VFS lock to avoid deadlock (record_version
         // reads the file through VFS internally).  TOCTOU between read and
@@ -1584,6 +1590,8 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.write_file(relative, data)?;
         }
+        // Charge quota usage after successful write.
+        super::quota::charge_bytes(0, 0, data.len() as u64);
         // Writing may create a new file — invalidate negative cache entries
         // that claimed this path didn't exist.
         VFS_DCACHE.lock().invalidate_negative_prefix(&path);
@@ -1591,6 +1599,7 @@ impl Vfs {
         super::notify::emit_modified(&path);
         super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::audit::log_ok(super::audit::AuditOp::Write, 0, &path);
         Ok(())
     }
 
@@ -1749,6 +1758,10 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
+        // Intercept: let pre-operation handlers approve/deny.
+        super::intercept::pre_delete(&path)?;
+        // Capture file size before deletion for quota release.
+        let file_size = Self::stat(&path).map(|s| s.size).unwrap_or(0);
         // Auto-version: save the file content before deleting.
         // Allows `fhist restore` to recover accidentally deleted files.
         super::history::try_auto_record(&path);
@@ -1757,12 +1770,18 @@ impl Vfs {
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.remove(relative)?;
         }
+        // Release quota usage for deleted file.
+        if file_size > 0 {
+            super::quota::release_bytes(0, 0, file_size);
+        }
+        super::quota::release_inode(0, 0);
         // Removing a file/symlink can invalidate cached resolutions that
         // traverse through it (if it was a symlink) or resolve to it.
         VFS_DCACHE.lock().invalidate_prefix(&path);
         super::notify::emit_deleted(&path);
         super::index::on_file_deleted(&path);
         super::journal::record(super::journal::JournalEventType::Deleted, &path);
+        super::audit::log_ok(super::audit::AuditOp::Delete, 0, &path);
         Ok(())
     }
 
@@ -1774,11 +1793,17 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
+        // Intercept: let pre-operation handlers approve/deny.
+        super::intercept::pre_mkdir(&path)?;
+        // Quota: check inode creation limit.
+        enforce_quota_create(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.mkdir(relative)?;
         }
+        // Charge quota for new inode.
+        super::quota::charge_inode(0, 0);
         // New directory invalidates negative cache entries that claimed
         // this path (or children) didn't exist.  Positive entries are
         // unaffected — existing path resolutions remain valid.
@@ -1786,6 +1811,7 @@ impl Vfs {
         super::notify::emit_created(&path);
         super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
+        super::audit::log_ok(super::audit::AuditOp::Mkdir, 0, &path);
         Ok(())
     }
 
@@ -1841,16 +1867,21 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
+        // Intercept: let pre-operation handlers approve/deny.
+        super::intercept::pre_delete(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.rmdir(relative)?;
         }
+        // Release inode quota for removed directory.
+        super::quota::release_inode(0, 0);
         // Removing a directory invalidates any cached paths through it.
         VFS_DCACHE.lock().invalidate_prefix(&path);
         super::notify::emit_deleted(&path);
         super::index::on_file_deleted(&path);
         super::journal::record(super::journal::JournalEventType::Deleted, &path);
+        super::audit::log_ok(super::audit::AuditOp::Rmdir, 0, &path);
         Ok(())
     }
 
@@ -1870,11 +1901,15 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
+        // Intercept and quota checks on partial writes.
+        super::intercept::pre_write(&path)?;
+        enforce_quota_write(&path, data.len() as u64)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.write_at(relative, offset, data)?;
         }
+        super::quota::charge_bytes(0, 0, data.len() as u64);
         super::notify::emit_modified(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
         Ok(())
@@ -1934,6 +1969,8 @@ impl Vfs {
         check_file_tags(&to)?;
         check_writable(&from)?;
         check_writable(&to)?;
+        // Intercept: let pre-operation handlers approve/deny.
+        super::intercept::pre_rename(&from, &to)?;
 
         // Check if both paths are on the same mount point.
         let same_mount = {
@@ -1985,6 +2022,7 @@ impl Vfs {
         super::notify::emit_renamed(&from, &to);
         super::index::on_file_renamed(&from, &to);
         super::journal::record_rename(&from, &to);
+        super::audit::log_ok(super::audit::AuditOp::Rename, 0, &from);
         Ok(())
     }
 
@@ -2232,6 +2270,14 @@ impl Vfs {
         let existing = Self::resolve_follow(existing)?;
         let new_path = Self::resolve_no_follow(new_path)?;
         check_writable(&new_path)?;
+        // Intercept: let pre-operation handlers approve/deny link creation.
+        super::intercept::pre_check(
+            super::intercept::FsOp::Link,
+            &new_path,
+            Some(&existing),
+        )?;
+        // Quota: creating a link is creating a new inode reference.
+        enforce_quota_create(&new_path)?;
 
         {
             let mut vfs = VFS.lock();
@@ -2299,11 +2345,14 @@ impl Vfs {
             mp.fs.link(rel_existing, rel_new)?;
         }
 
+        // Charge inode quota for new link.
+        super::quota::charge_inode(0, 0);
         // New hard link invalidates negative cache entries for the new path.
         VFS_DCACHE.lock().invalidate_negative_prefix(&new_path);
         super::notify::emit_created(&new_path);
         super::index::on_file_changed(&new_path);
         super::journal::record(super::journal::JournalEventType::Created, &new_path);
+        super::audit::log_ok(super::audit::AuditOp::Link, 0, &new_path);
         Ok(())
     }
 
@@ -3208,6 +3257,70 @@ fn check_writable(path: &str) -> KernelResult<()> {
         return Err(KernelError::ReadOnlyFilesystem);
     }
     Ok(())
+}
+
+/// Enforce filesystem quota on a write operation.
+///
+/// Checks whether writing `bytes` for the current user (uid/gid 0 until
+/// per-process identity is wired up) would exceed configured quota limits.
+/// Returns `DiskFull` on hard-limit denial.  Soft-limit warnings are
+/// logged but writes are allowed.
+///
+/// This is called *before* the VFS lock is taken.  When no quotas are
+/// configured the function returns immediately (fast path in the quota
+/// module).
+fn enforce_quota_write(path: &str, bytes: u64) -> KernelResult<()> {
+    // uid/gid 0 until per-process identity tracking is available.
+    match super::quota::check_write(0, 0, bytes) {
+        super::quota::QuotaCheckResult::Allowed => Ok(()),
+        super::quota::QuotaCheckResult::SoftWarning => {
+            // Over soft limit but within grace — warn and allow.
+            super::audit::log_err(
+                super::audit::AuditOp::Write,
+                0,
+                path,
+                KernelError::DiskFull,
+            );
+            Ok(())
+        }
+        super::quota::QuotaCheckResult::Denied => {
+            super::audit::log_err(
+                super::audit::AuditOp::Write,
+                0,
+                path,
+                KernelError::DiskFull,
+            );
+            Err(KernelError::DiskFull)
+        }
+    }
+}
+
+/// Enforce filesystem quota on an inode (file/directory) creation.
+///
+/// Checks whether creating a new file or directory would exceed the
+/// configured inode limit for the current user.
+fn enforce_quota_create(path: &str) -> KernelResult<()> {
+    match super::quota::check_create(0, 0) {
+        super::quota::QuotaCheckResult::Allowed => Ok(()),
+        super::quota::QuotaCheckResult::SoftWarning => {
+            super::audit::log_err(
+                super::audit::AuditOp::Mkdir,
+                0,
+                path,
+                KernelError::DiskFull,
+            );
+            Ok(())
+        }
+        super::quota::QuotaCheckResult::Denied => {
+            super::audit::log_err(
+                super::audit::AuditOp::Mkdir,
+                0,
+                path,
+                KernelError::DiskFull,
+            );
+            Err(KernelError::DiskFull)
+        }
+    }
 }
 
 /// Check file/directory capability tag access for the current process.

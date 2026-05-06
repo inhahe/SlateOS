@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "base64", "bunzip2", "bzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio",
+    "ar", "base64", "bunzip2", "bzip2", "bzcat", "cd", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
@@ -4379,6 +4379,7 @@ fn dispatch(line: &str) {
         "unzip" => cmd_unzip(args),
         "un7z" => cmd_un7z(args),
         "cpio" => cmd_cpio(args),
+        "ar" => cmd_ar(args),
         "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
         "sed" => cmd_sed(args),
@@ -4610,6 +4611,7 @@ fn cmd_help() {
     crate::console_println!("  un7z [-l] F [-d DIR]   List or extract 7-zip archive");
     crate::console_println!("  cpio -i|-t [-d DIR] < F.cpio  Extract or list CPIO archive (newc format)");
     crate::console_println!("  cpio -o F.cpio FILE..  Create CPIO archive from files");
+    crate::console_println!("  ar t F.a | ar x F.a [-d DIR] | ar r F.a FILE..  List/extract/create ar archive");
     crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
     crate::console_println!("  base64 [-d] F Encode file to Base64 (or -d to decode)");
@@ -8184,6 +8186,17 @@ fn detect_magic(header: &[u8]) -> Option<&'static str> {
         }
     }
 
+    // ar archive (used for .a static libraries and .deb packages)
+    if header.starts_with(b"!<arch>\n") {
+        // Check if it's a .deb by looking for "debian-binary" member.
+        if header.len() >= 68 && header.get(8..24).map_or(false, |n| {
+            n.starts_with(b"debian-binary")
+        }) {
+            return Some("Debian package (ar archive)");
+        }
+        return Some("ar archive");
+    }
+
     // Zstandard
     if header.len() >= 4 {
         let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
@@ -8384,6 +8397,7 @@ fn extension_hint(path: &str) -> &'static str {
         "tbz2" | "tbz" => "bzip2 compressed tar archive",
         "zip" => "ZIP archive",
         "7z" => "7-zip archive",
+        "deb" => "Debian package",
         "cpio" => "CPIO archive",
         "xz" => "XZ compressed",
         "zst" | "zstd" => "Zstandard compressed",
@@ -12156,7 +12170,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "ar" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -19743,6 +19757,237 @@ fn cmd_cpio_create(args: &[&str]) {
         }
         Err(e) => {
             crate::console_println!("cpio: write '{}': {:?}", archive_path, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ar — Unix ar archive operations
+// ---------------------------------------------------------------------------
+
+/// `ar` command — list, extract, or create ar archives.
+///
+/// Usage:
+///   ar t archive.a           List members
+///   ar x archive.a [-d DIR]  Extract members
+///   ar r archive.a FILE..    Create archive
+fn cmd_ar(args: &str) {
+    use crate::fs::Vfs;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: ar t archive.a           List members\n\
+             \x20      ar x archive.a [-d DIR]  Extract members\n\
+             \x20      ar r archive.a FILE..    Create archive from files"
+        );
+        return;
+    }
+
+    let mode = parts.first().copied().unwrap_or("");
+    match mode {
+        "t" => cmd_ar_list(&parts[1..]),
+        "x" => cmd_ar_extract(&parts[1..]),
+        "r" | "c" | "cr" | "rcs" => cmd_ar_create(&parts[1..]),
+        _ => {
+            crate::console_println!(
+                "ar: unknown operation '{}'. Use t (list), x (extract), or r (create)",
+                mode
+            );
+        }
+    }
+}
+
+fn cmd_ar_list(args: &[&str]) {
+    use crate::fs::Vfs;
+
+    let archive_path = match args.first() {
+        Some(&p) => resolve_path(p),
+        None => {
+            crate::console_println!("ar t: no archive file specified");
+            return;
+        }
+    };
+
+    let data = match Vfs::read_file(&archive_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("ar: '{}': {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let entries = match crate::fs::ar::unar(&data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("ar: '{}': parse failed: {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    crate::console_println!(
+        "  {:>8}  {:>5}:{:<5}  {:>10}  {}",
+        "Mode", "UID", "GID", "Size", "Name"
+    );
+    crate::console_println!(
+        "  {}  {}  {}  {}",
+        "-".repeat(8), "-".repeat(11), "-".repeat(10), "-".repeat(30)
+    );
+
+    let mut total_size: u64 = 0;
+    for entry in &entries {
+        crate::console_println!(
+            "  {:>8o}  {:>5}:{:<5}  {:>10}  {}",
+            entry.mode, entry.uid, entry.gid,
+            entry.data.len(), entry.name
+        );
+        total_size = total_size.wrapping_add(entry.data.len() as u64);
+    }
+
+    crate::console_println!("  {} member(s), {} bytes total", entries.len(), total_size);
+}
+
+fn cmd_ar_extract(args: &[&str]) {
+    use crate::fs::Vfs;
+
+    let mut archive_arg: Option<&str> = None;
+    let mut target_dir = alloc::string::String::from("/");
+    let mut skip_next = false;
+
+    for (i, &p) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-d" | "-C" => {
+                if let Some(&dir) = args.get(i.wrapping_add(1)) {
+                    target_dir = resolve_path(dir);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("ar x: -d requires a directory argument");
+                    return;
+                }
+            }
+            _ => {
+                if archive_arg.is_none() {
+                    archive_arg = Some(p);
+                }
+            }
+        }
+    }
+
+    let archive_path = match archive_arg {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("ar x: no archive file specified");
+            return;
+        }
+    };
+
+    let data = match Vfs::read_file(&archive_path) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("ar: '{}': {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let entries = match crate::fs::ar::unar(&data) {
+        Ok(e) => e,
+        Err(e) => {
+            crate::console_println!("ar: '{}': extraction failed: {:?}", archive_path, e);
+            return;
+        }
+    };
+
+    let mut extracted = 0u64;
+    let mut errors = 0u64;
+
+    for entry in &entries {
+        let dest = if target_dir == "/" {
+            alloc::format!("/{}", entry.name)
+        } else {
+            alloc::format!("{}/{}", target_dir, entry.name)
+        };
+
+        match Vfs::write_file(&dest, &entry.data) {
+            Ok(()) => {
+                extracted = extracted.wrapping_add(1);
+            }
+            Err(e) => {
+                crate::console_println!("ar: write '{}': {:?}", dest, e);
+                errors = errors.wrapping_add(1);
+            }
+        }
+    }
+
+    crate::console_println!(
+        "ar: extracted {} member(s) from '{}'{}",
+        extracted,
+        archive_path,
+        if errors > 0 {
+            alloc::format!(" ({} errors)", errors)
+        } else {
+            alloc::string::String::new()
+        }
+    );
+}
+
+fn cmd_ar_create(args: &[&str]) {
+    use crate::fs::Vfs;
+
+    if args.len() < 2 {
+        crate::console_println!("ar r: need archive name and at least one file");
+        return;
+    }
+
+    let archive_path = resolve_path(args[0]);
+    let mut entries = alloc::vec::Vec::new();
+
+    for &file_arg in &args[1..] {
+        let path = resolve_path(file_arg);
+        match Vfs::read_file(&path) {
+            Ok(data) => {
+                // Use the filename part only (strip directory).
+                let name = path.rsplit('/').next().unwrap_or(&path);
+                entries.push(crate::fs::ar::ArEntry {
+                    name: alloc::string::String::from(name),
+                    data,
+                    mtime: 0,
+                    uid: 0,
+                    gid: 0,
+                    mode: 0o100644,
+                });
+            }
+            Err(e) => {
+                crate::console_println!("ar: read '{}': {:?}", path, e);
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        crate::console_println!("ar r: no valid files to archive");
+        return;
+    }
+
+    let archive = match crate::fs::ar::mkar(&entries) {
+        Ok(a) => a,
+        Err(e) => {
+            crate::console_println!("ar: create failed: {:?}", e);
+            return;
+        }
+    };
+
+    match Vfs::write_file(&archive_path, &archive) {
+        Ok(()) => {
+            crate::console_println!(
+                "ar: created '{}' ({} members, {} bytes)",
+                archive_path, entries.len(), archive.len()
+            );
+        }
+        Err(e) => {
+            crate::console_println!("ar: write '{}': {:?}", archive_path, e);
         }
     }
 }

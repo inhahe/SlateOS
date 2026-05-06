@@ -462,8 +462,18 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 17a¼: Initialize named capability groups.
+    // Built-in groups (admin, network, filesystem, driver, process, ipc)
+    // are created with root (gid=0) as default member.
+    cap::groups::init();
+
     // Step 17a½: Capability audit log self-test.
     cap::audit::self_test();
+
+    // Step 17a¾: Capability groups self-test.
+    if let Err(e) = cap::groups::self_test() {
+        serial_println!("[WARN] Capability groups self-test failed: {:?}", e);
+    }
 
     // Step 17b: Initialize structured logging subsystem.
     // JSON-lines log entries go to serial and a kernel ring buffer.

@@ -53,6 +53,7 @@
 //! `CAP_TABLE` does not call into the scheduler or other IPC locks.
 
 pub mod audit;
+pub mod groups;
 pub mod rights;
 pub mod table;
 

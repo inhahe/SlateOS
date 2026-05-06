@@ -230,7 +230,14 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 ### 1.5 Capability / security model
 - [x] Per-process capability table (unforgeable handles to kernel objects)
 - [x] Capability delegation (parent passes subset to child, can't create new ones)
-- [ ] User/group model with named capability groups
+- [x] User/group model with named capability groups
+  - [x] CapGroup registry: named groups with (ResourceType, Rights) grants
+  - [x] 6 built-in groups: admin, network, filesystem, driver, process, ipc
+  - [x] OS group (gid) membership mapping (primary + supplementary)
+  - [x] check_access(): verify process gids against group capability grants
+  - [x] Root (uid=0) bypasses all group checks
+  - [x] Built-in protection (cannot remove built-in groups)
+  - [x] Self-test: builtins, create/remove, membership, access check, name lookup
 - [ ] File/directory capability tags (AND-composition between groups, OR within a group)
 - [x] Resource limits as cgroup-like controls (set at launch, kernel-enforced)
   - [x] Per-process ResourceLimits struct (max_rss_frames, cpu_quota_pct, max_threads, max_handles)

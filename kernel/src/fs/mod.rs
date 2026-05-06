@@ -43,6 +43,7 @@ pub mod memfs;
 pub mod notify;
 pub mod procfs;
 pub mod sysfs;
+pub mod tar;
 pub mod trash;
 pub mod vfs;
 #[allow(dead_code)]

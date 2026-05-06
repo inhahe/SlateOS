@@ -4920,54 +4920,44 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::write_file("/TARTEST/hello.txt", b"Hello from tar test!\n")?;
         crate::fs::Vfs::write_file("/TARTEST/sub/deep.txt", b"Nested file content.\n")?;
 
-        // Build tar archive in memory using the kshell's tar functions.
-        // We call the low-level tar_build_header/tar_parse_header functions
-        // directly since the kshell command requires string args.
-        let mut archive: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        let mut file_count: u32 = 0;
+        // Build tar archive in memory using the fs::tar module.
+        use crate::fs::tar::{self, TarWriteEntry, EntryKind};
 
-        // Manually archive the test tree.
-        // 1) Directory header for TARTEST/
-        let hdr = crate::kshell::tar_build_header("TARTEST/", 0, 0, 0o755, 0, 0, b'5', "");
-        archive.extend_from_slice(&hdr);
-        file_count += 1;
-
-        // 2) File: TARTEST/hello.txt
         let hello_data = b"Hello from tar test!\n";
-        let hdr2 = crate::kshell::tar_build_header(
-            "TARTEST/hello.txt", hello_data.len() as u64, 0, 0o644, 0, 0, b'0', "",
-        );
-        archive.extend_from_slice(&hdr2);
-        archive.extend_from_slice(hello_data);
-        // Pad to 512-byte boundary.
-        let remainder = hello_data.len() % 512;
-        if remainder != 0 {
-            let padding = 512 - remainder;
-            archive.extend_from_slice(&alloc::vec![0u8; padding]);
-        }
-        file_count += 1;
-
-        // 3) Directory: TARTEST/sub/
-        let hdr3 = crate::kshell::tar_build_header("TARTEST/sub/", 0, 0, 0o755, 0, 0, b'5', "");
-        archive.extend_from_slice(&hdr3);
-        file_count += 1;
-
-        // 4) File: TARTEST/sub/deep.txt
         let deep_data = b"Nested file content.\n";
-        let hdr4 = crate::kshell::tar_build_header(
-            "TARTEST/sub/deep.txt", deep_data.len() as u64, 0, 0o644, 0, 0, b'0', "",
-        );
-        archive.extend_from_slice(&hdr4);
-        archive.extend_from_slice(deep_data);
-        let rem2 = deep_data.len() % 512;
-        if rem2 != 0 {
-            archive.extend_from_slice(&alloc::vec![0u8; 512 - rem2]);
-        }
-        file_count += 1;
 
-        // End-of-archive markers.
-        archive.extend_from_slice(&[0u8; 512]);
-        archive.extend_from_slice(&[0u8; 512]);
+        let entries = alloc::vec![
+            TarWriteEntry {
+                name: alloc::string::String::from("TARTEST/"),
+                data: alloc::vec::Vec::new(),
+                kind: EntryKind::Directory,
+                link_target: alloc::string::String::new(),
+                mode: 0o755, uid: 0, gid: 0, mtime: 0,
+            },
+            TarWriteEntry {
+                name: alloc::string::String::from("TARTEST/hello.txt"),
+                data: hello_data.to_vec(),
+                kind: EntryKind::File,
+                link_target: alloc::string::String::new(),
+                mode: 0o644, uid: 0, gid: 0, mtime: 0,
+            },
+            TarWriteEntry {
+                name: alloc::string::String::from("TARTEST/sub/"),
+                data: alloc::vec::Vec::new(),
+                kind: EntryKind::Directory,
+                link_target: alloc::string::String::new(),
+                mode: 0o755, uid: 0, gid: 0, mtime: 0,
+            },
+            TarWriteEntry {
+                name: alloc::string::String::from("TARTEST/sub/deep.txt"),
+                data: deep_data.to_vec(),
+                kind: EntryKind::File,
+                link_target: alloc::string::String::new(),
+                mode: 0o644, uid: 0, gid: 0, mtime: 0,
+            },
+        ];
+        let file_count = entries.len() as u32;
+        let archive = tar::create(&entries);
 
         // Save the archive.
         crate::fs::Vfs::write_file("/test.tar", &archive)?;
@@ -4983,29 +4973,27 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
 
-        // Parse headers.
-        let mut offset: usize = 0;
-        let mut parsed_count: u32 = 0;
-        while offset + 512 <= readback.len() {
-            let mut hdr_buf = [0u8; 512];
-            hdr_buf.copy_from_slice(&readback[offset..offset + 512]);
-            offset += 512;
-
-            match crate::kshell::tar_parse_header(&hdr_buf) {
-                Some((name, size, _mtime, typeflag, _link)) => {
-                    crate::serial_println!(
-                        "[fat]     tar entry: '{}' type={} size={}",
-                        name, typeflag as char, size
-                    );
-                    parsed_count += 1;
-                    // Skip data blocks.
-                    if size > 0 {
-                        let blocks = (size as usize + 511) / 512;
-                        offset += blocks * 512;
-                    }
-                }
-                None => break, // End of archive.
+        // Parse headers using the fs::tar module.
+        let parsed_entries = match tar::parse(&readback) {
+            Ok(e) => e,
+            Err(e) => {
+                crate::serial_println!("[fat]   tar FAILED: parse error: {:?}", e);
+                let _ = crate::fs::Vfs::remove("/test.tar");
+                return Err(KernelError::IoError);
             }
+        };
+        let parsed_count = parsed_entries.len() as u32;
+        for pe in &parsed_entries {
+            let type_ch = match pe.kind {
+                EntryKind::Directory => '5',
+                EntryKind::File => '0',
+                EntryKind::Symlink => '2',
+                EntryKind::Other(b) => b as char,
+            };
+            crate::serial_println!(
+                "[fat]     tar entry: '{}' type={} size={}",
+                pe.name, type_ch, pe.size
+            );
         }
 
         if parsed_count != file_count {

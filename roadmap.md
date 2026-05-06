@@ -552,7 +552,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP server syscalls: bind, accept, close_listener (SYS_TCP_BIND 804, SYS_TCP_ACCEPT 805, SYS_TCP_CLOSE_LISTENER 806)
   - [x] UDP syscalls: bind, send, recv, close (SYS_UDP_BIND through SYS_UDP_CLOSE)
   - [x] DNS resolution syscall (SYS_DNS_RESOLVE)
-- [ ] Firewall (basic packet filtering)
+- [x] Firewall (basic packet filtering)
+  - [x] Rule-based inbound/outbound filtering (allow/deny, protocol, IP/prefix, port, priority)
+  - [x] Default policy (accept/drop), first-match-wins evaluation
+  - [x] Stateful connection tracking (outbound creates entry, inbound replies auto-allowed)
+  - [x] IPv4 hooks: inbound check in process_ipv4, outbound check in send
+  - [x] Kshell `firewall`/`fw` command (on/off, policy, allow/deny rules, stats, conntrack)
+  - [x] Self-test: disabled passthrough, default DROP, rule matching, IP prefix, connection tracking
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer

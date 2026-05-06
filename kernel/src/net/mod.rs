@@ -19,6 +19,7 @@ pub mod arp;
 pub mod dhcp;
 pub mod dns;
 pub mod ethernet;
+pub mod firewall;
 pub mod icmp;
 pub mod interface;
 pub mod ipv4;

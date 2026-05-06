@@ -1048,6 +1048,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("[WARN] TCP self-test failed: {:?}", e);
     }
 
+    // Step 22e⅞++++n3: Firewall self-test.
+    // Stateful packet filtering with rules and connection tracking.
+    if let Err(e) = net::firewall::self_test() {
+        serial_println!("[WARN] Firewall self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++o: Kernel object tracking self-test.
     // Lifecycle counters for all kernel object types.
     kobject::self_test();

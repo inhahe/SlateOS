@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
-    "flock", "fsck", "fsck.ext4", "fsck.fat", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "irq", "journal", "kill", "label", "let", "ln", "link", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4392,6 +4392,7 @@ fn dispatch(line: &str) {
         "ping" => cmd_ping(args),
         "dns" | "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
+        "firewall" | "fw" => cmd_firewall(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
@@ -4628,6 +4629,7 @@ fn cmd_help() {
     crate::console_println!("  ping IP   Send ICMP echo requests (ping)");
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
     crate::console_println!("  wget URL  Fetch a URL via HTTP GET");
+    crate::console_println!("  firewall  Manage packet filtering (fw alias)");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  uname [-asnrvmo] Print system information");
     crate::console_println!("  source F  Execute kshell commands from file F");
@@ -9780,6 +9782,174 @@ fn cmd_ping(args: &str) {
     );
 }
 
+/// `firewall` — manage packet filtering rules.
+///
+/// Usage:
+///   firewall                — show status and rules
+///   firewall on|off         — enable/disable firewall
+///   firewall policy accept|drop — set default policy
+///   firewall allow|deny in|out tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]
+///   firewall remove N       — remove rule by index
+///   firewall clear          — remove all rules
+///   firewall stats          — show packet counters
+///   firewall conntrack      — show connection tracking info
+#[allow(clippy::too_many_lines)]
+fn cmd_firewall(args: &str) {
+    use crate::net::firewall;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "status" => {
+            let enabled = firewall::is_enabled();
+            let policy = firewall::default_policy();
+            let nrules = firewall::rule_count();
+            let (allowed, denied) = firewall::stats();
+            let ct = firewall::conntrack_count();
+
+            crate::console_println!("=== Firewall ===");
+            crate::console_println!("  Status:   {}", if enabled { "ENABLED" } else { "disabled" });
+            crate::console_println!("  Policy:   {:?}", policy);
+            crate::console_println!("  Rules:    {}", nrules);
+            crate::console_println!("  Conntrack: {} entries", ct);
+            crate::console_println!("  Allowed:  {}", allowed);
+            crate::console_println!("  Denied:   {}", denied);
+        }
+        "on" | "enable" => firewall::enable(),
+        "off" | "disable" => firewall::disable(),
+        "policy" => {
+            match parts.get(1).copied() {
+                Some("accept") => firewall::set_default_policy(firewall::DefaultPolicy::Accept),
+                Some("drop") => firewall::set_default_policy(firewall::DefaultPolicy::Drop),
+                _ => crate::console_println!("Usage: firewall policy accept|drop"),
+            }
+        }
+        "allow" | "deny" => {
+            // Parse: allow|deny in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]
+            let action = if cmd == "allow" {
+                firewall::Action::Allow
+            } else {
+                firewall::Action::Deny
+            };
+
+            let direction = match parts.get(1).copied() {
+                Some("in") => firewall::Direction::In,
+                Some("out") => firewall::Direction::Out,
+                Some("both") => firewall::Direction::Both,
+                _ => {
+                    crate::console_println!("Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]", cmd);
+                    return;
+                }
+            };
+
+            let protocol = match parts.get(2).copied() {
+                Some("tcp") => firewall::Protocol::Tcp,
+                Some("udp") => firewall::Protocol::Udp,
+                Some("icmp") => firewall::Protocol::Icmp,
+                Some("any") | Some("all") => firewall::Protocol::Any,
+                _ => {
+                    crate::console_println!("Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]", cmd);
+                    return;
+                }
+            };
+
+            // Parse optional modifiers.
+            let mut dst_port: u16 = 0;
+            let mut src_ip = crate::net::interface::Ipv4Addr::UNSPECIFIED;
+            let mut src_prefix: u8 = 0;
+            let mut priority: u16 = 100;
+
+            let mut i = 3;
+            while i < parts.len() {
+                match parts[i] {
+                    "port" => {
+                        if let Some(p) = parts.get(i + 1) {
+                            if let Ok(port) = p.parse::<u16>() {
+                                dst_port = port;
+                            }
+                        }
+                        i += 2;
+                    }
+                    "ip" => {
+                        if let Some(ip_str) = parts.get(i + 1) {
+                            // Parse IP[/prefix].
+                            if let Some((ip_part, prefix_part)) = ip_str.split_once('/') {
+                                if let Some(ip) = parse_ipv4(ip_part) {
+                                    src_ip = ip;
+                                    src_prefix = prefix_part.parse::<u8>().unwrap_or(32);
+                                }
+                            } else if let Some(ip) = parse_ipv4(ip_str) {
+                                src_ip = ip;
+                                src_prefix = 32;
+                            }
+                        }
+                        i += 2;
+                    }
+                    "prio" | "priority" => {
+                        if let Some(p) = parts.get(i + 1) {
+                            priority = p.parse::<u16>().unwrap_or(100);
+                        }
+                        i += 2;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+
+            let rule = firewall::Rule {
+                active: true,
+                direction,
+                action,
+                protocol,
+                src_ip,
+                src_prefix,
+                dst_port,
+                priority,
+            };
+
+            match firewall::add_rule(rule) {
+                Ok(idx) => crate::console_println!("Rule {} added", idx),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" | "del" => {
+            if let Some(idx_str) = parts.get(1) {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    match firewall::remove_rule(idx) {
+                        Ok(()) => crate::console_println!("Rule {} removed", idx),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                } else {
+                    crate::console_println!("Usage: firewall remove <index>");
+                }
+            } else {
+                crate::console_println!("Usage: firewall remove <index>");
+            }
+        }
+        "clear" | "flush" => {
+            firewall::clear_rules();
+            crate::console_println!("All rules cleared");
+        }
+        "stats" => {
+            let (allowed, denied) = firewall::stats();
+            crate::console_println!("Packets allowed: {}", allowed);
+            crate::console_println!("Packets denied:  {}", denied);
+        }
+        "conntrack" | "ct" => {
+            let count = firewall::conntrack_count();
+            crate::console_println!("Connection tracking: {} active entries", count);
+        }
+        "reset" => {
+            firewall::reset_stats();
+            firewall::clear_conntrack();
+            crate::console_println!("Stats and conntrack reset");
+        }
+        _ => {
+            crate::console_println!("Usage: firewall [on|off|policy|allow|deny|remove|clear|stats|conntrack|reset]");
+        }
+    }
+}
+
 /// Parse a simple URL: "http://host/path" or just "host/path" or "host".
 /// Returns (host, port, path).
 fn parse_url(url: &str) -> Option<(&str, u16, &str)> {
@@ -12175,7 +12345,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "un7z" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"
@@ -18358,186 +18528,11 @@ fn cmd_od(args: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// tar — archive creation, extraction, and listing (USTAR format)
+// tar — archive creation, extraction, and listing (uses fs::tar module)
 // ---------------------------------------------------------------------------
 
-/// USTAR header constants.
-pub const TAR_BLOCK_SIZE: usize = 512;
-const TAR_MAGIC: &[u8; 6] = b"ustar\0";
-const TAR_VERSION: &[u8; 2] = b"00";
-
-/// File type flags for tar headers.
-const TAR_REGTYPE: u8 = b'0';       // Regular file
-const TAR_DIRTYPE: u8 = b'5';       // Directory
-const TAR_SYMTYPE: u8 = b'2';       // Symbolic link
-
-/// Build a USTAR header block for a file or directory.
-///
-/// Returns a 512-byte header with checksum computed.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-pub fn tar_build_header(
-    path: &str,
-    size: u64,
-    mtime_ns: u64,
-    mode: u32,
-    uid: u32,
-    gid: u32,
-    typeflag: u8,
-    linkname: &str,
-) -> [u8; TAR_BLOCK_SIZE] {
-    let mut header = [0u8; TAR_BLOCK_SIZE];
-
-    // Split path into prefix (155 bytes) + name (100 bytes) if needed.
-    let path_bytes = path.as_bytes();
-    if path_bytes.len() <= 100 {
-        let copy_len = path_bytes.len().min(100);
-        header[..copy_len].copy_from_slice(&path_bytes[..copy_len]);
-    } else {
-        // Try to split at a '/' boundary for USTAR prefix support.
-        let mut split_at = None;
-        for i in (0..path_bytes.len().saturating_sub(100)).rev() {
-            if path_bytes[i] == b'/' {
-                split_at = Some(i);
-                break;
-            }
-        }
-        if let Some(s) = split_at {
-            // prefix = path[..s], name = path[s+1..]
-            let prefix = &path_bytes[..s];
-            let name = &path_bytes[s + 1..];
-            let plen = prefix.len().min(155);
-            let nlen = name.len().min(100);
-            header[..nlen].copy_from_slice(&name[..nlen]);
-            header[345..345 + plen].copy_from_slice(&prefix[..plen]);
-        } else {
-            // Can't split — truncate to 100 bytes.
-            header[..100].copy_from_slice(&path_bytes[..100]);
-        }
-    }
-
-    // Mode (octal, 8 bytes including NUL).
-    let mode_str = alloc::format!("{:07o}\0", mode & 0o7777);
-    let mode_bytes = mode_str.as_bytes();
-    let mlen = mode_bytes.len().min(8);
-    header[100..100 + mlen].copy_from_slice(&mode_bytes[..mlen]);
-
-    // UID.
-    let uid_str = alloc::format!("{:07o}\0", uid);
-    let uid_bytes = uid_str.as_bytes();
-    let ulen = uid_bytes.len().min(8);
-    header[108..108 + ulen].copy_from_slice(&uid_bytes[..ulen]);
-
-    // GID.
-    let gid_str = alloc::format!("{:07o}\0", gid);
-    let gid_bytes = gid_str.as_bytes();
-    let glen = gid_bytes.len().min(8);
-    header[116..116 + glen].copy_from_slice(&gid_bytes[..glen]);
-
-    // Size (octal, 12 bytes including NUL).
-    let size_str = alloc::format!("{:011o}\0", size);
-    let size_bytes = size_str.as_bytes();
-    let slen = size_bytes.len().min(12);
-    header[124..124 + slen].copy_from_slice(&size_bytes[..slen]);
-
-    // Mtime (seconds since Unix epoch, octal).
-    let mtime_sec = mtime_ns / 1_000_000_000;
-    let mtime_str = alloc::format!("{:011o}\0", mtime_sec);
-    let mtime_bytes = mtime_str.as_bytes();
-    let mtlen = mtime_bytes.len().min(12);
-    header[136..136 + mtlen].copy_from_slice(&mtime_bytes[..mtlen]);
-
-    // Typeflag.
-    header[156] = typeflag;
-
-    // Linkname (100 bytes).
-    if !linkname.is_empty() {
-        let lbytes = linkname.as_bytes();
-        let llen = lbytes.len().min(100);
-        header[157..157 + llen].copy_from_slice(&lbytes[..llen]);
-    }
-
-    // Magic + version.
-    header[257..263].copy_from_slice(TAR_MAGIC);
-    header[263..265].copy_from_slice(TAR_VERSION);
-
-    // Checksum: fill with spaces first, then compute.
-    header[148..156].copy_from_slice(b"        ");
-
-    let mut cksum: u32 = 0;
-    for &b in header.iter() {
-        cksum = cksum.wrapping_add(u32::from(b));
-    }
-    let cksum_str = alloc::format!("{:06o}\0 ", cksum);
-    let cksum_bytes = cksum_str.as_bytes();
-    let clen = cksum_bytes.len().min(8);
-    header[148..148 + clen].copy_from_slice(&cksum_bytes[..clen]);
-
-    header
-}
-
-/// Parse a USTAR header. Returns (name, size, mtime_sec, typeflag, linkname)
-/// or None if the block is all zeros (end-of-archive).
-#[allow(clippy::arithmetic_side_effects)]
-pub fn tar_parse_header(header: &[u8; TAR_BLOCK_SIZE]) -> Option<(alloc::string::String, u64, u64, u8, alloc::string::String)> {
-    // Check for end-of-archive (all zeros).
-    if header.iter().all(|&b| b == 0) {
-        return None;
-    }
-
-    // Verify checksum.
-    let stored_cksum = tar_parse_octal(&header[148..156]);
-    let mut computed: u32 = 0;
-    for (i, &b) in header.iter().enumerate() {
-        if (148..156).contains(&i) {
-            computed = computed.wrapping_add(u32::from(b' '));
-        } else {
-            computed = computed.wrapping_add(u32::from(b));
-        }
-    }
-    if stored_cksum != u64::from(computed) {
-        return None; // Invalid checksum.
-    }
-
-    // Name: prefix (345..500) + "/" + name (0..100).
-    let name_raw = &header[..100];
-    let name_end = name_raw.iter().position(|&b| b == 0).unwrap_or(100);
-    let name_part = core::str::from_utf8(&name_raw[..name_end]).unwrap_or("");
-
-    let prefix_raw = &header[345..500];
-    let prefix_end = prefix_raw.iter().position(|&b| b == 0).unwrap_or(155);
-    let prefix_part = core::str::from_utf8(&prefix_raw[..prefix_end]).unwrap_or("");
-
-    let full_name = if prefix_part.is_empty() {
-        alloc::string::String::from(name_part)
-    } else {
-        alloc::format!("{}/{}", prefix_part, name_part)
-    };
-
-    let size = tar_parse_octal(&header[124..136]);
-    let mtime = tar_parse_octal(&header[136..148]);
-    let typeflag = header[156];
-
-    let link_raw = &header[157..257];
-    let link_end = link_raw.iter().position(|&b| b == 0).unwrap_or(100);
-    let linkname = core::str::from_utf8(&link_raw[..link_end]).unwrap_or("").into();
-
-    Some((full_name, size, mtime, typeflag, linkname))
-}
-
-/// Parse an octal ASCII field (NUL/space terminated) into u64.
-#[allow(clippy::arithmetic_side_effects)]
-fn tar_parse_octal(field: &[u8]) -> u64 {
-    let mut val: u64 = 0;
-    for &b in field {
-        if b == 0 || b == b' ' {
-            break;
-        }
-        if b >= b'0' && b <= b'7' {
-            val = val.wrapping_mul(8).wrapping_add(u64::from(b - b'0'));
-        }
-    }
-    val
-}
+/// Re-export block size from the tar module for use in command code.
+const TAR_BLOCK_SIZE: usize = crate::fs::tar::BLOCK_SIZE;
 
 /// `tar` command — create, extract, or list USTAR archives.
 ///
@@ -18792,57 +18787,43 @@ fn cmd_tar(args: &str) {
             raw_data
         };
 
-        let mut offset: usize = 0;
+        // Parse the tar archive using the fs::tar module.
+        let entries = match crate::fs::tar::parse(&data) {
+            Ok(e) => e,
+            Err(e) => {
+                crate::console_println!("tar: parse '{}': {:?}", archive_path, e);
+                return;
+            }
+        };
+
         let mut file_count: u32 = 0;
 
-        while offset + TAR_BLOCK_SIZE <= data.len() {
-            let mut header_buf = [0u8; TAR_BLOCK_SIZE];
-            header_buf.copy_from_slice(&data[offset..offset + TAR_BLOCK_SIZE]);
-            offset += TAR_BLOCK_SIZE;
-
-            let (name, size, _mtime, typeflag, _linkname) = match tar_parse_header(&header_buf) {
-                Some(h) => h,
-                None => break, // End of archive.
-            };
-
-            // Data blocks follow the header.
-            let data_blocks = if size > 0 {
-                ((size as usize) + TAR_BLOCK_SIZE - 1) / TAR_BLOCK_SIZE
-            } else {
-                0
-            };
-            let data_start = offset;
-            let data_end = (offset + data_blocks * TAR_BLOCK_SIZE).min(data.len());
-            offset = data_end;
-
+        for entry in &entries {
             if list {
-                // List mode: print entry info.
-                let type_ch = match typeflag {
-                    TAR_DIRTYPE => 'd',
-                    TAR_SYMTYPE => 'l',
+                let type_ch = match entry.kind {
+                    crate::fs::tar::EntryKind::Directory => 'd',
+                    crate::fs::tar::EntryKind::Symlink => 'l',
                     _ => '-',
                 };
                 if verbose {
                     crate::console_println!(
                         "{} {:>8} {}",
-                        type_ch, size, name
+                        type_ch, entry.size, entry.name
                     );
                 } else {
-                    crate::console_println!("{}", name);
+                    crate::console_println!("{}", entry.name);
                 }
             } else {
                 // Extract mode.
-                // Build full output path.
-                let clean_name = name.trim_start_matches('/');
+                let clean_name = entry.name.trim_start_matches('/');
                 let out_path = if target_dir == "/" {
                     alloc::format!("/{}", clean_name)
                 } else {
                     alloc::format!("{}/{}", target_dir.trim_end_matches('/'), clean_name)
                 };
 
-                match typeflag {
-                    TAR_DIRTYPE => {
-                        // Create directory (ignore AlreadyExists).
+                match entry.kind {
+                    crate::fs::tar::EntryKind::Directory => {
                         match Vfs::mkdir(&out_path) {
                             Ok(()) | Err(crate::error::KernelError::AlreadyExists) => {}
                             Err(e) => {
@@ -18853,9 +18834,7 @@ fn cmd_tar(args: &str) {
                             crate::console_println!("x {}", out_path);
                         }
                     }
-                    TAR_REGTYPE | b'\0' => {
-                        // Extract regular file.
-                        // Ensure parent directory exists.
+                    crate::fs::tar::EntryKind::File => {
                         if let Some(slash) = out_path.rfind('/') {
                             if slash > 0 {
                                 let parent = &out_path[..slash];
@@ -18863,11 +18842,8 @@ fn cmd_tar(args: &str) {
                             }
                         }
 
-                        let file_data = if size > 0 && data_start + (size as usize) <= data.len() {
-                            &data[data_start..data_start + size as usize]
-                        } else {
-                            &[]
-                        };
+                        let file_data = crate::fs::tar::entry_data(&data, entry)
+                            .unwrap_or(&[]);
 
                         match Vfs::write_file(&out_path, file_data) {
                             Ok(()) => {}
@@ -18876,23 +18852,22 @@ fn cmd_tar(args: &str) {
                             }
                         }
                         if verbose {
-                            crate::console_println!("x {} ({} bytes)", out_path, size);
+                            crate::console_println!("x {} ({} bytes)", out_path, entry.size);
                         }
                     }
-                    TAR_SYMTYPE => {
-                        // Symlink — create if VFS supports it.
+                    crate::fs::tar::EntryKind::Symlink => {
                         if verbose {
                             crate::console_println!(
                                 "x {} -> {} (symlink, skipped)",
-                                out_path, _linkname
+                                out_path, entry.link_target
                             );
                         }
                     }
-                    _ => {
+                    crate::fs::tar::EntryKind::Other(t) => {
                         if verbose {
                             crate::console_println!(
                                 "x {} (type '{}', skipped)",
-                                out_path, typeflag as char
+                                out_path, t as char
                             );
                         }
                     }
@@ -18955,19 +18930,21 @@ fn tar_add_recursive(
         }
     };
 
+    use crate::fs::tar::{self, TarWriteEntry, EntryKind};
+
     match meta.entry_type {
         EntryType::Directory => {
-            // Add directory header (size 0).
-            let header = tar_build_header(
-                &archive_name,
-                0,
-                meta.modified_ns,
-                u32::from(meta.permissions),
-                meta.uid,
-                meta.gid,
-                TAR_DIRTYPE,
-                "",
-            );
+            let entry = TarWriteEntry {
+                name: archive_name.clone(),
+                data: alloc::vec::Vec::new(),
+                kind: EntryKind::Directory,
+                link_target: alloc::string::String::new(),
+                mode: u32::from(meta.permissions),
+                uid: meta.uid,
+                gid: meta.gid,
+                mtime: meta.modified_ns / 1_000_000_000,
+            };
+            let header = tar::build_header(&entry);
             archive.extend_from_slice(&header);
             *count = count.saturating_add(1);
             if verbose {
@@ -18976,14 +18953,14 @@ fn tar_add_recursive(
 
             // Recurse into children.
             let entries = Vfs::readdir(path)?;
-            for entry in &entries {
-                if entry.name == "." || entry.name == ".." {
+            for dir_entry in &entries {
+                if dir_entry.name == "." || dir_entry.name == ".." {
                     continue;
                 }
                 let child = if path == "/" {
-                    alloc::format!("/{}", entry.name)
+                    alloc::format!("/{}", dir_entry.name)
                 } else {
-                    alloc::format!("{}/{}", path, entry.name)
+                    alloc::format!("{}/{}", path, dir_entry.name)
                 };
                 tar_add_recursive(&child, base, archive, count, verbose)?;
             }
@@ -18992,16 +18969,17 @@ fn tar_add_recursive(
             let data = Vfs::read_file(path)?;
             let file_size = data.len() as u64;
 
-            let header = tar_build_header(
-                &archive_name,
-                file_size,
-                meta.modified_ns,
-                u32::from(meta.permissions),
-                meta.uid,
-                meta.gid,
-                TAR_REGTYPE,
-                "",
-            );
+            let entry = TarWriteEntry {
+                name: archive_name.clone(),
+                data: data.clone(),
+                kind: EntryKind::File,
+                link_target: alloc::string::String::new(),
+                mode: u32::from(meta.permissions),
+                uid: meta.uid,
+                gid: meta.gid,
+                mtime: meta.modified_ns / 1_000_000_000,
+            };
+            let header = tar::build_header(&entry);
             archive.extend_from_slice(&header);
 
             // Write file data.
@@ -19020,22 +18998,22 @@ fn tar_add_recursive(
             }
         }
         EntryType::Symlink => {
-            // Read symlink target.
             let target = match Vfs::readlink(path) {
                 Ok(t) => t,
                 Err(_) => alloc::string::String::new(),
             };
 
-            let header = tar_build_header(
-                &archive_name,
-                0,
-                meta.modified_ns,
-                u32::from(meta.permissions),
-                meta.uid,
-                meta.gid,
-                TAR_SYMTYPE,
-                &target,
-            );
+            let entry = TarWriteEntry {
+                name: archive_name.clone(),
+                data: alloc::vec::Vec::new(),
+                kind: EntryKind::Symlink,
+                link_target: target.clone(),
+                mode: u32::from(meta.permissions),
+                uid: meta.uid,
+                gid: meta.gid,
+                mtime: meta.modified_ns / 1_000_000_000,
+            };
+            let header = tar::build_header(&entry);
             archive.extend_from_slice(&header);
             *count = count.saturating_add(1);
             if verbose {

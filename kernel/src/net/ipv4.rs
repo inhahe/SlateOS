@@ -215,6 +215,11 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
         return Ok(());
     }
 
+    // Firewall inbound check — drop packet if denied.
+    if !super::firewall::check_inbound(packet.protocol, packet.src, packet.payload) {
+        return Ok(()); // Silently dropped by firewall.
+    }
+
     match packet.protocol {
         PROTO_TCP => super::tcp::process_tcp(&packet),
         PROTO_UDP => super::udp::process_udp(&packet),
@@ -231,6 +236,11 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
 /// Resolves the next-hop MAC via ARP (or uses broadcast for broadcast
 /// addresses), wraps in an Ethernet frame, and sends via the NIC.
 pub fn send(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
+    // Firewall outbound check — block packet if denied.
+    if !super::firewall::check_outbound(protocol, dst, payload) {
+        return Err(KernelError::PermissionDenied);
+    }
+
     let our_mac = interface::mac();
     let our_ip = interface::ip();
 

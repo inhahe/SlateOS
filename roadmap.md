@@ -597,6 +597,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Overlay filesystem (fs::overlay): layered directory composition with copy-up, whiteout, and opaque directory semantics; read-only lower + read-write upper merge; reset (discard changes) and commit (merge to lower); `overlay` kshell command with 13 subcommands; 12 self-tests
   - [x] Named pipes (fs::pipe): FIFO support with fixed-capacity ring buffer (default 64 KiB), reader/writer ref counting, EOF/broken-pipe detection, peek, anonymous pipes for shell | operator; `mkfifo`/`lspipe` kshell commands; 12 self-tests
   - [x] Temporary file cleanup (fs::tmpwatch): age-based /tmp cleanup with configurable watch dirs, exclude prefixes, dry-run mode, cumulative stats; `tmpwatch` kshell command; 10 self-tests
+  - [x] Filesystem audit logging (fs::audit): structured security audit trail with rule-based filtering (path prefix, operation mask, UID, failures-only), 4096-entry ring buffer, lock-free disable fast path; `audit` kshell command; 10 self-tests
+  - [x] Mount namespaces (fs::mount_ns): per-process filesystem view isolation, child inherits parent mounts then diverges, process binding with refcount, read-only enforcement, nested namespace control; `namespace`/`ns` kshell command; 10 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -227,6 +227,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::smep_smap::self_test(); true },
         category: "security",
     });
+    suites.push(TestSuite {
+        name: "spectre",
+        description: "Spectre/Meltdown mitigations (IBRS/STIBP/SSBD/IBPB)",
+        run: || { crate::spectre::self_test(); true },
+        category: "security",
+    });
 
     suites
 }

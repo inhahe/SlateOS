@@ -11,6 +11,15 @@ make sure latest WINE plan and automatic code change plan are in roadmap
 
 ## Known Bugs / Limitations
 
+- Workqueue worker stack overflow (#DF): Task 61 ("kworker") double-faults
+  during workqueue::self_test() with RSP 0x180 bytes below stack bottom.
+  Stack is 32 KiB [0xffffc10000040000..0xffffc10000048000].  The self-test
+  apparently requires more stack than 32 KiB.  Was previously masked by
+  earlier #UD crashes (alloc_trace rdtscp, smep_smap STAC) that prevented
+  reaching this code.  FIX: either increase kworker stack size or reduce
+  self-test stack usage (avoid large local arrays or deep call chains).
+  Address: 0xffffffff800d90cd.
+
 - Init process null-deref after BOOT_OK: Task 67 ("init") crashes on CPU 1
   with a kernel-mode write to address 0x8 (null pointer + offset, error=0x2).
   RIP=0xffffffff8000bb1d, backtrace: 0xffffffff8027ab5d → 0xffffffff8000b1f3.

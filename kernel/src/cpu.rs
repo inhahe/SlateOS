@@ -847,6 +847,34 @@ pub struct CpuFeatures {
     pub pmu_counters: u8,
     /// Bit width of general-purpose PMC registers.
     pub pmu_counter_width: u8,
+
+    // --- CPUID leaf 7, subleaf 0, EDX: speculation control ---
+    /// IBRS/IBPB: Indirect Branch Restricted Speculation / Prediction Barrier.
+    /// (CPUID.07H.0:EDX[26])
+    pub ibrs_ibpb: bool,
+    /// STIBP: Single Thread Indirect Branch Predictors.
+    /// (CPUID.07H.0:EDX[27])
+    pub stibp: bool,
+    /// IA32_ARCH_CAPABILITIES MSR available.
+    /// (CPUID.07H.0:EDX[29])
+    pub arch_capabilities: bool,
+    /// SSBD: Speculative Store Bypass Disable via IA32_SPEC_CTRL.
+    /// (CPUID.07H.0:EDX[31])
+    pub ssbd: bool,
+
+    // --- CPUID leaf 0x80000008, EBX: AMD speculation control ---
+    /// IBPB: Indirect Branch Prediction Barrier (AMD).
+    /// (CPUID.80000008H:EBX[12])
+    pub amd_ibpb: bool,
+    /// SSBD: Speculative Store Bypass Disable (AMD, via LS_CFG MSR).
+    /// (CPUID.80000008H:EBX[24])
+    pub amd_ssbd: bool,
+    /// STIBP: Single Thread Indirect Branch Predictors (AMD).
+    /// (CPUID.80000008H:EBX[15])
+    pub amd_stibp: bool,
+    /// IBRS: Indirect Branch Restricted Speculation (AMD).
+    /// (CPUID.80000008H:EBX[14])
+    pub amd_ibrs: bool,
 }
 
 impl CpuFeatures {
@@ -864,6 +892,8 @@ impl CpuFeatures {
             xsave_area_size: 0, xcr0_supported: 0,
             xsaveopt: false, xsavec: false, xsaves: false,
             pmu_version: 0, pmu_counters: 0, pmu_counter_width: 0,
+            ibrs_ibpb: false, stibp: false, arch_capabilities: false, ssbd: false,
+            amd_ibpb: false, amd_ssbd: false, amd_stibp: false, amd_ibrs: false,
         }
     }
 }
@@ -922,6 +952,11 @@ pub fn detect_features() {
         // Intel CET (Control-flow Enforcement Technology).
         f.cet_ss = ecx7 & (1 << 7) != 0;   // Shadow Stack support
         f.cet_ibt = edx7 & (1 << 20) != 0; // Indirect Branch Tracking
+        // Speculation control (Spectre/Meltdown mitigations).
+        f.ibrs_ibpb = edx7 & (1 << 26) != 0;
+        f.stibp = edx7 & (1 << 27) != 0;
+        f.arch_capabilities = edx7 & (1 << 29) != 0;
+        f.ssbd = edx7 & (1 << 31) != 0;
     }
 
     // --- Leaf 0x80000001: extended features ---
@@ -930,6 +965,15 @@ pub fn detect_features() {
         let edx_ext1 = cpuid_extended_leaf1_edx();
         f.rdtscp = edx_ext1 & (1 << 27) != 0;
         f.page_1g = edx_ext1 & (1 << 26) != 0;
+    }
+
+    // --- Leaf 0x80000008: AMD speculation control (EBX) ---
+    if max_ext_leaf >= 0x8000_0008 {
+        let ebx_ext8 = cpuid_extended_leaf8_ebx();
+        f.amd_ibpb = ebx_ext8 & (1 << 12) != 0;
+        f.amd_ibrs = ebx_ext8 & (1 << 14) != 0;
+        f.amd_stibp = ebx_ext8 & (1 << 15) != 0;
+        f.amd_ssbd = ebx_ext8 & (1 << 24) != 0;
     }
 
     // --- Leaf 0xD, subleaf 0: XSAVE area info ---
@@ -1017,6 +1061,10 @@ pub fn log_features() {
     crate::serial_println!(
         "[cpu]   CET: shadow_stack={} indirect_branch_tracking={}",
         f.cet_ss, f.cet_ibt
+    );
+    crate::serial_println!(
+        "[cpu]   Speculation: IBRS/IBPB={} STIBP={} SSBD={} ARCH_CAP={}",
+        f.ibrs_ibpb, f.stibp, f.ssbd, f.arch_capabilities
     );
     if f.pmu_version > 0 {
         crate::serial_println!(
@@ -1129,6 +1177,29 @@ fn cpuid_extended_leaf1_edx() -> u32 {
         );
     }
     edx
+}
+
+/// CPUID leaf 0x80000008: AMD extended features (EBX).
+///
+/// Contains speculation control bits for AMD CPUs.
+fn cpuid_extended_leaf8_ebx() -> u32 {
+    let ebx: u32;
+    // SAFETY: Caller verified max_ext_leaf >= 0x80000008.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov eax, 0x80000008",
+            "cpuid",
+            "mov {ebx_out:e}, ebx",
+            "pop rbx",
+            ebx_out = out(reg) ebx,
+            out("eax") _,
+            out("ecx") _,
+            out("edx") _,
+            options(nomem, nostack),
+        );
+    }
+    ebx
 }
 
 /// CPUID leaf 0x0A: Architectural Performance Monitoring info.

@@ -3103,7 +3103,7 @@ const COMMANDS: &[&str] = &[
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
-    "fpu", "xsave",
+    "fpu", "xsave", "spectre", "meltdown", "specmit",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4248,6 +4248,7 @@ fn dispatch(line: &str) {
         "hypervisor" | "vminfo" => cmd_hypervisor(),
         "cet" | "cfi" => cmd_cet(),
         "smap" | "smep" => cmd_smep_smap(),
+        "spectre" | "meltdown" | "specmit" => cmd_spectre(),
         "fpu" | "xsave" => cmd_fpu(),
         "fairness" | "jfi" => cmd_fairness(),
         "mempool" | "pools" => cmd_mempool(),
@@ -21615,6 +21616,39 @@ fn cmd_fpu() {
         shell_println!("    [5] opmask: {}", if xcr0 & 0x20 != 0 { "enabled" } else { "-" });
         shell_println!("    [6] ZMM_Hi: {}", if xcr0 & 0x40 != 0 { "enabled" } else { "-" });
         shell_println!("    [7] Hi16_ZMM: {}", if xcr0 & 0x80 != 0 { "enabled" } else { "-" });
+    }
+}
+
+/// `spectre` / `meltdown` — show speculative execution mitigation status.
+fn cmd_spectre() {
+    use crate::spectre;
+
+    let s = spectre::status();
+
+    shell_println!("=== Speculative Execution Mitigations ===");
+    shell_println!("");
+    shell_println!("  Spectre v2 (Branch Target Injection):");
+    shell_println!("    IBRS:     hw={:<5} active={}", s.hw_ibrs, s.ibrs_active);
+    if s.enhanced_ibrs {
+        shell_println!("              (enhanced IBRS — zero performance cost)");
+    }
+    shell_println!("    STIBP:    hw={:<5} active={}", s.hw_stibp, s.stibp_active);
+    shell_println!("    IBPB barriers issued: {}", s.ibpb_count);
+    shell_println!("");
+    shell_println!("  Spectre v4 (Speculative Store Bypass):");
+    shell_println!("    SSBD:     hw={:<5} active={}", s.hw_ssbd, s.ssbd_active);
+    shell_println!("");
+    shell_println!("  Meltdown (Rogue Data Cache Load):");
+    shell_println!("    Immune (RDCL_NO): {}", if s.meltdown_immune { "yes" } else { "NO — KPTI needed" });
+    shell_println!("");
+    shell_println!("  IA32_ARCH_CAPABILITIES: {:#x}", s.arch_caps);
+    if s.arch_caps != 0 {
+        shell_println!("    [0] RDCL_NO:  {}", if s.arch_caps & 1 != 0 { "yes" } else { "-" });
+        shell_println!("    [1] IBRS_ALL: {}", if s.arch_caps & 2 != 0 { "yes" } else { "-" });
+        shell_println!("    [3] SKIP_L1DFL: {}", if s.arch_caps & 8 != 0 { "yes" } else { "-" });
+        shell_println!("    [4] SSB_NO:   {}", if s.arch_caps & 0x10 != 0 { "yes" } else { "-" });
+        shell_println!("    [5] MDS_NO:   {}", if s.arch_caps & 0x20 != 0 { "yes" } else { "-" });
+        shell_println!("    [8] TAA_NO:   {}", if s.arch_caps & 0x100 != 0 { "yes" } else { "-" });
     }
 }
 

@@ -118,6 +118,7 @@ mod selftest;
 mod serial;
 mod smep_smap;
 mod smp;
+mod spectre;
 mod softirq;
 mod sync;
 mod syscall;
@@ -216,6 +217,9 @@ extern "C" fn kmain() -> ! {
     // Enable SMEP/SMAP — hardware protection against kernel accidentally
     // accessing or executing user-space memory.  Critical for security.
     smep_smap::init();
+    // Spectre/Meltdown mitigations — enable IBRS, STIBP, SSBD based on
+    // CPU capabilities.  Issues initial IBPB to flush stale predictions.
+    spectre::init();
     // Cache topology detection uses only CPUID (no heap needed), but
     // logging uses alloc::format, so we detect now and log later.
     cpu::detect_cache_topology();
@@ -1049,6 +1053,10 @@ extern "C" fn kmain() -> ! {
     // Verifies hardware execution/access prevention is enabled.
     smep_smap::self_test();
 
+    // Step 22e⅞+++++c: Spectre/Meltdown mitigation self-test.
+    // Verifies IBRS/STIBP/SSBD MSRs are set and IBPB barrier works.
+    spectre::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();
@@ -1453,6 +1461,25 @@ fn print_security_posture() {
     // PCID — process-context identifiers (TLB optimization).
     if mm::pcid::is_enabled() {
         active.push_str(" PCID");
+    }
+
+    // Spectre/Meltdown mitigations.
+    let spectre_s = spectre::status();
+    if spectre_s.ibrs_active {
+        if spectre_s.enhanced_ibrs {
+            active.push_str(" IBRS(enhanced)");
+        } else {
+            active.push_str(" IBRS");
+        }
+    }
+    if spectre_s.stibp_active {
+        active.push_str(" STIBP");
+    }
+    if spectre_s.ssbd_active {
+        active.push_str(" SSBD");
+    }
+    if spectre_s.meltdown_immune {
+        active.push_str(" Meltdown-immune");
     }
 
     // CET — control-flow enforcement (deferred until toolchain support).

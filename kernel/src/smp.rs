@@ -782,6 +782,10 @@ extern "C" fn ap_entry() -> ! {
     // SMAP is intentionally not enabled until user access paths are instrumented.
     crate::smep_smap::init_ap();
 
+    // Enable Spectre mitigations on this AP (each CPU has its own MSRs).
+    // Replicates BSP's IA32_SPEC_CTRL and issues IBPB.
+    crate::spectre::init_ap();
+
     // Bump the online CPU count.
     NUM_CPUS_ONLINE.fetch_add(1, Ordering::Release);
 

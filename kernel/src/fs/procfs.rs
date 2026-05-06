@@ -105,6 +105,11 @@ const ROOT_FILES: &[&str] = &[
     "fhistory",
     "quotas",
     "security",
+    "pipes",
+    "overlays",
+    "namespaces",
+    "rlimits",
+    "audit",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1512,6 +1517,122 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
     }
 }
 
+/// Generate `/proc/pipes` — active named pipes.
+fn gen_pipes() -> Vec<u8> {
+    let pipes = crate::fs::pipe::list();
+    let mut s = String::with_capacity(512);
+    s.push_str(&format!("Active pipes: {}\n\n", pipes.len()));
+    if !pipes.is_empty() {
+        s.push_str(&format!("{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}\n",
+            "Path", "Capacity", "Buffered", "R", "W", "BytesIn", "BytesOut"));
+        for p in &pipes {
+            s.push_str(&format!("{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}\n",
+                p.path, p.capacity, p.buffered, p.readers, p.writers,
+                p.bytes_written, p.bytes_read));
+        }
+    }
+    s.into_bytes()
+}
+
+/// Generate `/proc/overlays` — active overlay mounts.
+fn gen_overlays() -> Vec<u8> {
+    let overlays = crate::fs::overlay::list();
+    let mut s = String::with_capacity(512);
+    s.push_str(&format!("Active overlays: {}\n\n", overlays.len()));
+    for (id, ov) in &overlays {
+        s.push_str(&format!("overlay {} ({}):\n", id, ov.name));
+        s.push_str(&format!("  lower:      {}\n", ov.lower_path));
+        s.push_str(&format!("  upper:      {}\n", ov.upper_path));
+        s.push_str(&format!("  whiteouts:  {}\n", ov.whiteout_count));
+        s.push_str(&format!("  opaque:     {}\n", ov.opaque_dir_count));
+        s.push_str(&format!("  reads:      {}\n", ov.reads));
+        s.push_str(&format!("  writes:     {}\n", ov.writes));
+        s.push_str(&format!("  copyups:    {}\n", ov.copyups));
+        s.push('\n');
+    }
+    s.into_bytes()
+}
+
+/// Generate `/proc/namespaces` — active mount namespaces.
+fn gen_namespaces() -> Vec<u8> {
+    let nss = crate::fs::mount_ns::list();
+    let mut s = String::with_capacity(512);
+    s.push_str(&format!("Mount namespaces: {}\n\n", nss.len()));
+    for ns in &nss {
+        let parent = ns.parent.map(|p| format!("{}", p)).unwrap_or_else(|| String::from("none"));
+        s.push_str(&format!("ns {} ({}):\n", ns.id, ns.name));
+        s.push_str(&format!("  parent:     {}\n", parent));
+        s.push_str(&format!("  mounts:     {}\n", ns.mount_count));
+        s.push_str(&format!("  refcount:   {}\n", ns.refcount));
+        s.push_str(&format!("  nested:     {}\n", ns.allow_nested));
+        s.push('\n');
+    }
+    s.into_bytes()
+}
+
+/// Generate `/proc/rlimits` — resource limits.
+fn gen_rlimits() -> Vec<u8> {
+    use crate::fs::rlimit;
+    let defaults = rlimit::get_defaults();
+    let overrides = rlimit::list_overrides();
+    let mut s = String::with_capacity(512);
+
+    s.push_str("Global defaults:\n");
+    s.push_str(&format!("  nofile:  soft={} hard={}\n",
+        rlimit::Rlimit::format_value(defaults.nofile.soft),
+        rlimit::Rlimit::format_value(defaults.nofile.hard)));
+    s.push_str(&format!("  fsize:   soft={} hard={}\n",
+        rlimit::Rlimit::format_value(defaults.fsize.soft),
+        rlimit::Rlimit::format_value(defaults.fsize.hard)));
+    s.push_str(&format!("  locks:   soft={} hard={}\n",
+        rlimit::Rlimit::format_value(defaults.locks.soft),
+        rlimit::Rlimit::format_value(defaults.locks.hard)));
+
+    if !overrides.is_empty() {
+        s.push_str(&format!("\nPer-UID overrides ({}):\n", overrides.len()));
+        for (uid, set) in &overrides {
+            s.push_str(&format!("  uid {}:\n", uid));
+            s.push_str(&format!("    nofile: soft={} hard={}\n",
+                rlimit::Rlimit::format_value(set.nofile.soft),
+                rlimit::Rlimit::format_value(set.nofile.hard)));
+            s.push_str(&format!("    fsize:  soft={} hard={}\n",
+                rlimit::Rlimit::format_value(set.fsize.soft),
+                rlimit::Rlimit::format_value(set.fsize.hard)));
+            s.push_str(&format!("    locks:  soft={} hard={}\n",
+                rlimit::Rlimit::format_value(set.locks.soft),
+                rlimit::Rlimit::format_value(set.locks.hard)));
+        }
+    } else {
+        s.push_str("\nNo per-UID overrides.\n");
+    }
+    s.into_bytes()
+}
+
+/// Generate `/proc/audit` — filesystem audit status.
+fn gen_audit() -> Vec<u8> {
+    use crate::fs::audit;
+    let st = audit::stats();
+    let rules = audit::list_rules();
+    let mut s = String::with_capacity(512);
+
+    s.push_str(&format!("Filesystem audit: {}\n\n", if st.enabled { "enabled" } else { "disabled" }));
+    s.push_str(&format!("  buffer:       {}/{} entries\n", st.buffer_used, st.buffer_size));
+    s.push_str(&format!("  total events: {}\n", st.total_events));
+    s.push_str(&format!("  dropped:      {}\n", st.dropped_events));
+    s.push_str(&format!("  rules:        {}\n\n", st.rules_count));
+
+    if !rules.is_empty() {
+        s.push_str("Rules:\n");
+        for r in &rules {
+            let uid_str = r.uid.map(|u| format!("{}", u)).unwrap_or_else(|| String::from("*"));
+            let prefix = if r.path_prefix.is_empty() { "(all)" } else { &r.path_prefix };
+            s.push_str(&format!("  rule {}: path={} mask=0x{:X} uid={} failures={} enabled={}\n",
+                r.id, prefix, r.mask.0, uid_str, r.failures_only, r.enabled));
+        }
+    }
+    s.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1558,6 +1679,11 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fhistory" => Ok(gen_fhistory()),
         "quotas" => Ok(gen_quotas()),
         "security" => Ok(gen_security()),
+        "pipes" => Ok(gen_pipes()),
+        "overlays" => Ok(gen_overlays()),
+        "namespaces" => Ok(gen_namespaces()),
+        "rlimits" => Ok(gen_rlimits()),
+        "audit" => Ok(gen_audit()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -69,6 +69,12 @@ pub struct HistoryConfig {
     pub max_total_entries: usize,
     /// Whether history tracking is enabled.
     pub enabled: bool,
+    /// Whether VFS auto-versioning is active.
+    ///
+    /// When true, the VFS automatically calls `record_version()` before
+    /// overwriting or removing files.  Independent of `enabled` — manual
+    /// recording via the kshell `fhist record` command works regardless.
+    pub auto_version: bool,
 }
 
 impl Default for HistoryConfig {
@@ -77,6 +83,7 @@ impl Default for HistoryConfig {
             max_versions_per_file: 16,
             max_total_entries: 10_000,
             enabled: true,
+            auto_version: true,
         }
     }
 }
@@ -97,6 +104,8 @@ pub struct HistoryStats {
     pub restore_count: u64,
     /// Whether history tracking is currently enabled.
     pub enabled: bool,
+    /// Whether VFS auto-versioning is active.
+    pub auto_version: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +140,7 @@ static HISTORY: Mutex<HistoryInner> = Mutex::new(HistoryInner {
         max_versions_per_file: 16,
         max_total_entries: 10_000,
         enabled: true,
+        auto_version: true,
     },
     evicted_versions: 0,
     record_count: 0,
@@ -156,6 +166,62 @@ pub fn is_enabled() -> bool {
 /// Enable or disable history tracking.
 pub fn set_enabled(enabled: bool) {
     HISTORY.lock().config.enabled = enabled;
+}
+
+/// Check if VFS auto-versioning is active.
+///
+/// Auto-versioning requires both `enabled` and `auto_version` to be true.
+pub fn is_auto_version_enabled() -> bool {
+    let inner = HISTORY.lock();
+    inner.config.enabled && inner.config.auto_version
+}
+
+/// Enable or disable VFS auto-versioning.
+///
+/// When enabled, the VFS automatically records old file content before
+/// overwriting or removing files.
+pub fn set_auto_version(enabled: bool) {
+    HISTORY.lock().config.auto_version = enabled;
+}
+
+/// Check if a path is eligible for automatic version recording.
+///
+/// Returns `false` for paths on virtual filesystems (procfs, devfs, sysfs),
+/// temporary files (/tmp), and internal metadata files.
+pub fn should_auto_version(path: &str) -> bool {
+    // Skip virtual filesystems — no real data to version.
+    if path.starts_with("/proc/")
+        || path.starts_with("/dev/")
+        || path.starts_with("/sys/")
+    {
+        return false;
+    }
+    // Skip temporary files — ephemeral by nature.
+    if path.starts_with("/tmp/") {
+        return false;
+    }
+    // Skip internal metadata files.
+    if path.ends_with("/_TRASH/_INDEX") || path.ends_with("/_JOURNAL") {
+        return false;
+    }
+    true
+}
+
+/// Try to auto-record a version of a file before it is modified or deleted.
+///
+/// Called by VFS write/remove paths.  Failures are silently ignored —
+/// version history is best-effort and must never prevent a write operation.
+pub fn try_auto_record(path: &str) {
+    if !is_auto_version_enabled() {
+        return;
+    }
+    if !should_auto_version(path) {
+        return;
+    }
+    // Non-fatal: ignore errors from recording.  The file operation
+    // must succeed even if history recording fails (e.g., CAS full,
+    // file too large, read error).
+    let _ = record_version(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +462,7 @@ pub fn stats() -> HistoryStats {
         record_count: inner.record_count,
         restore_count: inner.restore_count,
         enabled: inner.config.enabled,
+        auto_version: inner.config.auto_version,
     }
 }
 
@@ -611,6 +678,114 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[history]   disabled tracking OK");
     }
 
-    serial_println!("[history] Self-test passed (6 tests).");
+    // --- Test 7: VFS auto-versioning ---
+    // Writes to a non-/tmp path should automatically record versions.
+    {
+        use crate::fs::Vfs;
+
+        // Temporarily ensure auto-versioning is on.
+        let old_auto = HISTORY.lock().config.auto_version;
+        set_auto_version(true);
+
+        let test_path = "/_history_autoversion_test";
+        let v1 = b"Auto-versioned content v1";
+        let v2 = b"Auto-versioned content v2";
+
+        // Clear any prior history for this path.
+        clear_file(test_path);
+
+        // Write v1 — first write, no prior file to version.
+        if let Err(e) = Vfs::write_file(test_path, v1) {
+            serial_println!("[history]   SKIP auto-version test: cannot write to root: {:?}", e);
+            set_auto_version(old_auto);
+        } else {
+            // History should be empty (no prior content to save).
+            let h1 = get_history(test_path);
+            // Write v2 — this should auto-record v1 before overwriting.
+            Vfs::write_file(test_path, v2)?;
+
+            let h2 = get_history(test_path);
+            let auto_recorded = h2.len().saturating_sub(h1.len());
+
+            if auto_recorded < 1 {
+                serial_println!("[history]   ERROR: auto-version did not record previous content");
+                clear_file(test_path);
+                Vfs::remove(test_path).ok();
+                set_auto_version(old_auto);
+                return Err(KernelError::InternalError);
+            }
+
+            // Verify the auto-recorded version contains v1 data.
+            if let Some(entry) = h2.last() {
+                match get_version_data(&entry.hash) {
+                    Ok(data) if data.as_slice() == v1 => {
+                        serial_println!("[history]   auto-version on write OK");
+                    }
+                    Ok(_) => {
+                        serial_println!("[history]   ERROR: auto-recorded data doesn't match v1");
+                        clear_file(test_path);
+                        Vfs::remove(test_path).ok();
+                        set_auto_version(old_auto);
+                        return Err(KernelError::InternalError);
+                    }
+                    Err(e) => {
+                        serial_println!("[history]   ERROR: cannot read auto-recorded data: {:?}", e);
+                        clear_file(test_path);
+                        Vfs::remove(test_path).ok();
+                        set_auto_version(old_auto);
+                        return Err(KernelError::InternalError);
+                    }
+                }
+            }
+
+            clear_file(test_path);
+            Vfs::remove(test_path).ok();
+            set_auto_version(old_auto);
+        }
+    }
+
+    // --- Test 8: should_auto_version path filter ---
+    {
+        // Virtual filesystems excluded.
+        if should_auto_version("/proc/meminfo") {
+            serial_println!("[history]   ERROR: /proc/ should be excluded");
+            return Err(KernelError::InternalError);
+        }
+        if should_auto_version("/dev/null") {
+            serial_println!("[history]   ERROR: /dev/ should be excluded");
+            return Err(KernelError::InternalError);
+        }
+        if should_auto_version("/sys/kernel/version") {
+            serial_println!("[history]   ERROR: /sys/ should be excluded");
+            return Err(KernelError::InternalError);
+        }
+        // Temp files excluded.
+        if should_auto_version("/tmp/scratch.txt") {
+            serial_println!("[history]   ERROR: /tmp/ should be excluded");
+            return Err(KernelError::InternalError);
+        }
+        // Internal metadata excluded.
+        if should_auto_version("/mnt/data/_TRASH/_INDEX") {
+            serial_println!("[history]   ERROR: _TRASH/_INDEX should be excluded");
+            return Err(KernelError::InternalError);
+        }
+        if should_auto_version("/mnt/data/_JOURNAL") {
+            serial_println!("[history]   ERROR: _JOURNAL should be excluded");
+            return Err(KernelError::InternalError);
+        }
+        // Normal paths included.
+        if !should_auto_version("/home/user/document.txt") {
+            serial_println!("[history]   ERROR: normal path should be included");
+            return Err(KernelError::InternalError);
+        }
+        if !should_auto_version("/etc/config.yaml") {
+            serial_println!("[history]   ERROR: /etc/ path should be included");
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!("[history]   path filter OK");
+    }
+
+    serial_println!("[history] Self-test passed (8 tests).");
     Ok(())
 }

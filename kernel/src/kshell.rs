@@ -8735,7 +8735,7 @@ fn cmd_fhist(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
 
     if parts.is_empty() {
-        shell_println!("Usage: fhist <show|restore|record|clear|stats|list|enable|disable> [FILE] [VERSION]");
+        shell_println!("Usage: fhist <show|restore|record|clear|stats|list|enable|disable|autoversion> [FILE] [VERSION]");
         return;
     }
 
@@ -8867,6 +8867,7 @@ fn cmd_fhist(args: &str) {
             shell_println!("  Restores:        {}", st.restore_count);
             shell_println!("  Evicted:         {}", st.evicted_versions);
             shell_println!("  Enabled:         {}", st.enabled);
+            shell_println!("  Auto-version:    {}", st.auto_version);
         }
 
         "list" | "ls" => {
@@ -8894,8 +8895,26 @@ fn cmd_fhist(args: &str) {
             shell_println!("File version tracking disabled.");
         }
 
+        "autoversion" | "auto" => {
+            match target {
+                Some("on") | Some("enable") => {
+                    history::set_auto_version(true);
+                    shell_println!("VFS auto-versioning enabled (files versioned automatically on write/delete).");
+                }
+                Some("off") | Some("disable") => {
+                    history::set_auto_version(false);
+                    shell_println!("VFS auto-versioning disabled (use `fhist record` for manual versioning).");
+                }
+                _ => {
+                    let st = history::stats();
+                    shell_println!("Auto-versioning: {}", if st.auto_version { "on" } else { "off" });
+                    shell_println!("Usage: fhist autoversion <on|off>");
+                }
+            }
+        }
+
         _ => {
-            shell_println!("Unknown subcommand '{}'. Use: show, restore, record, clear, stats, list, enable, disable", subcommand);
+            shell_println!("Unknown subcommand '{}'. Use: show, restore, record, clear, stats, list, enable, disable, autoversion", subcommand);
         }
     }
 }

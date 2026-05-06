@@ -1574,6 +1574,11 @@ impl Vfs {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
+        // Auto-version: save the old content before overwriting.
+        // Called before taking the VFS lock to avoid deadlock (record_version
+        // reads the file through VFS internally).  TOCTOU between read and
+        // write is acceptable — version history is best-effort.
+        super::history::try_auto_record(&path);
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
@@ -1743,6 +1748,9 @@ impl Vfs {
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
         check_writable(&path)?;
+        // Auto-version: save the file content before deleting.
+        // Allows `fhist restore` to recover accidentally deleted files.
+        super::history::try_auto_record(&path);
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;

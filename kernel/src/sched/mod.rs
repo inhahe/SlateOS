@@ -2758,6 +2758,13 @@ static DEFERRED_WAKES: [AtomicU64; DEFERRED_WAKE_SLOTS] = {
     [EMPTY; DEFERRED_WAKE_SLOTS]
 };
 
+/// Fast-path flag: set when any slot becomes non-empty, cleared after drain.
+///
+/// OPT: Avoids scanning all 32 slots on every schedule_inner call when
+/// no deferred wakes are pending (the common case).  Each schedule_inner
+/// invocation reads one atomic bool instead of 32 atomic u64s.
+static DEFERRED_WAKES_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Queue a deferred wake for a task.
 ///
 /// Called from ISR context when `try_wake` fails (scheduler lock
@@ -2775,6 +2782,8 @@ fn defer_wake(task_id: TaskId) {
             .compare_exchange(0, task_id, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            // Signal that the drain loop should run on next schedule_inner.
+            DEFERRED_WAKES_PENDING.store(true, Ordering::Release);
             // Record that a wake was deferred (indicates ISR lock contention).
             crate::ktrace::record(
                 crate::ktrace::Category::Sched,
@@ -2796,6 +2805,12 @@ fn defer_wake(task_id: TaskId) {
 /// (lock contended again — extremely rare), the entry stays for the
 /// next tick.
 pub fn process_deferred_wakes() {
+    // OPT: Quick check — skip the scan if no wakes were deferred.
+    if !DEFERRED_WAKES_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+
+    let mut any_remaining = false;
     for slot in &DEFERRED_WAKES {
         let task_id = slot.load(Ordering::Acquire);
         if task_id == 0 {
@@ -2804,8 +2819,15 @@ pub fn process_deferred_wakes() {
         if try_wake(task_id) {
             // Success — clear the slot.
             slot.store(0, Ordering::Release);
+        } else {
+            // try_wake failed again — slot stays occupied for next drain.
+            any_remaining = true;
         }
-        // If try_wake still fails, leave it for next tick.
+    }
+
+    // Only clear the flag if all slots were successfully drained.
+    if !any_remaining {
+        DEFERRED_WAKES_PENDING.store(false, Ordering::Release);
     }
 }
 
@@ -2817,6 +2839,11 @@ pub fn process_deferred_wakes() {
 /// systems where the ISR-context `try_wake` always fails (because the
 /// interrupted code was holding the lock).
 fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
+    // OPT: Quick check — skip the scan if no wakes were deferred.
+    if !DEFERRED_WAKES_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+
     for slot in &DEFERRED_WAKES {
         let task_id = slot.load(Ordering::Acquire);
         if task_id == 0 {
@@ -2837,6 +2864,9 @@ fn drain_deferred_wakes_locked(state: &mut SchedState, _cpu: usize) {
         // by another path, or may not exist anymore).
         slot.store(0, Ordering::Release);
     }
+
+    // All slots drained — clear the pending flag.
+    DEFERRED_WAKES_PENDING.store(false, Ordering::Release);
 }
 
 /// Sleep the current task for a precise duration in nanoseconds.

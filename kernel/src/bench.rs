@@ -603,6 +603,14 @@ pub fn run_all() {
     // L4: ~0.5-1 µs).
     bench_ipc_channel();
 
+    // --- Sync (rendezvous) channel round-trip ---
+    //
+    // Measures the L4/seL4-style synchronous IPC path: send_blocking
+    // parks a message, receiver takes it directly from the rendezvous
+    // slot.  Requires a context switch each direction, so this
+    // measures IPC + context switch combined.
+    bench_ipc_channel_sync();
+
     // --- Pipe write+read round-trip ---
     //
     // Measures the kernel-side pipe hot path: write N bytes on the
@@ -923,6 +931,189 @@ fn bench_ipc_channel() {
             result.min_ns, target_ns
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sync (rendezvous) channel benchmark
+// ---------------------------------------------------------------------------
+
+/// Benchmark synchronous (rendezvous) channel round-trip.
+///
+/// Creates a sync channel pair, spawns a receiver task that loops
+/// calling `recv()`, and the driver task loops calling
+/// `send_blocking()`.  Each send parks the message and blocks until
+/// the receiver takes it, so this measures IPC + 2 context switches
+/// per iteration (sender→receiver→sender).
+///
+/// This is the L4/seL4-style zero-copy IPC path (minus the actual
+/// zero-copy optimization, which is not yet implemented).
+fn bench_ipc_channel_sync() {
+    use crate::ipc::channel::{self, Message};
+    use crate::sched;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    const ITERS: u32 = 500;
+    const RECV_PRIO: u8 = 8;
+    const DRIVER_PRIO: u8 = 8;
+
+    static SYNC_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+    static SYNC_MEAN: AtomicU64 = AtomicU64::new(0);
+    static SYNC_MAX: AtomicU64 = AtomicU64::new(0);
+    static SYNC_DONE: AtomicBool = AtomicBool::new(false);
+    static SYNC_EXIT: AtomicBool = AtomicBool::new(false);
+
+    // The receiver handle is passed via a static.  We use a raw u64
+    // because ChannelHandle isn't Sync (interior mutability isn't needed,
+    // but it doesn't implement Sync).
+    static RX_RAW: AtomicU64 = AtomicU64::new(0);
+    static TX_RAW: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn sync_receiver(_arg: u64) {
+        let rx = channel::ChannelHandle::from_raw(RX_RAW.load(Ordering::Acquire));
+        loop {
+            if SYNC_EXIT.load(Ordering::Relaxed) {
+                break;
+            }
+            match channel::recv(rx) {
+                Ok(_msg) => { /* consumed */ }
+                Err(_) => break, // channel closed
+            }
+        }
+    }
+
+    extern "C" fn sync_driver(_arg: u64) {
+        let tx = channel::ChannelHandle::from_raw(TX_RAW.load(Ordering::Acquire));
+
+        // Warmup.
+        for _ in 0..20u32 {
+            let msg = match Message::from_bytes(b"warm") {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            if channel::send_blocking(tx, msg).is_err() {
+                break;
+            }
+        }
+
+        let mut min = u64::MAX;
+        let mut max = 0u64;
+        let mut total = 0u64;
+
+        for _ in 0..ITERS {
+            let msg = match Message::from_bytes(b"sync") {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            let start = crate::bench::rdtsc_serialized();
+            if channel::send_blocking(tx, msg).is_err() {
+                break;
+            }
+            let end = crate::bench::rdtsc();
+            let elapsed = end.saturating_sub(start);
+            if elapsed < min { min = elapsed; }
+            if elapsed > max { max = elapsed; }
+            total = total.saturating_add(elapsed);
+        }
+
+        let mean = total.checked_div(u64::from(ITERS)).unwrap_or(0);
+        SYNC_MIN.store(min, Ordering::Release);
+        SYNC_MEAN.store(mean, Ordering::Release);
+        SYNC_MAX.store(max, Ordering::Release);
+
+        // Signal receiver to exit and close our end.
+        SYNC_EXIT.store(true, Ordering::Release);
+        channel::close(tx);
+
+        SYNC_DONE.store(true, Ordering::Release);
+    }
+
+    // Reset statics.
+    SYNC_DONE.store(false, Ordering::Release);
+    SYNC_EXIT.store(false, Ordering::Release);
+    SYNC_MIN.store(u64::MAX, Ordering::Relaxed);
+
+    // Create sync channel.
+    let (tx, rx) = channel::create_sync();
+    TX_RAW.store(tx.raw(), Ordering::Release);
+    RX_RAW.store(rx.raw(), Ordering::Release);
+
+    // Spawn receiver first so it's blocked in recv() by the time
+    // the driver starts sending.
+    let recv_id = match sched::spawn(b"bch-srx", RECV_PRIO, sync_receiver, 0, 0) {
+        Ok(id) => id,
+        Err(e) => {
+            serial_println!("[bench] ipc_channel_sync: SKIP (recv spawn: {:?})", e);
+            channel::close(tx);
+            channel::close(rx);
+            return;
+        }
+    };
+
+    // Let the receiver task run and block on recv().
+    sched::yield_now();
+
+    let driver_id = match sched::spawn(b"bch-stx", DRIVER_PRIO, sync_driver, 0, 0) {
+        Ok(id) => id,
+        Err(_) => {
+            serial_println!("[bench] ipc_channel_sync: SKIP (driver spawn failed)");
+            sched::kill_task(recv_id);
+            channel::close(tx);
+            channel::close(rx);
+            sched::reap_dead_tasks();
+            return;
+        }
+    };
+
+    // Wait for driver to finish.
+    for _ in 0..10_000u32 {
+        if SYNC_DONE.load(Ordering::Acquire) {
+            break;
+        }
+        sched::yield_now();
+    }
+
+    if !SYNC_DONE.load(Ordering::Acquire) {
+        serial_println!("[bench] ipc_channel_sync: TIMEOUT");
+        sched::kill_task(recv_id);
+        sched::kill_task(driver_id);
+        sched::reap_dead_tasks();
+        channel::close(rx);
+        return;
+    }
+
+    let min = SYNC_MIN.load(Ordering::Acquire);
+    let mean = SYNC_MEAN.load(Ordering::Acquire);
+    let max = SYNC_MAX.load(Ordering::Acquire);
+    let min_ns = cycles_to_ns(min);
+    let mean_ns = cycles_to_ns(mean);
+
+    serial_println!(
+        "[bench] ipc_channel_sync_rt: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        min, min_ns, mean, mean_ns, max, ITERS
+    );
+
+    // Target: < 5 µs.  Sync IPC includes context switches (sender→receiver
+    // and back), so it's slower than async channel send+recv.  L4/seL4
+    // achieve ~0.5-1 µs for the pure IPC portion; our target includes
+    // full context switch overhead under QEMU emulation.
+    let target_ns = 5000u64;
+    if min_ns <= target_ns {
+        serial_println!(
+            "[bench]   ipc_channel_sync: PASS (min {}ns <= target {}ns)",
+            min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   ipc_channel_sync: ABOVE TARGET (min {}ns > target {}ns)",
+            min_ns, target_ns
+        );
+    }
+
+    // Clean up.
+    sched::kill_task(recv_id);
+    sched::kill_task(driver_id);
+    sched::reap_dead_tasks();
+    channel::close(rx);
 }
 
 // ---------------------------------------------------------------------------

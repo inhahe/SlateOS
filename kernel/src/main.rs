@@ -53,6 +53,7 @@ mod apic;
 mod backtrace;
 mod bench;
 mod blkdev;
+mod ahci;
 mod boot;
 mod cap;
 mod cet;
@@ -678,6 +679,10 @@ extern "C" fn kmain() -> ! {
     console::boot_step(console::BootStatus::Running, "Storage & filesystems");
     blkdev::init_multi(boot_info.hhdm_offset);
 
+    // AHCI/SATA driver: detect and initialize SATA disks on real hardware.
+    // Registers devices as sda, sdb, etc.  No-op in QEMU without SATA.
+    ahci::init(boot_info.hhdm_offset);
+
     // Step 20e-2: Add disk-backed swap alongside zram.
     // Multi-device swap: zram (priority 100) handles most evictions with
     // zero I/O latency; disk (priority 0) catches overflow when zram is full.
@@ -884,6 +889,10 @@ extern "C" fn kmain() -> ! {
     // Filesystem quota self-test.
     if let Err(e) = fs::quota::self_test() {
         serial_println!("WARNING: Filesystem quota self-test failed: {:?}", e);
+    }
+    // ACL self-test.
+    if let Err(e) = fs::acl::self_test() {
+        serial_println!("WARNING: ACL self-test failed: {:?}", e);
     }
 
     // Run cryptographic self-tests.
@@ -1192,6 +1201,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = iommu_remap::self_test() {
         serial_println!("[WARN] IOMMU remap self-test failed: {:?}", e);
     }
+
+    // AHCI/SATA driver self-test.
+    ahci::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

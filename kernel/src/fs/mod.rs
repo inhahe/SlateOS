@@ -25,6 +25,7 @@
 //! uses longest-prefix matching to route operations to the correct
 //! filesystem.
 
+pub mod acl;
 #[allow(dead_code)]
 pub mod ar;
 pub mod associations;

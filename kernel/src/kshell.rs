@@ -3087,14 +3087,14 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
-    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
-    "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
+    "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
@@ -4312,6 +4312,8 @@ fn dispatch(line: &str) {
         "mime" | "mimetype" => cmd_mime(args),
         "assoc" | "openwith" => cmd_assoc(args),
         "quota" => cmd_quota(args),
+        "getfacl" => cmd_getfacl(args),
+        "setfacl" => cmd_setfacl(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -9343,6 +9345,226 @@ fn print_quota_info(info: &crate::fs::quota::QuotaInfo) {
     shell_println!("  Grace period: {}s", info.limits.grace_seconds);
 }
 
+/// `getfacl PATH` — display ACL for a file.
+fn cmd_getfacl(args: &str) {
+    use crate::fs::acl;
+
+    if args.is_empty() {
+        shell_println!("Usage: getfacl <path>");
+        return;
+    }
+
+    let path = resolve_path(args.trim());
+    match acl::get_acl(&path) {
+        Some(a) => {
+            shell_println!("# file: {}", path);
+            let lines = acl::format_acl(&a, None);
+            for line in &lines {
+                shell_println!("{}", line);
+            }
+        }
+        None => {
+            shell_println!("# file: {}", path);
+            shell_println!("# (no ACL set, using traditional permissions)");
+        }
+    }
+}
+
+/// `setfacl` — modify file ACL.
+///
+/// Usage:
+///   setfacl -m u:UID:PERM PATH   - add/modify user entry
+///   setfacl -m g:GID:PERM PATH   - add/modify group entry
+///   setfacl -x u:UID PATH        - remove user entry
+///   setfacl -x g:GID PATH        - remove group entry
+///   setfacl -b PATH              - remove ACL entirely
+///   setfacl --from-mode 755 PATH - set ACL from mode
+fn cmd_setfacl(args: &str) {
+    use crate::fs::acl;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    if parts.len() < 2 {
+        shell_println!("Usage: setfacl <-m spec|-x spec|-b|--from-mode MODE> <path>");
+        return;
+    }
+
+    match parts[0] {
+        "-m" => {
+            // setfacl -m u:UID:PERM PATH  or  setfacl -m g:GID:PERM PATH
+            if parts.len() < 3 {
+                shell_println!("Usage: setfacl -m <u:UID:rwx|g:GID:rwx> <path>");
+                return;
+            }
+            let spec = parts[1];
+            let path = resolve_path(parts[2]);
+
+            let (tag, perm) = match parse_acl_spec(spec) {
+                Some(v) => v,
+                None => {
+                    shell_println!("Invalid ACL spec: {}", spec);
+                    shell_println!("Format: u:UID:rwx or g:GID:rwx");
+                    return;
+                }
+            };
+
+            // Get existing ACL or create a default one.
+            let mut a = acl::get_acl(&path).unwrap_or_else(|| acl::from_mode(0o644));
+
+            // Remove existing entry with same tag.
+            a.entries.retain(|e| e.tag != tag);
+            a.entries.push(acl::AclEntry { tag, perm });
+
+            // Ensure mask exists if named entries are present.
+            let has_named = a.entries.iter().any(|e| matches!(e.tag, acl::AclTag::User(_) | acl::AclTag::Group(_)));
+            if has_named {
+                // Remove old mask and recompute.
+                a.entries.retain(|e| e.tag != acl::AclTag::Mask);
+                let mut mask_bits = 0u8;
+                for entry in &a.entries {
+                    match entry.tag {
+                        acl::AclTag::GroupObj | acl::AclTag::User(_) | acl::AclTag::Group(_) => {
+                            mask_bits |= entry.perm.0;
+                        }
+                        _ => {}
+                    }
+                }
+                a.entries.push(acl::AclEntry { tag: acl::AclTag::Mask, perm: acl::AclPerm(mask_bits) });
+            }
+
+            match acl::set_acl(&path, a) {
+                Ok(()) => shell_println!("ACL updated for {}", path),
+                Err(e) => shell_println!("Error setting ACL: {:?}", e),
+            }
+        }
+
+        "-x" => {
+            // setfacl -x u:UID PATH  or  setfacl -x g:GID PATH
+            if parts.len() < 3 {
+                shell_println!("Usage: setfacl -x <u:UID|g:GID> <path>");
+                return;
+            }
+            let spec = parts[1];
+            let path = resolve_path(parts[2]);
+
+            let tag = match parse_acl_remove_spec(spec) {
+                Some(t) => t,
+                None => {
+                    shell_println!("Invalid ACL spec: {}", spec);
+                    return;
+                }
+            };
+
+            if let Some(mut a) = acl::get_acl(&path) {
+                a.entries.retain(|e| e.tag != tag);
+
+                // Recompute mask if needed.
+                let has_named = a.entries.iter().any(|e| matches!(e.tag, acl::AclTag::User(_) | acl::AclTag::Group(_)));
+                if !has_named {
+                    a.entries.retain(|e| e.tag != acl::AclTag::Mask);
+                }
+
+                match acl::set_acl(&path, a) {
+                    Ok(()) => shell_println!("ACL entry removed for {}", path),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("No ACL set on {}", path);
+            }
+        }
+
+        "-b" => {
+            // setfacl -b PATH - remove all ACL
+            let path = resolve_path(parts[1]);
+            if acl::remove_acl(&path) {
+                shell_println!("ACL removed from {}", path);
+            } else {
+                shell_println!("No ACL set on {}", path);
+            }
+        }
+
+        "--from-mode" => {
+            // setfacl --from-mode 755 PATH
+            if parts.len() < 3 {
+                shell_println!("Usage: setfacl --from-mode <octal_mode> <path>");
+                return;
+            }
+            let mode = match u16::from_str_radix(parts[1], 8) {
+                Ok(m) => m,
+                Err(_) => {
+                    shell_println!("Invalid octal mode: {}", parts[1]);
+                    return;
+                }
+            };
+            let path = resolve_path(parts[2]);
+            let a = acl::from_mode(mode);
+            match acl::set_acl(&path, a) {
+                Ok(()) => shell_println!("ACL set from mode {:o} on {}", mode, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("Unknown flag '{}'. Use: -m, -x, -b, --from-mode", parts[0]);
+        }
+    }
+}
+
+/// Parse an ACL spec like "u:1000:rw-" or "g:100:r-x".
+fn parse_acl_spec(spec: &str) -> Option<(crate::fs::acl::AclTag, crate::fs::acl::AclPerm)> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let tag = match parts[0] {
+        "u" | "user" => {
+            let uid: u32 = parts[1].parse().ok()?;
+            crate::fs::acl::AclTag::User(uid)
+        }
+        "g" | "group" => {
+            let gid: u32 = parts[1].parse().ok()?;
+            crate::fs::acl::AclTag::Group(gid)
+        }
+        _ => return None,
+    };
+    let perm = parse_perm_str(parts[2])?;
+    Some((tag, perm))
+}
+
+/// Parse "u:UID" or "g:GID" for removal.
+fn parse_acl_remove_spec(spec: &str) -> Option<crate::fs::acl::AclTag> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    match parts[0] {
+        "u" | "user" => {
+            let uid: u32 = parts[1].parse().ok()?;
+            Some(crate::fs::acl::AclTag::User(uid))
+        }
+        "g" | "group" => {
+            let gid: u32 = parts[1].parse().ok()?;
+            Some(crate::fs::acl::AclTag::Group(gid))
+        }
+        _ => None,
+    }
+}
+
+/// Parse a "rwx" permission string into AclPerm.
+fn parse_perm_str(s: &str) -> Option<crate::fs::acl::AclPerm> {
+    let mut bits = 0u8;
+    for ch in s.chars() {
+        match ch {
+            'r' => bits |= 4,
+            'w' => bits |= 2,
+            'x' => bits |= 1,
+            '-' => {}
+            _ => return None,
+        }
+    }
+    Some(crate::fs::acl::AclPerm(bits))
+}
+
 /// Similar to the Unix `file` command.  Uses `lstat` to avoid following
 /// symlinks, then reports the entry type with additional detail:
 /// - Directories: "directory"
@@ -14258,7 +14480,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

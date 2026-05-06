@@ -754,22 +754,6 @@ extern "C" fn kmain() -> ! {
             if let Err(e) = fs::journal::self_test() {
                 serial_println!("WARNING: Change journal self-test failed: {:?}", e);
             }
-            // Run DEFLATE/gzip decompression self-test.
-            if let Err(e) = fs::compress::self_test() {
-                serial_println!("WARNING: Compression self-test failed: {:?}", e);
-            }
-            // Run bzip2 decompression self-test (BWT, MTF, RLE round-trips).
-            if let Err(e) = fs::bzip2::self_test() {
-                serial_println!("WARNING: Bzip2 self-test failed: {:?}", e);
-            }
-            // Run XZ/LZMA2 decompression self-test.
-            if let Err(e) = fs::xz::self_test() {
-                serial_println!("WARNING: XZ self-test failed: {:?}", e);
-            }
-            // Run Zstandard decompression self-test.
-            if let Err(e) = fs::zstd::self_test() {
-                serial_println!("WARNING: Zstd self-test failed: {:?}", e);
-            }
             // Run in-memory filesystem self-test (standalone, doesn't touch VFS mount).
             if let Err(e) = fs::memfs::self_test() {
                 serial_println!("WARNING: MemFs self-test failed: {:?}", e);
@@ -805,6 +789,20 @@ extern "C" fn kmain() -> ! {
     }
 
     boot_timing::mark(boot_timing::Milestone::Filesystem);
+
+    // Compression self-tests — pure in-memory, no mounted FS required.
+    if let Err(e) = fs::compress::self_test() {
+        serial_println!("WARNING: Compression self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::bzip2::self_test() {
+        serial_println!("WARNING: Bzip2 self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::xz::self_test() {
+        serial_println!("WARNING: XZ self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::zstd::self_test() {
+        serial_println!("WARNING: Zstd self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

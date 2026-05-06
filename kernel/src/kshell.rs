@@ -3105,7 +3105,7 @@ const COMMANDS: &[&str] = &[
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
     "fpu", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
-    "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip", "zstdcat",
+    "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip", "zstd", "zstdcat",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
@@ -4373,6 +4373,7 @@ fn dispatch(line: &str) {
         "bunzip2" | "bzcat" => cmd_bunzip2(args),
         "unxz" | "xzcat" => cmd_unxz(args),
         "unzstd" | "zstdcat" => cmd_unzstd(args),
+        "zstd" => cmd_zstd(args),
         "unzip" => cmd_unzip(args),
         "zip" => cmd_zip(args),
         "journal" => cmd_journal(args),
@@ -4598,6 +4599,7 @@ fn cmd_help() {
     crate::console_println!("  bunzip2 F [-o OUT] Decompress bzip2 file (bzcat alias)");
     crate::console_println!("  unxz F [-o OUT]    Decompress XZ/LZMA2 file (xzcat alias)");
     crate::console_println!("  unzstd F [-o OUT]  Decompress Zstandard file (zstdcat alias)");
+    crate::console_println!("  zstd [-s] F [-o OUT]   Compress file with Zstandard (-s = store mode)");
     crate::console_println!("  unzip [-l] F [-d DIR]  List or extract ZIP archive (stored + deflated)");
     crate::console_println!("  zip [-0] [-r] F.zip FILE..  Create ZIP archive (deflate or stored)");
     crate::console_println!("  crc32 FILE    Compute CRC32C checksum");
@@ -12130,7 +12132,7 @@ fn is_builtin(name: &str) -> bool {
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
-        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstdcat" | "unzip" | "zip" | "basename" | "dirname"
+        | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unzip" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
@@ -20512,6 +20514,104 @@ fn cmd_unzstd(args: &str) {
         }
         Err(e) => {
             crate::console_println!("unzstd: write '{}': {:?}", out, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// zstd — Zstandard compression
+// ---------------------------------------------------------------------------
+
+/// `zstd` command — compress files using Zstandard.
+///
+/// Modes:
+/// - Default: LZ77 compression with predefined FSE tables
+/// - `-s` / `--store`: Store mode (no LZ77, fast but larger output)
+fn cmd_zstd(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        crate::console_println!(
+            "Usage: zstd [-s] FILE [-o OUTPUT]   Compress file with Zstandard\n\
+             \x20 -s   Store mode (no LZ77, raw/RLE blocks only)\n\
+             \x20 -o F Write output to F instead of FILE.zst"
+        );
+        return;
+    }
+
+    let mut store_mode = false;
+    let mut input_path: Option<&str> = None;
+    let mut output_path: Option<&str> = None;
+    let mut skip_next = false;
+
+    for (i, &p) in parts.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match p {
+            "-s" | "--store" => store_mode = true,
+            "-o" => {
+                if let Some(&out) = parts.get(i.wrapping_add(1)) {
+                    output_path = Some(out);
+                    skip_next = true;
+                } else {
+                    crate::console_println!("zstd: -o requires an argument");
+                    return;
+                }
+            }
+            _ => {
+                if input_path.is_none() {
+                    input_path = Some(p);
+                }
+            }
+        }
+    }
+
+    let input = match input_path {
+        Some(p) => resolve_path(p),
+        None => {
+            crate::console_println!("zstd: no input file specified");
+            return;
+        }
+    };
+
+    // Read the input data.
+    let file_data = match crate::fs::Vfs::read_file(&input) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::console_println!("zstd: '{}': {:?}", input, e);
+            return;
+        }
+    };
+
+    // Compress.
+    let compressed = if store_mode {
+        crate::fs::zstd::zstd_store(&file_data)
+    } else {
+        crate::fs::zstd::compress_zstd(&file_data)
+    };
+
+    // Determine output path.
+    let out = if let Some(explicit) = output_path {
+        resolve_path(explicit)
+    } else {
+        alloc::format!("{}.zst", input)
+    };
+
+    match crate::fs::Vfs::write_file(&out, &compressed) {
+        Ok(()) => {
+            let ratio = if file_data.is_empty() {
+                0
+            } else {
+                compressed.len() * 100 / file_data.len()
+            };
+            crate::console_println!(
+                "zstd: '{}' -> '{}' ({} -> {} bytes, {}%)",
+                input, out, file_data.len(), compressed.len(), ratio
+            );
+        }
+        Err(e) => {
+            crate::console_println!("zstd: write '{}': {:?}", out, e);
         }
     }
 }

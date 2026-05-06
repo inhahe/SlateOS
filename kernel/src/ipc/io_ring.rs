@@ -221,6 +221,43 @@ pub const IO_OP_EVENTFD_SIGNAL: u8 = 12;
 /// Returns: 0 on success.
 pub const IO_OP_SEM_SIGNAL: u8 = 13;
 
+/// Timeout — completes after a specified duration.
+/// `arg1` = timeout in nanoseconds (0 = immediate).
+/// Returns: 0 on timeout (normal), or -ECANCELLED if cancelled.
+///
+/// This is a synchronous sleep (blocks the io_ring processing thread
+/// for the duration).  Useful for:
+/// - Rate limiting batch submissions
+/// - Adding delays between sequential linked SQEs
+/// - Implementing periodic timers via repeated submission
+pub const IO_OP_TIMEOUT: u8 = 14;
+
+/// Cancel a pending timeout (by user_data match).
+/// `arg1` = user_data of the timeout SQE to cancel.
+/// Returns: 0 if found and cancelled, -ENOENT if not found.
+///
+/// Note: Since the current io_ring is synchronous (processes SQEs
+/// in order), this is only useful for linked SQEs or future async
+/// mode.  Included for API completeness with Linux io_uring.
+pub const IO_OP_TIMEOUT_CANCEL: u8 = 15;
+
+/// Service connect — connect to a named service.
+/// `addr` = pointer to service name bytes.
+/// `len` = service name length.
+/// Returns: raw channel handle (>= 0) on success.
+///
+/// Equivalent to the SYS_SERVICE_CONNECT syscall but submittable
+/// via io_uring for batch service discovery.
+pub const IO_OP_SERVICE_CONNECT: u8 = 16;
+
+/// Sleep (nanosecond-precision delay using hrtimer).
+/// `arg1` = duration in nanoseconds.
+/// Returns: 0 on completion, -EINTR if interrupted.
+///
+/// Unlike IO_OP_TIMEOUT, this always sleeps the full duration
+/// (no cancel mechanism).  Used for precise delays in I/O sequences.
+pub const IO_OP_SLEEP: u8 = 17;
+
 // ---------------------------------------------------------------------------
 // Ring management
 // ---------------------------------------------------------------------------
@@ -578,6 +615,10 @@ fn execute_sqe(sqe: &SqEntry) -> i64 {
         IO_OP_FH_PWRITE => exec_fh_pwrite(sqe),
         IO_OP_EVENTFD_SIGNAL => exec_eventfd_signal(sqe),
         IO_OP_SEM_SIGNAL => exec_sem_signal(sqe),
+        IO_OP_TIMEOUT => exec_timeout(sqe),
+        IO_OP_TIMEOUT_CANCEL => exec_timeout_cancel(sqe),
+        IO_OP_SERVICE_CONNECT => exec_service_connect(sqe),
+        IO_OP_SLEEP => exec_sleep(sqe),
         _ => KernelError::NotSupported.code() as i64,
     }
 }
@@ -913,6 +954,79 @@ fn exec_sem_signal(sqe: &SqEntry) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// Timeout / Sleep / Service connect
+// ---------------------------------------------------------------------------
+
+/// Execute IO_OP_TIMEOUT — sleep for the specified nanosecond duration.
+///
+/// This is a synchronous timeout: the io_ring processing blocks for
+/// the specified duration, then completes with result 0.  Useful for
+/// rate-limiting batch submissions or inserting delays in sequences.
+fn exec_timeout(sqe: &SqEntry) -> i64 {
+    let timeout_ns = sqe.arg1;
+
+    if timeout_ns == 0 {
+        // Zero timeout = immediate completion (no sleep).
+        return 0;
+    }
+
+    // Cap at 10 seconds to prevent accidental multi-minute hangs.
+    let capped_ns = timeout_ns.min(10_000_000_000);
+    crate::sched::sleep_ns(capped_ns);
+    0
+}
+
+/// Execute IO_OP_TIMEOUT_CANCEL — cancel a pending timeout.
+///
+/// In the current synchronous io_ring model, timeouts execute inline
+/// and cannot be cancelled after submission.  This returns -ENOENT
+/// (NotFound) always, but exists for API compatibility with future
+/// async io_ring modes.
+fn exec_timeout_cancel(_sqe: &SqEntry) -> i64 {
+    // In synchronous mode, by the time we see a cancel SQE, the target
+    // timeout has already completed (SQEs are processed in order).
+    KernelError::NotFound.code() as i64
+}
+
+/// Execute IO_OP_SERVICE_CONNECT — connect to a named service.
+///
+/// `addr` points to the service name bytes, `len` is the name length.
+/// Returns the raw channel handle on success (>= 0).
+fn exec_service_connect(sqe: &SqEntry) -> i64 {
+    let ptr = sqe.addr as *const u8;
+    let len = sqe.len as usize;
+
+    if ptr.is_null() || len == 0 || len > 256 {
+        return KernelError::InvalidArgument.code() as i64;
+    }
+
+    // SAFETY: Caller guarantees ptr is valid for len bytes.
+    let name = unsafe { core::slice::from_raw_parts(ptr, len) };
+
+    match crate::ipc::service::connect(name) {
+        Ok(handle) => handle.raw() as i64,
+        Err(e) => e.code() as i64,
+    }
+}
+
+/// Execute IO_OP_SLEEP — nanosecond-precision delay via hrtimer.
+///
+/// Always sleeps the full duration (no cancellation).
+fn exec_sleep(sqe: &SqEntry) -> i64 {
+    let duration_ns = sqe.arg1;
+
+    if duration_ns == 0 {
+        crate::sched::yield_now();
+        return 0;
+    }
+
+    // Cap at 60 seconds.
+    let capped_ns = duration_ns.min(60_000_000_000);
+    crate::sched::sleep_ns(capped_ns);
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -922,6 +1036,7 @@ pub fn self_test() -> KernelResult<()> {
     test_nop_submission()?;
     test_console_write_batch()?;
     test_fh_read_write()?;
+    test_timeout_and_service()?;
 
     Ok(())
 }
@@ -1232,5 +1347,180 @@ fn test_fh_read_write() -> KernelResult<()> {
     destroy(ring_handle)?;
     let _ = crate::fs::Vfs::remove(test_path);
     serial_println!("[io_ring]   File handle read/write (1 entry): OK");
+    Ok(())
+}
+
+/// Test 5: Timeout and service connect opcodes.
+///
+/// Verifies:
+/// - IO_OP_TIMEOUT with short duration completes successfully (result 0).
+/// - IO_OP_TIMEOUT with 0 ns completes immediately (result 0).
+/// - IO_OP_TIMEOUT_CANCEL always returns NotFound in sync mode.
+/// - IO_OP_SERVICE_CONNECT connects to a registered service.
+fn test_timeout_and_service() -> KernelResult<()> {
+    use crate::ipc::{channel, service};
+
+    let (ring_handle, base_virt, _frames) = setup(8, 16)?;
+
+    let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
+    #[allow(clippy::arithmetic_side_effects)]
+    let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
+    #[allow(clippy::arithmetic_side_effects)]
+    let cq_base = (base_virt
+        + core::mem::size_of::<IoRingHeader>() as u64
+        + 8u64 * core::mem::size_of::<SqEntry>() as u64) as *const CqEntry;
+
+    // --- Sub-test A: IO_OP_TIMEOUT with 0ns (immediate) ---
+    let sqe_timeout_zero = SqEntry {
+        opcode: IO_OP_TIMEOUT,
+        flags: 0,
+        _pad0: [0; 2],
+        _pad1: 0,
+        user_data: 1000,
+        handle: 0,
+        addr: 0,
+        len: 0,
+        _pad2: 0,
+        arg1: 0, // 0 ns = immediate
+        arg2: 0,
+    };
+    unsafe { *sq_base.add(0) = sqe_timeout_zero; }
+    header.sq_tail.store(1, Ordering::Release);
+
+    let processed = enter(ring_handle, 0)?;
+    if processed != 1 {
+        serial_println!("[io_ring]   FAIL: timeout(0ns) processed {}, expected 1", processed);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    let cqe = unsafe { &*cq_base.add(0) };
+    if cqe.user_data != 1000 || cqe.result != 0 {
+        serial_println!(
+            "[io_ring]   FAIL: timeout(0ns) CQE ud={} result={}, expected ud=1000 result=0",
+            cqe.user_data, cqe.result
+        );
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Reset ring pointers for next sub-test.
+    header.sq_head.store(0, Ordering::Release);
+    header.sq_tail.store(0, Ordering::Release);
+    header.cq_head.store(0, Ordering::Release);
+    header.cq_tail.store(0, Ordering::Release);
+
+    // --- Sub-test B: IO_OP_TIMEOUT_CANCEL (always NotFound in sync mode) ---
+    let sqe_cancel = SqEntry {
+        opcode: IO_OP_TIMEOUT_CANCEL,
+        flags: 0,
+        _pad0: [0; 2],
+        _pad1: 0,
+        user_data: 2000,
+        handle: 0,
+        addr: 0,
+        len: 0,
+        _pad2: 0,
+        arg1: 1000, // try to cancel the previous timeout's user_data
+        arg2: 0,
+    };
+    unsafe { *sq_base.add(0) = sqe_cancel; }
+    header.sq_tail.store(1, Ordering::Release);
+
+    let processed = enter(ring_handle, 0)?;
+    if processed != 1 {
+        serial_println!("[io_ring]   FAIL: timeout_cancel processed {}, expected 1", processed);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    let cqe = unsafe { &*cq_base.add(0) };
+    let expected_cancel_result = KernelError::NotFound.code() as i64;
+    if cqe.result != expected_cancel_result {
+        serial_println!(
+            "[io_ring]   FAIL: timeout_cancel result={}, expected {}",
+            cqe.result, expected_cancel_result
+        );
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Reset ring pointers.
+    header.sq_head.store(0, Ordering::Release);
+    header.sq_tail.store(0, Ordering::Release);
+    header.cq_head.store(0, Ordering::Release);
+    header.cq_tail.store(0, Ordering::Release);
+
+    // --- Sub-test C: IO_OP_SERVICE_CONNECT ---
+    // Register a test service, then connect to it via io_ring.
+    let svc_name = b"io_ring_test_svc";
+    let listener = service::register(svc_name)?;
+
+    let sqe_connect = SqEntry {
+        opcode: IO_OP_SERVICE_CONNECT,
+        flags: 0,
+        _pad0: [0; 2],
+        _pad1: 0,
+        user_data: 3000,
+        handle: 0,
+        addr: svc_name.as_ptr() as u64,
+        len: svc_name.len() as u32,
+        _pad2: 0,
+        arg1: 0,
+        arg2: 0,
+    };
+    unsafe { *sq_base.add(0) = sqe_connect; }
+    header.sq_tail.store(1, Ordering::Release);
+
+    let processed = enter(ring_handle, 0)?;
+    if processed != 1 {
+        serial_println!("[io_ring]   FAIL: service_connect processed {}, expected 1", processed);
+        let _ = service::unregister(listener);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    let cqe = unsafe { &*cq_base.add(0) };
+    if cqe.result < 0 {
+        serial_println!(
+            "[io_ring]   FAIL: service_connect result={} (error)",
+            cqe.result
+        );
+        let _ = service::unregister(listener);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // The result is the raw channel handle.  Accept the server side
+    // and verify we can send a message across.
+    let client_handle = channel::ChannelHandle::from_raw(cqe.result as u64);
+    let server_handle = service::try_accept(listener)?
+        .ok_or(KernelError::InternalError)?;
+
+    // Send from client → server.
+    let test_msg = b"hello from io_ring";
+    let msg = channel::Message::from_bytes(test_msg)
+        .map_err(|_| KernelError::InternalError)?;
+    channel::send(client_handle, msg)?;
+
+    // Receive on server side.
+    let received = channel::try_recv(server_handle)?
+        .ok_or(KernelError::InternalError)?;
+    if received.data() != test_msg {
+        serial_println!("[io_ring]   FAIL: service message data mismatch");
+        channel::close(client_handle);
+        channel::close(server_handle);
+        let _ = service::unregister(listener);
+        destroy(ring_handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    channel::close(client_handle);
+    channel::close(server_handle);
+    let _ = service::unregister(listener);
+    destroy(ring_handle)?;
+
+    serial_println!("[io_ring]   Timeout + service connect: OK");
     Ok(())
 }

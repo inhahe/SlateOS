@@ -30,6 +30,7 @@ pub mod ar;
 #[allow(dead_code)]
 pub mod bzip2;
 pub mod cache;
+pub mod cas;
 pub mod compress;
 #[allow(dead_code)]
 pub mod cpio;

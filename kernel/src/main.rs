@@ -849,6 +849,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::index::self_test() {
         serial_println!("WARNING: File index self-test failed: {:?}", e);
     }
+    if let Err(e) = fs::cas::self_test() {
+        serial_println!("WARNING: CAS self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

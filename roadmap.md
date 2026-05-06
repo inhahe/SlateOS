@@ -262,6 +262,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] HPET (High Precision Event Timer): ACPI table discovery, MMIO mapping, 100 MHz monotonic counter, ticks_to_ns conversion, self-test
   - [x] High-resolution timers (hrtimer): per-CPU sorted timer lists, nanosecond scheduling via HPET, repeating timers, cancel API, process_expired() from APIC ISR
   - [x] Scheduler integration: sleep_ns() for nanosecond-precision task sleep (hrtimer-backed, tick-based fallback for >100ms)
+  - [x] Deferred wake queue: 32-slot lock-free retry mechanism for ISR-context try_wake failures, drained by schedule_inner + softirq
+  - [x] Nanosecond timeout variants for all blocking primitives (waitqueue, kmutex, semaphore, condvar, once_event, kchannel)
+  - [x] ktrace timer tracepoints: TIMER_SCHEDULE, TIMER_FIRE, TIMER_CANCEL, TIMER_TICK_SHORT
 - [x] RTC (real-time clock)
 
 ### 2.3 Filesystem

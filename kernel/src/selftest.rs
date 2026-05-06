@@ -191,6 +191,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::sched_migrate::self_test(); true },
         category: "sched",
     });
+    suites.push(TestSuite {
+        name: "wchan",
+        description: "Wait channel tracking (WCHAN for ps/top)",
+        run: || { crate::wchan::self_test(); true },
+        category: "sched",
+    });
 
     suites
 }

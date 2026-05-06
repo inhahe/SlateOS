@@ -123,6 +123,7 @@ mod tlb;
 mod virtio;
 mod watchdog;
 mod watchpoint;
+mod wchan;
 mod workqueue;
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1006,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++v: Scheduler migration tracker self-test.
     // Records and analyzes task migration events between CPUs.
     sched_migrate::self_test();
+
+    // Step 22e⅞++++w: Wait channel tracker self-test.
+    // Tracks what blocked tasks are waiting on (WCHAN for ps/top).
+    wchan::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

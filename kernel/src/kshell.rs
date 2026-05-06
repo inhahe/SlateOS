@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4241,6 +4241,7 @@ fn dispatch(line: &str) {
         "ripsample" | "perf" => cmd_rip_sample(args),
         "invariant" | "invar" => cmd_invariant(args),
         "migrate" | "migrations" => cmd_migrate(args),
+        "wchan" => cmd_wchan(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -21285,5 +21286,54 @@ fn cmd_migrate(args: &str) {
                 shell_println!("  Hottest path: CPU{} → CPU{} ({}x)", from, to, count);
             }
         }
+    }
+}
+
+/// `wchan` — show what blocked tasks are waiting on.
+fn cmd_wchan() {
+    use crate::wchan;
+
+    let s = wchan::stats();
+
+    shell_println!("=== Wait Channels (WCHAN) ===");
+    shell_println!("");
+    shell_println!("  Total set/clear operations: {} / {}", s.total_sets, s.total_clears);
+    shell_println!("  Currently blocked tasks: {}", s.currently_blocked);
+    shell_println!("");
+
+    // Breakdown by channel type.
+    if s.currently_blocked > 0 {
+        shell_println!("  By channel:");
+        let channels = [
+            (wchan::WaitChannel::Timer, "Timer"),
+            (wchan::WaitChannel::Channel, "IPC Channel"),
+            (wchan::WaitChannel::Pipe, "Pipe"),
+            (wchan::WaitChannel::Futex, "Futex"),
+            (wchan::WaitChannel::Mutex, "Mutex"),
+            (wchan::WaitChannel::Event, "Event"),
+            (wchan::WaitChannel::Join, "Join"),
+            (wchan::WaitChannel::Completion, "Completion"),
+            (wchan::WaitChannel::Io, "I/O"),
+            (wchan::WaitChannel::Other, "Other"),
+        ];
+        for (ch, label) in &channels {
+            let count = s.by_channel[*ch as usize];
+            if count > 0 {
+                shell_println!("    {:<14} {}", label, count);
+            }
+        }
+
+        // Show individual blocked tasks.
+        shell_println!("");
+        shell_println!("  Blocked tasks:");
+        shell_println!("    {:>6}  {:>8}  {:>16}", "TASK", "WCHAN", "ARG");
+        let mut buf = [(0u64, wchan::WaitChannel::None, 0u64); 32];
+        let n = wchan::blocked_list(&mut buf);
+        for i in 0..n {
+            let (tid, ch, arg) = buf[i];
+            shell_println!("    {:>6}  {:>8}  {:#016x}", tid, ch.name(), arg);
+        }
+    } else {
+        shell_println!("  No tasks currently blocked (or no wchan data recorded)");
     }
 }

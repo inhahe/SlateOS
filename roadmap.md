@@ -282,8 +282,10 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] Local APIC timer (calibrated via PIT, 100 Hz periodic, preemptive scheduling)
   - [x] HPET (High Precision Event Timer): ACPI table discovery, MMIO mapping, 100 MHz monotonic counter, ticks_to_ns conversion, self-test
   - [x] High-resolution timers (hrtimer): per-CPU sorted timer lists, nanosecond scheduling via HPET, repeating timers, cancel API, process_expired() from APIC ISR
+  - [x] hrtimer IRQ safety: all CPU_TIMERS lock acquisitions wrapped in without_interrupts() to prevent ISR deadlock
   - [x] Scheduler integration: sleep_ns() for nanosecond-precision task sleep (hrtimer-backed, tick-based fallback for >100ms)
-  - [x] Deferred wake queue: 32-slot lock-free retry mechanism for ISR-context try_wake failures, drained by schedule_inner + softirq
+  - [x] Deferred wake queue: 32-slot lock-free retry mechanism for ISR-context try_wake failures, drained by schedule_inner + softirq + idle loop
+  - [x] Deferred wake sentinel fix: use u64::MAX (not 0) as empty slot marker — task 0 wakes were silently dropped
   - [x] Nanosecond timeout variants for all blocking primitives (waitqueue, kmutex, semaphore, condvar, once_event, kchannel)
   - [x] ktrace timer tracepoints: TIMER_SCHEDULE, TIMER_FIRE, TIMER_CANCEL, TIMER_TICK_SHORT
 - [x] RTC (real-time clock)
@@ -509,6 +511,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Bzip2 decompression (fs::bzip2): MSB-first bit reader, Huffman decode with grouped selectors, MTF encode/decode, BWT inverse (O(n) LF-mapping), two-layer RLE, unreflected CRC-32, multi-block streams; `bunzip2`/`bzcat` commands, tar .tar.bz2 auto-detection, `file` magic byte recognition
   - [x] XZ/LZMA2 decompression (fs::xz): XZ container parser (header/blocks/index/footer, CRC-64 ECMA-182), LZMA2 chunk decoder (uncompressed/LZMA with state/props/full reset), core LZMA decoder (range coder, adaptive probabilities, 12-state Markov model, literal/match/rep/shortrep, slot-based distances with context/direct/align bits); `unxz`/`xzcat` commands, tar .tar.xz auto-detection
   - [x] Zstandard decompression (fs::zstd): RFC 8478 frame/block parser (raw/RLE/compressed), FSE (tANS) decoding tables with predefined/RLE/compressed/repeat modes, Huffman literal decoding (single + 4-stream), sequence decoder (literal-length/match-length/offset triplets with repeat offset tracking), xxHash-64 content checksums; `unzstd`/`zstdcat` commands, tar .tar.zst auto-detection
+  - [x] Zstandard compression (fs::zstd): store mode (raw/RLE blocks), LZ77 mode with hash-chain matching (MIN_MATCH=4, WINDOW_SIZE=64K) and proper FSE state-machine encoding using predefined tables (backward sequence processing to resolve state transitions); `zstd` command with `-s` store flag; round-trip verified (repetitive data: 11%, text: 76%)
   - [x] ext4 extent tree node splitting: depth-0→depth-1 promotion (4→~340 extents per leaf), add_leaf_to_tree for depth-1 leaf splitting (up to 4 leaves = ~1360 extents), fix dormant ei_leaf_hi<<16→<<32 bug in 2 index traversal sites; proper error cleanup and metadata checksum stamping
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 

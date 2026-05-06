@@ -64,11 +64,14 @@ const MAX_SUPERVISED: usize = 32;
 
 /// How to handle task exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // OnFailure reserved for when exit codes are wired in.
 pub enum RestartMode {
     /// Always restart (regardless of exit reason).
     Always,
-    /// Restart only on unexpected exit (future: check exit code).
+    /// Restart only on abnormal exit (crash/kill, not clean return).
+    ///
+    /// For process-associated tasks: restarts if the process has crash
+    /// info (exit code < 0, set by unhandled exception handler).
+    /// For pure kernel tasks: always restarts (any exit is unexpected).
     OnFailure,
     /// Never restart — just log the exit.
     Never,
@@ -341,7 +344,22 @@ fn on_task_exit(task_id: TaskId) {
     // Check if we should restart.
     let should_restart = match policy.mode {
         RestartMode::Always => true,
-        RestartMode::OnFailure => true, // TODO: check exit code when available.
+        RestartMode::OnFailure => {
+            // For process-associated tasks, check if the process crashed
+            // (exit code < 0 = crash, >= 0 = normal exit).
+            // For pure kernel tasks (no process), assume failure — if a
+            // supervised kernel task exits, it's unexpected by definition.
+            match crate::proc::thread::owner_process(task_id) {
+                Some(pid) => {
+                    // Check if the process has crash info or a negative exit code.
+                    crate::proc::pcb::get_crash_info(pid).is_some()
+                }
+                None => {
+                    // Pure kernel task — any exit is considered failure.
+                    true
+                }
+            }
+        }
         RestartMode::Never => false,
     };
 

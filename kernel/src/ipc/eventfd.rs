@@ -240,6 +240,113 @@ pub fn try_write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
     Ok(())
 }
 
+/// Write (signal) with a timeout (nanoseconds).
+///
+/// Adds `value` to the counter.  If the result would overflow
+/// `MAX_COUNTER`, blocks up to `timeout_ns` nanoseconds waiting for
+/// a reader to drain the counter.
+///
+/// `timeout_ns = 0` is equivalent to `try_write()` (returns `TimedOut`
+/// instead of `WouldBlock` on overflow).
+///
+/// # Returns
+///
+/// - `Ok(())` — value added.
+/// - `Err(TimedOut)` — no space within the deadline.
+/// - `Err(ChannelClosed)` — eventfd closed.
+/// - `Err(InvalidHandle)` — not found.
+pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> KernelResult<()> {
+    if value == 0 {
+        return Ok(());
+    }
+
+    // Fast path.
+    {
+        let mut table = EVENTFD_TABLE.lock();
+        let efd = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
+
+        if efd.closed {
+            return Err(KernelError::ChannelClosed);
+        }
+
+        if let Some(new_val) = efd.counter.checked_add(value)
+            && new_val <= MAX_COUNTER
+        {
+            efd.counter = new_val;
+            let reader = efd.reader_waiter.take();
+            drop(table);
+            if let Some(task_id) = reader {
+                sched::wake(task_id);
+            }
+            return Ok(());
+        }
+    }
+
+    // Non-blocking mode.
+    if timeout_ns == 0 {
+        return Err(KernelError::TimedOut);
+    }
+
+    // Schedule timer.
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    let timer_handle = crate::hrtimer::schedule_ns(
+        timeout_ns,
+        timeout_wake,
+        sched::current_task_id(),
+    );
+
+    // Block loop.
+    loop {
+        {
+            let mut table = EVENTFD_TABLE.lock();
+            let efd = table
+                .get_mut(&handle.id())
+                .ok_or_else(|| {
+                    crate::hrtimer::cancel(timer_handle);
+                    KernelError::InvalidHandle
+                })?;
+
+            if efd.closed {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::ChannelClosed);
+            }
+
+            if let Some(new_val) = efd.counter.checked_add(value)
+                && new_val <= MAX_COUNTER
+            {
+                efd.counter = new_val;
+                let reader = efd.reader_waiter.take();
+                crate::hrtimer::cancel(timer_handle);
+                drop(table);
+                if let Some(task_id) = reader {
+                    sched::wake(task_id);
+                }
+                return Ok(());
+            }
+
+            // Check timeout.
+            if crate::hrtimer::now_ns() >= deadline_ns {
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::TimedOut);
+            }
+
+            // Register as waiter.
+            efd.writer_waiter = Some(sched::current_task_id());
+        }
+
+        sched::block_current();
+    }
+}
+
 /// Read (wait) — consume the counter value.
 ///
 /// Blocks until the counter is non-zero, then returns the value and

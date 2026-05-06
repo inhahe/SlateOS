@@ -532,6 +532,16 @@ pub const SYS_PIPE_CLOSE: u64 = 225;
 /// Returns: bytes read, 0 if EOF, `TimedOut` if deadline expires.
 pub const SYS_PIPE_READ_TIMEOUT: u64 = 226;
 
+/// Write to a pipe with a timeout (nanoseconds).
+///
+/// `arg0`: pipe handle (write end).
+/// `arg1`: pointer to data buffer.
+/// `arg2`: data length.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: bytes written, `TimedOut` if deadline expires.
+pub const SYS_PIPE_WRITE_TIMEOUT: u64 = 227;
+
 /// Create a shared memory region.
 ///
 /// `arg0`: requested size in bytes (rounded up to frame boundary).
@@ -604,6 +614,18 @@ pub const SYS_EVENTFD_CLOSE: u64 = 244;
 ///
 /// Returns: counter value (> 0), `TimedOut` if deadline expires.
 pub const SYS_EVENTFD_READ_TIMEOUT: u64 = 245;
+
+/// Write (signal) an eventfd with a timeout (nanoseconds).
+///
+/// `arg0`: eventfd handle.
+/// `arg1`: value to add (must be > 0).
+/// `arg2`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Blocks up to the timeout if the addition would overflow
+/// `u64::MAX - 1`.  Returns `TimedOut` if the deadline expires.
+///
+/// Returns: 0 on success, `TimedOut` if deadline expires.
+pub const SYS_EVENTFD_WRITE_TIMEOUT: u64 = 246;
 
 /// Create a completion port (unified wait multiplexer).
 ///

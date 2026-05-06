@@ -29,7 +29,7 @@ use super::number::{
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
     SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
     SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ,
-    SYS_EVENTFD_WRITE, SYS_EXIT,
+    SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT,
     SYS_FS_DELETE, SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_READ_FILE,
     SYS_FS_RMDIR, SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS, SYS_FS_FLOCK,
     SYS_FS_FUNLOCK, SYS_FS_SYNC,
@@ -70,7 +70,7 @@ use super::number::{
     SYS_SEM_WAIT_TIMEOUT,
     SYS_CHANNEL_RECV_TIMEOUT,
     SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_RECV_CAPS,
-    SYS_PIPE_READ_TIMEOUT,
+    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_WRITE_TIMEOUT,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_DNS_RESOLVE,
     SYS_YIELD,
@@ -236,6 +236,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PIPE_TRY_READ as usize] = Some(handlers::sys_pipe_try_read);
     handlers[SYS_PIPE_CLOSE as usize] = Some(handlers::sys_pipe_close);
     handlers[SYS_PIPE_READ_TIMEOUT as usize] = Some(handlers::sys_pipe_read_timeout);
+    handlers[SYS_PIPE_WRITE_TIMEOUT as usize] = Some(handlers::sys_pipe_write_timeout);
     handlers[SYS_SHM_CREATE as usize] = Some(handlers::sys_shm_create);
     handlers[SYS_SHM_SIZE as usize] = Some(handlers::sys_shm_size);
     handlers[SYS_SHM_CLOSE as usize] = Some(handlers::sys_shm_close);
@@ -245,6 +246,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_EVENTFD_TRY_READ as usize] = Some(handlers::sys_eventfd_try_read);
     handlers[SYS_EVENTFD_CLOSE as usize] = Some(handlers::sys_eventfd_close);
     handlers[SYS_EVENTFD_READ_TIMEOUT as usize] = Some(handlers::sys_eventfd_read_timeout);
+    handlers[SYS_EVENTFD_WRITE_TIMEOUT as usize] = Some(handlers::sys_eventfd_write_timeout);
     handlers[SYS_CP_CREATE as usize] = Some(handlers::sys_cp_create);
     handlers[SYS_CP_REGISTER as usize] = Some(handlers::sys_cp_register);
     handlers[SYS_CP_UNREGISTER as usize] = Some(handlers::sys_cp_unregister);

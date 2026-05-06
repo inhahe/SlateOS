@@ -1374,6 +1374,47 @@ pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_PIPE_WRITE_TIMEOUT` — write to a pipe with a deadline.
+///
+/// `arg0`: pipe handle (write end).
+/// `arg1`: pointer to data buffer.
+/// `arg2`: data length.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: bytes written, `TimedOut` if deadline expires.
+pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    let data_ptr = args.arg1 as *const u8;
+    let data_len = args.arg2 as usize;
+    let timeout_ns = args.arg3;
+
+    if data_ptr.is_null() && data_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above — data_ptr is in user space, mapped, and readable.
+        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    };
+
+    match pipe::write_timeout(handle, data, timeout_ns) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let written = n as i64;
+            SyscallResult::ok(written)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared memory handlers (230–239)
 // ---------------------------------------------------------------------------
@@ -1517,6 +1558,22 @@ pub fn sys_eventfd_read_timeout(args: &SyscallArgs) -> SyscallResult {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(val as i64)
         }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_EVENTFD_WRITE_TIMEOUT` — write with a timeout (nanoseconds).
+///
+/// `arg0`: eventfd handle.
+/// `arg1`: value to add.
+/// `arg2`: timeout in nanoseconds.
+pub fn sys_eventfd_write_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = EventFdHandle::from_raw(args.arg0);
+    let value = args.arg1;
+    let timeout_ns = args.arg2;
+
+    match eventfd::write_timeout(handle, value, timeout_ns) {
+        Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
 }

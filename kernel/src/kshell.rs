@@ -3089,7 +3089,7 @@ const COMMANDS: &[&str] = &[
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
-    "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
+    "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "profile", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
@@ -4309,6 +4309,7 @@ fn dispatch(line: &str) {
         "dedup" => cmd_dedup(args),
         "integrity" => cmd_integrity(args),
         "fhist" | "filehist" => cmd_fhist(args),
+        "mime" | "mimetype" => cmd_mime(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4664,6 +4665,7 @@ fn cmd_help() {
     crate::console_println!("  unalias N Remove command alias");
     crate::console_println!("  dmesg [-n] Show kernel log messages");
     crate::console_println!("  file F    Identify file type by extension");
+    crate::console_println!("  mime F    Show MIME content type (magic + extension)");
     crate::console_println!("  printf FMT .. Formatted output (%s %d %x %o %c)");
     crate::console_println!("  trash F   Move file to recycle bin (--list/--restore/--empty/--prune)");
     crate::console_println!("  cut -d/-f/-c  Extract columns/fields from text");
@@ -8919,6 +8921,32 @@ fn cmd_fhist(args: &str) {
     }
 }
 
+/// `mime PATH [PATH...]` — show the MIME content type of files.
+///
+/// Uses magic byte detection first, falling back to extension-based
+/// detection.  Also shows the content category (Image, Audio, etc.).
+fn cmd_mime(args: &str) {
+    if args.is_empty() {
+        shell_println!("Usage: mime <path> [path...]");
+        set_exit(1);
+        return;
+    }
+
+    for word in args.split_whitespace() {
+        let path = resolve_path(word);
+        match crate::fs::mime::detect(&path) {
+            Ok(mime) => {
+                let cat = crate::fs::mime::category(mime);
+                shell_println!("{}: {} ({})", path, mime, cat);
+            }
+            Err(e) => {
+                shell_println!("{}: error: {:?}", path, e);
+                set_exit(1);
+            }
+        }
+    }
+}
+
 /// `file PATH` — identify a file's type and basic info.
 ///
 /// Similar to the Unix `file` command.  Uses `lstat` to avoid following
@@ -11441,7 +11469,7 @@ fn cmd_reboot() {
     crate::power::reboot();
 }
 
-/// `iommu` — display IOMMU detection status.
+/// `iommu` — display IOMMU detection and DMA remapping status.
 fn cmd_iommu() {
     use crate::iommu;
 
@@ -11465,6 +11493,16 @@ fn cmd_iommu() {
             );
         }
     }
+
+    // DMA remapping status.
+    crate::console_println!();
+    let remap = crate::iommu_remap::stats();
+    crate::console_println!("DMA Remapping:");
+    crate::console_println!("  status:          {}",
+        if remap.active { "enabled" } else { "disabled" });
+    crate::console_println!("  active domains:  {}", remap.active_domains);
+    crate::console_println!("  mapped pages:    {}", remap.total_mapped_pages);
+    crate::console_println!("  DMA faults:      {}", remap.total_faults);
 }
 
 /// `capreq` — manage capability requests.
@@ -13826,7 +13864,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "fhist" | "filehist" | "mime" | "mimetype" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

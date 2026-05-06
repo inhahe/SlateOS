@@ -32,10 +32,11 @@
 //!
 //! ## Implementation
 //!
-//! The kernel maintains a hash table mapping virtual addresses to wait
-//! queues.  When userspace processes are added, the key will become
-//! (`address_space_id`, `virtual_address`) to distinguish the same virtual
-//! address in different processes.
+//! The kernel maintains a hash table mapping (`address_space`, `virtual_address`)
+//! pairs to wait queues.  The address-space key is the PML4 physical address
+//! (0 for kernel tasks).  This prevents aliasing: the same virtual address in
+//! different processes maps to different physical pages, so they must not
+//! share a futex queue.
 //!
 //! The hash table uses separate chaining with a fixed number of buckets.
 //! Each bucket is a `VecDeque<Waiter>`.  The table is protected by a
@@ -61,6 +62,25 @@ use spin::Mutex;
 const NUM_BUCKETS: usize = 64;
 
 // ---------------------------------------------------------------------------
+// Address-space identification
+// ---------------------------------------------------------------------------
+
+/// Get the current task's address-space key for futex hashing.
+///
+/// Returns the PML4 physical address for user processes, or 0 for
+/// kernel tasks.  This prevents aliasing: the same virtual address
+/// in different processes maps to different physical memory and must
+/// not share a futex queue.
+fn current_addr_space() -> u64 {
+    let task_id = sched::current_task_id();
+    let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    if pid == 0 {
+        return 0; // Kernel task — no per-process address space.
+    }
+    crate::proc::pcb::get_pml4(pid).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // Waiter and hash table
 // ---------------------------------------------------------------------------
 
@@ -68,6 +88,16 @@ const NUM_BUCKETS: usize = 64;
 struct Waiter {
     /// The virtual address being waited on.
     addr: u64,
+    /// The address space identifier (PML4 physical address) that owns
+    /// this futex address.  0 = kernel address space.
+    ///
+    /// This prevents aliasing: the same virtual address in different
+    /// processes maps to different physical pages, so they must not
+    /// share a futex queue.  Shared memory futexes (same physical page
+    /// mapped into multiple address spaces) should use the same PML4 —
+    /// which is correct because shared memory regions are mapped into
+    /// the kernel address space (PML4 = 0) during early development.
+    addr_space: u64,
     /// The blocked task's ID.
     task_id: TaskId,
 }
@@ -94,13 +124,20 @@ impl FutexTable {
         }
     }
 
-    /// Hash an address to a bucket index.
+    /// Hash an address + address-space pair to a bucket index.
+    ///
+    /// Incorporates both the virtual address and the address-space key
+    /// (PML4 physical address) to ensure that the same VA in different
+    /// processes lands in a different bucket (reducing false sharing on
+    /// bucket locks when multi-process futexes are common).
     #[allow(clippy::cast_possible_truncation)]
-    fn bucket_index(addr: u64) -> usize {
+    fn bucket_index(addr: u64, addr_space: u64) -> usize {
         // Mix bits for better distribution.  Addresses are often
-        // aligned, so we shift down and XOR.
+        // aligned, so we shift down and XOR.  The addr_space (PML4
+        // physical address) is page-aligned, so shift it too.
         #[allow(clippy::arithmetic_side_effects)]
-        let hash = addr ^ (addr >> 12) ^ (addr >> 24);
+        let hash = addr ^ (addr >> 12) ^ (addr >> 24)
+            ^ addr_space ^ (addr_space >> 12);
         #[allow(clippy::arithmetic_side_effects)]
         { (hash as usize) & (NUM_BUCKETS - 1) }
     }
@@ -141,6 +178,7 @@ pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
     }
 
     let current_task = sched::current_task_id();
+    let addr_space = current_addr_space();
 
     {
         let mut table = FUTEX_TABLE.lock();
@@ -161,12 +199,13 @@ pub fn futex_wait(addr: u64, expected: u32) -> KernelResult<bool> {
         }
 
         // Value matches — add to wait queue and block.
-        let idx = FutexTable::bucket_index(addr);
+        let idx = FutexTable::bucket_index(addr, addr_space);
 
         // SAFETY: idx is masked to NUM_BUCKETS-1, which is < NUM_BUCKETS.
         #[allow(clippy::indexing_slicing)]
         table.buckets[idx].push_back(Waiter {
             addr,
+            addr_space,
             task_id: current_task,
         });
 
@@ -204,6 +243,7 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
     }
 
     let current_task = sched::current_task_id();
+    let addr_space = current_addr_space();
 
     {
         let mut table = FUTEX_TABLE.lock();
@@ -223,11 +263,12 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
             return Err(KernelError::TimedOut);
         }
 
-        let idx = FutexTable::bucket_index(addr);
+        let idx = FutexTable::bucket_index(addr, addr_space);
 
         #[allow(clippy::indexing_slicing)]
         table.buckets[idx].push_back(Waiter {
             addr,
+            addr_space,
             task_id: current_task,
         });
     }
@@ -254,13 +295,17 @@ pub fn futex_wait_timeout(addr: u64, expected: u32, timeout_ns: u64) -> KernelRe
 
     {
         let mut table = FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr);
+        let idx = FutexTable::bucket_index(addr, addr_space);
 
         #[allow(clippy::indexing_slicing)]
         let bucket = &mut table.buckets[idx];
 
         // If we're still in the bucket, the timer woke us (not futex_wake).
-        if let Some(pos) = bucket.iter().position(|w| w.task_id == current_task && w.addr == addr) {
+        // Match on both addr and addr_space to avoid false positives from
+        // other processes that collide into the same bucket.
+        if let Some(pos) = bucket.iter().position(|w| {
+            w.task_id == current_task && w.addr == addr && w.addr_space == addr_space
+        }) {
             bucket.remove(pos);
             was_timed_out = true;
         }
@@ -289,6 +334,8 @@ pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
         return 0;
     }
 
+    let addr_space = current_addr_space();
+
     // Collect task IDs to wake while holding the table lock, then
     // wake them outside the lock to respect lock ordering.
     let mut to_wake: [TaskId; 32] = [0; 32];
@@ -296,17 +343,20 @@ pub fn futex_wake(addr: u64, max_wake: u32) -> u32 {
 
     {
         let mut table = FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr);
+        let idx = FutexTable::bucket_index(addr, addr_space);
 
         // SAFETY: idx is masked to NUM_BUCKETS-1.
         #[allow(clippy::indexing_slicing)]
         let bucket = &mut table.buckets[idx];
 
-        // Remove up to max_wake waiters with matching address.
+        // Remove up to max_wake waiters with matching address AND
+        // address space.  This prevents cross-process wake: a process
+        // can only wake tasks that share the same address space mapping.
         let mut i = 0;
         while i < bucket.len() && wake_count < max_wake as usize && wake_count < to_wake.len() {
             if let Some(waiter) = bucket.get(i)
                 && waiter.addr == addr
+                && waiter.addr_space == addr_space
                 && let Some(removed) = bucket.remove(i)
             {
                 if let Some(slot) = to_wake.get_mut(wake_count) {
@@ -369,6 +419,8 @@ const FUTEX_WAITERS_BIT: u32 = 1 << 30;
 struct PiWaiter {
     /// The virtual address being waited on.
     addr: u64,
+    /// Address-space key (PML4 physical address, 0 = kernel).
+    addr_space: u64,
     /// The blocked task's ID.
     task_id: TaskId,
     /// The task's effective priority at the time of blocking.
@@ -379,6 +431,8 @@ struct PiWaiter {
 struct PiOwner {
     /// The futex address this task holds.
     addr: u64,
+    /// Address-space key (PML4 physical address, 0 = kernel).
+    addr_space: u64,
     /// The owning task's ID.
     owner_id: TaskId,
 }
@@ -419,32 +473,37 @@ static PI_FUTEX_TABLE: Mutex<PiFutexTable> = Mutex::new(PiFutexTable::new());
 /// Acquires `PI_FUTEX_TABLE` lock briefly.  Safe to call from
 /// `pi_chain_boost` since that function does not hold any locks
 /// (it alternates between PI_FUTEX_TABLE and SCHED without nesting).
+///
+/// Uses the caller's address space (addr_space = 0 during chain walks
+/// within the kernel).  For cross-process PI (future), the chain walk
+/// would need to carry the addr_space along.
 fn find_pi_owner(addr: u64) -> Option<TaskId> {
+    let addr_space = current_addr_space();
     let table = PI_FUTEX_TABLE.lock();
-    let idx = FutexTable::bucket_index(addr);
+    let idx = FutexTable::bucket_index(addr, addr_space);
     // SAFETY: idx is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
     table.owners[idx]
         .iter()
-        .find(|o| o.addr == addr)
+        .find(|o| o.addr == addr && o.addr_space == addr_space)
         .map(|o| o.owner_id)
 }
 
 /// Register a task as the PI futex owner for an address.
-fn register_pi_owner(addr: u64, owner_id: TaskId) {
+fn register_pi_owner(addr: u64, addr_space: u64, owner_id: TaskId) {
     let mut table = PI_FUTEX_TABLE.lock();
-    let idx = FutexTable::bucket_index(addr);
+    let idx = FutexTable::bucket_index(addr, addr_space);
     // SAFETY: idx is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
-    table.owners[idx].push_back(PiOwner { addr, owner_id });
+    table.owners[idx].push_back(PiOwner { addr, addr_space, owner_id });
 }
 
 /// Remove a task's PI ownership record for an address.
-fn unregister_pi_owner(table: &mut PiFutexTable, addr: u64, owner_id: TaskId) {
-    let idx = FutexTable::bucket_index(addr);
+fn unregister_pi_owner(table: &mut PiFutexTable, addr: u64, addr_space: u64, owner_id: TaskId) {
+    let idx = FutexTable::bucket_index(addr, addr_space);
     // SAFETY: idx is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
-    table.owners[idx].retain(|o| !(o.addr == addr && o.owner_id == owner_id));
+    table.owners[idx].retain(|o| !(o.addr == addr && o.addr_space == addr_space && o.owner_id == owner_id));
 }
 
 /// Recalculate the inherited priority for a task based on all PI
@@ -468,12 +527,12 @@ fn recalculate_inherited_for_owner(
             if ownership.owner_id != owner_id {
                 continue;
             }
-            // Check for PI waiters on this address.
-            let widx = FutexTable::bucket_index(ownership.addr);
+            // Check for PI waiters on this address + addr_space.
+            let widx = FutexTable::bucket_index(ownership.addr, ownership.addr_space);
             // SAFETY: widx is masked to NUM_BUCKETS - 1.
             #[allow(clippy::indexing_slicing)]
             for waiter in &table.waiters[widx] {
-                if waiter.addr == ownership.addr {
+                if waiter.addr == ownership.addr && waiter.addr_space == ownership.addr_space {
                     best = Some(match best {
                         Some(p) => p.min(waiter.priority),
                         None => waiter.priority,
@@ -515,6 +574,7 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
     }
 
     let current_id = sched::current_task_id();
+    let addr_space = current_addr_space();
     #[allow(clippy::cast_possible_truncation)]
     let current_tid = (current_id as u32) & FUTEX_TID_MASK;
 
@@ -526,7 +586,7 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
         .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        register_pi_owner(addr, current_id);
+        register_pi_owner(addr, addr_space, current_id);
         return Ok(());
     }
 
@@ -548,7 +608,7 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
                 .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                register_pi_owner(addr, current_id);
+                register_pi_owner(addr, addr_space, current_id);
                 return Ok(());
             }
             let w2 = atomic.load(Ordering::Acquire);
@@ -569,11 +629,12 @@ pub fn futex_lock_pi(addr: u64) -> KernelResult<()> {
     // Register as a PI waiter under the PI table lock.
     {
         let mut table = PI_FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr);
+        let idx = FutexTable::bucket_index(addr, addr_space);
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         table.waiters[idx].push_back(PiWaiter {
             addr,
+            addr_space,
             task_id: current_id,
             priority: our_priority,
         });
@@ -626,6 +687,7 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
     }
 
     let current_id = sched::current_task_id();
+    let addr_space = current_addr_space();
 
     // SAFETY: Caller guarantees addr is valid and aligned.
     let atomic = unsafe { &*(addr as *const AtomicU32) };
@@ -646,17 +708,18 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
         let mut table = PI_FUTEX_TABLE.lock();
 
         // Remove our ownership record.
-        unregister_pi_owner(&mut table, addr, current_id);
+        unregister_pi_owner(&mut table, addr, addr_space, current_id);
 
-        // Find the highest-priority (lowest number) waiter for this addr.
-        let idx = FutexTable::bucket_index(addr);
+        // Find the highest-priority (lowest number) waiter for this addr
+        // in our address space.
+        let idx = FutexTable::bucket_index(addr, addr_space);
         let mut best_idx: Option<usize> = None;
         let mut best_prio: u8 = u8::MAX;
 
         // SAFETY: idx is masked to NUM_BUCKETS - 1.
         #[allow(clippy::indexing_slicing)]
         for (i, w) in table.waiters[idx].iter().enumerate() {
-            if w.addr == addr && w.priority < best_prio {
+            if w.addr == addr && w.addr_space == addr_space && w.priority < best_prio {
                 best_prio = w.priority;
                 best_idx = Some(i);
             }
@@ -670,12 +733,12 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
                 .map(|w| w.task_id);
         }
 
-        // Check if more waiters remain for this address.
+        // Check if more waiters remain for this address + addr_space.
         #[allow(clippy::indexing_slicing)]
         {
             has_more_waiters = table.waiters[idx]
                 .iter()
-                .any(|w| w.addr == addr);
+                .any(|w| w.addr == addr && w.addr_space == addr_space);
         }
 
         // Recalculate our inherited priority based on remaining locks.
@@ -690,8 +753,9 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
             | if has_more_waiters { FUTEX_WAITERS_BIT } else { 0 };
         atomic.store(new_word, Ordering::Release);
 
-        // Register the new owner.
-        register_pi_owner(addr, new_owner_id);
+        // Register the new owner (same addr_space — they're in the same
+        // address space since they were waiting on the same futex).
+        register_pi_owner(addr, addr_space, new_owner_id);
 
         // Wake the new owner.
         sched::wake(new_owner_id);

@@ -1304,6 +1304,11 @@ impl Vfs {
     /// `FileSystem` trait (like Linux's namei) to avoid re-resolving
     /// parent components.
     fn resolve_follow(path: &str) -> KernelResult<String> {
+        // Apply per-process namespace translation before anything else.
+        // This may remap or block the path entirely.
+        let ns_path = crate::ipc::namespace::resolve_path(path)?;
+        let path = ns_path.as_str();
+
         validate_path(path)?;
         let norm = normalize_path(path);
 
@@ -1345,6 +1350,10 @@ impl Vfs {
     /// Used for operations that act on the entry itself: `remove`,
     /// `rmdir`, `lstat`, `readlink`, `symlink`, `rename`.
     fn resolve_no_follow(path: &str) -> KernelResult<String> {
+        // Apply per-process namespace translation before anything else.
+        let ns_path = crate::ipc::namespace::resolve_path(path)?;
+        let path = ns_path.as_str();
+
         validate_path(path)?;
         let norm = normalize_path(path);
 

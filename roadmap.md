@@ -218,7 +218,12 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] accept / try_accept / accept_timeout for server-side connection pickup
   - [x] Unregister closes pending connections, wakes blocked acceptors
   - [x] SYS_SERVICE_REGISTER (280) through SYS_SERVICE_UNREGISTER (285)
-- [ ] Per-process namespace support (mount table remapping for sandboxing)
+- [x] Per-process namespace support (path isolation and remapping for sandboxing):
+  - [x] Bind rules (remap path prefixes), hide rules (block path access)
+  - [x] First-match-wins evaluation, root namespace fast passthrough
+  - [x] Process attach/detach with refcount tracking
+  - [x] SYS_NS_CREATE (290) through SYS_NS_QUERY (295)
+  - [x] 6 self-tests: create/destroy, bind, hide, path boundary, clone, attach/detach
 
 ### 1.5 Capability / security model
 - [x] Per-process capability table (unforgeable handles to kernel objects)

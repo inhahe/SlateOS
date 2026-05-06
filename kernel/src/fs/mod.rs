@@ -51,6 +51,7 @@ pub mod journal;
 pub mod lz4;
 pub mod memfs;
 pub mod mime;
+pub mod mount_ns;
 pub mod notify;
 pub mod overlay;
 pub mod pipe;

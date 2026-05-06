@@ -3104,6 +3104,7 @@ const COMMANDS: &[&str] = &[
     "mkfifo", "lspipe", "pipes",
     "tmpwatch",
     "audit",
+    "namespace", "ns",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4326,6 +4327,7 @@ fn dispatch(line: &str) {
         "lspipe" | "pipes" => cmd_lspipe(args),
         "tmpwatch" => cmd_tmpwatch(args),
         "audit" => cmd_audit(args),
+        "namespace" | "ns" => cmd_namespace(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -10281,6 +10283,177 @@ fn cmd_audit(args: &str) {
     }
 }
 
+/// `namespace` / `ns` — manage mount namespaces.
+///
+/// Usage:
+///   namespace list                      - list all namespaces
+///   namespace create NAME [PARENT_ID]   - create child namespace
+///   namespace destroy ID                - destroy namespace
+///   namespace mounts ID                 - list mounts in namespace
+///   namespace mount ID PATH TYPE [ro]   - add mount to namespace
+///   namespace unmount ID PATH           - remove mount from namespace
+///   namespace info ID                   - show namespace details
+///   namespace init                      - initialize namespace subsystem
+fn cmd_namespace(args: &str) {
+    use crate::fs::mount_ns;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        let nss = mount_ns::list();
+        if nss.is_empty() {
+            shell_println!("No namespaces (run `namespace init` first).");
+            return;
+        }
+        shell_println!("{:<4} {:<16} {:>6} {:>6} {:>4}",
+            "ID", "Name", "Parent", "Mounts", "Refs");
+        shell_println!("{}", "-".repeat(40));
+        for ns in &nss {
+            let parent = ns.parent.map(|p| alloc::format!("{}", p)).unwrap_or_else(|| String::from("-"));
+            shell_println!("{:<4} {:<16} {:>6} {:>6} {:>4}",
+                ns.id, ns.name, parent, ns.mount_count, ns.refcount);
+        }
+        return;
+    }
+
+    match parts[0] {
+        "init" => {
+            mount_ns::init();
+            shell_println!("Mount namespace subsystem initialized.");
+        }
+
+        "list" | "ls" => {
+            let nss = mount_ns::list();
+            if nss.is_empty() {
+                shell_println!("No namespaces.");
+                return;
+            }
+            shell_println!("{:<4} {:<16} {:>6} {:>6} {:>4} {}",
+                "ID", "Name", "Parent", "Mounts", "Refs", "Nested");
+            shell_println!("{}", "-".repeat(55));
+            for ns in &nss {
+                let parent = ns.parent.map(|p| alloc::format!("{}", p)).unwrap_or_else(|| String::from("-"));
+                shell_println!("{:<4} {:<16} {:>6} {:>6} {:>4} {}",
+                    ns.id, ns.name, parent, ns.mount_count, ns.refcount,
+                    if ns.allow_nested { "yes" } else { "no" });
+            }
+        }
+
+        "create" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: namespace create NAME [PARENT_ID]");
+                return;
+            }
+            let name = parts[1];
+            let parent = if parts.len() > 2 {
+                parts[2].parse::<u64>().unwrap_or(mount_ns::ROOT_NAMESPACE)
+            } else {
+                mount_ns::ROOT_NAMESPACE
+            };
+            match mount_ns::create(parent, name) {
+                Ok(id) => shell_println!("Namespace '{}' created (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "destroy" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: namespace destroy ID");
+                return;
+            }
+            if let Ok(id) = parts[1].parse::<u64>() {
+                match mount_ns::destroy(id) {
+                    Ok(()) => shell_println!("Namespace {} destroyed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid ID: {}", parts[1]);
+            }
+        }
+
+        "mounts" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: namespace mounts ID");
+                return;
+            }
+            if let Ok(id) = parts[1].parse::<u64>() {
+                match mount_ns::ns_mounts(id) {
+                    Ok(mounts) => {
+                        shell_println!("{:<24} {:<12} {}",
+                            "Mount point", "Type", "Flags");
+                        shell_println!("{}", "-".repeat(42));
+                        for m in &mounts {
+                            let flags = if m.readonly { "ro" } else { "rw" };
+                            shell_println!("{:<24} {:<12} {}", m.mount_path, m.fs_type, flags);
+                        }
+                        shell_println!("({} mounts)", mounts.len());
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid ID: {}", parts[1]);
+            }
+        }
+
+        "mount" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: namespace mount ID PATH TYPE [ro]");
+                return;
+            }
+            if let Ok(id) = parts[1].parse::<u64>() {
+                let ro = parts.get(4) == Some(&"ro");
+                match mount_ns::ns_mount(id, parts[2], parts[3], ro) {
+                    Ok(()) => shell_println!("Mounted {} ({}) in namespace {}",
+                        parts[2], parts[3], id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid ID: {}", parts[1]);
+            }
+        }
+
+        "unmount" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: namespace unmount ID PATH");
+                return;
+            }
+            if let Ok(id) = parts[1].parse::<u64>() {
+                match mount_ns::ns_unmount(id, parts[2]) {
+                    Ok(()) => shell_println!("Unmounted {} from namespace {}", parts[2], id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid ID: {}", parts[1]);
+            }
+        }
+
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: namespace info ID");
+                return;
+            }
+            if let Ok(id) = parts[1].parse::<u64>() {
+                match mount_ns::info(id) {
+                    Ok(i) => {
+                        shell_println!("Namespace {}:", i.id);
+                        shell_println!("  Name:       {}", i.name);
+                        shell_println!("  Parent:     {:?}", i.parent);
+                        shell_println!("  Mounts:     {}", i.mount_count);
+                        shell_println!("  Refcount:   {}", i.refcount);
+                        shell_println!("  Nested OK:  {}", i.allow_nested);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Invalid ID: {}", parts[1]);
+            }
+        }
+
+        _ => {
+            shell_println!("Usage: namespace [list|create|destroy|mounts|mount|unmount|info|init]");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -15416,7 +15589,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

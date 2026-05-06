@@ -200,6 +200,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] channel::recv_timeout (SYS_CHANNEL_RECV_TIMEOUT 205)
   - [x] pipe::read_timeout (SYS_PIPE_READ_TIMEOUT 226)
   - [x] semaphore::wait_timeout (SYS_SEM_WAIT_TIMEOUT 275)
+  - [x] eventfd::read_timeout (SYS_EVENTFD_READ_TIMEOUT 245)
 - [x] Capability transfer through channel messages (Fuchsia-style):
   - [x] SYS_CHANNEL_SEND_CAPS (206): move cap handles into message (sender loses access)
   - [x] SYS_CHANNEL_RECV_CAPS (207): extract caps into receiver's table (new handles)
@@ -355,7 +356,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Space pre-allocation: FileSystem::fallocate() trait method, Vfs::fallocate(), SYS_FS_FALLOCATE (649) syscall
   - [x] Sparse file support: SeekFrom::Data and SeekFrom::Hole variants, SYS_FS_SEEK_DATA (650) and SYS_FS_SEEK_HOLE (651) syscalls (non-sparse default: data=offset, hole=EOF)
   - [x] ext4 directory entry cache: 512-entry LRU keyed by (dir_inode, name) → child_inode, avoids linear O(n) directory scans on repeated lookups, invalidation on add/remove
-  - [x] ext4 htree (hash-tree) directory index: half_md4/TEA/legacy hash functions, dx_root/dx_node parsing, binary search, O(1) amortized lookups for INDEX directories (read-only; write-side node splitting deferred)
+  - [x] ext4 htree (hash-tree) directory index: half_md4/TEA/legacy hash functions, dx_root/dx_node parsing, binary search, O(1) amortized lookups for INDEX directories; write-side: hash-aware insertion finds correct leaf block via tree probe, leaf splitting distributes entries by hash between old/new blocks and updates dx_root index, extent tree extension for new leaf blocks
   - [x] ext4 extent range cache: 256-entry LRU keyed by (inode, logical_block_range) → physical_block, interior-mutable via spin::Mutex for use through &self references, invalidation on all write paths (write_file, truncate, remove, rmdir, rename), stats in debug_stats
   - [x] ext4 inode cache: 128-entry LRU keyed by inode_nr → Ext4Inode, interior-mutable via spin::Mutex, read_inode() cache-first with disk fallback, write_inode() updates cache after write, stats in debug_stats
   - [x] ext4 journal recovery on mount: checks RECOVER incompat flag, reads journal inode, resolves extent tree to physical blocks, replays committed transactions, clears RECOVER flag; leaf extent collector with binary search for journal block mapping

@@ -1256,6 +1256,9 @@ extern "C" fn kmain() -> ! {
 
     boot_timing::mark(boot_timing::Milestone::SelfTests);
 
+    // Security posture summary — one consolidated view of active protections.
+    print_security_posture();
+
     // Boot success marker — the boot test script greps for this.
     // Printed synchronously so it appears within seconds of power-on,
     // regardless of how long deferred benchmarks take.
@@ -1404,6 +1407,73 @@ extern "C" fn deferred_bench_task(_arg: u64) {
 
 /// The kernel idle loop.
 ///
+/// Print a consolidated security posture summary near end-of-boot.
+///
+/// Shows all hardware security features (active vs deferred vs unavailable)
+/// in a compact format for quick auditing of the boot serial log.
+fn print_security_posture() {
+    use alloc::string::String;
+
+    let mut active: String = String::new();
+    let mut deferred: String = String::new();
+
+    // SMEP — supervisor mode execution prevention.
+    if smep_smap::smep_active() {
+        active.push_str(" SMEP");
+    }
+
+    // SMAP — supervisor mode access prevention (deferred until STAC/CLAC paths).
+    let smap_status = smep_smap::status();
+    if smap_status.smap_active {
+        active.push_str(" SMAP");
+    } else if smap_status.hw_smap {
+        deferred.push_str(" SMAP(needs-STAC/CLAC)");
+    }
+
+    // UMIP — user-mode instruction prevention.
+    if smap_status.umip_active {
+        active.push_str(" UMIP");
+    }
+
+    // NX — no-execute (always enabled on x86_64 long mode via IA32_EFER.NXE).
+    active.push_str(" NX");
+
+    // Stack canary — randomized per-boot via CSPRNG.
+    // If the canary differs from the fallback constant, it was randomized.
+    let canary = sched::task::stack_canary();
+    if canary != 0xDEAD_BEEF_CAFE_BABE {
+        active.push_str(" StackCanary(random)");
+    } else {
+        active.push_str(" StackCanary(fixed)");
+    }
+
+    // Guard pages — always present (kernel stack allocator inserts them).
+    active.push_str(" GuardPages");
+
+    // PCID — process-context identifiers (TLB optimization).
+    if mm::pcid::is_enabled() {
+        active.push_str(" PCID");
+    }
+
+    // CET — control-flow enforcement (deferred until toolchain support).
+    let cet_status = cet::status();
+    if cet_status.supervisor_shstk {
+        active.push_str(" CET-SS");
+    } else if cet_status.hw_shstk {
+        deferred.push_str(" CET-SS(needs-toolchain)");
+    }
+    if cet_status.supervisor_ibt {
+        active.push_str(" CET-IBT");
+    } else if cet_status.hw_ibt {
+        deferred.push_str(" CET-IBT(needs-toolchain)");
+    }
+
+    serial_println!("[security] Active:{}", active);
+    if !deferred.is_empty() {
+        serial_println!("[security] Deferred:{}", deferred);
+    }
+}
+
 /// After spawning the init process, the boot thread enters this loop.
 /// Each iteration performs lightweight housekeeping before yielding
 /// and halting:

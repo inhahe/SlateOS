@@ -2241,11 +2241,21 @@ impl Vfs {
     pub fn symlink(path: &str, target: &str) -> KernelResult<()> {
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
+        // Intercept: let pre-operation handlers approve/deny symlink creation.
+        super::intercept::pre_check(
+            super::intercept::FsOp::Symlink,
+            &path,
+            Some(target),
+        )?;
+        // Quota: creating a symlink consumes an inode.
+        enforce_quota_create(&path)?;
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;
             mp.fs.symlink(relative, target)?;
         }
+        // Charge inode quota for new symlink.
+        super::quota::charge_inode(0, 0);
         // A new symlink can change how any path through it resolves.
         // Invalidate the parent directory prefix to be safe.
         if let Some(last_slash) = path.rfind('/') {
@@ -2255,6 +2265,7 @@ impl Vfs {
         super::notify::emit_created(&path);
         super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
+        super::audit::log_ok(super::audit::AuditOp::Symlink, 0, &path);
         Ok(())
     }
 

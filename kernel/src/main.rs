@@ -475,6 +475,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("[WARN] Capability groups self-test failed: {:?}", e);
     }
 
+    // Step 17a⅞: File capability tags self-test.
+    if let Err(e) = cap::file_tags::self_test() {
+        serial_println!("[WARN] File capability tags self-test failed: {:?}", e);
+    }
+
     // Step 17b: Initialize structured logging subsystem.
     // JSON-lines log entries go to serial and a kernel ring buffer.
     // Must be after APIC init (uses tick_count for timestamps).

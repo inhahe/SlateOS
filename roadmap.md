@@ -238,7 +238,15 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Root (uid=0) bypasses all group checks
   - [x] Built-in protection (cannot remove built-in groups)
   - [x] Self-test: builtins, create/remove, membership, access check, name lookup
-- [ ] File/directory capability tags (AND-composition between groups, OR within a group)
+- [x] File/directory capability tags (AND-composition between groups, OR within a group)
+  - [x] Per-path tag registry (128 paths, 8 groups per path, normalized paths)
+  - [x] AND-composition: process must be member of ALL tagged groups to access path
+  - [x] OR within group: any matching gid satisfies group membership
+  - [x] Tag inheritance from parent directories (effective_tags walks ancestors)
+  - [x] Root (uid=0) bypass for all tag checks
+  - [x] Group deletion cleanup (remove_group_references)
+  - [x] Kshell `captags`/`ct` command (list/show/add/remove/clear/check)
+  - [x] Self-test: tag/untag, inheritance, access check, AND-composition, group ref cleanup
 - [x] Resource limits as cgroup-like controls (set at launch, kernel-enforced)
   - [x] Per-process ResourceLimits struct (max_rss_frames, cpu_quota_pct, max_threads, max_handles)
   - [x] PID-indexed limits table with apply/query/update/remove API

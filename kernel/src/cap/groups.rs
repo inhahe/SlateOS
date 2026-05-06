@@ -467,6 +467,23 @@ pub fn find_by_name(name: &str) -> Option<CapGroupId> {
     None
 }
 
+/// Check if a process (identified by its gids) is a member of a specific
+/// capability group.
+///
+/// Returns `true` if any of the process's gids (primary or supplementary)
+/// matches a member gid of the group (OR within the group's member list).
+pub fn is_member(group_id: CapGroupId, primary_gid: u32, supplementary_gids: &[u32]) -> bool {
+    let groups = GROUPS.lock();
+    for group in groups.iter() {
+        if group.active && group.id == group_id {
+            return group.member_gids[..group.member_count]
+                .iter()
+                .any(|&gid| gid == primary_gid || supplementary_gids.contains(&gid));
+        }
+    }
+    false // Group not found — treat as non-member.
+}
+
 /// Get the number of active capability groups.
 pub fn count() -> usize {
     let groups = GROUPS.lock();

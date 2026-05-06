@@ -21527,13 +21527,13 @@ fn cmd_hypervisor() {
     }
 }
 
-/// `smap`/`smep` — show SMEP/SMAP (user page protection) status.
+/// `smap`/`smep` — show SMEP/SMAP/UMIP (supervisor mode protections) status.
 fn cmd_smep_smap() {
     use crate::smep_smap;
 
     let s = smep_smap::status();
 
-    shell_println!("=== SMEP/SMAP (User Page Protection) ===");
+    shell_println!("=== Supervisor Mode Protections ===");
     shell_println!("");
     shell_println!("  SMEP (Supervisor Mode Execution Prevention):");
     shell_println!("    Hardware: {}", if s.hw_smep { "supported" } else { "not supported" });
@@ -21541,20 +21541,15 @@ fn cmd_smep_smap() {
     shell_println!("");
     shell_println!("  SMAP (Supervisor Mode Access Prevention):");
     shell_println!("    Hardware: {}", if s.hw_smap { "supported" } else { "not supported" });
-    shell_println!("    Status:   {}", if s.smap_active { "ACTIVE" } else { "inactive" });
+    shell_println!("    Status:   {}", if s.smap_active { "ACTIVE" } else { "deferred (needs STAC/CLAC)" });
+    shell_println!("");
+    shell_println!("  UMIP (User-Mode Instruction Prevention):");
+    shell_println!("    Hardware: {}", if s.hw_umip { "supported" } else { "not supported" });
+    shell_println!("    Status:   {}", if s.umip_active { "ACTIVE" } else { "inactive" });
+    shell_println!("    Blocks:   SGDT, SIDT, SLDT, SMSW, STR in ring 3");
     shell_println!("");
     shell_println!("  CR4: {:#x}", s.cr4);
     shell_println!("  User-access windows (STAC/CLAC): {}", s.user_access_count);
-
-    if s.smep_active && s.smap_active {
-        shell_println!("");
-        shell_println!("  Both protections ACTIVE — kernel cannot access/execute");
-        shell_println!("  user pages without explicit STAC/CLAC window.");
-    } else if !s.hw_smep && !s.hw_smap {
-        shell_println!("");
-        shell_println!("  Note: This CPU does not support SMEP/SMAP.");
-        shell_println!("  Requires Intel Haswell+ or AMD Zen+.");
-    }
 }
 
 /// `cet` — show Intel CET (Control-flow Enforcement) status.

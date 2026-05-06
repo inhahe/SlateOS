@@ -58,6 +58,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const CR4_SMEP: u64 = 1 << 20;
 /// CR4.SMAP — Supervisor Mode Access Prevention (bit 21).
 const CR4_SMAP: u64 = 1 << 21;
+/// CR4.UMIP — User-Mode Instruction Prevention (bit 11).
+const CR4_UMIP: u64 = 1 << 11;
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -67,6 +69,8 @@ const CR4_SMAP: u64 = 1 << 21;
 static SMEP_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Whether SMAP is currently enabled.
 static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Whether UMIP is currently enabled.
+static UMIP_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Count of intentional user-access windows opened (STAC/CLAC pairs).
 static USER_ACCESS_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -113,6 +117,21 @@ pub fn init() {
         serial_println!("[smep_smap] SMAP not supported by CPU");
     }
 
+    // Enable UMIP if supported.
+    // UMIP blocks user-mode execution of SGDT, SIDT, SLDT, SMSW, STR.
+    // These instructions leak kernel addresses (GDT/IDT base, LDT selector)
+    // which could be used to bypass KASLR.  Safe to enable unconditionally
+    // since user-mode code should never need these instructions.
+    if features.umip {
+        if cr4 & CR4_UMIP == 0 {
+            new_cr4 |= CR4_UMIP;
+            serial_println!("[smep_smap] Enabling UMIP (user SGDT/SIDT/SLDT/SMSW/STR blocked)");
+        }
+        UMIP_ENABLED.store(true, Ordering::Release);
+    } else {
+        serial_println!("[smep_smap] UMIP not supported by CPU");
+    }
+
     // Apply CR4 changes if any bits were added.
     if new_cr4 != cr4 {
         // SAFETY: We've verified the CPU supports these features via CPUID.
@@ -137,8 +156,9 @@ pub fn init_ap() {
     if features.smep && (cr4 & CR4_SMEP == 0) {
         new_cr4 |= CR4_SMEP;
     }
-    if features.smap && (cr4 & CR4_SMAP == 0) {
-        new_cr4 |= CR4_SMAP;
+    // SMAP intentionally skipped (deferred until access paths instrumented).
+    if features.umip && (cr4 & CR4_UMIP == 0) {
+        new_cr4 |= CR4_UMIP;
     }
 
     if new_cr4 != cr4 {
@@ -229,35 +249,41 @@ where
 // Status and diagnostics
 // ---------------------------------------------------------------------------
 
-/// SMEP/SMAP status for diagnostics.
+/// SMEP/SMAP/UMIP status for diagnostics.
 #[derive(Debug, Clone)]
 pub struct SmepSmapStatus {
     /// CPU supports SMEP.
     pub hw_smep: bool,
     /// CPU supports SMAP.
     pub hw_smap: bool,
+    /// CPU supports UMIP.
+    pub hw_umip: bool,
     /// SMEP currently enabled (CR4.SMEP set on BSP).
     pub smep_active: bool,
     /// SMAP currently enabled (CR4.SMAP set on BSP).
     pub smap_active: bool,
+    /// UMIP currently enabled (CR4.UMIP set on BSP).
+    pub umip_active: bool,
     /// Total user-access windows opened (STAC calls).
     pub user_access_count: u64,
     /// Current CR4 value (for diagnostics).
     pub cr4: u64,
 }
 
-/// Query current SMEP/SMAP status.
+/// Query current SMEP/SMAP/UMIP status.
 pub fn status() -> SmepSmapStatus {
     let features = crate::cpu::features();
-    let (hw_smep, hw_smap) = features
-        .map(|f| (f.smep, f.smap))
-        .unwrap_or((false, false));
+    let (hw_smep, hw_smap, hw_umip) = features
+        .map(|f| (f.smep, f.smap, f.umip))
+        .unwrap_or((false, false, false));
 
     SmepSmapStatus {
         hw_smep,
         hw_smap,
+        hw_umip,
         smep_active: SMEP_ENABLED.load(Ordering::Relaxed),
         smap_active: SMAP_ENABLED.load(Ordering::Relaxed),
+        umip_active: UMIP_ENABLED.load(Ordering::Relaxed),
         user_access_count: USER_ACCESS_COUNT.load(Ordering::Relaxed),
         cr4: read_cr4(),
     }
@@ -312,8 +338,10 @@ pub fn self_test() {
 
     // Test 1: Status query works without panic.
     let s = status();
-    serial_println!("[smep_smap]   Status: SMEP hw={}, SMAP hw={}", s.hw_smep, s.hw_smap);
-    serial_println!("[smep_smap]   Active: SMEP={}, SMAP={}", s.smep_active, s.smap_active);
+    serial_println!("[smep_smap]   Status: SMEP hw={}, SMAP hw={}, UMIP hw={}",
+        s.hw_smep, s.hw_smap, s.hw_umip);
+    serial_println!("[smep_smap]   Active: SMEP={}, SMAP={}, UMIP={}",
+        s.smep_active, s.smap_active, s.umip_active);
     serial_println!("[smep_smap]   CR4={:#x}", s.cr4);
 
     // Test 2: If SMEP is supported, verify CR4.SMEP is set.
@@ -334,6 +362,15 @@ pub fn self_test() {
     } else {
         assert_eq!(s.cr4 & CR4_SMAP, 0, "CR4.SMAP should be clear without support");
         serial_println!("[smep_smap]   SMAP: not available on this CPU");
+    }
+
+    // Test 3b: If UMIP is supported, verify CR4.UMIP is set.
+    if s.hw_umip {
+        assert!(s.cr4 & CR4_UMIP != 0, "CR4.UMIP should be set when UMIP is supported");
+        assert!(s.umip_active, "UMIP should be marked active");
+        serial_println!("[smep_smap]   UMIP enforcement: VERIFIED (CR4 bit set)");
+    } else {
+        serial_println!("[smep_smap]   UMIP: not available on this CPU");
     }
 
     // Test 4: STAC/CLAC don't fault (they're safe to execute regardless of SMAP).

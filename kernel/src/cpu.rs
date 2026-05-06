@@ -806,6 +806,8 @@ pub struct CpuFeatures {
     pub smap: bool,
 
     // --- CPUID leaf 7, subleaf 0, ECX ---
+    /// UMIP (User-Mode Instruction Prevention) — blocks SGDT/SIDT/SLDT/SMSW/STR in ring 3.
+    pub umip: bool,
     /// VAES (vectorized AES).
     pub vaes: bool,
     /// RDPID (read processor ID without TSC).
@@ -849,7 +851,7 @@ impl CpuFeatures {
             fxsr: false, sse: false, sse2: false, tsc: false, apic: false,
             avx2: false, bmi1: false, bmi2: false, avx512f: false,
             sha: false, rdseed: false, smep: false, smap: false,
-            vaes: false, rdpid: false, cet_ss: false, cet_ibt: false,
+            umip: false, vaes: false, rdpid: false, cet_ss: false, cet_ibt: false,
             rdtscp: false, page_1g: false,
             xsave_area_size: 0, xcr0_supported: 0,
             pmu_version: 0, pmu_counters: 0, pmu_counter_width: 0,
@@ -905,6 +907,7 @@ pub fn detect_features() {
         f.rdseed = ebx7 & (1 << 18) != 0;
         f.smep = ebx7 & (1 << 7) != 0;
         f.smap = ebx7 & (1 << 20) != 0;
+        f.umip = ecx7 & (1 << 2) != 0;
         f.vaes = ecx7 & (1 << 9) != 0;
         f.rdpid = ecx7 & (1 << 22) != 0;
         // Intel CET (Control-flow Enforcement Technology).
@@ -990,7 +993,7 @@ pub fn log_features() {
         f.rdtscp, f.page_1g, f.tsc
     );
     crate::serial_println!(
-        "[cpu]   SMEP={} SMAP={}", f.smep, f.smap
+        "[cpu]   SMEP={} SMAP={} UMIP={}", f.smep, f.smap, f.umip
     );
     crate::serial_println!(
         "[cpu]   CET: shadow_stack={} indirect_branch_tracking={}",

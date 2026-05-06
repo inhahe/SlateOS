@@ -372,25 +372,29 @@ pub fn self_test() {
         serial_println!("[smep_smap]   UMIP: not available on this CPU");
     }
 
-    // Test 4: STAC/CLAC don't fault (they're safe to execute regardless of SMAP).
-    // This just verifies the instructions are encodable and don't trap.
-    unsafe {
-        stac();
-        clac();
+    // Test 4: STAC/CLAC don't fault — only when SMAP hardware is present.
+    // STAC/CLAC require CPUID SMAP support; they #UD on CPUs without it.
+    if s.hw_smap {
+        unsafe {
+            stac();
+            clac();
+        }
+        serial_println!("[smep_smap]   STAC/CLAC pair: OK (no fault)");
+
+        // Test 5: with_user_access closure executes and returns value.
+        let result = unsafe { with_user_access(|| 42u64) };
+        assert_eq!(result, 42);
+        serial_println!("[smep_smap]   with_user_access: OK");
+
+        // Test 6: Access count incremented correctly.
+        let count_before = USER_ACCESS_COUNT.load(Ordering::Relaxed);
+        unsafe { stac(); clac(); }
+        let count_after = USER_ACCESS_COUNT.load(Ordering::Relaxed);
+        assert_eq!(count_after, count_before + 1);
+        serial_println!("[smep_smap]   Access counter: OK");
+    } else {
+        serial_println!("[smep_smap]   STAC/CLAC: skipped (SMAP not available — instructions would #UD)");
     }
-    serial_println!("[smep_smap]   STAC/CLAC pair: OK (no fault)");
-
-    // Test 5: with_user_access closure executes and returns value.
-    let result = unsafe { with_user_access(|| 42u64) };
-    assert_eq!(result, 42);
-    serial_println!("[smep_smap]   with_user_access: OK");
-
-    // Test 6: Access count incremented correctly.
-    let count_before = USER_ACCESS_COUNT.load(Ordering::Relaxed);
-    unsafe { stac(); clac(); }
-    let count_after = USER_ACCESS_COUNT.load(Ordering::Relaxed);
-    assert_eq!(count_after, count_before + 1);
-    serial_println!("[smep_smap]   Access counter: OK");
 
     serial_println!("[smep_smap] Self-test PASSED");
 }

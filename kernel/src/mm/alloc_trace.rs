@@ -459,21 +459,13 @@ fn rdtsc() -> u64 {
     ((hi as u64) << 32) | (lo as u64)
 }
 
-/// Get current CPU index quickly (0 if not available).
+/// Get current CPU index quickly (0 if SMP not yet initialized).
 #[inline]
 fn current_cpu_fast() -> u8 {
-    // Try rdtscp which gives us the CPU index in ECX via IA32_TSC_AUX.
-    let cpu: u32;
-    unsafe {
-        core::arch::asm!(
-            "rdtscp",
-            out("ecx") cpu,
-            out("eax") _,
-            out("edx") _,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (cpu & 0xFF) as u8
+    // Use the SMP module's tiered detection (RDPID → rdtscp → APIC MMIO).
+    // Never call rdtscp unconditionally — it may not be available.
+    #[allow(clippy::cast_possible_truncation)]
+    { crate::smp::current_cpu_index() as u8 }
 }
 
 // ---------------------------------------------------------------------------

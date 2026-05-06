@@ -73,6 +73,7 @@ mod hypervisor;
 mod idt;
 mod idle;
 mod iommu;
+mod iommu_remap;
 mod invariant;
 mod ioapic;
 mod irq_storm;
@@ -568,9 +569,17 @@ extern "C" fn kmain() -> ! {
 
     // Step 19c¼: Detect IOMMU hardware (Intel VT-d / AMD-Vi).
     // Probes for DMAR/IVRS ACPI tables.  Detection only — actual DMA
-    // remapping will be enabled when driver sandboxing is implemented.
+    // remapping page tables are set up below.
     // Must be after ACPI init (uses acpi::find_table).
     iommu::init();
+
+    // Step 19c¼: Initialize IOMMU DMA remapping page tables.
+    // Programs root/context tables and enables translation on each
+    // detected IOMMU unit.  After this, all PCI DMA is sandboxed.
+    // Must be after iommu::init() (detection) and frame allocator.
+    if let Err(e) = iommu_remap::init() {
+        serial_println!("[boot] WARNING: IOMMU remap init failed: {:?}", e);
+    }
 
     // Step 19c½: Initialize high-resolution timer subsystem.
     // Uses HPET as the clock source for nanosecond-precision timers.
@@ -1163,6 +1172,12 @@ extern "C" fn kmain() -> ! {
     // Verifies API consistency (available ↔ vendor ↔ unit_count).
     if let Err(e) = iommu::self_test() {
         serial_println!("[WARN] IOMMU self-test failed: {:?}", e);
+    }
+
+    // Step 22e⅞+++++d½: IOMMU DMA remapping self-test.
+    // Tests page table manipulation (domain create/map/unmap/destroy).
+    if let Err(e) = iommu_remap::self_test() {
+        serial_println!("[WARN] IOMMU remap self-test failed: {:?}", e);
     }
 
     // Step 22e⅞++++f: Memory subsystem integration tests.

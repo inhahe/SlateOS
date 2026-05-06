@@ -545,7 +545,10 @@ impl PtPagePool {
 }
 
 /// Allocate a zeroed 4 KiB page for a page table.
-fn alloc_pt_page() -> KernelResult<u64> {
+///
+/// The returned physical address is 4 KiB-aligned.  Used by both CPU
+/// page tables and IOMMU second-level page tables.
+pub fn alloc_pt_page() -> KernelResult<u64> {
     PT_PAGE_POOL.lock().alloc()
 }
 

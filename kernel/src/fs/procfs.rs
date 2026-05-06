@@ -1090,9 +1090,20 @@ fn gen_security() -> Vec<u8> {
     if iommu_available {
         s.push_str(&format!(
             "  vendor:             {:?}\n\
-             units:              {}\n",
+               units:              {}\n",
             crate::iommu::vendor(),
             crate::iommu::unit_count(),
+        ));
+        let remap = crate::iommu_remap::stats();
+        s.push_str(&format!(
+            "  dma_remapping:      {}\n\
+               active_domains:     {}\n\
+               mapped_pages:       {}\n\
+               dma_faults:         {}\n",
+            if remap.active { "enabled" } else { "disabled" },
+            remap.active_domains,
+            remap.total_mapped_pages,
+            remap.total_faults,
         ));
     }
     s.push('\n');

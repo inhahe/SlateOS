@@ -158,13 +158,15 @@ pub const IDLE_PRIORITY: u8 = (NUM_PRIORITIES - 1) as u8;
 /// Default priority for normal tasks.
 pub const DEFAULT_PRIORITY: u8 = 16;
 
-/// Stack size for kernel tasks: 2 frames = 32 KiB.
+/// Stack size for kernel tasks: 4 frames = 64 KiB.
 ///
-/// Typical kernel stacks are 8–16 KiB on Linux.  We use 32 KiB
-/// (2 × 16 KiB frames) for extra headroom — stack overflow in the
-/// kernel is fatal and hard to debug.
+/// Linux uses 4 pages (16 KiB) with 4 KiB pages.  We use 4 frames
+/// (64 KiB) with 16 KiB pages — proportionally equivalent.  Debug
+/// builds require more stack than release due to unoptimized frames
+/// (no inlining, no dead-store elimination).  32 KiB was insufficient
+/// for deep call chains (scheduler → wait queue → lock → yield).
 #[allow(clippy::arithmetic_side_effects)]
-pub const TASK_STACK_SIZE: usize = 2 * FRAME_SIZE;
+pub const TASK_STACK_SIZE: usize = 4 * FRAME_SIZE;
 
 /// Number of frames per task stack.
 #[allow(clippy::arithmetic_side_effects)]

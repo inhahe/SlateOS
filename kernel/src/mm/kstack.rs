@@ -62,8 +62,12 @@ const GUARD_FRAMES: usize = 1;
 #[allow(clippy::arithmetic_side_effects)]
 const GUARD_SIZE: u64 = (GUARD_FRAMES * FRAME_SIZE) as u64;
 
-/// Number of frames per stack (2 frames = 32 KiB).
-const STACK_FRAMES: usize = 2;
+/// Number of frames per stack (4 frames = 64 KiB).
+///
+/// Must match `sched::task::TASK_STACK_SIZE / FRAME_SIZE`.  Debug builds
+/// require larger stacks due to unoptimized frames (no inlining, no DSE).
+/// 32 KiB overflowed in deep call chains (scheduler → wait queue → yield).
+const STACK_FRAMES: usize = 4;
 
 /// Size of the stack in bytes.
 #[allow(clippy::arithmetic_side_effects)]
@@ -74,7 +78,7 @@ pub const STACK_SIZE: u64 = (STACK_FRAMES * FRAME_SIZE) as u64;
 const SLOT_SIZE: u64 = GUARD_SIZE + STACK_SIZE;
 
 /// Maximum number of kernel stacks (limits virtual address consumption).
-/// 4096 stacks × 48 KiB = 192 MiB virtual.
+/// 4096 stacks × 80 KiB (guard + stack) = 320 MiB virtual.
 const MAX_STACKS: usize = 4096;
 
 /// Bitmap words needed to track MAX_STACKS slots (64 bits per word).

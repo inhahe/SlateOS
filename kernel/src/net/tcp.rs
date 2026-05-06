@@ -1,24 +1,31 @@
 //! TCP (Transmission Control Protocol) implementation.
 //!
-//! A minimal TCP client supporting connection establishment (3-way
-//! handshake), reliable data transfer with sequence numbers, and
-//! orderly connection teardown.
+//! Supports both client and server operation:
+//!
+//! - **Client**: `connect()` performs a 3-way handshake to a remote server.
+//! - **Server**: `bind()` + `listen()` + `accept()` implements passive open.
 //!
 //! ## State machine
 //!
 //! ```text
-//! CLOSED → SYN_SENT → ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED
-//!                                  → CLOSE_WAIT → LAST_ACK → CLOSED
+//! Server path:
+//!   CLOSED → LISTEN → SYN_RECEIVED → ESTABLISHED
+//!
+//! Client path:
+//!   CLOSED → SYN_SENT → ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED
+//!
+//! Close (either side):
+//!   ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED
 //! ```
 //!
 //! ## Limitations
 //!
-//! - Client-side only (no listening sockets).
 //! - Fixed receive window (16 KiB).
 //! - No congestion control (sends at wire rate).
 //! - No Nagle algorithm.
 //! - Simple retransmission (single timeout, no RTT estimation).
 //! - Maximum 8 concurrent connections.
+//! - Maximum 4 listeners, each with a backlog of 8 pending connections.
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -38,10 +45,17 @@ const TCP_HEADER_SIZE: usize = 20;
 /// Maximum concurrent TCP connections.
 const MAX_CONNECTIONS: usize = 8;
 
+/// Maximum concurrent TCP listeners.
+const MAX_LISTENERS: usize = 4;
+
+/// Maximum pending connections per listener (SYN backlog).
+const MAX_BACKLOG: usize = 8;
+
 /// Default receive window size (16 KiB).
 const DEFAULT_WINDOW: u16 = 16384;
 
 /// Retransmission timeout in poll cycles (~2 seconds).
+#[allow(dead_code)]
 const RETRANSMIT_TIMEOUT: u32 = 2000;
 
 /// Maximum data waiting for delivery per connection.
@@ -62,7 +76,9 @@ const TCP_ACK: u8 = 0x10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpState {
     Closed,
+    Listen,
     SynSent,
+    SynReceived,
     Established,
     FinWait1,
     FinWait2,
@@ -126,6 +142,51 @@ impl TcpConnection {
 static CONNECTIONS: Mutex<[TcpConnection; MAX_CONNECTIONS]> = Mutex::new({
     const EMPTY: TcpConnection = TcpConnection::empty();
     [EMPTY; MAX_CONNECTIONS]
+});
+
+// ---------------------------------------------------------------------------
+// TCP listener (server-side passive open)
+// ---------------------------------------------------------------------------
+
+/// A pending connection in the listener's backlog (completed 3-way handshake).
+struct PendingConnection {
+    /// Connection handle index in CONNECTIONS table.
+    conn_handle: usize,
+    /// Whether this slot is used.
+    active: bool,
+}
+
+impl PendingConnection {
+    const fn empty() -> Self {
+        Self { conn_handle: 0, active: false }
+    }
+}
+
+/// A TCP listener — bound to a local port, accepting incoming connections.
+struct TcpListener {
+    /// Whether this listener slot is active.
+    active: bool,
+    /// Local port to listen on.
+    port: u16,
+    /// Backlog of fully-established connections waiting to be accepted.
+    backlog: [PendingConnection; MAX_BACKLOG],
+}
+
+impl TcpListener {
+    const fn empty() -> Self {
+        const EMPTY_PENDING: PendingConnection = PendingConnection::empty();
+        Self {
+            active: false,
+            port: 0,
+            backlog: [EMPTY_PENDING; MAX_BACKLOG],
+        }
+    }
+}
+
+/// Global TCP listener table.
+static LISTENERS: Mutex<[TcpListener; MAX_LISTENERS]> = Mutex::new({
+    const EMPTY: TcpListener = TcpListener::empty();
+    [EMPTY; MAX_LISTENERS]
 });
 
 /// Next ephemeral port.
@@ -478,6 +539,270 @@ pub fn is_remote_closed(handle: usize) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Server API (bind / listen / accept)
+// ---------------------------------------------------------------------------
+
+/// Bind a TCP listener to a local port.
+///
+/// Returns a listener handle that can be used with `accept()`.
+/// The listener starts accepting connections immediately.
+///
+/// # Errors
+///
+/// - `InvalidArgument` — port is 0.
+/// - `AlreadyExists` — another listener is already bound to this port.
+/// - `OutOfMemory` — no free listener slots.
+pub fn bind(port: u16) -> KernelResult<usize> {
+    if port == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut listeners = LISTENERS.lock();
+
+    // Check for duplicate binding.
+    for listener in listeners.iter() {
+        if listener.active && listener.port == port {
+            return Err(KernelError::AlreadyExists);
+        }
+    }
+
+    // Find a free slot.
+    let slot = listeners.iter().position(|l| !l.active)
+        .ok_or(KernelError::OutOfMemory)?;
+
+    listeners[slot].active = true;
+    listeners[slot].port = port;
+    // Clear backlog.
+    for pending in &mut listeners[slot].backlog {
+        pending.active = false;
+    }
+
+    crate::serial_println!("[tcp] Listener bound to port {}", port);
+    Ok(slot)
+}
+
+/// Accept an incoming TCP connection on a listener.
+///
+/// Blocks (by polling) until a connection completes the 3-way handshake
+/// and is placed in the listener's backlog.
+///
+/// Returns a connection handle (same type as `connect()` returns).
+///
+/// # Errors
+///
+/// - `InvalidArgument` — invalid listener handle.
+/// - `TimedOut` — no connection arrived within the timeout.
+pub fn accept(listener_handle: usize) -> KernelResult<usize> {
+    // Validate the listener exists.
+    {
+        let listeners = LISTENERS.lock();
+        let listener = listeners.get(listener_handle)
+            .ok_or(KernelError::InvalidArgument)?;
+        if !listener.active {
+            return Err(KernelError::InvalidArgument);
+        }
+    }
+
+    // Poll for an accepted connection (up to ~10 seconds).
+    for _ in 0..10_000 {
+        super::poll();
+
+        // Check for a completed connection in the backlog.
+        let mut listeners = LISTENERS.lock();
+        let listener = &mut listeners[listener_handle];
+        if !listener.active {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        for pending in listener.backlog.iter_mut() {
+            if pending.active {
+                // Found one — take it.
+                let conn_handle = pending.conn_handle;
+                pending.active = false;
+                crate::serial_println!(
+                    "[tcp] Accepted connection on port {} → handle {}",
+                    listener.port, conn_handle
+                );
+                return Ok(conn_handle);
+            }
+        }
+
+        drop(listeners);
+
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    Err(KernelError::TimedOut)
+}
+
+/// Accept a connection without blocking (non-blocking variant).
+///
+/// Returns `Ok(handle)` if a connection is ready, or
+/// `Err(WouldBlock)` if no pending connections.
+pub fn try_accept(listener_handle: usize) -> KernelResult<usize> {
+    let mut listeners = LISTENERS.lock();
+    let listener = listeners.get_mut(listener_handle)
+        .ok_or(KernelError::InvalidArgument)?;
+    if !listener.active {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    for pending in listener.backlog.iter_mut() {
+        if pending.active {
+            let conn_handle = pending.conn_handle;
+            pending.active = false;
+            return Ok(conn_handle);
+        }
+    }
+
+    Err(KernelError::WouldBlock)
+}
+
+/// Close a TCP listener, freeing its port.
+///
+/// Any pending (not yet accepted) connections in the backlog are
+/// reset (RST sent to the remote).
+pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
+    let mut listeners = LISTENERS.lock();
+    let listener = listeners.get_mut(listener_handle)
+        .ok_or(KernelError::InvalidArgument)?;
+    if !listener.active {
+        return Ok(());
+    }
+
+    let port = listener.port;
+
+    // Close any pending connections that haven't been accepted yet.
+    let pending_handles: [Option<usize>; MAX_BACKLOG] = {
+        let mut handles = [None; MAX_BACKLOG];
+        for (i, pending) in listener.backlog.iter_mut().enumerate() {
+            if pending.active {
+                handles[i] = Some(pending.conn_handle);
+                pending.active = false;
+            }
+        }
+        handles
+    };
+
+    listener.active = false;
+    listener.port = 0;
+    drop(listeners);
+
+    // Reset unaccepted connections.
+    let mut conns = CONNECTIONS.lock();
+    for handle in pending_handles.into_iter().flatten() {
+        if let Some(conn) = conns.get_mut(handle) {
+            if conn.active {
+                conn.active = false;
+                conn.state = TcpState::Closed;
+                conn.rx_buffer.clear();
+            }
+        }
+    }
+    drop(conns);
+
+    crate::serial_println!("[tcp] Listener on port {} closed", port);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Server-side passive open helpers
+// ---------------------------------------------------------------------------
+
+/// Handle an incoming SYN for a listening port (passive open step 1).
+///
+/// If a listener is bound on `dst_port`, allocate a new connection in
+/// `SynReceived` state, send SYN-ACK.  When the ACK arrives, the
+/// connection transitions to `Established` and is queued to the
+/// listener's backlog for `accept()`.
+#[allow(clippy::arithmetic_side_effects)]
+fn handle_incoming_syn(
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+    local_port: u16,
+    remote_seq: u32,
+) -> KernelResult<()> {
+    // Check if we have a listener for this port.
+    let listener_exists = {
+        let listeners = LISTENERS.lock();
+        listeners.iter().any(|l| l.active && l.port == local_port)
+    };
+
+    if !listener_exists {
+        // No listener — send RST.
+        let rst_ack = remote_seq.wrapping_add(1);
+        let _ = send_segment(
+            local_port, remote_ip, remote_port,
+            0, rst_ack, TCP_RST | TCP_ACK, &[],
+        );
+        return Ok(());
+    }
+
+    // Allocate a connection slot for this incoming connection.
+    let isn = generate_isn();
+    let handle = {
+        let mut conns = CONNECTIONS.lock();
+        let slot = conns.iter().position(|c| !c.active)
+            .ok_or(KernelError::OutOfMemory)?;
+
+        let conn = &mut conns[slot];
+        conn.active = true;
+        conn.state = TcpState::SynReceived;
+        conn.local_port = local_port;
+        conn.remote_ip = remote_ip;
+        conn.remote_port = remote_port;
+        conn.snd_iss = isn;
+        conn.snd_una = isn;
+        conn.snd_nxt = isn.wrapping_add(1); // SYN-ACK consumes 1 seq.
+        conn.rcv_irs = remote_seq;
+        conn.rcv_nxt = remote_seq.wrapping_add(1); // Client's SYN consumes 1.
+        conn.rx_buffer.clear();
+        conn.remote_closed = false;
+        conn.retransmit_timer = 0;
+        slot
+    };
+
+    // Send SYN-ACK.
+    let rcv_nxt = remote_seq.wrapping_add(1);
+    send_segment(
+        local_port, remote_ip, remote_port,
+        isn, rcv_nxt, TCP_SYN | TCP_ACK, &[],
+    )?;
+
+    crate::serial_println!(
+        "[tcp] SYN-ACK sent to {}:{} (handle={}, isn={})",
+        remote_ip, remote_port, handle, isn
+    );
+
+    Ok(())
+}
+
+/// Place a fully-established connection into its listener's backlog.
+fn enqueue_to_listener(local_port: u16, conn_handle: usize) {
+    let mut listeners = LISTENERS.lock();
+    for listener in listeners.iter_mut() {
+        if listener.active && listener.port == local_port {
+            // Find a free backlog slot.
+            for pending in listener.backlog.iter_mut() {
+                if !pending.active {
+                    pending.active = true;
+                    pending.conn_handle = conn_handle;
+                    return;
+                }
+            }
+            // Backlog full — drop (connection will time out).
+            crate::serial_println!(
+                "[tcp] Warning: backlog full on port {}, dropping connection",
+                local_port
+            );
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TCP segment processing (called from IPv4 layer)
 // ---------------------------------------------------------------------------
 
@@ -512,7 +837,14 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     });
 
     let Some(idx) = conn_idx else {
-        // No matching connection.  Send RST if this isn't a RST.
+        // No matching connection — check if this is a SYN for a listener
+        // (passive open / server-side handshake).
+        if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 && flags & TCP_RST == 0 {
+            drop(conns);
+            return handle_incoming_syn(ip_packet.src, src_port, dst_port, seq);
+        }
+        // No matching connection and not a SYN for a listener.
+        // Send RST if this isn't itself a RST.
         if flags & TCP_RST == 0 {
             drop(conns);
             let rst_seq = if flags & TCP_ACK != 0 { ack } else { 0 };
@@ -556,6 +888,28 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     local_port, remote_ip, remote_port,
                     snd_nxt, rcv_nxt, TCP_ACK, &[],
                 );
+            }
+        }
+
+        TcpState::SynReceived => {
+            // Server-side: waiting for ACK to complete 3-way handshake.
+            if flags & TCP_ACK != 0 {
+                conn.snd_una = ack;
+                conn.state = TcpState::Established;
+
+                let local_port = conn.local_port;
+
+                // Place this connection in the listener's backlog.
+                drop(conns);
+                enqueue_to_listener(local_port, idx);
+
+                crate::serial_println!(
+                    "[tcp] 3-way handshake complete for {}:{} → port {}",
+                    ip_packet.src, src_port, local_port
+                );
+            } else if flags & TCP_RST != 0 {
+                conn.active = false;
+                conn.state = TcpState::Closed;
             }
         }
 
@@ -670,5 +1024,97 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         _ => {}
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// TCP self-test: validates listener bind/close lifecycle and basic
+/// state management without requiring actual network traffic.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[tcp] Running TCP self-test...");
+
+    test_bind_close()?;
+    test_bind_duplicate_rejected()?;
+    test_try_accept_empty()?;
+
+    crate::serial_println!("[tcp] TCP self-test PASSED");
+    Ok(())
+}
+
+/// Test 1: bind and close a listener.
+fn test_bind_close() -> KernelResult<()> {
+    let handle = bind(9999)?;
+
+    // Verify listener is active.
+    {
+        let listeners = LISTENERS.lock();
+        if !listeners[handle].active || listeners[handle].port != 9999 {
+            crate::serial_println!("[tcp]   FAIL: listener not active or wrong port");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close_listener(handle)?;
+
+    // Verify listener is freed.
+    {
+        let listeners = LISTENERS.lock();
+        if listeners[handle].active {
+            crate::serial_println!("[tcp]   FAIL: listener still active after close");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[tcp]   Bind + close: OK");
+    Ok(())
+}
+
+/// Test 2: binding the same port twice is rejected.
+fn test_bind_duplicate_rejected() -> KernelResult<()> {
+    let handle = bind(8888)?;
+
+    // Try to bind the same port again — should fail.
+    match bind(8888) {
+        Err(KernelError::AlreadyExists) => {}
+        other => {
+            close_listener(handle).ok();
+            crate::serial_println!(
+                "[tcp]   FAIL: duplicate bind returned {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // After close, rebind should succeed.
+    close_listener(handle)?;
+    let handle2 = bind(8888)?;
+    close_listener(handle2)?;
+
+    crate::serial_println!("[tcp]   Duplicate bind rejected: OK");
+    Ok(())
+}
+
+/// Test 3: try_accept on empty backlog returns WouldBlock.
+fn test_try_accept_empty() -> KernelResult<()> {
+    let handle = bind(7777)?;
+
+    match try_accept(handle) {
+        Err(KernelError::WouldBlock) => {}
+        other => {
+            close_listener(handle).ok();
+            crate::serial_println!(
+                "[tcp]   FAIL: try_accept on empty returned {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close_listener(handle)?;
+    crate::serial_println!("[tcp]   try_accept empty → WouldBlock: OK");
     Ok(())
 }

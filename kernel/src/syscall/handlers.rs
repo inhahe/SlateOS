@@ -4989,6 +4989,77 @@ pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_TCP_BIND` — bind a TCP listener to a local port.
+///
+/// `arg0`: local port (1–65535).
+pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let port = args.arg0 as u16;
+
+    if port == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    match crate::net::tcp::bind(port) {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TCP_ACCEPT` — accept an incoming TCP connection (blocking).
+///
+/// `arg0`: listener handle.
+pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with READ rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let listener_handle = args.arg0 as usize;
+
+    match crate::net::tcp::accept(listener_handle) {
+        Ok(conn_handle) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(conn_handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TCP_CLOSE_LISTENER` — close a TCP listener.
+///
+/// `arg0`: listener handle.
+pub fn sys_tcp_close_listener(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let listener_handle = args.arg0 as usize;
+
+    match crate::net::tcp::close_listener(listener_handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_UDP_BIND` — bind a UDP socket to a local port.
 ///
 /// `arg0`: local port.

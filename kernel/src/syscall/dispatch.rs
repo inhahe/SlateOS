@@ -64,7 +64,8 @@ use super::number::{
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
-    SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_TCP_ACCEPT, SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER,
+    SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
     SYS_THREAD_SUSPEND, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
     SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
@@ -389,6 +390,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TCP_SEND as usize] = Some(handlers::sys_tcp_send);
     handlers[SYS_TCP_RECV as usize] = Some(handlers::sys_tcp_recv);
     handlers[SYS_TCP_CLOSE as usize] = Some(handlers::sys_tcp_close);
+    handlers[SYS_TCP_BIND as usize] = Some(handlers::sys_tcp_bind);
+    handlers[SYS_TCP_ACCEPT as usize] = Some(handlers::sys_tcp_accept);
+    handlers[SYS_TCP_CLOSE_LISTENER as usize] = Some(handlers::sys_tcp_close_listener);
     handlers[SYS_UDP_BIND as usize] = Some(handlers::sys_udp_bind);
     handlers[SYS_UDP_SEND as usize] = Some(handlers::sys_udp_send);
     handlers[SYS_UDP_RECV as usize] = Some(handlers::sys_udp_recv);

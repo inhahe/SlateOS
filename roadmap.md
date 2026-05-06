@@ -544,10 +544,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] UDP datagram send/receive with socket layer
   - [x] DHCP client (auto-configure IP/mask/gateway/DNS at boot)
   - [x] TCP client (3-way handshake, data transfer, FIN teardown)
+  - [x] TCP server (bind/listen/accept, passive open 3-way handshake, backlog queue)
   - [x] DNS resolver (A record queries via UDP)
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
+  - [x] TCP server syscalls: bind, accept, close_listener (SYS_TCP_BIND 804, SYS_TCP_ACCEPT 805, SYS_TCP_CLOSE_LISTENER 806)
   - [x] UDP syscalls: bind, send, recv, close (SYS_UDP_BIND through SYS_UDP_CLOSE)
   - [x] DNS resolution syscall (SYS_DNS_RESOLVE)
 - [ ] Firewall (basic packet filtering)

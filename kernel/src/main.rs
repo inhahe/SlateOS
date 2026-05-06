@@ -815,6 +815,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::zip::self_test() {
         serial_println!("WARNING: ZIP self-test failed: {:?}", e);
     }
+    if let Err(e) = fs::tar::self_test() {
+        serial_println!("WARNING: tar self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {
@@ -1038,6 +1041,12 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++n: IPC statistics self-test.
     // Per-mechanism usage and performance counters.
     ipc::stats::self_test();
+
+    // Step 22e⅞++++n2: TCP server (bind/listen/accept) self-test.
+    // Validates listener lifecycle without needing network hardware.
+    if let Err(e) = net::tcp::self_test() {
+        serial_println!("[WARN] TCP self-test failed: {:?}", e);
+    }
 
     // Step 22e⅞++++o: Kernel object tracking self-test.
     // Lifecycle counters for all kernel object types.

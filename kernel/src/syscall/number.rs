@@ -1796,6 +1796,35 @@ pub const SYS_TCP_RECV: u64 = 802;
 /// Returns: 0 on success.
 pub const SYS_TCP_CLOSE: u64 = 803;
 
+/// Bind a TCP listener to a local port.
+///
+/// `arg0`: local port (1–65535).
+///
+/// Creates a listener socket that can accept incoming connections.
+///
+/// Returns: listener handle on success, negative error on failure.
+pub const SYS_TCP_BIND: u64 = 804;
+
+/// Accept an incoming TCP connection on a listener (blocking).
+///
+/// `arg0`: listener handle (from `SYS_TCP_BIND`).
+///
+/// Blocks until a client completes the 3-way handshake.
+/// The returned handle is a regular TCP connection handle usable
+/// with `SYS_TCP_SEND`, `SYS_TCP_RECV`, and `SYS_TCP_CLOSE`.
+///
+/// Returns: connection handle on success, negative error on failure.
+pub const SYS_TCP_ACCEPT: u64 = 805;
+
+/// Close a TCP listener, releasing the bound port.
+///
+/// `arg0`: listener handle.
+///
+/// Any pending connections that haven't been accepted are dropped.
+///
+/// Returns: 0 on success.
+pub const SYS_TCP_CLOSE_LISTENER: u64 = 806;
+
 /// Bind a UDP socket to a local port.
 ///
 /// `arg0`: local port (0–65535).

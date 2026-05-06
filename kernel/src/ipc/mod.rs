@@ -33,7 +33,6 @@ pub mod stats;
 pub mod timer;
 
 // TODO: Splice/vmsplice for pipes.
-// TODO: Benchmark all IPC paths.
 
 use crate::cap::ResourceType;
 

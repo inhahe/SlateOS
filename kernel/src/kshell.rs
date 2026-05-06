@@ -3083,9 +3083,9 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "ct",
+    "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
-    "cut", "date", "dd", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
+    "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
@@ -4306,6 +4306,7 @@ fn dispatch(line: &str) {
         "find" => cmd_find(args),
         "file" => cmd_file(args),
         "locate" | "updatedb" => cmd_locate(args),
+        "dedup" => cmd_dedup(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4402,6 +4403,7 @@ fn dispatch(line: &str) {
         "sockact" | "sa" => cmd_socket_activation(args),
         "slimit" | "sl" => cmd_service_limits(args),
         "iommu" => cmd_iommu(),
+        "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
@@ -4519,6 +4521,7 @@ fn cmd_help() {
     crate::console_println!("  du [-s] [-dN] [D]  Show disk usage (-s summary, -dN max depth)");
     crate::console_println!("  find [D] [-name PAT] [-type f|d|l] [-size +N|-N] [-maxdepth N] [-empty]");
     crate::console_println!("  locate [--update|--stats|--ext E|--size MIN-MAX] PATTERN");
+    crate::console_println!("  dedup [--dry-run|--delete|--stats] [--min-size N] [--max-size N] [DIR]");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
     crate::console_println!("  mount     List all mounted filesystems");
@@ -8182,6 +8185,288 @@ fn parse_size_value(s: &str) -> Option<u64> {
     num_part.parse::<u64>().ok().map(|n| n.saturating_mul(multiplier))
 }
 
+/// `dedup [--dry-run] [--min-size N] [--max-size N] [DIR]` — find duplicate files.
+///
+/// Walks the directory tree rooted at DIR (default: current directory),
+/// groups files by size as a cheap pre-filter, then computes SHA-256 hashes
+/// for files with matching sizes to identify true duplicates.
+///
+/// Options:
+/// - `--dry-run` / `-n`: only report duplicates, don't offer deletion
+/// - `--min-size N`: skip files smaller than N bytes (default: 1, skips empty)
+/// - `--max-size N`: skip files larger than N bytes (default: 64 MiB)
+/// - `--delete`: interactively delete duplicates (keeps first file in each group)
+/// - `--stats` / `-s`: show summary statistics only
+///
+/// ## Algorithm
+///
+/// 1. Walk directory tree, collecting (path, size) for all regular files.
+/// 2. Group by size. Discard groups with only one file (unique by size).
+/// 3. For remaining files, read contents and compute SHA-256 hash.
+/// 4. Group by hash. Discard groups with only one file.
+/// 5. Report duplicate groups: hash, count, wasted bytes, file list.
+///
+/// This is the standard size→hash two-phase dedup strategy used by tools
+/// like `fdupes`, `rdfind`, and `jdupes`.  The size pre-filter avoids
+/// reading+hashing files that can't possibly be duplicates, which is the
+/// vast majority in typical filesystems.
+fn cmd_dedup(args: &str) {
+    use crate::fs::{Vfs, EntryType};
+    use alloc::collections::BTreeMap;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    let mut dry_run = true; // Default to dry-run for safety.
+    let mut delete_mode = false;
+    let mut stats_only = false;
+    let mut min_size: u64 = 1; // Skip empty files by default.
+    let mut max_size: u64 = 64 * 1024 * 1024; // 64 MiB.
+    let mut target_dir: Option<&str> = None;
+    let mut i = 0;
+
+    while i < parts.len() {
+        match parts.get(i).copied().unwrap_or("") {
+            "--dry-run" | "-n" => dry_run = true,
+            "--delete" => { delete_mode = true; dry_run = false; }
+            "--stats" | "-s" => stats_only = true,
+            "--min-size" => {
+                i = i.saturating_add(1);
+                if let Some(v) = parts.get(i).copied() {
+                    min_size = parse_size_value(v).unwrap_or(1);
+                }
+            }
+            "--max-size" => {
+                i = i.saturating_add(1);
+                if let Some(v) = parts.get(i).copied() {
+                    max_size = parse_size_value(v).unwrap_or(64 * 1024 * 1024);
+                }
+            }
+            "--help" | "-h" => {
+                shell_println!("Usage: dedup [--dry-run|-n] [--delete] [--stats|-s] [--min-size N] [--max-size N] [DIR]");
+                shell_println!("  Find and report duplicate files by content hash (SHA-256).");
+                shell_println!("  Default: dry-run mode (report only, no changes).");
+                shell_println!("  --delete: remove duplicates, keeping the first file in each group.");
+                shell_println!("  --stats:  show summary only (no file listing).");
+                return;
+            }
+            s => {
+                if !s.starts_with('-') {
+                    target_dir = Some(s);
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+
+    let root = resolve_path(target_dir.unwrap_or("."));
+    shell_println!("Scanning {} for duplicates...", root);
+
+    // Phase 1: Walk the directory tree, collecting (path, size) pairs.
+    let mut file_list: Vec<(String, u64)> = Vec::new();
+    let mut dirs_to_visit: Vec<String> = Vec::new();
+    dirs_to_visit.push(root.clone());
+
+    let mut total_scanned: u64 = 0;
+    let mut total_skipped: u64 = 0;
+    let max_files: usize = 100_000; // Safety limit to prevent OOM.
+
+    while let Some(dir) = dirs_to_visit.pop() {
+        let entries = match Vfs::readdir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue, // Skip unreadable directories.
+        };
+
+        for entry in &entries {
+            let path = if dir == "/" {
+                alloc::format!("/{}", entry.name)
+            } else {
+                alloc::format!("{}/{}", dir, entry.name)
+            };
+
+            match entry.entry_type {
+                EntryType::Directory => {
+                    // Skip . and .. (shouldn't appear, but be safe).
+                    if entry.name != "." && entry.name != ".." {
+                        dirs_to_visit.push(path);
+                    }
+                }
+                EntryType::File => {
+                    total_scanned = total_scanned.saturating_add(1);
+
+                    // Size filter.
+                    if entry.size < min_size || entry.size > max_size {
+                        total_skipped = total_skipped.saturating_add(1);
+                        continue;
+                    }
+
+                    file_list.push((path, entry.size));
+
+                    if file_list.len() >= max_files {
+                        shell_println!("Warning: hit {} file limit, results may be incomplete.", max_files);
+                        dirs_to_visit.clear();
+                        break;
+                    }
+                }
+                _ => {} // Skip symlinks, etc.
+            }
+        }
+    }
+
+    if file_list.is_empty() {
+        shell_println!("No files found matching criteria.");
+        shell_println!("  Scanned: {} files, skipped: {}", total_scanned, total_skipped);
+        return;
+    }
+
+    // Phase 2: Group by size.
+    let mut by_size: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    for (path, size) in &file_list {
+        by_size.entry(*size)
+            .or_insert_with(Vec::new)
+            .push(path.clone());
+    }
+
+    // Keep only groups with 2+ files (potential duplicates).
+    let candidate_groups: Vec<(u64, Vec<String>)> = by_size
+        .into_iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .collect();
+
+    if candidate_groups.is_empty() {
+        shell_println!("No duplicate candidates found (all files have unique sizes).");
+        shell_println!("  Scanned: {} files, skipped: {}", total_scanned, total_skipped);
+        return;
+    }
+
+    let mut candidates_count: usize = 0;
+    for (_, paths) in &candidate_groups {
+        candidates_count = candidates_count.saturating_add(paths.len());
+    }
+    shell_println!("Phase 1: {} files have non-unique sizes ({} size groups). Hashing...",
+        candidates_count, candidate_groups.len());
+
+    // Phase 3: Hash files in each size group and group by hash.
+    let mut dup_groups: Vec<(String, u64, Vec<String>)> = Vec::new(); // (hex_hash, size, paths)
+    let mut hash_errors: u64 = 0;
+    let mut files_hashed: u64 = 0;
+
+    for (size, paths) in &candidate_groups {
+        let mut by_hash: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        for path in paths {
+            match Vfs::read_file(path) {
+                Ok(data) => {
+                    let hash = crate::crypto::sha256(&data);
+                    let hex = crate::fs::cas::hash_to_hex(&hash);
+                    by_hash.entry(hex)
+                        .or_insert_with(Vec::new)
+                        .push(path.clone());
+                    files_hashed = files_hashed.saturating_add(1);
+                }
+                Err(_) => {
+                    hash_errors = hash_errors.saturating_add(1);
+                }
+            }
+        }
+
+        // Collect groups with 2+ files (true duplicates).
+        for (hex, dup_paths) in by_hash {
+            if dup_paths.len() > 1 {
+                dup_groups.push((hex, *size, dup_paths));
+            }
+        }
+    }
+
+    // Phase 4: Report results.
+    let total_dup_groups = dup_groups.len();
+    let mut total_dup_files: u64 = 0;
+    let mut total_wasted: u64 = 0;
+
+    for (_, size, paths) in &dup_groups {
+        let extras = (paths.len() as u64).saturating_sub(1);
+        total_dup_files = total_dup_files.saturating_add(extras);
+        total_wasted = total_wasted.saturating_add(size.saturating_mul(extras));
+    }
+
+    if dup_groups.is_empty() {
+        shell_println!("No duplicates found.");
+        shell_println!("  Scanned: {}, hashed: {}, errors: {}",
+            total_scanned, files_hashed, hash_errors);
+        return;
+    }
+
+    // Summary.
+    shell_println!();
+    shell_println!("=== Duplicate Report ===");
+    shell_println!("  Duplicate groups:   {}", total_dup_groups);
+    shell_println!("  Duplicate files:    {} (extra copies)", total_dup_files);
+    shell_println!("  Wasted space:       {}", format_size_human(total_wasted));
+    shell_println!("  Files scanned:      {}", total_scanned);
+    shell_println!("  Files hashed:       {}", files_hashed);
+    if hash_errors > 0 {
+        shell_println!("  Read errors:        {}", hash_errors);
+    }
+    shell_println!();
+
+    if !stats_only {
+        // Print each duplicate group.
+        let max_groups_display = 50;
+        for (gi, (hex, size, paths)) in dup_groups.iter().enumerate() {
+            if gi >= max_groups_display {
+                shell_println!("... and {} more groups (showing first {})",
+                    total_dup_groups.saturating_sub(max_groups_display),
+                    max_groups_display);
+                break;
+            }
+            let short_hash = if hex.len() >= 12 { &hex[..12] } else { hex.as_str() };
+            shell_println!("[{}...] {} x {} (wasted: {})",
+                short_hash,
+                paths.len(),
+                format_size_human(*size),
+                format_size_human(size.saturating_mul((paths.len() as u64).saturating_sub(1))));
+            for (pi, path) in paths.iter().enumerate() {
+                if pi == 0 {
+                    shell_println!("  KEEP  {}", path);
+                } else {
+                    shell_println!("  DUP   {}", path);
+                }
+            }
+        }
+    }
+
+    // Delete mode: remove duplicate files (keep the first in each group).
+    if delete_mode && !dry_run {
+        let mut deleted_count: u64 = 0;
+        let mut deleted_bytes: u64 = 0;
+        let mut delete_errors: u64 = 0;
+
+        for (_, size, paths) in &dup_groups {
+            // Skip the first file (keep it), delete the rest.
+            for path in paths.iter().skip(1) {
+                match Vfs::remove(path) {
+                    Ok(()) => {
+                        deleted_count = deleted_count.saturating_add(1);
+                        deleted_bytes = deleted_bytes.saturating_add(*size);
+                    }
+                    Err(e) => {
+                        shell_println!("  Error deleting {}: {:?}", path, e);
+                        delete_errors = delete_errors.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        shell_println!();
+        shell_println!("Deleted {} duplicate files, reclaimed {}.",
+            deleted_count, format_size_human(deleted_bytes));
+        if delete_errors > 0 {
+            shell_println!("  {} files could not be deleted.", delete_errors);
+        }
+    } else if !delete_mode {
+        shell_println!("(dry-run: no files deleted. Use --delete to remove duplicates.)");
+    }
+}
+
 /// `file PATH` — identify a file's type and basic info.
 ///
 /// Similar to the Unix `file` command.  Uses `lstat` to avoid following
@@ -10730,6 +11015,148 @@ fn cmd_iommu() {
     }
 }
 
+/// `capreq` — manage capability requests.
+///
+/// Usage:
+///   capreq                — list pending requests
+///   capreq all            — list all requests (including resolved)
+///   capreq approve ID     — approve a pending request
+///   capreq deny ID        — deny a pending request
+///   capreq test           — submit a test request
+///   capreq handler on/off — register/unregister policy handler
+fn cmd_cap_request(args: &str) {
+    use crate::cap::request;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "pending" => {
+            let pending = request::list_pending();
+            if pending.is_empty() {
+                crate::console_println!("No pending capability requests.");
+                crate::console_println!("Handler active: {}", request::handler_active());
+                return;
+            }
+            crate::console_println!("=== Pending Capability Requests ({}) ===", pending.len());
+            for req in &pending {
+                crate::console_println!(
+                    "  #{}: pid={} ({}) wants {:?}/{:?}",
+                    req.id, req.pid, req.process_name,
+                    req.resource_type, req.rights
+                );
+                crate::console_println!("       Reason: {}", req.reason);
+            }
+        }
+        "all" => {
+            let all = request::list_all();
+            if all.is_empty() {
+                crate::console_println!("No capability requests on record.");
+                return;
+            }
+            crate::console_println!("=== All Capability Requests ({}) ===", all.len());
+            for req in &all {
+                let status_str = match req.status {
+                    request::RequestStatus::Pending => "PENDING",
+                    request::RequestStatus::Approved => "APPROVED",
+                    request::RequestStatus::Denied => "DENIED",
+                    request::RequestStatus::TimedOut => "TIMEOUT",
+                    request::RequestStatus::Cancelled => "CANCEL",
+                };
+                crate::console_println!(
+                    "  #{}: [{}] pid={} ({}) {:?}/{:?} -- {}",
+                    req.id, status_str, req.pid, req.process_name,
+                    req.resource_type, req.rights, req.reason
+                );
+            }
+        }
+        "approve" | "allow" | "grant" => {
+            let id_str = parts.get(1).unwrap_or(&"");
+            let id: u64 = match id_str.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    crate::console_println!("Usage: capreq approve <request-id>");
+                    return;
+                }
+            };
+            match request::approve(id) {
+                Ok(req) => {
+                    crate::console_println!(
+                        "Approved #{}: pid={} gets {:?}/{:?}",
+                        id, req.pid, req.resource_type, req.rights
+                    );
+                }
+                Err(e) => {
+                    crate::console_println!("Failed to approve #{}: {:?}", id, e);
+                }
+            }
+        }
+        "deny" | "reject" => {
+            let id_str = parts.get(1).unwrap_or(&"");
+            let id: u64 = match id_str.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    crate::console_println!("Usage: capreq deny <request-id>");
+                    return;
+                }
+            };
+            match request::deny(id) {
+                Ok(()) => {
+                    crate::console_println!("Denied #{}", id);
+                }
+                Err(e) => {
+                    crate::console_println!("Failed to deny #{}: {:?}", id, e);
+                }
+            }
+        }
+        "handler" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            match action {
+                "on" | "register" => {
+                    request::register_handler();
+                    crate::console_println!("Policy handler registered (requests will pend)");
+                }
+                "off" | "unregister" => {
+                    request::unregister_handler();
+                    crate::console_println!("Policy handler unregistered (auto-deny mode)");
+                }
+                _ => {
+                    crate::console_println!(
+                        "Handler: {} ({})",
+                        if request::handler_active() { "active" } else { "inactive" },
+                        if request::handler_active() { "requests pend" } else { "auto-deny" }
+                    );
+                }
+            }
+        }
+        "test" => {
+            // Submit a test request for demonstration.
+            if !request::handler_active() {
+                request::register_handler();
+                crate::console_println!("(registered handler for test)");
+            }
+            match request::request_capability(
+                1,
+                "kshell",
+                crate::cap::ResourceType::File,
+                crate::cap::Rights::WRITE,
+                "Test request from kshell",
+            ) {
+                Ok(id) => {
+                    crate::console_println!("Submitted test request #{}", id);
+                    crate::console_println!("Use 'capreq approve {}' or 'capreq deny {}'", id, id);
+                }
+                Err(e) => {
+                    crate::console_println!("Failed to submit test request: {:?}", e);
+                }
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: capreq [list|all|approve ID|deny ID|handler on/off|test]");
+        }
+    }
+}
+
 fn cmd_version() {
     shell_println!("Kernel v0.1.0 (x86_64, microkernel)");
     shell_println!("Built with Rust, AI-developed");
@@ -12947,7 +13374,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
@@ -12955,7 +13382,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

@@ -55,6 +55,8 @@
 pub mod audit;
 pub mod file_tags;
 pub mod groups;
+#[allow(dead_code)] // API functions for future syscall interface and timer expiry.
+pub mod request;
 pub mod rights;
 pub mod table;
 

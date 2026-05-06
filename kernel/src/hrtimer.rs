@@ -191,21 +191,20 @@ pub fn schedule_repeating(
 ///
 /// Returns `true` if the timer was found and removed, `false` if it
 /// already fired or was not found (invalid handle).
+///
+/// Disables interrupts while holding per-CPU timer locks to prevent
+/// deadlock with the APIC timer ISR.
 pub fn cancel(handle: HrTimerHandle) -> bool {
-    let cpu = crate::smp::current_cpu_index();
-    let mut state = CPU_TIMERS[cpu].lock();
+    let found = crate::cpu::without_interrupts(|| {
+        let cpu = crate::smp::current_cpu_index();
+        let mut state = CPU_TIMERS[cpu].lock();
 
-    if let Some(pos) = state.timers.iter().position(|t| t.id == handle.0) {
-        state.timers.remove(pos);
-        TOTAL_CANCELLED.fetch_add(1, Ordering::Relaxed);
-        crate::ktrace::record(
-            crate::ktrace::Category::Timer,
-            crate::ktrace::event::TIMER_CANCEL,
-            handle.0,
-            0,
-        );
-        true
-    } else {
+        if let Some(pos) = state.timers.iter().position(|t| t.id == handle.0) {
+            state.timers.remove(pos);
+            TOTAL_CANCELLED.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
         // Try other CPUs (timer might have been scheduled from a different CPU
         // if the task migrated).  This is rare but correct.
         drop(state);
@@ -221,13 +220,25 @@ pub fn cancel(handle: HrTimerHandle) -> bool {
             }
         }
         false
+    });
+
+    if found {
+        crate::ktrace::record(
+            crate::ktrace::Category::Timer,
+            crate::ktrace::event::TIMER_CANCEL,
+            handle.0,
+            0,
+        );
     }
+    found
 }
 
 /// Query the number of pending timers on the current CPU.
 pub fn pending_count() -> usize {
-    let cpu = crate::smp::current_cpu_index();
-    CPU_TIMERS[cpu].lock().timers.len()
+    crate::cpu::without_interrupts(|| {
+        let cpu = crate::smp::current_cpu_index();
+        CPU_TIMERS[cpu].lock().timers.len()
+    })
 }
 
 /// Query total timers fired since boot.
@@ -242,9 +253,11 @@ pub fn scheduled_count() -> u64 {
 
 /// Query the next timer expiry time on the current CPU (or None).
 pub fn next_expiry_ns() -> Option<u64> {
-    let cpu = crate::smp::current_cpu_index();
-    let state = CPU_TIMERS[cpu].lock();
-    state.timers.first().map(|t| t.expiry_ns)
+    crate::cpu::without_interrupts(|| {
+        let cpu = crate::smp::current_cpu_index();
+        let state = CPU_TIMERS[cpu].lock();
+        state.timers.first().map(|t| t.expiry_ns)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -253,8 +266,12 @@ pub fn next_expiry_ns() -> Option<u64> {
 
 /// Process expired timers on the current CPU.
 ///
-/// Called from the APIC timer ISR (vector 32) on every tick.
-/// Fires callbacks for all timers whose expiry time has passed.
+/// Called from the APIC timer ISR (vector 32) on every tick, and also
+/// from the hrtimer self-test during boot.  Fires callbacks for all
+/// timers whose expiry time has passed.
+///
+/// Disables interrupts to prevent re-entrant deadlock when called from
+/// non-ISR context (safe no-op when already in ISR context).
 ///
 /// Returns the number of timers fired this tick.
 pub fn process_expired() -> u32 {
@@ -271,7 +288,11 @@ pub fn process_expired() -> u32 {
     let mut to_fire: [Option<(fn(u64), u64, u64)>; 16] = [None; 16];
     let mut fire_count = 0usize;
 
-    {
+    // Disable interrupts while holding the per-CPU timer lock.
+    // When called from ISR context, interrupts are already disabled
+    // (without_interrupts is a no-op).  When called from the self-test,
+    // this prevents the APIC timer ISR from re-entering and deadlocking.
+    crate::cpu::without_interrupts(|| {
         let mut state = CPU_TIMERS[cpu].lock();
 
         // Since the list is sorted, scan from the front until we find
@@ -299,9 +320,10 @@ pub fn process_expired() -> u32 {
                 break; // Remaining timers are in the future.
             }
         }
-    }
+    });
 
-    // Fire callbacks outside the lock.
+    // Fire callbacks outside the lock (and outside the IRQ-disabled region).
+    // Callbacks might schedule new timers (which take the lock with CLI).
     for slot in to_fire.iter().take(fire_count) {
         if let Some((cb, arg, _interval)) = *slot {
             cb(arg);
@@ -336,6 +358,9 @@ fn insert_sorted(timers: &mut Vec<TimerEntry>, entry: TimerEntry) {
 }
 
 /// Schedule a timer with an absolute expiry time.
+///
+/// Disables interrupts while holding the per-CPU timer lock to prevent
+/// deadlock with `process_expired()` which runs from the APIC timer ISR.
 fn schedule_absolute(
     expiry_ns: u64,
     interval_ns: u64,
@@ -343,28 +368,35 @@ fn schedule_absolute(
     arg: u64,
 ) -> HrTimerHandle {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let cpu = crate::smp::current_cpu_index();
 
-    let entry = TimerEntry {
-        expiry_ns,
-        callback,
-        arg,
-        id,
-        interval_ns,
-    };
+    // SAFETY: Must disable interrupts before taking the per-CPU timer lock.
+    // The APIC timer ISR calls process_expired() which also takes this lock.
+    // Without CLI, if the ISR fires while we hold the lock on the same CPU,
+    // the spin::Mutex deadlocks (non-reentrant).
+    crate::cpu::without_interrupts(|| {
+        let cpu = crate::smp::current_cpu_index();
 
-    let mut state = CPU_TIMERS[cpu].lock();
+        let entry = TimerEntry {
+            expiry_ns,
+            callback,
+            arg,
+            id,
+            interval_ns,
+        };
 
-    // Enforce per-CPU limit.
-    if state.timers.len() >= MAX_TIMERS_PER_CPU {
-        serial_println!("[hrtimer] WARNING: per-CPU timer limit reached — oldest timer evicted");
-        state.timers.pop(); // Remove the last (furthest) timer.
-    }
+        let mut state = CPU_TIMERS[cpu].lock();
 
-    insert_sorted(&mut state.timers, entry);
-    TOTAL_SCHEDULED.fetch_add(1, Ordering::Relaxed);
+        // Enforce per-CPU limit.
+        if state.timers.len() >= MAX_TIMERS_PER_CPU {
+            serial_println!("[hrtimer] WARNING: per-CPU timer limit reached — oldest timer evicted");
+            state.timers.pop(); // Remove the last (furthest) timer.
+        }
 
-    // Trace: timer scheduled (arg1 = timer ID, arg2 = expiry_ns).
+        insert_sorted(&mut state.timers, entry);
+        TOTAL_SCHEDULED.fetch_add(1, Ordering::Relaxed);
+    });
+
+    // Trace outside the critical section (ktrace might allocate).
     crate::ktrace::record(
         crate::ktrace::Category::Timer,
         crate::ktrace::event::TIMER_SCHEDULE,

@@ -1948,25 +1948,18 @@ pub fn sys_process_exec_with_frame(
 
 /// `SYS_CLOCK_MONOTONIC` — get monotonic time since boot in nanoseconds.
 ///
-/// Returns an approximate monotonic clock based on the APIC timer tick
-/// count.  At 100 Hz, resolution is 10 ms.  Good enough for coarse
-/// timing; high-resolution timing will be added via TSC or HPET later.
+/// Uses the best available hardware clock source:
+/// 1. HPET (High Precision Event Timer) — ~10 ns resolution, hardware counter
+/// 2. TSC (Time Stamp Counter) — sub-microsecond, needs calibration
+/// 3. APIC tick count — 10 ms resolution (fallback only)
+///
+/// The hrtimer subsystem's `now_ns()` already implements this priority
+/// chain, so we delegate to it for consistency with kernel-internal
+/// timing (sleep_ns, wait_timeout_ns, etc.).
 pub fn sys_clock_monotonic(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
 
-    // Use TSC for nanosecond precision when calibrated, falling back
-    // to APIC tick count (10ms resolution) if TSC freq is unknown.
-    let freq = crate::bench::tsc_freq();
-    let ns = if freq > 0 {
-        // TSC-based: read current TSC and convert to nanoseconds.
-        // This gives sub-microsecond precision.
-        let tsc = crate::bench::rdtsc();
-        crate::bench::cycles_to_ns(tsc)
-    } else {
-        // Fallback: APIC tick count at 100 Hz → 10ms granularity.
-        let ticks = crate::apic::tick_count();
-        ticks.saturating_mul(10_000_000)
-    };
+    let ns = crate::hrtimer::now_ns();
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(ns as i64)
@@ -1976,9 +1969,11 @@ pub fn sys_clock_monotonic(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: duration in nanoseconds.
 ///
-/// Blocks the calling task until the timer fires a wakeup.  The actual
-/// sleep time is rounded up to the next timer tick (10 ms granularity
-/// at 100 Hz).
+/// Blocks the calling task for the specified duration.  Uses the
+/// high-resolution timer subsystem (HPET-backed hrtimer) for sleeps
+/// ≤ 100ms, falling back to tick-based sleep for longer durations.
+/// Typical precision: ~1-4 ms scheduling latency on top of the
+/// requested duration.
 ///
 /// Returns: 0 on success.
 pub fn sys_sleep(args: &SyscallArgs) -> SyscallResult {
@@ -1990,19 +1985,10 @@ pub fn sys_sleep(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
 
-    // Convert nanoseconds to ticks (100 Hz → 10 ms per tick).
-    // Round up so the task sleeps at least the requested duration.
-    let ticks_needed = duration_ns
-        .saturating_add(9_999_999)
-        .saturating_div(10_000_000);
-
-    // Ensure at least 1 tick.
-    let ticks_needed = ticks_needed.max(1);
-
-    let current_tick = crate::apic::tick_count();
-    let wake_tick = current_tick.saturating_add(ticks_needed);
-
-    sched::sleep_until_tick(wake_tick);
+    // Delegate to sleep_ns which automatically selects the best path:
+    // - hrtimer for ≤ 100ms (nanosecond-precision wake via HPET)
+    // - tick-based for > 100ms (efficient, avoids hrtimer slot pressure)
+    sched::sleep_ns(duration_ns);
 
     SyscallResult::ok(0)
 }

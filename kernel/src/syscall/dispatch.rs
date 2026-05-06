@@ -64,6 +64,7 @@ use super::number::{
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
     SYS_THREAD_SUSPEND, SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY,
     SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
+    SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_WAIT, SYS_SEM_TRY_WAIT, SYS_SEM_CLOSE,
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_DNS_RESOLVE,
     SYS_YIELD,
@@ -244,6 +245,13 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
     handlers[SYS_IO_RING_ENTER as usize] = Some(handlers::sys_io_ring_enter);
     handlers[SYS_IO_RING_DESTROY as usize] = Some(handlers::sys_io_ring_destroy);
+
+    // IPC semaphores (270–274).
+    handlers[SYS_SEM_CREATE as usize] = Some(handlers::sys_sem_create);
+    handlers[SYS_SEM_SIGNAL as usize] = Some(handlers::sys_sem_signal);
+    handlers[SYS_SEM_WAIT as usize] = Some(handlers::sys_sem_wait);
+    handlers[SYS_SEM_TRY_WAIT as usize] = Some(handlers::sys_sem_try_wait);
+    handlers[SYS_SEM_CLOSE as usize] = Some(handlers::sys_sem_close);
 
     // Time and timers (10–19).
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);

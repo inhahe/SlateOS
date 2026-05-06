@@ -85,6 +85,9 @@ pub enum WaitSource {
     /// A kernel timer — ready when the deadline has passed.
     /// The u64 is the timer handle from `timer::create()`.
     Timer(u64),
+    /// An IPC semaphore — ready when count > 0.
+    /// The u64 is the semaphore handle from `semaphore::create()`.
+    Semaphore(u64),
 }
 
 impl WaitSource {
@@ -97,7 +100,8 @@ impl WaitSource {
             | Self::PipeWrite(h)
             | Self::EventFd(h)
             | Self::ProcessExit(h)
-            | Self::Timer(h) => h,
+            | Self::Timer(h)
+            | Self::Semaphore(h) => h,
         }
     }
 
@@ -111,6 +115,7 @@ impl WaitSource {
             Self::EventFd(h) => (3, h),
             Self::ProcessExit(h) => (4, h),
             Self::Timer(h) => (5, h),
+            Self::Semaphore(h) => (6, h),
         }
     }
 }
@@ -254,6 +259,9 @@ fn poll_source(source: WaitSource) -> bool {
         WaitSource::EventFd(h) => poll_eventfd(h),
         WaitSource::ProcessExit(pid) => poll_process_exit(pid),
         WaitSource::Timer(h) => super::timer::is_expired(h),
+        WaitSource::Semaphore(h) => {
+            super::semaphore::has_value(super::semaphore::SemHandle::from_raw(h))
+        }
     }
 }
 

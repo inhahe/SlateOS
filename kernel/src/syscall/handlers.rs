@@ -1261,6 +1261,7 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
         3 => Some(WaitSource::EventFd(handle)),
         4 => Some(WaitSource::ProcessExit(handle)),
         5 => Some(WaitSource::Timer(handle)),
+        6 => Some(WaitSource::Semaphore(handle)),
         _ => None,
     }
 }
@@ -1334,6 +1335,7 @@ fn encode_event(event: &completion::CompletionEvent) -> CpEventRaw {
         WaitSource::EventFd(h) => (3, h),
         WaitSource::ProcessExit(h) => (4, h),
         WaitSource::Timer(h) => (5, h),
+        WaitSource::Semaphore(h) => (6, h),
     };
     CpEventRaw {
         source_type,
@@ -4895,6 +4897,83 @@ pub fn sys_io_ring_destroy(args: &SyscallArgs) -> SyscallResult {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// IPC semaphore syscalls
+// ---------------------------------------------------------------------------
+
+/// `SYS_SEM_CREATE` — create a new IPC semaphore.
+///
+/// `arg0`: initial count.
+/// `arg1`: maximum count (0 = default max).
+///
+/// Returns: semaphore handle.
+pub fn sys_sem_create(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::semaphore;
+
+    let initial = args.arg0;
+    let max_count = args.arg1;
+
+    let handle = semaphore::create(initial, max_count);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(handle.raw() as i64)
+}
+
+/// `SYS_SEM_SIGNAL` — signal (release) a semaphore.
+///
+/// `arg0`: semaphore handle.
+/// `arg1`: count to add.
+pub fn sys_sem_signal(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::semaphore::{self, SemHandle};
+
+    let handle = SemHandle::from_raw(args.arg0);
+    let count = args.arg1;
+
+    match semaphore::signal(handle, count) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SEM_WAIT` — wait (acquire) a semaphore (blocking).
+///
+/// `arg0`: semaphore handle.
+pub fn sys_sem_wait(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::semaphore::{self, SemHandle};
+
+    let handle = SemHandle::from_raw(args.arg0);
+
+    match semaphore::wait(handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SEM_TRY_WAIT` — try-wait (non-blocking acquire).
+///
+/// `arg0`: semaphore handle.
+pub fn sys_sem_try_wait(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::semaphore::{self, SemHandle};
+
+    let handle = SemHandle::from_raw(args.arg0);
+
+    match semaphore::try_wait(handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SEM_CLOSE` — close (destroy) a semaphore.
+///
+/// `arg0`: semaphore handle.
+pub fn sys_sem_close(args: &SyscallArgs) -> SyscallResult {
+    use crate::ipc::semaphore::{self, SemHandle};
+
+    let handle = SemHandle::from_raw(args.arg0);
+    semaphore::close(handle);
+    SyscallResult::ok(0)
 }
 
 /// `SYS_DNS_RESOLVE` — resolve a hostname to an IPv4 address.

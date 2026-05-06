@@ -66,12 +66,9 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   on_thread_exit() zombie transition.  set_exit_code(pid, args.arg0)
   called via owner_process() lookup.
 
-- kernel-ipc: Fix mmap partial failure recovery (handlers.rs:500, 548).
-  If mmap region partially maps then alloc_frame fails, already-mapped
-  frames leak.  FIX AVAILABLE: replace the manual alloc-map loop with
-  `mm::page_table::map_committed_range(pml4_phys, base_virt, num_frames, flags)`
-  which does alloc+zero+map atomically with full rollback on partial failure.
-  For MMIO path, use a similar pattern with `unmap_committed_range()` for cleanup.
+- (DONE) kernel-ipc: mmap partial failure recovery — committed path now
+  uses map_committed_range() with full rollback.  MMIO path also has
+  proper unmap rollback for already-mapped device frames.
 
 - (DONE) kernel-ipc: SYS_PROCESS_ID already returns owner process PID
   via thread::owner_process(task_id).  Verified correct.

@@ -23,6 +23,7 @@ pub mod eventfd;
 pub mod futex;
 pub mod io_ring;
 pub mod pipe;
+pub mod semaphore;
 pub mod shm;
 pub mod stats;
 pub mod timer;

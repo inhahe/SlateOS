@@ -620,6 +620,53 @@ pub const SYS_IO_RING_ENTER: u64 = 261;
 pub const SYS_IO_RING_DESTROY: u64 = 262;
 
 // ---------------------------------------------------------------------------
+// IPC semaphore syscalls (270–275)
+// ---------------------------------------------------------------------------
+
+/// Create a new IPC semaphore.
+///
+/// `arg0`: initial count (0 = empty).
+/// `arg1`: maximum count (0 = use default max).
+///
+/// Returns: semaphore handle (> 0), or negative error.
+pub const SYS_SEM_CREATE: u64 = 270;
+
+/// Signal (release) a semaphore — increment count.
+///
+/// `arg0`: semaphore handle.
+/// `arg1`: count to add (typically 1).
+///
+/// Wakes blocked waiters (up to `count`).
+///
+/// Returns: 0 on success, or negative error.
+pub const SYS_SEM_SIGNAL: u64 = 271;
+
+/// Wait (acquire) a semaphore — decrement by 1.
+///
+/// `arg0`: semaphore handle.
+///
+/// Blocks if count is 0 until a signal occurs.
+///
+/// Returns: 0 on success, or negative error.
+pub const SYS_SEM_WAIT: u64 = 272;
+
+/// Try-wait (non-blocking acquire) — decrement if count > 0.
+///
+/// `arg0`: semaphore handle.
+///
+/// Returns: 0 on success, or negative error (WouldBlock if count=0).
+pub const SYS_SEM_TRY_WAIT: u64 = 273;
+
+/// Close (destroy) a semaphore.
+///
+/// `arg0`: semaphore handle.
+///
+/// Wakes all blocked waiters with ChannelClosed.
+///
+/// Returns: 0 on success.
+pub const SYS_SEM_CLOSE: u64 = 274;
+
+// ---------------------------------------------------------------------------
 // Security syscalls (400–499)
 // ---------------------------------------------------------------------------
 

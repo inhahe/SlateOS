@@ -187,7 +187,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Eventfd-like lightweight wake-up counters (kernel-managed integer, wait/wake)
 - [x] IOCP-like completion port / unified wait:
   - [x] Register/unregister waitable objects with arbitrary user-data int
-  - [-] Wait on: I/O completion, timers, process exit, eventfd counters, semaphores, channel messages (channels, pipes, eventfds, process exit done; timers/semaphores/IO TODO)
+  - [-] Wait on: I/O completion, timers, process exit, eventfd counters, semaphores, channel messages (channels, pipes, eventfds, process exit, timers done; semaphores/IO TODO)
 - [x] io_uring-style submission queue (optional async path for batch I/O)
   - [x] Shared-memory SQ/CQ ring buffers with atomic head/tail pointers
   - [x] 8 opcodes: NOP, console write, channel send/recv, pipe read/write, FS read/write

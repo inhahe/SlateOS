@@ -58,6 +58,8 @@ pub enum KernelError {
     ChannelFull = -301,
     /// The message exceeds the maximum allowed size.
     MessageTooLarge = -302,
+    /// A counter or resource count would overflow its maximum.
+    Overflow = -303,
 
     // --- Capability (400 - 499) ---
     /// The caller lacks the required capability for this operation.
@@ -120,6 +122,7 @@ impl KernelError {
             Self::ChannelClosed => "channel closed",
             Self::ChannelFull => "channel buffer full",
             Self::MessageTooLarge => "message too large",
+            Self::Overflow => "counter overflow",
             Self::PermissionDenied => "permission denied",
             Self::InvalidCapability => "invalid capability",
             Self::NotFound => "not found",

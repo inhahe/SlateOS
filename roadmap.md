@@ -291,7 +291,15 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
     - [x] try_reap returns ExitInfo (exit_code + optional CrashInfo)
     - [x] SYS_PROCESS_CRASH_INFO (516) syscall for crash diagnostics
     - [x] Init service manager already has auto-restart with exponential backoff
-- [ ] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
+- [-] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
+  - [x] Detect Intel VT-d via ACPI DMAR table (parse DRHD entries)
+  - [x] Detect AMD-Vi via ACPI IVRS table (basic presence)
+  - [x] Report IOMMU availability, vendor, and hardware unit count
+  - [x] Log recommendation if IOMMU not detected
+  - [x] Kshell `iommu` command for status display
+  - [x] Self-test for API consistency
+  - [ ] IOMMU page table setup (DMA remapping)
+  - [ ] Per-device DMA sandboxing for driver isolation
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing
   - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, interrupt-driven completion with polling fallback)
@@ -552,6 +560,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TAR module (fs::tar): extracted inline kshell USTAR code into proper module with public API (parse/entry_data/build_header/create); files/directories/symlinks with metadata (uid/gid/mtime/mode); USTAR prefix support for long paths; checksum validation; 6 self-tests (file round-trip, multi-entry dir+file+symlink, empty archive, checksum validation, magic validation, metadata preservation); kshell tar commands and fat.rs test refactored to use module (QEMU boot-verified)
   - [x] LZ4 compression/decompression (fs::lz4): standard LZ4 block format with overlapping match support, LZ4 frame format (magic, descriptor, data blocks, xxHash-32 content checksums); compress_block/decompress_block for raw blocks, compress/decompress for framed files; `lz4`/`unlz4`/`lz4cat` commands; tar `--lz4` flag and .tar.lz4 auto-detection; `file` magic detection; 9 self-tests (QEMU boot-verified)
   - [x] RAR5 archive support (fs::rar): RAR5 signature detection, variable-length integer (vint) encoding, archive/file/end block parsing, Store-mode extraction with CRC-32 verification; `unrar` command with list (-l) and extract modes, automatic directory creation; `file` magic detection (RAR5 vs RAR4); 6 self-tests: parse, stored extraction, vint encoding, magic validation, multi-entry dir+file, CRC-32 (QEMU boot-verified)
+  - [x] Filesystem indexer (fs::index): in-memory file index for fast locate-style search; configurable watch dirs, extension filters, exclude dirs, bounded max_entries; full rebuild via VFS walk (lock-free during I/O), incremental add/remove; search by name (case-insensitive substring), extension (BTreeMap secondary index), size range, full path, and combined filters; `locate` command (--update/--stats/--ext/--size/--path), `updatedb` alias; 6 self-tests: extension extraction, init, in-memory CRUD, clear, rebuild, VFS integration (QEMU boot-verified)
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4245,6 +4245,7 @@ fn dispatch(line: &str) {
         "bench" | "benchmark" => cmd_bench(args),
         "diag2" | "report" => cmd_diag_report(args),
         "hypervisor" | "vminfo" => cmd_hypervisor(),
+        "fairness" | "jfi" => cmd_fairness(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
         "rcu" => cmd_rcu(),
@@ -21521,5 +21522,42 @@ fn cmd_hypervisor() {
     } else {
         shell_println!("  Running on:     bare metal (no hypervisor)");
         shell_println!("  Virtualized:    no");
+    }
+}
+
+/// `fairness` — show scheduler fairness (Jain's Fairness Index).
+fn cmd_fairness() {
+    use crate::sched_fairness;
+
+    let r = sched_fairness::measure();
+
+    shell_println!("=== Scheduler Fairness ===");
+    shell_println!("");
+    shell_println!("  Jain's Fairness Index: {}.{:03}", r.jfi_x1000 / 1000, r.jfi_x1000 % 1000);
+    shell_println!("  Tasks measured: {}", r.task_count);
+    shell_println!("  Measurements: {}", sched_fairness::measurement_count());
+    shell_println!("");
+
+    if r.task_count > 0 {
+        shell_println!("  Max ticks: {}  Min ticks: {}  Ratio: {:.1}x",
+            r.max_ticks, r.min_ticks,
+            if r.min_ticks > 0 { r.max_ticks as f64 / r.min_ticks as f64 } else { 0.0 });
+        shell_println!("");
+
+        // Show per-task breakdown (top tasks by ticks).
+        shell_println!("  {:>8}  {:>8}", "TICKS", "NAME");
+        for i in 0..r.task_count.min(16) {
+            let ticks = r.per_task_ticks[i];
+            if ticks == 0 {
+                continue;
+            }
+            let name = core::str::from_utf8(&r.per_task_names[i])
+                .unwrap_or("?")
+                .trim_end_matches('\0');
+            shell_println!("  {:>8}  {}", ticks, name);
+        }
+    } else {
+        shell_println!("  No active tasks with CPU time in this window.");
+        shell_println!("  (Run again after some tasks have executed)");
     }
 }

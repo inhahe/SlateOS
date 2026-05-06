@@ -209,6 +209,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::hypervisor::self_test(); true },
         category: "kernel",
     });
+    suites.push(TestSuite {
+        name: "sched_fairness",
+        description: "Scheduler fairness (Jain's Index)",
+        run: || { crate::sched_fairness::self_test(); true },
+        category: "sched",
+    });
 
     suites
 }

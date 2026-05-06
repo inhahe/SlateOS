@@ -109,6 +109,7 @@ mod rip_sample;
 mod rng;
 mod rtc;
 mod sched;
+mod sched_fairness;
 mod sched_migrate;
 mod sclatency;
 mod security;
@@ -1024,6 +1025,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++y: Hypervisor detection self-test.
     // Verifies CPUID-based VM detection and signature matching.
     hypervisor::self_test();
+
+    // Step 22e⅞++++z: Scheduler fairness measurement self-test.
+    // Computes Jain's Fairness Index for CPU time distribution.
+    sched_fairness::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

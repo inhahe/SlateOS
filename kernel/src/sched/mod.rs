@@ -501,6 +501,25 @@ pub fn sched_stats() -> SchedStats {
     stats
 }
 
+/// Get per-task CPU tick counts for fairness measurement.
+///
+/// Returns an array of (total_ticks, name_bytes, name_len) for up to 64
+/// active tasks.  Used by the fairness module to compute Jain's Index.
+pub fn all_task_ticks() -> alloc::vec::Vec<(u64, [u8; 32], usize)> {
+    let mut result = alloc::vec::Vec::with_capacity(64);
+    if let Some(state) = SCHED.try_lock() {
+        for task in state.tasks.values() {
+            if task.state != task::TaskState::Dead {
+                result.push((task.total_ticks, task.name, task.name_len));
+            }
+            if result.len() >= 64 {
+                break;
+            }
+        }
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Task exit hooks
 // ---------------------------------------------------------------------------

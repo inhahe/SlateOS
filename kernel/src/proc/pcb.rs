@@ -353,7 +353,20 @@ pub fn grant_capability(
         .get_mut(&pid)
         .ok_or(KernelError::NoSuchProcess)?;
 
-    proc.cap_table.insert(resource_type, resource_id, rights)
+    let result = proc.cap_table.insert(resource_type, resource_id, rights);
+
+    // Audit the grant operation.
+    match &result {
+        Ok(handle) => {
+            #[allow(clippy::cast_possible_truncation)]
+            cap::audit::record_grant(pid as u32, handle.raw() as u32, rights.raw() as u8);
+        }
+        Err(_) => {
+            // Grant failed (table full) — not a security event.
+        }
+    }
+
+    result
 }
 
 /// Check a capability for a process.
@@ -367,8 +380,20 @@ pub fn check_capability(
         .get(&pid)
         .ok_or(KernelError::NoSuchProcess)?;
 
-    proc.cap_table.check_rights(handle, required)?;
-    Ok(())
+    match proc.cap_table.check_rights(handle, required) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // Audit the denial.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            cap::audit::record_deny(
+                pid as u32,
+                handle.raw() as u32,
+                required.raw() as u8,
+                (-e.code()) as u32,
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Remove capability entries from a process table (for cap transfer).
@@ -401,6 +426,16 @@ pub fn remove_caps(
     for &raw in handles {
         let h = cap::table::CapHandle::from_raw(raw);
         if let Some(entry) = proc.cap_table.remove(h) {
+            // Audit: capability dropped/transferred from this process.
+            #[allow(clippy::cast_possible_truncation)]
+            cap::audit::record(
+                cap::audit::AuditOp::Drop,
+                pid as u32,
+                raw as u32,
+                entry.rights.raw() as u8,
+                0,
+                0,
+            );
             entries.push(entry);
         }
     }

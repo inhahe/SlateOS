@@ -11,6 +11,16 @@ make sure latest WINE plan and automatic code change plan are in roadmap
 
 ## Known Bugs / Limitations
 
+- Init process null-deref after BOOT_OK: Task 67 ("init") crashes on CPU 1
+  with a kernel-mode write to address 0x8 (null pointer + offset, error=0x2).
+  RIP=0xffffffff8000bb1d, backtrace: 0xffffffff8027ab5d → 0xffffffff8000b1f3.
+  Happens reproducibly after BOOT_OK when the init process runs its first
+  syscalls. Likely in kernel-ipc zone (syscall handler) or kernel-process
+  zone (thread/process management). Does not affect boot-test success since
+  BOOT_OK is printed before the crash. RSP=0xffffc10000083f80 (kstack region).
+  NEEDS: Disassemble RIP to find faulting instruction; likely a PCB or task
+  struct field access on a NULL pointer. Probably a scheduler race on SMP.
+
 - (FIXED) Init task BTreeMap corruption on SMP: Was a use-after-free via
   raw pointers extracted from the task BTreeMap during context switch.
   After dropping the SCHED lock, concurrent BTreeMap operations on other

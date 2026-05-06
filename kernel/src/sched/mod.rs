@@ -2573,7 +2573,7 @@ pub fn check_all_canaries() -> CanaryScanResult {
         // SAFETY: stack_bottom is a valid kernel virtual address set during
         // task creation.  The canary is a u64 at that address.
         let canary = unsafe { core::ptr::read_volatile(bottom as *const u64) };
-        if canary == task::STACK_CANARY {
+        if canary == task::stack_canary() {
             result.ok += 1;
         } else {
             result.corrupted.push((id, task_item.name, task_item.name_len));
@@ -3360,7 +3360,7 @@ fn test_stack_canary() -> KernelResult<()> {
                 let canary = unsafe {
                     core::ptr::read_volatile(t.stack_bottom as *const u64)
                 };
-                if canary != task::STACK_CANARY {
+                if canary != task::stack_canary() {
                     serial_println!(
                         "[sched]   FAIL: stack canary corrupted for task {}",
                         id

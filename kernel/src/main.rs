@@ -538,6 +538,9 @@ extern "C" fn kmain() -> ! {
     // Seeds ChaCha20 from RDRAND/RDSEED (if available), HPET counter,
     // and TSC jitter.  Must be after HPET init for timer-based entropy.
     rng::init();
+    // Randomize the stack canary using the now-initialized CSPRNG.
+    // Must be after rng::init() and before any task creation.
+    sched::task::init_canary();
 
     console::boot_step_update(console::BootStatus::Ok, "Hardware tables (ACPI/HPET)");
 

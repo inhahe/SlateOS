@@ -176,8 +176,43 @@ const TASK_STACK_FRAMES: usize = TASK_STACK_SIZE / FRAME_SIZE;
 /// task has overflowed its stack and we panic immediately instead of
 /// silently corrupting adjacent memory.
 ///
-/// Based on Linux's `CONFIG_SCHED_STACK_END_CHECK` mechanism.
-pub const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
+/// The canary is randomized at boot via the CSPRNG.  An attacker cannot
+/// predict the value from the source code alone — they would need to
+/// read kernel memory (which SMEP/SMAP/KASLR prevent).
+///
+/// Based on Linux's `CONFIG_SCHED_STACK_END_CHECK` mechanism, enhanced
+/// with per-boot randomization (like `__stack_chk_guard` in GCC/Clang).
+///
+/// Initialized by [`init_canary()`]; falls back to `0xDEAD_BEEF_CAFE_BABE`
+/// if called before RNG is ready.
+static STACK_CANARY_VALUE: AtomicU64 = AtomicU64::new(0xDEAD_BEEF_CAFE_BABE);
+
+/// Get the current stack canary value.
+///
+/// After [`init_canary()`], this returns a random 64-bit value unique to
+/// this boot.  Before init, returns the fallback constant.
+#[inline]
+pub fn stack_canary() -> u64 {
+    STACK_CANARY_VALUE.load(Ordering::Relaxed)
+}
+
+/// Randomize the stack canary using the kernel CSPRNG.
+///
+/// Called once during early boot, after `rng::init()`.  After this,
+/// `stack_canary()` returns an unpredictable per-boot value.
+pub fn init_canary() {
+    let random = crate::rng::next_u64();
+    // Ensure the canary is never zero (trivial to guess) or the sentinel
+    // (which would confuse watermark tracking).
+    let canary = if random == 0 || random == STACK_SENTINEL {
+        random ^ 0x5A5A_5A5A_5A5A_5A5A
+    } else {
+        random
+    };
+    STACK_CANARY_VALUE.store(canary, Ordering::Release);
+    crate::serial_println!("[sched] Stack canary randomized (per-boot CSPRNG)");
+}
+
 
 /// Sentinel pattern used to paint stack memory for watermark tracking.
 ///
@@ -748,7 +783,7 @@ impl Task {
         // SAFETY: stack_bottom is a valid, freshly-allocated address
         // (either HHDM or kstack-mapped).
         unsafe {
-            ptr::write_volatile(stack_bottom as *mut u64, STACK_CANARY);
+            ptr::write_volatile(stack_bottom as *mut u64, stack_canary());
         }
 
         // Paint the stack with a sentinel pattern for watermark tracking.
@@ -933,7 +968,7 @@ impl Task {
         let canary = unsafe {
             ptr::read_volatile(self.stack_bottom as *const u64)
         };
-        if canary != STACK_CANARY {
+        if canary != stack_canary() {
             // Stack overflow detected.  Print as much info as possible
             // before halting — the stack is corrupted so we might crash
             // trying to print, but it's better than silent corruption.
@@ -943,7 +978,7 @@ impl Task {
             );
             serial_println!(
                 "  Expected: {:#018x}, Found: {:#018x}",
-                STACK_CANARY, canary
+                stack_canary(), canary
             );
             serial_println!(
                 "  stack_bottom={:#x}, stack_top={:#x}",

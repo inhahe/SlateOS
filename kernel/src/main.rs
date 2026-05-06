@@ -116,6 +116,7 @@ mod sclatency;
 mod security;
 mod selftest;
 mod serial;
+mod smep_smap;
 mod smp;
 mod softirq;
 mod sync;
@@ -212,6 +213,9 @@ extern "C" fn kmain() -> ! {
     // Detect Intel CET (Control-flow Enforcement Technology) support.
     // On hardware with CET, this enables shadow stacks and IBT for kernel protection.
     cet::detect();
+    // Enable SMEP/SMAP — hardware protection against kernel accidentally
+    // accessing or executing user-space memory.  Critical for security.
+    smep_smap::init();
     // Cache topology detection uses only CPUID (no heap needed), but
     // logging uses alloc::format, so we detect now and log later.
     cpu::detect_cache_topology();
@@ -1037,6 +1041,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞+++++a: Intel CET self-test.
     // Verifies CET detection, error code parsing, and CR4 state.
     cet::self_test();
+
+    // Step 22e⅞+++++b: SMEP/SMAP self-test.
+    // Verifies hardware execution/access prevention is enabled.
+    smep_smap::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

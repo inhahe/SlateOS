@@ -221,6 +221,12 @@ fn all_suites() -> Vec<TestSuite> {
         run: || { crate::cet::self_test(); true },
         category: "security",
     });
+    suites.push(TestSuite {
+        name: "smep_smap",
+        description: "SMEP/SMAP (user page execution/access prevention)",
+        run: || { crate::smep_smap::self_test(); true },
+        category: "security",
+    });
 
     suites
 }

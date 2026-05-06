@@ -3102,7 +3102,7 @@ const COMMANDS: &[&str] = &[
     "uname", "unalias", "uniq", "unmount", "unset", "unzip", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
-    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi",
+    "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
     "ktimer", "ktrace", "lockdep", "rng", "supervisor", "sv", "timers", "trace", "xattr", "xxd", "zip",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4246,6 +4246,7 @@ fn dispatch(line: &str) {
         "diag2" | "report" => cmd_diag_report(args),
         "hypervisor" | "vminfo" => cmd_hypervisor(),
         "cet" | "cfi" => cmd_cet(),
+        "smap" | "smep" => cmd_smep_smap(),
         "fairness" | "jfi" => cmd_fairness(),
         "mempool" | "pools" => cmd_mempool(),
         "numa" => cmd_numa(),
@@ -21523,6 +21524,36 @@ fn cmd_hypervisor() {
     } else {
         shell_println!("  Running on:     bare metal (no hypervisor)");
         shell_println!("  Virtualized:    no");
+    }
+}
+
+/// `smap`/`smep` — show SMEP/SMAP (user page protection) status.
+fn cmd_smep_smap() {
+    use crate::smep_smap;
+
+    let s = smep_smap::status();
+
+    shell_println!("=== SMEP/SMAP (User Page Protection) ===");
+    shell_println!("");
+    shell_println!("  SMEP (Supervisor Mode Execution Prevention):");
+    shell_println!("    Hardware: {}", if s.hw_smep { "supported" } else { "not supported" });
+    shell_println!("    Status:   {}", if s.smep_active { "ACTIVE" } else { "inactive" });
+    shell_println!("");
+    shell_println!("  SMAP (Supervisor Mode Access Prevention):");
+    shell_println!("    Hardware: {}", if s.hw_smap { "supported" } else { "not supported" });
+    shell_println!("    Status:   {}", if s.smap_active { "ACTIVE" } else { "inactive" });
+    shell_println!("");
+    shell_println!("  CR4: {:#x}", s.cr4);
+    shell_println!("  User-access windows (STAC/CLAC): {}", s.user_access_count);
+
+    if s.smep_active && s.smap_active {
+        shell_println!("");
+        shell_println!("  Both protections ACTIVE — kernel cannot access/execute");
+        shell_println!("  user pages without explicit STAC/CLAC window.");
+    } else if !s.hw_smep && !s.hw_smap {
+        shell_println!("");
+        shell_println!("  Note: This CPU does not support SMEP/SMAP.");
+        shell_println!("  Requires Intel Haswell+ or AMD Zen+.");
     }
 }
 

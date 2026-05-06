@@ -52,6 +52,7 @@ pub mod memfs;
 pub mod mime;
 pub mod notify;
 pub mod overlay;
+pub mod pipe;
 pub mod procfs;
 pub mod quota;
 #[allow(dead_code)]

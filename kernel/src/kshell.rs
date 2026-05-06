@@ -3101,6 +3101,7 @@ const COMMANDS: &[&str] = &[
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "ulimit",
     "overlay",
+    "mkfifo", "lspipe", "pipes",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4319,6 +4320,8 @@ fn dispatch(line: &str) {
         "intercept" => cmd_intercept(args),
         "ulimit" => cmd_ulimit(args),
         "overlay" => cmd_overlay(args),
+        "mkfifo" => cmd_mkfifo(args),
+        "lspipe" | "pipes" => cmd_lspipe(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -9856,6 +9859,63 @@ fn cmd_overlay(args: &str) {
     }
 }
 
+/// `mkfifo PATH` — create a named pipe.
+///
+/// Usage:
+///   mkfifo /tmp/mypipe            - create with default 64K buffer
+///   mkfifo -s 8192 /tmp/mypipe    - create with 8K buffer
+fn cmd_mkfifo(args: &str) {
+    use crate::fs::pipe;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        shell_println!("Usage: mkfifo [-s SIZE] PATH");
+        return;
+    }
+
+    let (capacity, path) = if parts[0] == "-s" {
+        if parts.len() < 3 {
+            shell_println!("Usage: mkfifo -s SIZE PATH");
+            return;
+        }
+        if let Some(cap) = parse_size_suffix(parts[1]) {
+            (cap as usize, parts[2])
+        } else {
+            shell_println!("Invalid size: {}", parts[1]);
+            return;
+        }
+    } else {
+        (pipe::DEFAULT_CAPACITY, parts[0])
+    };
+
+    let resolved = resolve_path(path);
+    match pipe::mkfifo_with_capacity(&resolved, capacity) {
+        Ok(id) => shell_println!("Named pipe created: {} (id={}, capacity={})", resolved, id, capacity),
+        Err(e) => shell_println!("Error: {:?}", e),
+    }
+}
+
+/// `lspipe` / `pipes` — list named pipes.
+fn cmd_lspipe(_args: &str) {
+    use crate::fs::pipe;
+
+    let pipes = pipe::list();
+    if pipes.is_empty() {
+        shell_println!("No active named pipes.");
+        return;
+    }
+
+    shell_println!("{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}",
+        "Path", "Capacity", "Buffered", "R", "W", "BytesIn", "BytesOut");
+    shell_println!("{}", "-".repeat(82));
+    for p in &pipes {
+        shell_println!("{:<30} {:>8} {:>8} {:>4} {:>4} {:>12} {:>12}",
+            p.path, p.capacity, p.buffered, p.readers, p.writers,
+            p.bytes_written, p.bytes_read);
+    }
+    shell_println!("({} pipes)", pipes.len());
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -14991,7 +15051,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

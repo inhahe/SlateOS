@@ -53,6 +53,10 @@ use super::number::{
     SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
     SYS_PORT_READ, SYS_PORT_WRITE,
+    SYS_DMA_ALLOC, SYS_DMA_FREE,
+    SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY,
+    SYS_DMA_MAP, SYS_DMA_UNMAP,
+    SYS_DMA_ATTACH, SYS_DMA_DETACH,
     SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE,
     SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
     SYS_SYSCTL_GET, SYS_SYSCTL_SET,
@@ -204,6 +208,16 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_IRQ_RELEASE as usize] = Some(handlers::sys_irq_release);
     handlers[SYS_PORT_READ as usize] = Some(handlers::sys_port_read);
     handlers[SYS_PORT_WRITE as usize] = Some(handlers::sys_port_write);
+
+    // DMA / IOMMU (42–49).
+    handlers[SYS_DMA_ALLOC as usize] = Some(handlers::sys_dma_alloc);
+    handlers[SYS_DMA_FREE as usize] = Some(handlers::sys_dma_free);
+    handlers[SYS_DMA_DOMAIN_CREATE as usize] = Some(handlers::sys_dma_domain_create);
+    handlers[SYS_DMA_DOMAIN_DESTROY as usize] = Some(handlers::sys_dma_domain_destroy);
+    handlers[SYS_DMA_MAP as usize] = Some(handlers::sys_dma_map);
+    handlers[SYS_DMA_UNMAP as usize] = Some(handlers::sys_dma_unmap);
+    handlers[SYS_DMA_ATTACH as usize] = Some(handlers::sys_dma_attach);
+    handlers[SYS_DMA_DETACH as usize] = Some(handlers::sys_dma_detach);
 
     // Scheduler configuration (50–59).
     handlers[SYS_SCHED_SET_TIMESLICE as usize] = Some(handlers::sys_sched_set_timeslice);

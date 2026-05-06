@@ -157,6 +157,97 @@ pub const SYS_PORT_READ: u64 = 40;
 /// hardware resources.
 pub const SYS_PORT_WRITE: u64 = 41;
 
+/// Allocate a DMA buffer and map it into the calling process.
+///
+/// `arg0`: size in bytes (minimum; actual allocation may be larger).
+/// `arg1`: constraint (0 = none/64-bit, 1 = below 4 GiB, 2 = below 16 MiB).
+///
+/// Returns (packed in value + value2):
+/// - `value`: user-space virtual address of the buffer.
+/// - `value2`: physical address (for programming device DMA descriptors).
+///
+/// The buffer is zeroed and mapped with write-through caching
+/// suitable for DMA.  The caller must call `SYS_DMA_FREE` when done.
+///
+/// Requires: PortIo or DeviceIrq capability (driver privilege).
+pub const SYS_DMA_ALLOC: u64 = 42;
+
+/// Free a DMA buffer previously allocated with `SYS_DMA_ALLOC`.
+///
+/// `arg0`: user-space virtual address of the buffer.
+///
+/// Unmaps the buffer from the process and frees the physical memory.
+/// The device must not be actively DMA-ing to this buffer.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_DMA_FREE: u64 = 43;
+
+/// Create an IOMMU DMA remapping domain.
+///
+/// Returns: domain ID on success (> 0), negative error.
+///
+/// A domain is an isolated DMA address space.  Devices attached to a
+/// domain can only DMA to physical pages explicitly mapped into that
+/// domain.  Unmapped addresses cause a DMA fault.
+///
+/// Requires: PortIo capability (driver privilege).
+pub const SYS_DMA_DOMAIN_CREATE: u64 = 44;
+
+/// Destroy an IOMMU DMA remapping domain.
+///
+/// `arg0`: domain ID.
+///
+/// All devices must be detached before destroying a domain.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_DMA_DOMAIN_DESTROY: u64 = 45;
+
+/// Map a physical address range into an IOMMU domain.
+///
+/// `arg0`: domain ID.
+/// `arg1`: bus address (device-visible address, page-aligned).
+/// `arg2`: physical address (host physical, page-aligned).
+/// `arg3`: size in bytes (rounded up to 4 KiB pages).
+/// `arg4`: permissions (1 = read, 2 = write, 3 = read+write).
+///
+/// After this call, devices in the domain can DMA to `bus_addr`
+/// and it will be translated to `phys_addr`.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_DMA_MAP: u64 = 46;
+
+/// Unmap a bus address range from an IOMMU domain.
+///
+/// `arg0`: domain ID.
+/// `arg1`: bus address (start of range to unmap).
+/// `arg2`: size in bytes.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_DMA_UNMAP: u64 = 47;
+
+/// Attach a PCI device to an IOMMU domain.
+///
+/// `arg0`: domain ID.
+/// `arg1`: PCI bus number (0–255).
+/// `arg2`: PCI device number (0–31).
+/// `arg3`: PCI function number (0–7).
+///
+/// After attachment, all DMA from this device goes through the
+/// domain's page table.  Unauthorized DMA causes a fault.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_DMA_ATTACH: u64 = 48;
+
+/// Detach a PCI device from an IOMMU domain.
+///
+/// `arg0`: domain ID.
+/// `arg1`: PCI bus number.
+/// `arg2`: PCI device number.
+/// `arg3`: PCI function number.
+///
+/// Returns: 0 on success, negative error.
+pub const SYS_DMA_DETACH: u64 = 49;
+
 /// Create a kernel timer.
 ///
 /// `arg0`: duration in nanoseconds until first expiry.

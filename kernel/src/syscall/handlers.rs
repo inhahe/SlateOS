@@ -58,6 +58,13 @@ fn caller_pid() -> Option<u64> {
     crate::proc::thread::owner_process(task_id)
 }
 
+/// Get the calling process's PML4 physical address.
+fn caller_pml4() -> Option<u64> {
+    let pid = caller_pid()?;
+    let pml4 = crate::proc::pcb::get_pml4(pid)?;
+    if pml4 != 0 { Some(pml4) } else { None }
+}
+
 /// Check that the calling process holds a capability for a specific
 /// resource (type + ID + rights).
 ///
@@ -398,6 +405,185 @@ pub fn sys_port_write(args: &SyscallArgs) -> SyscallResult {
     }
 
     SyscallResult::ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// DMA / IOMMU syscalls (42–49)
+// ---------------------------------------------------------------------------
+
+/// `SYS_DMA_ALLOC` — allocate a DMA buffer mapped into user space.
+///
+/// Returns (value, value2) = (user_virt, phys_addr).
+pub fn sys_dma_alloc(args: &SyscallArgs) -> SyscallResult {
+    let size = args.arg0 as usize;
+    let constraint_raw = args.arg1;
+
+    if size == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Capability check: require PortIo capability (driver privilege).
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let constraint = match constraint_raw {
+        0 => crate::mm::dma::DmaConstraint::None,
+        1 => crate::mm::dma::DmaConstraint::Below4G,
+        2 => crate::mm::dma::DmaConstraint::Below16M,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // Get the calling process's PML4.
+    let pml4 = match caller_pml4() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::mm::dma::alloc_for_user(pml4, size, constraint) {
+        Ok((user_virt, phys_addr, _actual_size)) => {
+            SyscallResult::ok2(user_virt as i64, phys_addr as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_DMA_FREE` — free a DMA buffer.
+pub fn sys_dma_free(args: &SyscallArgs) -> SyscallResult {
+    let user_virt = args.arg0;
+
+    let pml4 = match caller_pml4() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::mm::dma::free_for_user(pml4, user_virt) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_DMA_DOMAIN_CREATE` — create an IOMMU domain.
+pub fn sys_dma_domain_create(_args: &SyscallArgs) -> SyscallResult {
+    // Capability check.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::iommu_remap::create_domain() {
+        Ok(id) => SyscallResult::ok(id as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_DMA_DOMAIN_DESTROY` — destroy an IOMMU domain.
+pub fn sys_dma_domain_destroy(args: &SyscallArgs) -> SyscallResult {
+    let domain_id = args.arg0 as u16;
+
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::iommu_remap::destroy_domain(domain_id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_DMA_MAP` — map physical address into IOMMU domain.
+pub fn sys_dma_map(args: &SyscallArgs) -> SyscallResult {
+    let domain_id = args.arg0 as u16;
+    let bus_addr = args.arg1;
+    let phys_addr = args.arg2;
+    let size = args.arg3 as usize;
+    let perms_raw = args.arg4;
+
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let perms = match perms_raw {
+        1 => crate::iommu_remap::DmaPerms::READ,
+        2 => crate::iommu_remap::DmaPerms::WRITE,
+        3 => crate::iommu_remap::DmaPerms::READ_WRITE,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    match crate::iommu_remap::map_dma(domain_id, bus_addr, phys_addr, size, perms) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_DMA_UNMAP` — unmap bus address range from IOMMU domain.
+pub fn sys_dma_unmap(args: &SyscallArgs) -> SyscallResult {
+    let domain_id = args.arg0 as u16;
+    let bus_addr = args.arg1;
+    let size = args.arg2 as usize;
+
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::iommu_remap::unmap_dma(domain_id, bus_addr, size) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_DMA_ATTACH` — attach a PCI device to an IOMMU domain.
+pub fn sys_dma_attach(args: &SyscallArgs) -> SyscallResult {
+    let domain_id = args.arg0 as u16;
+    let bus = args.arg1 as u8;
+    let device = args.arg2 as u8;
+    let function = args.arg3 as u8;
+
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::iommu_remap::attach_device(domain_id, bus, device, function) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_DMA_DETACH` — detach a PCI device from an IOMMU domain.
+pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
+    let domain_id = args.arg0 as u16;
+    let bus = args.arg1 as u8;
+    let device = args.arg2 as u8;
+    let function = args.arg3 as u8;
+
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::PortIo,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::iommu_remap::detach_device(domain_id, bus, device, function) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_MMAP` — map memory into the calling process's address space.

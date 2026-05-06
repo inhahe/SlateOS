@@ -3094,7 +3094,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "printf", "profile", "ps", "pwd", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
-    "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "sha256", "sleep", "sockact", "sort", "source",
+    "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
@@ -4399,6 +4399,7 @@ fn dispatch(line: &str) {
         "capgroups" | "cg" => cmd_cap_groups(args),
         "captags" | "ct" => cmd_cap_tags(args),
         "sockact" | "sa" => cmd_socket_activation(args),
+        "slimit" | "sl" => cmd_service_limits(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
         "source" | "." => cmd_source(args),
@@ -10224,6 +10225,136 @@ fn cmd_socket_activation(args: &str) {
     }
 }
 
+/// `slimit` — manage per-service resource limits.
+///
+/// Usage:
+///   slimit                                  — list all service limits
+///   slimit show NAME                        — show limits for a service
+///   slimit set NAME rss=N cpu=N thr=N hdl=N — set custom limits
+///   slimit profile NAME daemon|network|system|sandbox — apply preset
+///   slimit remove NAME                      — remove limits for a service
+fn cmd_service_limits(args: &str) {
+    use crate::ipc::service_limits;
+    use crate::mm::rlimits::ResourceLimits;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let all = service_limits::list_all();
+            if all.is_empty() {
+                crate::console_println!("No service limits configured.");
+                return;
+            }
+            crate::console_println!("=== Service Resource Limits ({}) ===", all.len());
+            crate::console_println!("{:<25} {:<12} {:<8} {:<10} {}",
+                "Service", "RSS", "CPU", "Threads", "Handles");
+            for (name, limits) in &all {
+                let rss = if limits.max_rss_frames == 0 {
+                    alloc::string::String::from("unlimited")
+                } else {
+                    alloc::format!("{} fr", limits.max_rss_frames)
+                };
+                let cpu = if limits.cpu_quota_pct == 0 {
+                    alloc::string::String::from("unlimited")
+                } else {
+                    alloc::format!("{}%", limits.cpu_quota_pct)
+                };
+                let thr = if limits.max_threads == 0 {
+                    alloc::string::String::from("unlimited")
+                } else {
+                    alloc::format!("{}", limits.max_threads)
+                };
+                let hdl = if limits.max_handles == 0 {
+                    alloc::string::String::from("unlimited")
+                } else {
+                    alloc::format!("{}", limits.max_handles)
+                };
+                crate::console_println!("{:<25} {:<12} {:<8} {:<10} {}",
+                    name, rss, cpu, thr, hdl);
+            }
+        }
+        "show" => {
+            if let Some(name) = parts.get(1) {
+                match service_limits::get_service_limits(name) {
+                    Some(limits) => {
+                        crate::console_println!("Service: {}", name);
+                        crate::console_println!("  {}", limits);
+                    }
+                    None => crate::console_println!("No limits configured for '{}'", name),
+                }
+            } else {
+                crate::console_println!("Usage: slimit show <service_name>");
+            }
+        }
+        "set" => {
+            // slimit set NAME rss=N cpu=N thr=N hdl=N
+            if parts.len() < 3 {
+                crate::console_println!("Usage: slimit set <name> rss=N cpu=N thr=N hdl=N");
+                return;
+            }
+            let name = parts[1];
+            let mut limits = service_limits::get_service_limits(name)
+                .unwrap_or(ResourceLimits::unlimited());
+
+            for &param in &parts[2..] {
+                if let Some(val) = param.strip_prefix("rss=") {
+                    limits.max_rss_frames = val.parse().unwrap_or(0);
+                } else if let Some(val) = param.strip_prefix("cpu=") {
+                    limits.cpu_quota_pct = val.parse().unwrap_or(0);
+                } else if let Some(val) = param.strip_prefix("thr=") {
+                    limits.max_threads = val.parse().unwrap_or(0);
+                } else if let Some(val) = param.strip_prefix("hdl=") {
+                    limits.max_handles = val.parse().unwrap_or(0);
+                } else {
+                    crate::console_println!("Unknown parameter: {} (use rss=, cpu=, thr=, hdl=)", param);
+                    return;
+                }
+            }
+
+            match service_limits::set_service_limits(name, limits) {
+                Ok(()) => crate::console_println!("Limits set for '{}': {}", name, limits),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "profile" => {
+            if parts.len() >= 3 {
+                let name = parts[1];
+                let profile = match parts[2] {
+                    "daemon" | "d" => service_limits::ServiceProfile::Daemon,
+                    "network" | "net" | "n" => service_limits::ServiceProfile::NetworkService,
+                    "system" | "sys" | "s" => service_limits::ServiceProfile::SystemService,
+                    "sandbox" | "sand" | "x" => service_limits::ServiceProfile::Sandboxed,
+                    _ => {
+                        crate::console_println!("Unknown profile: {} (daemon|network|system|sandbox)", parts[2]);
+                        return;
+                    }
+                };
+                match service_limits::apply_profile(name, profile) {
+                    Ok(()) => crate::console_println!("Profile {:?} applied to '{}'", profile, name),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            } else {
+                crate::console_println!("Usage: slimit profile <name> <daemon|network|system|sandbox>");
+            }
+        }
+        "remove" | "rm" | "del" => {
+            if let Some(name) = parts.get(1) {
+                match service_limits::remove_service_limits(name) {
+                    Ok(()) => crate::console_println!("Limits removed for '{}'", name),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            } else {
+                crate::console_println!("Usage: slimit remove <service_name>");
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: slimit [list|show|set|profile|remove]");
+        }
+    }
+}
+
 /// Parse a simple URL: "http://host/path" or just "host/path" or "host".
 /// Returns (host, port, path).
 fn parse_url(url: &str) -> Option<(&str, u16, &str)> {
@@ -12619,7 +12750,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "sockact" | "sa" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "sockact" | "sa" | "slimit" | "sl" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

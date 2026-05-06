@@ -830,12 +830,19 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::zip::self_test() {
         serial_println!("WARNING: ZIP self-test failed: {:?}", e);
     }
+    serial_println!("[debug] about to call tar self-test");
     if let Err(e) = fs::tar::self_test() {
         serial_println!("WARNING: tar self-test failed: {:?}", e);
     }
+    serial_println!("[debug] about to call lz4 self-test");
     if let Err(e) = fs::lz4::self_test() {
         serial_println!("WARNING: LZ4 self-test failed: {:?}", e);
     }
+    serial_println!("[debug] about to call rar self-test");
+    if let Err(e) = fs::rar::self_test() {
+        serial_println!("WARNING: RAR self-test failed: {:?}", e);
+    }
+    serial_println!("[debug] archive self-tests done");
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {
@@ -1347,6 +1354,11 @@ extern "C" fn kmain() -> ! {
     // Service registry self-test (requires scheduler + channels).
     if let Err(e) = ipc::service::self_test() {
         serial_println!("[FATAL] Service registry self-test failed: {:?}", e);
+    }
+
+    // Service limits self-test.
+    if let Err(e) = ipc::service_limits::self_test() {
+        serial_println!("[FATAL] Service limits self-test failed: {:?}", e);
     }
 
     // Namespace self-test (pure in-memory, no dependencies beyond alloc).

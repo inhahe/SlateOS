@@ -603,7 +603,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell `sockact`/`sa` command (list/add/remove/reset)
   - [x] Self-test: register activation, connect triggers spawn, register transfers queue, channel works
 - [x] Automatic crash restart with backoff
-- [ ] Resource limits per service (cgroup-equivalent)
+- [x] Resource limits per service (cgroup-equivalent)
+  - [x] Per-service ResourceLimits configuration registry (64 entries)
+  - [x] set_service_limits/get_service_limits/remove_service_limits API
+  - [x] 4 predefined profiles: Daemon (16M/10%), NetworkService (64M/25%), SystemService (256M/50%), Sandboxed (8M/5%)
+  - [x] apply_profile() for quick configuration with presets
+  - [x] Kshell `slimit`/`sl` command (list/show/set/profile/remove)
+  - [x] Self-test: set/get, update, remove, profiles, list
 - [x] JSON-lines structured logging (text-based, not binary)
 - [x] "Service ready" notification API
 - [x] Startup app list (simple serial list, separate from service manager)

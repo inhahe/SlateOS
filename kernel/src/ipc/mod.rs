@@ -28,6 +28,7 @@ pub mod namespace;
 pub mod pipe;
 pub mod semaphore;
 pub mod service;
+pub mod service_limits;
 pub mod shm;
 pub mod stats;
 pub mod timer;

@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "file", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "integrity", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4307,6 +4307,7 @@ fn dispatch(line: &str) {
         "file" => cmd_file(args),
         "locate" | "updatedb" => cmd_locate(args),
         "dedup" => cmd_dedup(args),
+        "integrity" => cmd_integrity(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4522,6 +4523,7 @@ fn cmd_help() {
     crate::console_println!("  find [D] [-name PAT] [-type f|d|l] [-size +N|-N] [-maxdepth N] [-empty]");
     crate::console_println!("  locate [--update|--stats|--ext E|--size MIN-MAX] PATTERN");
     crate::console_println!("  dedup [--dry-run|--delete|--stats] [--min-size N] [--max-size N] [DIR]");
+    crate::console_println!("  integrity [baseline|verify|stats|clear] [DIR]  File integrity monitoring");
     crate::console_println!("  df [path] Show filesystem space usage");
     crate::console_println!("  sync      Flush all filesystems to disk");
     crate::console_println!("  mount     List all mounted filesystems");
@@ -8464,6 +8466,253 @@ fn cmd_dedup(args: &str) {
         }
     } else if !delete_mode {
         shell_println!("(dry-run: no files deleted. Use --delete to remove duplicates.)");
+    }
+}
+
+/// `integrity [baseline|verify|stats|clear] [DIR|FILE]` — file integrity monitoring.
+///
+/// Manages file integrity baselines and verification:
+///
+/// - `integrity baseline [DIR]` — Compute SHA-256 hashes for all files
+///   under DIR (default: current directory) and store as the baseline.
+/// - `integrity verify [DIR]` — Compare current file hashes against the
+///   baseline. Reports: MODIFIED, MISSING, NEW files.
+/// - `integrity baseline FILE` — Baseline a single file.
+/// - `integrity verify FILE` — Verify a single file against its baseline.
+/// - `integrity stats` — Show baseline statistics.
+/// - `integrity clear` — Clear the baseline.
+/// - `integrity list [PREFIX]` — List baselined files (optionally filtered).
+fn cmd_integrity(args: &str) {
+    use crate::fs::integrity;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    if parts.is_empty() {
+        shell_println!("Usage: integrity <baseline|verify|stats|clear|list> [DIR|FILE]");
+        shell_println!("  baseline [DIR]  — Compute SHA-256 hashes and store as baseline");
+        shell_println!("  verify [DIR]    — Compare current hashes against baseline");
+        shell_println!("  stats           — Show baseline statistics");
+        shell_println!("  clear           — Clear the baseline");
+        shell_println!("  list [PREFIX]   — List baselined file paths");
+        return;
+    }
+
+    let subcommand = parts.first().copied().unwrap_or("");
+    let target = parts.get(1).copied();
+
+    match subcommand {
+        "baseline" | "bl" => {
+            if let Some(path) = target {
+                let resolved = resolve_path(path);
+
+                // Check if it's a file or directory.
+                match crate::fs::Vfs::stat(&resolved) {
+                    Ok(entry) => {
+                        if entry.entry_type == crate::fs::EntryType::File {
+                            // Single file baseline.
+                            match integrity::baseline_file(&resolved) {
+                                Ok(hash) => {
+                                    let hex = crate::fs::cas::hash_to_hex(&hash);
+                                    shell_println!("Baselined: {} ({})", resolved, &hex[..12]);
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        } else if entry.entry_type == crate::fs::EntryType::Directory {
+                            // Directory baseline.
+                            shell_println!("Baselining {}...", resolved);
+                            match integrity::baseline_dir(&resolved) {
+                                Ok(count) => {
+                                    shell_println!("Baselined {} files. Total entries: {}",
+                                        count, integrity::baseline_len());
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        } else {
+                            shell_println!("Error: not a file or directory");
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                // Default: baseline current directory.
+                let cwd = get_cwd();
+                shell_println!("Baselining {}...", cwd);
+                match integrity::baseline_dir(&cwd) {
+                    Ok(count) => {
+                        shell_println!("Baselined {} files. Total entries: {}",
+                            count, integrity::baseline_len());
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+
+        "verify" | "vf" => {
+            if integrity::baseline_len() == 0 {
+                shell_println!("No baseline exists. Run `integrity baseline [DIR]` first.");
+                return;
+            }
+
+            if let Some(path) = target {
+                let resolved = resolve_path(path);
+
+                // Check if it's a file or directory.
+                match crate::fs::Vfs::stat(&resolved) {
+                    Ok(entry) => {
+                        if entry.entry_type == crate::fs::EntryType::File {
+                            // Single file verify.
+                            match integrity::verify_file(&resolved) {
+                                Ok(result) => {
+                                    print_verify_result(&result);
+                                }
+                                Err(crate::error::KernelError::NotFound) => {
+                                    shell_println!("{}: not in baseline", resolved);
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        } else if entry.entry_type == crate::fs::EntryType::Directory {
+                            // Directory verify.
+                            shell_println!("Verifying {}...", resolved);
+                            run_dir_verify(&resolved);
+                        } else {
+                            shell_println!("Error: not a file or directory");
+                        }
+                    }
+                    Err(_) => {
+                        // Path doesn't exist — might still be in baseline as missing.
+                        // Try as directory verify (will detect missing files).
+                        shell_println!("Verifying {}...", resolved);
+                        run_dir_verify(&resolved);
+                    }
+                }
+            } else {
+                // Default: verify current directory.
+                let cwd = get_cwd();
+                shell_println!("Verifying {}...", cwd);
+                run_dir_verify(&cwd);
+            }
+        }
+
+        "stats" | "st" => {
+            let st = integrity::stats();
+            shell_println!("=== Integrity Monitoring Statistics ===");
+            shell_println!("  Baseline entries:    {}", st.baseline_entries);
+            shell_println!("  Max entries:         {}", st.max_entries);
+            shell_println!("  Max file size:       {} bytes", st.max_file_size);
+            shell_println!("  Baseline operations: {}", st.baseline_count);
+            shell_println!("  Verify operations:   {}", st.verify_count);
+            if st.baseline_timestamp > 0 {
+                let secs = st.baseline_timestamp / 1_000_000_000;
+                shell_println!("  Last baseline:       {}s after boot", secs);
+            } else {
+                shell_println!("  Last baseline:       never");
+            }
+        }
+
+        "clear" => {
+            let old_count = integrity::baseline_len();
+            integrity::clear_baseline();
+            shell_println!("Baseline cleared ({} entries removed).", old_count);
+        }
+
+        "list" | "ls" => {
+            let prefix = target.map(|p| resolve_path(p));
+            let max_display = 100;
+
+            let (entries, total) = integrity::list_entries(
+                prefix.as_deref(),
+                max_display,
+            );
+
+            if entries.is_empty() {
+                shell_println!("No entries in baseline{}.",
+                    if prefix.is_some() { " matching prefix" } else { "" });
+            } else {
+                for (path, hash, size) in &entries {
+                    let hex = crate::fs::cas::hash_to_hex(hash);
+                    shell_println!("{}  {:>8}  {}", &hex[..12], size, path);
+                }
+                if entries.len() >= max_display && total > max_display {
+                    shell_println!("... showing first {} of {} entries", max_display, total);
+                } else {
+                    shell_println!("({} entries)", entries.len());
+                }
+            }
+        }
+
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Use: baseline, verify, stats, clear, list", subcommand);
+        }
+    }
+}
+
+/// Print a single verify result with status indicator.
+fn print_verify_result(result: &crate::fs::integrity::VerifyResult) {
+    use crate::fs::integrity::VerifyStatus;
+
+    let status_str = match result.status {
+        VerifyStatus::Ok => "  OK  ",
+        VerifyStatus::Modified => "MODIFY",
+        VerifyStatus::Missing => " MISS ",
+        VerifyStatus::New => " NEW  ",
+        VerifyStatus::Error => "ERROR ",
+    };
+
+    shell_println!("[{}] {}", status_str, result.path);
+
+    if result.status == VerifyStatus::Modified {
+        if let (Some(bl_hash), Some(cur_hash)) = (result.baseline_hash, result.current_hash) {
+            let bl_hex = crate::fs::cas::hash_to_hex(&bl_hash);
+            let cur_hex = crate::fs::cas::hash_to_hex(&cur_hash);
+            shell_println!("    baseline: {}...", &bl_hex[..16]);
+            shell_println!("    current:  {}...", &cur_hex[..16]);
+        }
+        if let (Some(bl_size), Some(cur_size)) = (result.baseline_size, result.current_size) {
+            if bl_size != cur_size {
+                shell_println!("    size: {} -> {} bytes", bl_size, cur_size);
+            }
+        }
+    }
+}
+
+/// Run a directory verify and print the summary.
+fn run_dir_verify(dir: &str) {
+    use crate::fs::integrity;
+
+    let (results, summary) = integrity::verify_dir(dir);
+
+    // Print changes (non-OK results).
+    let max_display = 100;
+    for (i, result) in results.iter().enumerate() {
+        if i >= max_display {
+            shell_println!("... and {} more changes",
+                results.len().saturating_sub(max_display));
+            break;
+        }
+        print_verify_result(result);
+    }
+
+    shell_println!();
+    shell_println!("=== Verification Summary ===");
+    shell_println!("  Total checked: {}", summary.total);
+    shell_println!("  OK:            {}", summary.ok);
+    if summary.modified > 0 {
+        shell_println!("  Modified:      {}", summary.modified);
+    }
+    if summary.missing > 0 {
+        shell_println!("  Missing:       {}", summary.missing);
+    }
+    if summary.new > 0 {
+        shell_println!("  New:           {}", summary.new);
+    }
+    if summary.errors > 0 {
+        shell_println!("  Errors:        {}", summary.errors);
+    }
+
+    if summary.modified == 0 && summary.missing == 0 && summary.errors == 0 {
+        shell_println!("  Status: ALL CLEAR ✓");
+    } else {
+        shell_println!("  Status: CHANGES DETECTED");
     }
 }
 
@@ -13374,7 +13623,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

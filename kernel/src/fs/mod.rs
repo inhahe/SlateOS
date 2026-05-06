@@ -39,6 +39,7 @@ pub mod ext4;
 pub mod fat;
 pub mod handle;
 pub mod index;
+pub mod integrity;
 pub mod iso9660;
 pub mod journal;
 #[allow(dead_code)]

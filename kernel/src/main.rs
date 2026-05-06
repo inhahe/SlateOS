@@ -857,6 +857,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = fs::cas::self_test() {
         serial_println!("WARNING: CAS self-test failed: {:?}", e);
     }
+    if let Err(e) = fs::integrity::self_test() {
+        serial_println!("WARNING: Integrity monitoring self-test failed: {:?}", e);
+    }
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

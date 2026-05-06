@@ -190,7 +190,8 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Wait on: channels, pipes, eventfds, process exit, timers, semaphores, I/O completion (io_ring CQ readiness via WaitSource::IoCompletion)
 - [x] io_uring-style submission queue (optional async path for batch I/O)
   - [x] Shared-memory SQ/CQ ring buffers with atomic head/tail pointers
-  - [x] 8 opcodes: NOP, console write, channel send/recv, pipe read/write, FS read/write
+  - [x] 14 opcodes: NOP, console write, channel send/recv, pipe read/write, FS read/write, file handle read/write/pread/pwrite, eventfd signal, semaphore signal
+  - [x] Completion port integration: io_ring notifies registered CP when CQEs are posted
   - [x] SYS_IO_RING_SETUP (260), SYS_IO_RING_ENTER (261), SYS_IO_RING_DESTROY (262)
   - [x] 3 self-tests: create/destroy, NOP submission, console write batch
 - [x] Futexes (for userspace synchronization without syscall in uncontended case)

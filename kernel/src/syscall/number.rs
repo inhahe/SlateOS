@@ -417,6 +417,18 @@ pub const SYS_CHANNEL_RECV_TIMEOUT: u64 = 205;
 /// Returns: 0 on success, `TimedOut` if deadline expires.
 pub const SYS_CHANNEL_SEND_TIMEOUT: u64 = 208;
 
+/// Send a message (blocking when queue is full).
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message data.
+/// `arg2`: length of message data.
+///
+/// Unlike `SYS_CHANNEL_SEND` which returns `ChannelFull` immediately,
+/// this variant blocks until queue space is available.
+///
+/// Returns: 0 on success.
+pub const SYS_CHANNEL_SEND_BLOCKING: u64 = 209;
+
 /// Send a message with capability transfer.
 ///
 /// `arg0`: channel handle.

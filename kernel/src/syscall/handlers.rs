@@ -947,6 +947,46 @@ pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_CHANNEL_SEND_BLOCKING` — send, blocking when queue is full.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to message data.
+/// `arg2`: message data length.
+///
+/// Returns: 0 on success.
+pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
+    let handle = ChannelHandle::from_raw(args.arg0);
+    let data_ptr = args.arg1 as *const u8;
+    let data_len = args.arg2 as usize;
+
+    if data_ptr.is_null() && data_len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if data_len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above — data_ptr is in user space, mapped, readable.
+        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    };
+
+    let msg = match Message::from_bytes(data) {
+        Ok(m) => m,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match channel::send_blocking(handle, msg) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_CHANNEL_SEND_CAPS` — send a message with capability transfer.
 ///
 /// `arg0`: channel handle.

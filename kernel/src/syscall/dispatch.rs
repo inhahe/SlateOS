@@ -26,7 +26,7 @@ use super::number::{
     SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
     SYS_CLOCK_MONOTONIC,
     SYS_DEBUG_PRINT, SYS_LOG_READ,
-    SYS_CHANNEL_SEND_TIMEOUT,
+    SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_TIMEOUT,
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
     SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
     SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ,
@@ -226,6 +226,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CHANNEL_CLOSE as usize] = Some(handlers::sys_channel_close);
     handlers[SYS_CHANNEL_RECV_TIMEOUT as usize] = Some(handlers::sys_channel_recv_timeout);
     handlers[SYS_CHANNEL_SEND_TIMEOUT as usize] = Some(handlers::sys_channel_send_timeout);
+    handlers[SYS_CHANNEL_SEND_BLOCKING as usize] = Some(handlers::sys_channel_send_blocking);
     handlers[SYS_CHANNEL_SEND_CAPS as usize] = Some(handlers::sys_channel_send_caps);
     handlers[SYS_CHANNEL_RECV_CAPS as usize] = Some(handlers::sys_channel_recv_caps);
     handlers[SYS_FUTEX_WAIT as usize] = Some(handlers::sys_futex_wait);

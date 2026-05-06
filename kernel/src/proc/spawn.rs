@@ -287,6 +287,19 @@ pub fn spawn_process(
         }
     }
 
+    // Step 5c: Inherit the parent's filesystem namespace.
+    //
+    // If the parent process is in a non-root namespace, the child
+    // inherits it automatically (same isolation applies by default).
+    // The parent can override this by attaching the child to a
+    // different namespace before starting it.
+    if options.parent != 0 {
+        let parent_ns = crate::ipc::namespace::query(options.parent);
+        if parent_ns != crate::ipc::namespace::ROOT_NAMESPACE {
+            let _ = crate::ipc::namespace::attach(pid, parent_ns);
+        }
+    }
+
     // Step 6: Create the entry info struct (heap-allocated, freed by
     // the trampoline when the thread first runs) and spawn the
     // initial thread.

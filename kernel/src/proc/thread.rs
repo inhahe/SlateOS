@@ -386,6 +386,9 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                     pid
                 );
 
+                // Release namespace reference so the namespace can be cleaned up.
+                crate::ipc::namespace::detach(pid);
+
                 // Wake any task waiting to reap this process.
                 if let Some(waiter) = wake_task {
                     crate::sched::wake(waiter);

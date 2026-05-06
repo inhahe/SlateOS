@@ -115,6 +115,50 @@ pub enum ProcessState {
 }
 
 // ---------------------------------------------------------------------------
+// Crash information — details about how a process died
+// ---------------------------------------------------------------------------
+
+/// Information about a process crash (unhandled exception).
+///
+/// Captured by the kernel when a userspace process takes an unhandled
+/// hardware exception (access violation, divide-by-zero, etc.).  Stored
+/// in the PCB and available to the parent via `SYS_PROCESS_CRASH_INFO`.
+///
+/// The init service manager uses this to distinguish normal exits from
+/// crashes, and to log crash diagnostics for driver restart decisions.
+#[derive(Debug, Clone, Copy)]
+pub struct CrashInfo {
+    /// The exception code that killed the process.
+    pub exception_code: u64,
+    /// Faulting instruction pointer (RIP at the time of the exception).
+    pub faulting_rip: u64,
+    /// Auxiliary value (e.g., page fault address for access violations,
+    /// error code for GP faults).
+    pub aux: u64,
+    /// The thread that caused the crash.
+    pub thread_id: TaskId,
+}
+
+/// Conventional exit code for processes killed by an unhandled exception.
+///
+/// Mirrors Unix convention (128 + signal number) but uses exception codes
+/// instead of signal numbers.  The parent can distinguish normal exit
+/// (exit_code >= 0) from crash (exit_code < 0 or == CRASH_EXIT_BASE + code).
+///
+/// We use negative exit codes for crashes: -(exception_code).
+/// DivideError (1) → exit_code = -1
+/// AccessViolation (8) → exit_code = -8
+/// This is a clean, simple convention.  The parent service manager
+/// checks `exit_code < 0` to detect crashes.
+pub const fn crash_exit_code(exception_code: u64) -> i32 {
+    // Negate the exception code.  Exception codes are small positive
+    // integers (1-11), so this always fits in i32.
+    #[allow(clippy::cast_possible_wrap)]
+    let neg = -(exception_code as i32);
+    neg
+}
+
+// ---------------------------------------------------------------------------
 // Process Control Block
 // ---------------------------------------------------------------------------
 
@@ -167,6 +211,10 @@ pub struct Process {
     /// register handles here; IPC close syscalls deregister them.
     /// On process death, all remaining handles are released.
     pub ipc_handles: Vec<(crate::cap::ResourceType, u64)>,
+    /// Crash information — set when the process dies from an unhandled
+    /// exception.  `None` for normal exits.  The parent can read this
+    /// via `SYS_PROCESS_CRASH_INFO` to get diagnostics.
+    pub crash_info: Option<CrashInfo>,
 }
 
 impl Process {
@@ -186,6 +234,7 @@ impl Process {
             ready: false,
             vmas: Vec::new(),
             ipc_handles: Vec::new(),
+            crash_info: None,
         }
     }
 }
@@ -406,10 +455,60 @@ pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
     Ok(())
 }
 
+/// Record crash information for a process killed by an unhandled exception.
+///
+/// Sets the crash info and the exit code to a negative value derived
+/// from the exception code.  Called by the exception handler just
+/// before killing the process.
+///
+/// The exit code convention is: -(exception_code).  This means:
+/// - exit_code >= 0: normal exit
+/// - exit_code < 0: crash (negated exception code)
+///
+/// The parent can call `SYS_PROCESS_CRASH_INFO` to get full details
+/// (exception code, faulting RIP, auxiliary value).
+pub fn set_crash_info(
+    pid: ProcessId,
+    info: CrashInfo,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    proc.exit_code = Some(crash_exit_code(info.exception_code));
+    proc.crash_info = Some(info);
+    Ok(())
+}
+
+/// Get crash information for a zombie process.
+///
+/// Returns `None` if the process exited normally (no crash) or if the
+/// process doesn't exist.  Must be called before reaping — the crash
+/// info is destroyed when the process is reaped.
+pub fn get_crash_info(pid: ProcessId) -> Option<CrashInfo> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).and_then(|p| p.crash_info)
+}
+
+/// Exit information returned by `try_reap`.
+///
+/// Contains the exit code and optional crash details (if the process
+/// died from an unhandled exception).
+#[derive(Debug, Clone)]
+pub struct ExitInfo {
+    /// Process exit code.  Normal exit: >= 0.  Crash: < 0 (negated
+    /// exception code).
+    pub exit_code: i32,
+    /// Crash details (exception code, faulting address, etc.).
+    /// `None` for normal exits.
+    pub crash: Option<CrashInfo>,
+}
+
 /// Try to reap (wait for) a zombie child process.
 ///
 /// If the child process `child_pid` is a zombie:
-/// - Returns `Ok(Some(exit_code))` and destroys the process (frees
+/// - Returns `Ok(Some(ExitInfo))` and destroys the process (frees
 ///   address space, DMA buffers, IPC handles, capability table).
 ///
 /// If the child process exists but is still running:
@@ -423,11 +522,11 @@ pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
 pub fn try_reap(
     parent_pid: ProcessId,
     child_pid: ProcessId,
-) -> KernelResult<Option<i32>> {
+) -> KernelResult<Option<ExitInfo>> {
     // Phase 1: Under PROCESS_TABLE lock — verify state, extract
     // process info, and remove from table.  We must extract all
     // fields needed for cleanup before dropping the lock.
-    let reaped: Option<(i32, u64, Vec<(crate::cap::ResourceType, u64)>)>;
+    let reaped: Option<(ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>)>;
 
     {
         let mut table = PROCESS_TABLE.lock();
@@ -445,6 +544,7 @@ pub fn try_reap(
         }
 
         let exit_code = proc.exit_code.unwrap_or(0);
+        let crash = proc.crash_info;
         let pml4_phys = proc.pml4_phys;
 
         // Extract the IPC handle list before removing.
@@ -454,15 +554,16 @@ pub fn try_reap(
             .map(|p| core::mem::take(&mut p.ipc_handles))
             .unwrap_or_default();
 
-        reaped = Some((exit_code, pml4_phys, ipc_handles));
+        let info = ExitInfo { exit_code, crash };
+        reaped = Some((info, pml4_phys, ipc_handles));
     }
     // PROCESS_TABLE lock dropped here.
 
-    if let Some((exit_code, pml4_phys, ipc_handles)) = reaped {
+    if let Some((info, pml4_phys, ipc_handles)) = reaped {
         // Phase 2: Cleanup without holding PROCESS_TABLE lock.
         // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
         destroy_process_resources(child_pid, pml4_phys, &ipc_handles);
-        Ok(Some(exit_code))
+        Ok(Some(info))
     } else {
         Ok(None)
     }
@@ -1120,8 +1221,8 @@ fn test_reap_zombie() -> KernelResult<()> {
     // Try to reap before zombie — should return None.
     match try_reap(parent_pid, child_pid)? {
         None => {} // Expected: child still running.
-        Some(code) => {
-            serial_println!("[proc]   FAIL: reap should return None (still running), got {}", code);
+        Some(info) => {
+            serial_println!("[proc]   FAIL: reap should return None (still running), got {}", info.exit_code);
             destroy(child_pid);
             destroy(parent_pid);
             return Err(KernelError::InternalError);
@@ -1140,9 +1241,17 @@ fn test_reap_zombie() -> KernelResult<()> {
 
     // Reap the zombie.
     match try_reap(parent_pid, child_pid)? {
-        Some(42) => {} // Expected.
+        Some(info) if info.exit_code == 42 => {
+            // Normal exit — no crash info expected.
+            if info.crash.is_some() {
+                serial_println!("[proc]   FAIL: normal exit should have no crash info");
+                destroy(parent_pid);
+                return Err(KernelError::InternalError);
+            }
+        }
         other => {
-            serial_println!("[proc]   FAIL: reap should return 42, got {:?}", other);
+            serial_println!("[proc]   FAIL: reap should return exit_code=42, got {:?}",
+                other.map(|i| i.exit_code));
             destroy(parent_pid);
             return Err(KernelError::InternalError);
         }
@@ -1175,5 +1284,101 @@ fn test_reap_zombie() -> KernelResult<()> {
     destroy(child2);
     destroy(parent_pid);
     serial_println!("[proc]   Reap zombie: OK");
+
+    // --- Test 8: Crash info on process death ---
+    serial_println!("[proc]   Testing crash info...");
+    let crash_parent = create("crash-parent", 0);
+    let crash_child = create("crash-child", crash_parent);
+    set_running(crash_child)?;
+    add_thread(crash_child, 950)?;
+
+    // Simulate a crash: set crash info (AccessViolation at 0xDEAD).
+    let info = CrashInfo {
+        exception_code: 8, // AccessViolation
+        faulting_rip: 0xDEAD_BEEF,
+        aux: 0xBAD_FA6E,
+        thread_id: 950,
+    };
+    set_crash_info(crash_child, info)?;
+
+    // Verify crash info is queryable before reaping.
+    match get_crash_info(crash_child) {
+        Some(ci) => {
+            if ci.exception_code != 8 || ci.faulting_rip != 0xDEAD_BEEF || ci.aux != 0xBAD_FA6E {
+                serial_println!("[proc]   FAIL: crash info mismatch");
+                destroy(crash_child);
+                destroy(crash_parent);
+                return Err(KernelError::InternalError);
+            }
+        }
+        None => {
+            serial_println!("[proc]   FAIL: crash info should exist");
+            destroy(crash_child);
+            destroy(crash_parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Verify exit code is negative (crash convention).
+    {
+        let table = PROCESS_TABLE.lock();
+        let proc = table.get(&crash_child).expect("crash child exists");
+        let code = proc.exit_code.unwrap_or(0);
+        if code >= 0 {
+            serial_println!("[proc]   FAIL: crash exit code should be negative, got {}", code);
+            drop(table);
+            destroy(crash_child);
+            destroy(crash_parent);
+            return Err(KernelError::InternalError);
+        }
+        if code != -8 {
+            serial_println!("[proc]   FAIL: crash exit code should be -8, got {}", code);
+            drop(table);
+            destroy(crash_child);
+            destroy(crash_parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Make zombie and reap — crash info should be in ExitInfo.
+    let (zombie, _) = remove_thread(crash_child, 950)?;
+    if !zombie {
+        serial_println!("[proc]   FAIL: crash child should be zombie");
+        destroy(crash_child);
+        destroy(crash_parent);
+        return Err(KernelError::InternalError);
+    }
+    match try_reap(crash_parent, crash_child)? {
+        Some(exit_info) => {
+            if exit_info.exit_code != -8 {
+                serial_println!("[proc]   FAIL: reap crash exit_code should be -8, got {}", exit_info.exit_code);
+                destroy(crash_parent);
+                return Err(KernelError::InternalError);
+            }
+            match exit_info.crash {
+                Some(ci) => {
+                    if ci.exception_code != 8 || ci.faulting_rip != 0xDEAD_BEEF {
+                        serial_println!("[proc]   FAIL: reap crash info mismatch");
+                        destroy(crash_parent);
+                        return Err(KernelError::InternalError);
+                    }
+                }
+                None => {
+                    serial_println!("[proc]   FAIL: reap should include crash info");
+                    destroy(crash_parent);
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+        None => {
+            serial_println!("[proc]   FAIL: reap should succeed (zombie)");
+            destroy(crash_parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    destroy(crash_parent);
+    serial_println!("[proc]   Crash info: OK");
+
     Ok(())
 }

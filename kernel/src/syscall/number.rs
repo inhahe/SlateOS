@@ -1077,6 +1077,24 @@ pub const SYS_THREAD_RESUME: u64 = 514;
 /// Returns: the old priority on success, negative error on failure.
 pub const SYS_THREAD_SET_PRIORITY: u64 = 515;
 
+/// Retrieve crash information for a zombie child process.
+///
+/// `arg0`: child PID.
+/// `arg1`: pointer to a 4×u64 output buffer in userspace:
+///         [0] exception_code
+///         [1] faulting_rip
+///         [2] aux (e.g., page fault address)
+///         [3] thread_id
+///
+/// Returns: 1 if crash info is available (process crashed),
+///          0 if no crash info (normal exit), or negative error.
+///
+/// Must be called before reaping — crash info is destroyed when the
+/// process is reaped.  The parent should call this after
+/// `SYS_PROCESS_TRY_WAIT` returns an exit code (especially if
+/// exit_code < 0, indicating a crash).
+pub const SYS_PROCESS_CRASH_INFO: u64 = 516;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

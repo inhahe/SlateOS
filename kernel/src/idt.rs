@@ -855,6 +855,22 @@ fn try_dispatch_user_exception(
 ///
 /// This function never returns.
 fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
+    kill_userspace_task_with_info(exception_name, frame, None);
+}
+
+/// Kill the current task with crash information recorded in the PCB.
+///
+/// The crash info (exception code, faulting address, etc.) is stored
+/// in the process's PCB so the parent can retrieve it via
+/// `SYS_PROCESS_CRASH_INFO`.  The exit code is set to a negative
+/// value derived from the exception code (convention: crash = negative).
+///
+/// This function never returns.
+fn kill_userspace_task_with_info(
+    exception_name: &str,
+    frame: &InterruptStackFrame,
+    crash: Option<crate::proc::pcb::CrashInfo>,
+) -> ! {
     let task_id = sched::current_task_id();
     serial_println!(
         "[exception] Killing task {} — {} at {:#x} (ring 3)",
@@ -864,6 +880,19 @@ fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
+
+    // Record crash info in the PCB before killing the thread.
+    // This allows the parent process (service manager) to distinguish
+    // crashes from normal exits and get diagnostic details.
+    if let Some(info) = crash {
+        if let Some(pid) = crate::proc::thread::owner_process(task_id) {
+            serial_println!(
+                "[exception] Recording crash: pid={} exception={} rip={:#x} aux={:#x}",
+                pid, info.exception_code, info.faulting_rip, info.aux
+            );
+            let _ = crate::proc::pcb::set_crash_info(pid, info);
+        }
+    }
 
     crate::proc::thread::on_thread_exit(task_id);
     sched::task_exit();
@@ -915,9 +944,17 @@ unsafe fn dispatch_or_kill_userspace_raw(
         return;
     }
 
-    // No handler — kill.
+    // No handler — kill, recording crash details for the parent.
     // SAFETY: frame_ptr is valid; creating `&` for reading is fine.
-    kill_userspace_task(exception_name, unsafe { &*frame_ptr });
+    let frame_ref = unsafe { &*frame_ptr };
+    let task_id = sched::current_task_id();
+    let crash = crate::proc::pcb::CrashInfo {
+        exception_code: code as u64,
+        faulting_rip: frame_ref.rip,
+        aux,
+        thread_id: task_id,
+    };
+    kill_userspace_task_with_info(exception_name, frame_ref, Some(crash));
 }
 
 /// Convenience wrapper: casts `&InterruptStackFrame` to `*mut` and

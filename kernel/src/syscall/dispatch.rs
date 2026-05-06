@@ -60,6 +60,7 @@ use super::number::{
     SYS_SYSTEM_SET_PROFILE,
     SYS_CAP_QUERY, SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
+    SYS_PROCESS_CRASH_INFO,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
@@ -321,6 +322,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_THREAD_SUSPEND as usize] = Some(handlers::sys_thread_suspend);
     handlers[SYS_THREAD_RESUME as usize] = Some(handlers::sys_thread_resume);
     handlers[SYS_THREAD_SET_PRIORITY as usize] = Some(handlers::sys_thread_set_priority);
+    handlers[SYS_PROCESS_CRASH_INFO as usize] = Some(handlers::sys_process_crash_info);
 
     // Filesystem — path-based (600–609).
     handlers[SYS_FS_READ_FILE as usize] = Some(handlers::sys_fs_read_file);

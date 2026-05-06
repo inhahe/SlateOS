@@ -2035,9 +2035,9 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
 
     // Try to reap immediately.
     match pcb::try_reap(parent_pid, child_pid) {
-        Ok(Some(exit_code)) => {
+        Ok(Some(info)) => {
             #[allow(clippy::cast_possible_wrap)]
-            return SyscallResult::ok(exit_code as i64);
+            return SyscallResult::ok(info.exit_code as i64);
         }
         Ok(None) => {
             // Child still running — register wait and block.
@@ -2049,9 +2049,9 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
 
             // Woken up — try to reap again.
             match pcb::try_reap(parent_pid, child_pid) {
-                Ok(Some(exit_code)) => {
+                Ok(Some(info)) => {
                     #[allow(clippy::cast_possible_wrap)]
-                    SyscallResult::ok(exit_code as i64)
+                    SyscallResult::ok(info.exit_code as i64)
                 }
                 Ok(None) => {
                     // Shouldn't happen — we were woken because it became
@@ -2077,9 +2077,9 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
     let parent_pid = 0;
 
     match pcb::try_reap(parent_pid, child_pid) {
-        Ok(Some(exit_code)) => {
+        Ok(Some(info)) => {
             #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(exit_code as i64)
+            SyscallResult::ok(info.exit_code as i64)
         }
         Ok(None) => {
             // Child still running — return WouldBlock.
@@ -2126,6 +2126,51 @@ pub fn sys_process_is_ready(args: &SyscallArgs) -> SyscallResult {
         Ok(true) => SyscallResult::ok(1),
         Ok(false) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_CRASH_INFO` — retrieve crash details for a zombie process.
+///
+/// `arg0`: child PID.
+/// `arg1`: pointer to a 4×u64 output buffer in userspace.
+///
+/// If the process crashed (unhandled exception), writes the crash info
+/// into the buffer and returns 1.  If the process exited normally,
+/// returns 0.  The buffer layout:
+///   [0] exception_code (1=DivideError, 8=AccessViolation, etc.)
+///   [1] faulting_rip
+///   [2] aux (page fault address, GP fault error code, etc.)
+///   [3] thread_id that caused the crash
+///
+/// Must be called before reaping (try_wait returns Some → process is
+/// removed from the process table).
+pub fn sys_process_crash_info(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let child_pid = args.arg0;
+    let buf_ptr = args.arg1;
+
+    // Validate the buffer pointer.
+    if buf_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    match pcb::get_crash_info(child_pid) {
+        Some(info) => {
+            // Write crash info to userspace buffer.
+            // SAFETY: validated non-null, and the caller is responsible
+            // for providing a writable 32-byte buffer.  In kernel mode
+            // (current state), this is always valid kernel memory.
+            let buf = buf_ptr as *mut u64;
+            unsafe {
+                buf.write(info.exception_code);
+                buf.add(1).write(info.faulting_rip);
+                buf.add(2).write(info.aux);
+                buf.add(3).write(info.thread_id);
+            }
+            SyscallResult::ok(1)
+        }
+        None => SyscallResult::ok(0), // Normal exit, no crash info.
     }
 }
 

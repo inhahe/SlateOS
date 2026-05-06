@@ -3102,6 +3102,7 @@ const COMMANDS: &[&str] = &[
     "ulimit",
     "overlay",
     "mkfifo", "lspipe", "pipes",
+    "tmpwatch",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4322,6 +4323,7 @@ fn dispatch(line: &str) {
         "overlay" => cmd_overlay(args),
         "mkfifo" => cmd_mkfifo(args),
         "lspipe" | "pipes" => cmd_lspipe(args),
+        "tmpwatch" => cmd_tmpwatch(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -9916,6 +9918,158 @@ fn cmd_lspipe(_args: &str) {
     shell_println!("({} pipes)", pipes.len());
 }
 
+/// `tmpwatch` — manage automatic temporary file cleanup.
+///
+/// Usage:
+///   tmpwatch --run                   - run cleanup now
+///   tmpwatch --dry-run               - show what would be removed
+///   tmpwatch --status                - show config and stats
+///   tmpwatch --max-age SECONDS       - set max file age
+///   tmpwatch --add DIR               - add watch directory
+///   tmpwatch --remove DIR            - remove watch directory
+///   tmpwatch --exclude PREFIX        - add exclude prefix
+///   tmpwatch --enable / --disable    - enable/disable
+fn cmd_tmpwatch(args: &str) {
+    use crate::fs::tmpwatch;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        // Default: show status.
+        let dirs = tmpwatch::watch_dirs();
+        let exc = tmpwatch::excludes();
+        let s = tmpwatch::stats();
+        shell_println!("Tmpwatch status:");
+        shell_println!("  Enabled:     {}", if tmpwatch::is_enabled() { "yes" } else { "no" });
+        shell_println!("  Max age:     {} seconds", tmpwatch::max_age());
+        shell_println!("  Watch dirs:  {}", if dirs.is_empty() { "(none)".into() } else { dirs.join(", ") });
+        shell_println!("  Excludes:    {}", if exc.is_empty() { "(none)".into() } else { exc.join(", ") });
+        shell_println!("  Runs:        {}", s.runs);
+        shell_println!("  Removed:     {} files ({} bytes)", s.total_files_removed, s.total_bytes_freed);
+        return;
+    }
+
+    match parts[0] {
+        "--run" | "run" | "-r" => {
+            // Use current time from RTC if available, or 0.
+            let now = crate::timekeeping::clock_realtime() / 1_000_000_000;
+            match tmpwatch::run(now) {
+                Ok(result) => {
+                    shell_println!("Cleanup complete: {} files removed, {} bytes freed, {} skipped, {} errors",
+                        result.files_removed, result.bytes_freed, result.files_skipped, result.errors);
+                    if !result.removed_paths.is_empty() {
+                        for p in &result.removed_paths {
+                            shell_println!("  removed: {}", p);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "--dry-run" | "dry-run" | "-n" => {
+            let now = crate::timekeeping::clock_realtime() / 1_000_000_000;
+            match tmpwatch::dry_run(now) {
+                Ok(candidates) => {
+                    if candidates.is_empty() {
+                        shell_println!("No files would be removed.");
+                    } else {
+                        shell_println!("Would remove {} files:", candidates.len());
+                        let mut total = 0u64;
+                        for (path, size) in &candidates {
+                            shell_println!("  {} ({} bytes)", path, size);
+                            total = total.saturating_add(*size);
+                        }
+                        shell_println!("Total: {} bytes", total);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "--status" | "status" | "-s" => {
+            let dirs = tmpwatch::watch_dirs();
+            let exc = tmpwatch::excludes();
+            let s = tmpwatch::stats();
+            shell_println!("Tmpwatch status:");
+            shell_println!("  Enabled:     {}", if tmpwatch::is_enabled() { "yes" } else { "no" });
+            shell_println!("  Max age:     {} seconds", tmpwatch::max_age());
+            shell_println!("  Watch dirs:");
+            for d in &dirs { shell_println!("    {}", d); }
+            shell_println!("  Excludes:");
+            for e in &exc { shell_println!("    {}", e); }
+            shell_println!("  Stats:");
+            shell_println!("    Runs:            {}", s.runs);
+            shell_println!("    Files removed:   {}", s.total_files_removed);
+            shell_println!("    Bytes freed:     {}", s.total_bytes_freed);
+        }
+
+        "--max-age" | "max-age" => {
+            if parts.len() < 2 {
+                shell_println!("Current max age: {} seconds", tmpwatch::max_age());
+                return;
+            }
+            if let Ok(secs) = parts[1].parse::<u64>() {
+                tmpwatch::set_max_age(secs);
+                shell_println!("Max age set to {} seconds.", secs);
+            } else {
+                shell_println!("Invalid value: {}", parts[1]);
+            }
+        }
+
+        "--add" | "add" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: tmpwatch --add DIR");
+                return;
+            }
+            let dir = resolve_path(parts[1]);
+            match tmpwatch::add_watch_dir(&dir) {
+                Ok(()) => shell_println!("Added watch directory: {}", dir),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "--remove" | "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: tmpwatch --remove DIR");
+                return;
+            }
+            if tmpwatch::remove_watch_dir(parts[1]) {
+                shell_println!("Removed watch directory: {}", parts[1]);
+            } else {
+                shell_println!("Directory not in watch list: {}", parts[1]);
+            }
+        }
+
+        "--exclude" | "exclude" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: tmpwatch --exclude PREFIX");
+                return;
+            }
+            tmpwatch::add_exclude(parts[1]);
+            shell_println!("Added exclude: {}", parts[1]);
+        }
+
+        "--enable" | "enable" => {
+            tmpwatch::set_enabled(true);
+            shell_println!("Tmpwatch enabled.");
+        }
+
+        "--disable" | "disable" => {
+            tmpwatch::set_enabled(false);
+            shell_println!("Tmpwatch disabled.");
+        }
+
+        "--init" | "init" => {
+            tmpwatch::init();
+            shell_println!("Tmpwatch initialized with defaults.");
+        }
+
+        _ => {
+            shell_println!("Usage: tmpwatch [--run|--dry-run|--status|--max-age N|--add DIR|--remove DIR|--exclude PREFIX|--enable|--disable|--init]");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -15051,7 +15205,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

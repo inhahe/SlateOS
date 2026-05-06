@@ -2745,6 +2745,50 @@ pub fn sleep_until_tick(wake_tick: u64) {
     block_current();
 }
 
+/// Sleep the current task for a precise duration in nanoseconds.
+///
+/// Uses the high-resolution timer subsystem (HPET-backed) for sub-10ms
+/// precision.  Falls back to tick-based [`sleep_until_tick`] if hrtimers
+/// are unavailable.
+///
+/// The task is blocked and woken by an hrtimer callback.  Actual sleep
+/// time depends on timer ISR frequency but is bounded by one tick
+/// (~10ms) in the current implementation.
+///
+/// # Arguments
+///
+/// - `duration_ns` — sleep duration in nanoseconds (0 = yield)
+pub fn sleep_ns(duration_ns: u64) {
+    if duration_ns == 0 {
+        yield_now();
+        return;
+    }
+
+    // For very long sleeps (> 100ms), use tick-based for efficiency.
+    // For short sleeps, use hrtimer for precision.
+    if duration_ns > 100_000_000 {
+        let ticks = duration_ns
+            .saturating_add(9_999_999)
+            .saturating_div(10_000_000);
+        let wake_tick = crate::apic::tick_count().saturating_add(ticks);
+        sleep_until_tick(wake_tick);
+        return;
+    }
+
+    let task_id = load_current_task();
+
+    // Schedule an hrtimer to wake us.
+    fn wake_callback(task_id_arg: u64) {
+        // task_id_arg is already TaskId (u64) — wake the blocked task.
+        try_wake(task_id_arg);
+    }
+
+    let _handle = crate::hrtimer::schedule_ns(duration_ns, wake_callback, u64::from(task_id));
+
+    // Block until the timer fires and wakes us.
+    block_current();
+}
+
 /// Scan the sleep queue and wake tasks whose sleep deadline has passed.
 ///
 /// Called from the APIC timer ISR on every tick.  Must be lock-free

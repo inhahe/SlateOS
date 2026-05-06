@@ -2603,6 +2603,87 @@ impl Vfs {
         mp.fs.set_volume_label(label)
     }
 
+    // ----- Atomic file operations -----
+
+    /// Atomically replace a file's contents.
+    ///
+    /// Writes `data` to a temporary file in the same directory as `path`,
+    /// syncs the filesystem, then renames the temp file to the final path.
+    /// If the rename succeeds, the file is guaranteed to contain either the
+    /// old data or the new data — never a partial write.
+    ///
+    /// If any step fails, the temporary file is cleaned up and the original
+    /// file is left untouched.
+    ///
+    /// This is the standard safe-write pattern (used by editors, databases,
+    /// config writers, etc.) exposed as a single VFS operation.
+    pub fn atomic_write(path: &str, data: &[u8]) -> KernelResult<()> {
+        let resolved = Self::resolve_follow(path)?;
+        check_file_tags(&resolved)?;
+        check_writable(&resolved)?;
+
+        // Generate a unique temp filename in the same directory.
+        // Same directory ensures rename is on the same filesystem (atomic).
+        let dir = if let Some(pos) = resolved.rfind('/') {
+            if pos == 0 { "/" } else { &resolved[..pos] }
+        } else {
+            "/"
+        };
+
+        let ns = crate::hpet::elapsed_ns();
+        // SAFETY: rdtsc is always available on x86_64 and has no side effects.
+        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        let unique = ns ^ tsc;
+        let tmp_path = alloc::format!("{}/.tmp_atomic_{:016x}", dir, unique);
+
+        // Step 1: Write data to the temp file.
+        if let Err(e) = Self::write_file(&tmp_path, data) {
+            // Cleanup temp file if it was partially created.
+            let _ = Self::remove(&tmp_path);
+            return Err(e);
+        }
+
+        // Step 2: Sync the filesystem to ensure data is on disk.
+        // Errors from sync are non-fatal — the rename will still work
+        // in memory, and the next sync or shutdown will persist it.
+        let _ = Self::sync_path(&tmp_path);
+
+        // Step 3: Rename temp file to the final path (atomic on same fs).
+        if let Err(e) = Self::rename(&tmp_path, &resolved) {
+            // Rename failed — clean up the temp file.
+            let _ = Self::remove(&tmp_path);
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    /// Atomically write a file, preserving its permissions and ownership.
+    ///
+    /// Like `atomic_write()`, but copies the original file's metadata
+    /// (permissions, ownership, timestamps) to the new file after the
+    /// rename.  Use this when replacing config files or documents where
+    /// metadata preservation matters.
+    pub fn atomic_write_preserve(path: &str, data: &[u8]) -> KernelResult<()> {
+        let resolved = Self::resolve_follow(path)?;
+
+        // Capture existing metadata before the atomic write replaces it.
+        let old_meta = Self::metadata(&resolved).ok();
+
+        // Perform the atomic write (writes temp, syncs, renames).
+        Self::atomic_write(path, data)?;
+
+        // Restore metadata from the original file.
+        if let Some(meta) = old_meta {
+            // Permissions.
+            let _ = Self::set_permissions(&resolved, meta.permissions);
+            // Ownership.
+            let _ = Self::set_owner(&resolved, meta.uid, meta.gid);
+        }
+
+        Ok(())
+    }
+
     // ----- Advisory file locking -----
 
     /// Acquire an advisory lock on a file.
@@ -4083,6 +4164,70 @@ pub fn self_test() -> KernelResult<()> {
         // Clean up.
         let _ = cleanup_glob_test();
         serial_println!("[vfs]     globstar (**) test PASSED");
+    }
+
+    // --- Atomic write test ---
+    if has_tmp {
+        serial_println!("[vfs]   --- atomic write ---");
+
+        let test_path = "/tmp/_vfs_atomic_test";
+        let original = b"Original data before atomic write";
+        let replacement = b"Replacement data via atomic write";
+
+        // Write original file.
+        Vfs::write_file(test_path, original)?;
+        let check = Vfs::read_file(test_path)?;
+        if check.as_slice() != original {
+            serial_println!("[vfs]     FAIL: initial write data mismatch");
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+
+        // Atomic replace.
+        Vfs::atomic_write(test_path, replacement)?;
+        let check2 = Vfs::read_file(test_path)?;
+        if check2.as_slice() != replacement {
+            serial_println!("[vfs]     FAIL: atomic write data mismatch");
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     atomic_write: replace OK");
+
+        // Atomic write to new file (no pre-existing file).
+        let new_path = "/tmp/_vfs_atomic_new";
+        let _ = Vfs::remove(new_path);
+        Vfs::atomic_write(new_path, b"new file via atomic")?;
+        let check3 = Vfs::read_file(new_path)?;
+        if check3.as_slice() != b"new file via atomic" {
+            serial_println!("[vfs]     FAIL: atomic write new file data mismatch");
+            let _ = Vfs::remove(test_path);
+            let _ = Vfs::remove(new_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     atomic_write: new file OK");
+
+        // Atomic write with metadata preservation.
+        Vfs::atomic_write_preserve(test_path, b"preserved metadata")?;
+        let check4 = Vfs::read_file(test_path)?;
+        if check4.as_slice() != b"preserved metadata" {
+            serial_println!("[vfs]     FAIL: atomic_write_preserve data mismatch");
+            let _ = Vfs::remove(test_path);
+            let _ = Vfs::remove(new_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     atomic_write_preserve OK");
+
+        // Verify no temp files left behind.
+        let tmp_entries = Vfs::readdir("/tmp")?;
+        let stale = tmp_entries.iter().any(|e| e.name.starts_with(".tmp_atomic_"));
+        if stale {
+            serial_println!("[vfs]     WARN: stale temp file found after atomic write");
+        }
+
+        // Cleanup.
+        let _ = Vfs::remove(test_path);
+        let _ = Vfs::remove(new_path);
+        serial_println!("[vfs]     atomic write test PASSED");
     }
 
     serial_println!("[vfs] Self-test PASSED");

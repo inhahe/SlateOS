@@ -283,6 +283,9 @@ pub fn from_extension(ext: &str) -> Option<&'static str> {
         "diff" | "patch" => Some("text/x-diff"),
 
         // Binary / executable
+        "nx" => Some("application/x-nx-executable"),
+        "dso" => Some("application/x-nx-sharedlib"),
+        "slib" => Some("application/x-nx-staticlib"),
         "elf" => Some("application/x-elf"),
         "o" => Some("application/x-object"),
         "a" | "lib" => Some("application/x-archive"),
@@ -436,6 +439,9 @@ pub fn category(mime: &str) -> &'static str {
         || mime == "application/wasm"
         || mime == "application/x-sharedlib"
         || mime == "application/x-object"
+        || mime == "application/x-nx-executable"
+        || mime == "application/x-nx-sharedlib"
+        || mime == "application/x-nx-staticlib"
     {
         "Executable"
     } else if mime == "application/x-sqlite3" || mime == "application/sql" {

@@ -311,6 +311,29 @@ pub fn register_defaults() {
 
     // Web browser for HTML.
     register("text/html", "/usr/bin/browser", "Web Browser", 5, false);
+
+    // OS-native executable formats.
+    register(
+        "application/x-nx-executable",
+        "/usr/bin/run",
+        "Program Launcher",
+        10,
+        false,
+    );
+    register(
+        "application/x-nx-sharedlib",
+        "/usr/bin/ldd",
+        "Library Inspector",
+        10,
+        false,
+    );
+    register(
+        "application/x-nx-staticlib",
+        "/usr/bin/ar",
+        "Archive Tool",
+        10,
+        false,
+    );
 }
 
 // ---------------------------------------------------------------------------

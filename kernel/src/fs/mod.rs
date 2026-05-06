@@ -51,6 +51,7 @@ pub mod lz4;
 pub mod memfs;
 pub mod mime;
 pub mod notify;
+pub mod overlay;
 pub mod procfs;
 pub mod quota;
 #[allow(dead_code)]

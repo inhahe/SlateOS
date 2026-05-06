@@ -592,6 +592,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Filesystem quotas (fs::quota): per-user and per-group disk usage limits with soft/hard byte and inode limits, configurable grace periods, charge/release tracking; `quota` kshell command; /proc/quotas; 10 self-tests
   - [x] POSIX ACLs (fs::acl): Access Control Lists with USER_OBJ/USER/GROUP_OBJ/GROUP/MASK/OTHER tags, POSIX 1003.1e evaluation algorithm, mask intersection, from_mode()/build_acl() helpers; `getfacl`/`setfacl` kshell commands; 10 self-tests
   - [x] Filesystem interceptors (fs::intercept): pre-operation hooks for policy enforcement (approve/deny writes, deletes, renames before they happen), path prefix matching, operation mask filtering, built-in readonly/no-delete/audit handlers; `intercept` kshell command; 10 self-tests
+  - [x] Symlink/hardlink security (fs::symlink_security): Linux-style protected_symlinks/protected_hardlinks restrictions, lock-free AtomicBool config, TOCTOU protection (owner/directory checks), FIFO write protection; 7 self-tests
+  - [x] Resource limits (fs::rlimit): ulimit-style per-UID soft/hard limits for open files (NOFILE), file size (FSIZE), advisory locks (LOCKS); privilege enforcement, global defaults with per-UID overrides; `ulimit` kshell command; TooManyOpenFiles/FileTooLarge error variants; 10 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

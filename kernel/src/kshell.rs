@@ -3100,6 +3100,7 @@ const COMMANDS: &[&str] = &[
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "ulimit",
+    "overlay",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4317,6 +4318,7 @@ fn dispatch(line: &str) {
         "setfacl" => cmd_setfacl(args),
         "intercept" => cmd_intercept(args),
         "ulimit" => cmd_ulimit(args),
+        "overlay" => cmd_overlay(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -9585,6 +9587,275 @@ fn parse_limit_value(s: &str) -> Option<u64> {
     }
 }
 
+/// `overlay` — manage overlay filesystem mounts.
+///
+/// Usage:
+///   overlay list                    - list all overlays
+///   overlay create NAME LOWER UPPER - create overlay mount
+///   overlay destroy NAME            - destroy overlay mount
+///   overlay ls NAME [PATH]          - list merged directory
+///   overlay cat NAME PATH           - read file through overlay
+///   overlay write NAME PATH DATA    - write file through overlay
+///   overlay rm NAME PATH            - remove file through overlay
+///   overlay which NAME PATH         - show which layer a path is in
+///   overlay whiteouts NAME          - list whiteout entries
+///   overlay stats NAME              - show overlay statistics
+///   overlay reset NAME              - discard all upper-layer changes
+///   overlay commit NAME             - merge upper into lower
+fn cmd_overlay(args: &str) {
+    use crate::fs::overlay;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        shell_println!("Usage: overlay <list|create|destroy|ls|cat|write|rm|which|whiteouts|stats|reset|commit> ...");
+        return;
+    }
+
+    match parts[0] {
+        "list" | "ls-all" => {
+            let overlays = overlay::list();
+            if overlays.is_empty() {
+                shell_println!("No active overlays.");
+                return;
+            }
+            shell_println!("{:<4} {:<16} {:<24} {:<24} {:>4} {:>6} {:>6}",
+                "ID", "Name", "Lower", "Upper", "WO", "Reads", "Writes");
+            shell_println!("{}", "-".repeat(84));
+            for (id, s) in &overlays {
+                shell_println!("{:<4} {:<16} {:<24} {:<24} {:>4} {:>6} {:>6}",
+                    id, s.name, s.lower_path, s.upper_path,
+                    s.whiteout_count, s.reads, s.writes);
+            }
+        }
+
+        "create" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: overlay create NAME LOWER_PATH UPPER_PATH");
+                return;
+            }
+            let name = parts[1];
+            let lower = parts[2];
+            let upper = parts[3];
+            match overlay::create(name, lower, upper) {
+                Ok(id) => shell_println!("Overlay '{}' created (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+
+        "destroy" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: overlay destroy NAME");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::destroy(id) {
+                    Ok(()) => shell_println!("Overlay '{}' destroyed.", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "ls" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: overlay ls NAME [PATH]");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                let rel = if parts.len() > 2 { parts[2] } else { "" };
+                match overlay::readdir(id, rel) {
+                    Ok(entries) => {
+                        for e in &entries {
+                            let type_char = match e.entry_type {
+                                crate::fs::EntryType::Directory => "d",
+                                crate::fs::EntryType::File => "-",
+                                crate::fs::EntryType::Symlink => "l",
+                                _ => "?",
+                            };
+                            // Show which layer.
+                            let layer = overlay::which_layer(id, &if rel.is_empty() {
+                                e.name.clone()
+                            } else {
+                                alloc::format!("{}/{}", rel, e.name)
+                            }).unwrap_or(overlay::Layer::None);
+                            let layer_tag = match layer {
+                                overlay::Layer::Upper => "[upper]",
+                                overlay::Layer::Lower => "[lower]",
+                                overlay::Layer::Both => "[both] ",
+                                overlay::Layer::None => "[none] ",
+                            };
+                            shell_println!("{} {} {:>8} {}", type_char, layer_tag, e.size, e.name);
+                        }
+                        shell_println!("({} entries)", entries.len());
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "cat" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: overlay cat NAME PATH");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::read_file(id, parts[2]) {
+                    Ok(data) => {
+                        if let Ok(text) = core::str::from_utf8(&data) {
+                            shell_println!("{}", text);
+                        } else {
+                            shell_println!("(binary data, {} bytes)", data.len());
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "write" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: overlay write NAME PATH DATA...");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                let data = parts[3..].join(" ");
+                match overlay::write_file(id, parts[2], data.as_bytes()) {
+                    Ok(()) => shell_println!("Written {} bytes to overlay.", data.len()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "rm" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: overlay rm NAME PATH");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::remove(id, parts[2]) {
+                    Ok(()) => shell_println!("Removed from overlay view."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "which" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: overlay which NAME PATH");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::which_layer(id, parts[2]) {
+                    Ok(layer) => {
+                        let desc = match layer {
+                            overlay::Layer::Upper => "upper (writable layer only)",
+                            overlay::Layer::Lower => "lower (read-only base)",
+                            overlay::Layer::Both => "both (upper overrides lower)",
+                            overlay::Layer::None => "not found (or whited out)",
+                        };
+                        shell_println!("{}: {}", parts[2], desc);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "whiteouts" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: overlay whiteouts NAME");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::list_whiteouts(id) {
+                    Ok(wos) => {
+                        if wos.is_empty() {
+                            shell_println!("No whiteout entries.");
+                        } else {
+                            for w in &wos {
+                                shell_println!("  .wh.{}", w);
+                            }
+                            shell_println!("({} whiteouts)", wos.len());
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "stats" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: overlay stats NAME");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::stats(id) {
+                    Ok(s) => {
+                        shell_println!("Overlay: {}", s.name);
+                        shell_println!("  Lower: {}", s.lower_path);
+                        shell_println!("  Upper: {}", s.upper_path);
+                        shell_println!("  Whiteouts:    {}", s.whiteout_count);
+                        shell_println!("  Opaque dirs:  {}", s.opaque_dir_count);
+                        shell_println!("  Reads:        {}", s.reads);
+                        shell_println!("  Writes:       {}", s.writes);
+                        shell_println!("  Copy-ups:     {}", s.copyups);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "reset" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: overlay reset NAME");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::reset(id) {
+                    Ok(removed) => shell_println!("Reset overlay '{}': removed {} upper entries.", parts[1], removed),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        "commit" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: overlay commit NAME");
+                return;
+            }
+            if let Some(id) = overlay::find_by_name(parts[1]) {
+                match overlay::commit(id) {
+                    Ok(applied) => shell_println!("Committed overlay '{}': {} changes applied to lower.", parts[1], applied),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Overlay '{}' not found.", parts[1]);
+            }
+        }
+
+        _ => {
+            shell_println!("Unknown overlay subcommand: {}", parts[0]);
+            shell_println!("Usage: overlay <list|create|destroy|ls|cat|write|rm|which|whiteouts|stats|reset|commit>");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -14720,7 +14991,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

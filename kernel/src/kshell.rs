@@ -4459,6 +4459,7 @@ fn dispatch(line: &str) {
         "net" | "ifconfig" => cmd_net(),
         "mouse" => cmd_mouse(),
         "audio" | "hda" => cmd_audio(args),
+        "mixer" => cmd_mixer(args),
         "gfx" => cmd_gfx(args),
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
@@ -16650,6 +16651,58 @@ fn cmd_audio(args: &str) {
             crate::console_println!("  play         — play 440 Hz test tone (best available output)");
             crate::console_println!("  stop         — stop all playback");
             crate::console_println!("  beep [f] [d] — PC speaker beep (freq Hz, duration ms)");
+        }
+    }
+}
+
+fn cmd_mixer(args: &str) {
+    let sub = args.split_whitespace().next().unwrap_or("status");
+    match sub {
+        "status" => {
+            let (active, opened, frames, mvol, mmuted) = crate::audio_mixer::status();
+            crate::console_println!("Audio Mixer:");
+            crate::console_println!("  Master volume: {}%{}", mvol,
+                if mmuted { " (MUTED)" } else { "" });
+            crate::console_println!("  Active streams: {}/{}", active, 8);
+            crate::console_println!("  Total opened:   {}", opened);
+            crate::console_println!("  Frames mixed:   {}", frames);
+
+            let streams = crate::audio_mixer::list_streams();
+            if !streams.is_empty() {
+                crate::console_println!();
+                crate::console_println!("  {:>3}  {:>5}  {:>5}  {:>8}", "ID", "VOL", "MUTE", "BUFFERED");
+                for (id, vol, muted, buf) in &streams {
+                    crate::console_println!("  {:>3}  {:>4}%  {:>5}  {:>7}B",
+                        id, vol, if *muted { "yes" } else { "no" }, buf);
+                }
+            }
+        }
+        "vol" | "volume" => {
+            let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+            if parts.len() < 2 {
+                crate::console_println!("Master volume: {}%", crate::audio_mixer::master_volume());
+                return;
+            }
+            if let Ok(vol) = parts[1].parse::<u8>() {
+                crate::audio_mixer::set_master_volume(vol);
+                crate::console_println!("Master volume set to {}%", vol.min(100));
+            } else {
+                crate::console_println!("Usage: mixer vol <0-100>");
+            }
+        }
+        "mute" => {
+            crate::audio_mixer::set_master_mute(true);
+            crate::console_println!("Master muted.");
+        }
+        "unmute" => {
+            crate::audio_mixer::set_master_mute(false);
+            crate::console_println!("Master unmuted.");
+        }
+        _ => {
+            crate::console_println!("Usage: mixer [status|vol|mute|unmute]");
+            crate::console_println!("  status        — show mixer state and streams");
+            crate::console_println!("  vol [0-100]   — set/show master volume");
+            crate::console_println!("  mute/unmute   — toggle master mute");
         }
     }
 }

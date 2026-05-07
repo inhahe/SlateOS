@@ -51,6 +51,7 @@ extern crate alloc;
 mod ac97;
 mod acpi;
 mod apic;
+mod audio_mixer;
 mod backtrace;
 mod bench;
 mod blkdev;
@@ -1317,6 +1318,9 @@ extern "C" fn kmain() -> ! {
 
     // AC97 audio self-test.
     ac97::self_test();
+
+    // Audio mixer self-test.
+    audio_mixer::self_test();
 
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {

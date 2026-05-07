@@ -52,6 +52,7 @@ pub mod ext4;
 pub mod fat;
 pub mod fcompress;
 pub mod fileinfo;
+pub mod findex;
 pub mod freeze;
 pub mod fstrim;
 pub mod fswalk;

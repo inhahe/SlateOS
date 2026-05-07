@@ -3086,7 +3086,7 @@ const COMMANDS: &[&str] = &[
     "ar", "backup", "base64", "batch", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "finfo", "fold", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "findex", "finfo", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
@@ -4373,6 +4373,7 @@ fn dispatch(line: &str) {
         "recent" => cmd_recent(args),
         "fileinfo" | "finfo" => cmd_fileinfo(args),
         "fswalk" | "walk" => cmd_fswalk(args),
+        "findex" => cmd_findex(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4462,6 +4463,7 @@ fn dispatch(line: &str) {
         "mouse" => cmd_mouse(),
         "audio" | "hda" => cmd_audio(args),
         "mixer" => cmd_mixer(args),
+        "soundhist" => cmd_soundhist(),
         "gfx" => cmd_gfx(args),
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
@@ -14748,6 +14750,143 @@ fn cmd_fswalk(args: &str) {
     }
 }
 
+fn cmd_findex(args: &str) {
+    use crate::fs::findex;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "build" => {
+            let path = if parts.len() > 1 { resolve_path(parts[1]) } else { get_cwd() };
+            let depth = parts.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(3);
+            shell_println!("Indexing {}  (depth {})...", path, depth);
+            match findex::build(&path, depth) {
+                Ok(count) => shell_println!("Indexed {} files.", count),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" | "index" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: findex add <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match findex::index_file(&path) {
+                Ok(fields) => shell_println!("Indexed {}: {} fields", path, fields),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: findex remove <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            if findex::remove_file(&path) {
+                shell_println!("Removed: {}", path);
+            } else {
+                shell_println!("Not indexed: {}", path);
+            }
+        }
+        "query" | "q" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: findex query <field op value [AND ...]>");
+                shell_println!("  Ops: = != < > <= >= ~ (contains) ^ (starts) $ (ends)");
+                shell_println!("  Example: findex query audio.artist=Radiohead");
+                shell_println!("  Example: findex query image.width>=1920 AND image.height>=1080");
+                return;
+            }
+            let query_str = parts[1..].join(" ");
+            let predicates = findex::parse_query(&query_str);
+            if predicates.is_empty() {
+                shell_println!("No valid predicates in query.");
+                return;
+            }
+            let results = findex::query(&predicates);
+            if results.is_empty() {
+                shell_println!("No matching files.");
+            } else {
+                for path in &results {
+                    shell_println!("{}", path);
+                }
+                shell_println!("\n{} matches.", results.len());
+            }
+        }
+        "get" | "show" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: findex get <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let fields = findex::get_fields(&path);
+            if fields.is_empty() {
+                shell_println!("No indexed fields for: {}", path);
+            } else {
+                shell_println!("{:30} {}", "FIELD", "VALUE");
+                shell_println!("{}", "-".repeat(60));
+                for (name, value) in &fields {
+                    shell_println!("{:30} {}", name, value);
+                }
+            }
+        }
+        "columns" | "cols" => {
+            let path = if parts.len() > 1 { resolve_path(parts[1]) } else { get_cwd() };
+            let columns = findex::columns_for_dir(&path);
+            if columns.is_empty() {
+                shell_println!("No indexed files in: {}", path);
+            } else {
+                shell_println!("Recommended columns for {}:", path);
+                shell_println!("{:30} {:20} {:>5}", "FIELD", "LABEL", "FILES");
+                shell_println!("{}", "-".repeat(60));
+                for col in &columns {
+                    shell_println!("{:30} {:20} {:>5}", col.name, col.label, col.count);
+                }
+            }
+        }
+        "fields" => {
+            let fields = findex::known_fields();
+            if fields.is_empty() {
+                shell_println!("No fields indexed yet.");
+            } else {
+                shell_println!("{:30} {}", "FIELD NAME", "LABEL");
+                shell_println!("{}", "-".repeat(50));
+                for (name, label) in &fields {
+                    shell_println!("{:30} {}", name, label);
+                }
+            }
+        }
+        "clear" => {
+            findex::clear();
+            shell_println!("Index cleared.");
+        }
+        "stats" => {
+            let (builds, ops, queries, indexed, fields) = findex::stats();
+            shell_println!("File Index Statistics");
+            shell_println!("  Indexed files: {}/16384", indexed);
+            shell_println!("  Known fields:  {}/256", fields);
+            shell_println!("  Builds:        {}", builds);
+            shell_println!("  Index ops:     {}", ops);
+            shell_println!("  Queries:       {}", queries);
+        }
+        "reset" => {
+            findex::reset_stats();
+            shell_println!("Index statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: findex <command>");
+            shell_println!("  build [path] [depth]         Build index for directory");
+            shell_println!("  add <path>                   Index a single file");
+            shell_println!("  remove <path>                Remove from index");
+            shell_println!("  query <predicates>           Search by attributes");
+            shell_println!("  get <path>                   Show fields for a file");
+            shell_println!("  columns [dir]                Discover columns for dir");
+            shell_println!("  fields                       List all known field names");
+            shell_println!("  clear                        Clear entire index");
+            shell_println!("  stats                        Show statistics");
+            shell_println!("  reset                        Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -16928,6 +17067,33 @@ fn cmd_mixer(args: &str) {
             crate::console_println!("  vol [0-100]   — set/show master volume");
             crate::console_println!("  mute/unmute   — toggle master mute");
         }
+    }
+}
+
+fn cmd_soundhist() {
+    let (events, bytes, active) = crate::audio_history::stats();
+    crate::console_println!("Sound History:");
+    crate::console_println!("  Total events: {} | Total bytes: {} | Active: {}",
+        events, bytes, active);
+    crate::console_println!();
+
+    let history = crate::audio_history::recent(16);
+    if history.is_empty() {
+        crate::console_println!("  No sound events recorded.");
+        return;
+    }
+
+    crate::console_println!("  {:20} {:>8} {:>10} {:>4} {:>7}", "NAME", "DURATION", "BYTES", "VOL", "STATUS");
+    crate::console_println!("  {}", "-".repeat(55));
+    for (name, dur, bytes, vol, playing) in &history {
+        let status = if *playing { "PLAYING" } else { "done" };
+        let dur_str = if *dur > 0 {
+            alloc::format!("{}ms", dur)
+        } else {
+            alloc::string::String::from("<1ms")
+        };
+        crate::console_println!("  {:20} {:>8} {:>10} {:>3}% {:>7}",
+            name, dur_str, bytes, vol, status);
     }
 }
 
@@ -20194,7 +20360,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

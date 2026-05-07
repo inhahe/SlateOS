@@ -143,6 +143,7 @@ const ROOT_FILES: &[&str] = &[
     "recent",
     "fileinfo",
     "fswalk",
+    "findex",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2512,6 +2513,31 @@ fn gen_fswalk() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_findex() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (builds, index_ops, queries, indexed, fields) = super::findex::stats();
+
+    out.push_str("File Metadata Index\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Indexed files: {}/{}\n", indexed, 16384));
+    out.push_str(&format!("Known fields:  {}/{}\n", fields, 256));
+    out.push_str(&format!("Builds:        {}\n", builds));
+    out.push_str(&format!("Index ops:     {}\n", index_ops));
+    out.push_str(&format!("Queries:       {}\n\n", queries));
+
+    let known = super::findex::known_fields();
+    if !known.is_empty() {
+        out.push_str("Known field names:\n");
+        for (name, label) in &known {
+            out.push_str(&format!("  {:30} {}\n", name, label));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2596,6 +2622,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "recent" => Ok(gen_recent()),
         "fileinfo" => Ok(gen_fileinfo()),
         "fswalk" => Ok(gen_fswalk()),
+        "findex" => Ok(gen_findex()),
         _ => Err(KernelError::NotFound),
     }
 }

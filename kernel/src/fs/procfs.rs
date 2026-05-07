@@ -118,6 +118,7 @@ const ROOT_FILES: &[&str] = &[
     "encryption",
     "dedup",
     "search",
+    "tags",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1813,6 +1814,33 @@ fn gen_search() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/tags` — file tagging system statistics.
+fn gen_tags() -> Vec<u8> {
+    use crate::fs::tags;
+    let s = tags::stats();
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!("File Tagging: {}\n\n", if tags::is_enabled() { "enabled" } else { "disabled" }));
+    out.push_str(&format!("  unique tags:     {}\n", s.unique_tags));
+    out.push_str(&format!("  tagged files:    {}\n", s.tagged_files));
+    out.push_str(&format!("  associations:    {}\n", s.total_associations));
+    out.push_str(&format!("  adds:            {}\n", s.adds));
+    out.push_str(&format!("  removes:         {}\n", s.removes));
+    out.push_str(&format!("  searches:        {}\n", s.searches));
+    out.push_str(&format!("  index built:     {}\n", s.index_built));
+
+    // List known tags if index is built.
+    let all_tags = tags::list_tags();
+    if !all_tags.is_empty() {
+        out.push_str("\nKnown Tags:\n");
+        for (tag, count) in &all_tags {
+            out.push_str(&format!("  {:20} {} file(s)\n", tag, count));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1872,6 +1900,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "encryption" => Ok(gen_encryption()),
         "dedup" => Ok(gen_dedup()),
         "search" => Ok(gen_search()),
+        "tags" => Ok(gen_tags()),
         _ => Err(KernelError::NotFound),
     }
 }

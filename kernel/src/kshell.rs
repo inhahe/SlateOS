@@ -3112,6 +3112,7 @@ const COMMANDS: &[&str] = &[
     "fcompress", "fc",
     "encrypt",
     "fsearch",
+    "tag",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4342,6 +4343,7 @@ fn dispatch(line: &str) {
         "fcompress" | "fc" => cmd_fcompress(args),
         "encrypt" => cmd_encrypt(args),
         "fsearch" => cmd_fsearch(args),
+        "tag" => cmd_tag(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -11800,6 +11802,181 @@ fn cmd_fsearch(args: &str) {
     }
 }
 
+/// `tag` — file tagging system for BFS-style metadata queries.
+///
+/// Subcommands:
+///   tag add <path> <tag>           — add a tag to a file
+///   tag rm <path> <tag>            — remove a tag from a file
+///   tag get <path>                 — list tags on a file
+///   tag set <path> <tag1,tag2,...> — set all tags on a file
+///   tag clear <path>               — remove all tags from a file
+///   tag search <tag> [path]        — find files with a tag
+///   tag find <tag1,tag2> [path]    — find files with ALL tags
+///   tag list                       — list all known tags
+///   tag index [path]               — build/rebuild tag index
+///   tag stats                      — show tag statistics
+fn cmd_tag(args: &str) {
+    use crate::fs::tags;
+
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    let sub = parts.first().copied().unwrap_or("");
+    let rest = if parts.len() > 1 { parts[1].trim() } else { "" };
+
+    match sub {
+        "add" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let path = tok.first().copied().unwrap_or("");
+            let tag = if tok.len() > 1 { tok[1].trim() } else { "" };
+
+            if path.is_empty() || tag.is_empty() {
+                shell_println!("Usage: tag add <path> <tag>");
+                return;
+            }
+
+            match tags::add(path, tag) {
+                Ok(()) => shell_println!("Tagged '{}' with '{}'", path, tag),
+                Err(e) => shell_println!("tag add: {:?}", e),
+            }
+        }
+        "rm" | "remove" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let path = tok.first().copied().unwrap_or("");
+            let tag = if tok.len() > 1 { tok[1].trim() } else { "" };
+
+            if path.is_empty() || tag.is_empty() {
+                shell_println!("Usage: tag rm <path> <tag>");
+                return;
+            }
+
+            match tags::remove(path, tag) {
+                Ok(()) => shell_println!("Removed tag '{}' from '{}'", tag, path),
+                Err(e) => shell_println!("tag rm: {:?}", e),
+            }
+        }
+        "get" | "show" => {
+            if rest.is_empty() {
+                shell_println!("Usage: tag get <path>");
+                return;
+            }
+
+            match tags::get(rest) {
+                Ok(t) => {
+                    if t.is_empty() {
+                        shell_println!("(no tags)");
+                    } else {
+                        shell_println!("{}", t.join(", "));
+                    }
+                }
+                Err(e) => shell_println!("tag get: {:?}", e),
+            }
+        }
+        "set" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let path = tok.first().copied().unwrap_or("");
+            let tag_str = if tok.len() > 1 { tok[1].trim() } else { "" };
+
+            if path.is_empty() || tag_str.is_empty() {
+                shell_println!("Usage: tag set <path> <tag1,tag2,...>");
+                return;
+            }
+
+            let tag_list: Vec<&str> = tag_str.split(',').map(|s| s.trim()).collect();
+            match tags::set(path, &tag_list) {
+                Ok(()) => shell_println!("Set {} tag(s) on '{}'", tag_list.len(), path),
+                Err(e) => shell_println!("tag set: {:?}", e),
+            }
+        }
+        "clear" => {
+            if rest.is_empty() {
+                shell_println!("Usage: tag clear <path>");
+                return;
+            }
+
+            match tags::clear(rest) {
+                Ok(()) => shell_println!("Cleared all tags from '{}'", rest),
+                Err(e) => shell_println!("tag clear: {:?}", e),
+            }
+        }
+        "search" | "find" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let tag_str = tok.first().copied().unwrap_or("");
+            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+
+            if tag_str.is_empty() {
+                shell_println!("Usage: tag search <tag> [path]");
+                shell_println!("       tag find <tag1,tag2,...> [path]");
+                return;
+            }
+
+            let tag_list: Vec<&str> = tag_str.split(',').collect();
+            let results = if tag_list.len() == 1 {
+                tags::search(tag_list[0], root)
+            } else {
+                tags::search_multi(&tag_list, root)
+            };
+
+            match results {
+                Ok(files) => {
+                    if files.is_empty() {
+                        shell_println!("No files found.");
+                    } else {
+                        shell_println!("Found {} file(s):", files.len());
+                        for f in &files {
+                            shell_println!("  {} [{}]", f.path, f.tags.join(", "));
+                        }
+                    }
+                }
+                Err(e) => shell_println!("tag search: {:?}", e),
+            }
+        }
+        "list" => {
+            let all_tags = tags::list_tags();
+            if all_tags.is_empty() {
+                shell_println!("No tags in index. Run 'tag index' to build.");
+            } else {
+                shell_println!("{} unique tag(s):", all_tags.len());
+                for (tag, count) in &all_tags {
+                    shell_println!("  {:20} {} file(s)", tag, count);
+                }
+            }
+        }
+        "index" | "rebuild" => {
+            let root = if rest.is_empty() { "/" } else { rest };
+            shell_println!("Building tag index from '{}'...", root);
+            match tags::build_index(root) {
+                Ok(count) => shell_println!("Indexed {} tagged file(s)", count),
+                Err(e) => shell_println!("tag index: {:?}", e),
+            }
+        }
+        "stats" | "status" => {
+            let s = tags::stats();
+            shell_println!("File Tagging: {}", if tags::is_enabled() { "enabled" } else { "disabled" });
+            shell_println!("  unique tags:   {}", s.unique_tags);
+            shell_println!("  tagged files:  {}", s.tagged_files);
+            shell_println!("  associations:  {}", s.total_associations);
+            shell_println!("  adds:          {}", s.adds);
+            shell_println!("  removes:       {}", s.removes);
+            shell_println!("  searches:      {}", s.searches);
+            shell_println!("  index built:   {}", s.index_built);
+        }
+        _ => {
+            shell_println!("Usage: tag <add|rm|get|set|clear|search|find|list|index|stats>");
+            shell_println!();
+            shell_println!("Subcommands:");
+            shell_println!("  add <path> <tag>           Add a tag to a file");
+            shell_println!("  rm <path> <tag>            Remove a tag from a file");
+            shell_println!("  get <path>                 List tags on a file");
+            shell_println!("  set <path> <t1,t2,...>     Set all tags on a file");
+            shell_println!("  clear <path>               Remove all tags");
+            shell_println!("  search <tag> [path]        Find files with a tag");
+            shell_println!("  find <t1,t2,...> [path]    Find files with ALL tags");
+            shell_println!("  list                       List all known tags");
+            shell_println!("  index [path]               Build tag index");
+            shell_println!("  stats                      Show statistics");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -17058,7 +17235,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

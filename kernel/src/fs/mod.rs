@@ -69,6 +69,7 @@ pub mod rar;
 pub mod rlimit;
 pub mod symlink_security;
 pub mod sysfs;
+pub mod tags;
 pub mod tar;
 pub mod tmpwatch;
 pub mod transaction;

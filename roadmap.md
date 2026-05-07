@@ -793,6 +793,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] malloc/free/calloc/realloc via mmap-backed allocator (size header per allocation)
   - [x] setjmp/longjmp: x86_64 assembly, saves/restores callee-saved registers
   - [x] stdio: putchar, puts, fputs, fputc, fgetc, getchar, fwrite, fread, perror, stdout/stderr/stdin symbols
+  - [x] signal stubs: POSIX signal constants, signal/kill/raise stubs (ENOSYS), sigset operations, raise(SIGABRT)→abort
+  - [x] assert: __assert_fail for C assert() macro
+  - [x] environ: getenv/setenv/unsetenv (static 128-entry store), environ pointer
+  - [x] C runtime: atexit (32 handlers LIFO), exit, __libc_start_main (glibc convention)
   - [ ] dup/dup2 for pipe handles (needs SYS_PIPE_DUP or fd-level refcounting)
   - [ ] ioctl
   - [ ] select/poll/epoll equivalents

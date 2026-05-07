@@ -35,6 +35,7 @@ use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
+use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
 
@@ -439,9 +440,30 @@ pub fn init(hhdm_offset: u64) {
 
     serial_println!("[hda] MMIO BAR0 physical: {:#x}", bar0_phys);
 
-    // Map the MMIO region (at least 16 KiB).
-    // Use HHDM for direct access (physical address + HHDM offset = virtual).
-    let mmio_base = bar0_phys + hhdm_offset;
+    // Map the MMIO region into kernel virtual address space.
+    // PCI BAR addresses may be above physical RAM, so the HHDM bootloader
+    // mapping doesn't cover them.  We must explicitly map the MMIO pages
+    // with NO_CACHE attribute (uncacheable device memory).
+    let mmio_base = bar0_phys.wrapping_add(hhdm_offset);
+    let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
+    let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
+
+    // HDA register space is ~16 KiB. Map 1 frame (16 KiB) minimum.
+    if let Some(frame) = PhysFrame::from_addr(bar0_phys) {
+        let virt = VirtAddr::new(mmio_base);
+        // SAFETY: bar0_phys is the PCI BAR MMIO region for the HDA controller.
+        // We're mapping device registers into kernel virtual address space.
+        if let Err(e) = unsafe { page_table::map_frame(pml4_phys, virt, frame, mmio_flags) } {
+            // May already be mapped (e.g., within HHDM range on large-RAM systems).
+            serial_println!("[hda] Note: MMIO map returned {:?} (may be pre-mapped)", e);
+        }
+    }
+
+    // Flush TLB for the mapped address.
+    // SAFETY: Standard invlpg to flush stale TLB entries for device MMIO.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) mmio_base, options(nostack, preserves_flags));
+    }
 
     // Ensure the PCI device is bus-master enabled (needed for DMA).
     pci::enable_bus_master(pci_dev.address);

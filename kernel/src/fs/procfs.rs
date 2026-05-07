@@ -206,6 +206,7 @@ const ROOT_FILES: &[&str] = &[
     "mmtune",
     "capsettings",
     "vpn",
+    "dyndns",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4467,6 +4468,43 @@ fn gen_vpn() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_dyndns() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (entry_count, forward_count, router_detected, ops) = super::dyndns::stats();
+
+    out.push_str("Dynamic DNS & Port Forwarding\n");
+    out.push_str("=============================\n\n");
+    out.push_str(&format!("DDNS entries:  {}\n", entry_count));
+    out.push_str(&format!("Forwards:      {}\n", forward_count));
+    out.push_str(&format!("Router:        {}\n", if router_detected { "detected" } else { "none" }));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    if let Some(ri) = super::dyndns::router_info() {
+        out.push_str(&format!("\nRouter: {} ({})\n", ri.ip, ri.model));
+        out.push_str(&format!("  External IP: {}\n", ri.external_ip));
+        out.push_str(&format!("  UPnP:        {}\n", ri.upnp_available));
+        out.push_str(&format!("  NAT-PMP:     {}\n", ri.natpmp_available));
+    }
+
+    let entries = super::dyndns::list_entries();
+    if !entries.is_empty() {
+        out.push_str(&format!("\n{:<4} {:<15} {:<10} {:<25} {:<10} {}\n",
+            "ID", "NAME", "PROVIDER", "HOSTNAME", "STATUS", "IP"));
+        for e in &entries {
+            out.push_str(&format!("{:<4} {:<15} {:<10} {:<25} {:<10} {}\n",
+                e.id, e.name,
+                format!("{:?}", e.provider),
+                e.hostname,
+                format!("{:?}", e.status),
+                e.last_ip));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4838,6 +4876,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "mmtune" => Ok(gen_mmtune()),
         "capsettings" => Ok(gen_capsettings()),
         "vpn" => Ok(gen_vpn()),
+        "dyndns" => Ok(gen_dyndns()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

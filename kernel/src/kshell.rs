@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4810,6 +4810,7 @@ fn dispatch(line: &str) {
         "mmtune" | "mtune" => cmd_mmtune(args),
         "capsettings" | "caps" => cmd_capsettings(args),
         "vpn" => cmd_vpn(args),
+        "dyndns" | "ddns" => cmd_dyndns(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -22801,6 +22802,249 @@ fn cmd_vpn(args: &str) {
     }
 }
 
+/// `dyndns` / `ddns` — dynamic DNS and port forwarding.
+fn cmd_dyndns(args: &str) {
+    use crate::fs::dyndns;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "init" => {
+            dyndns::init_defaults();
+            shell_println!("Initialised default dynamic DNS config.");
+        }
+        "list" | "ls" => {
+            let entries = dyndns::list_entries();
+            if entries.is_empty() {
+                shell_println!("No DDNS entries configured.");
+                return;
+            }
+            shell_println!("{:<4} {:<15} {:<10} {:<25} {:<10} {}",
+                "ID", "NAME", "PROVIDER", "HOSTNAME", "STATUS", "IP");
+            for e in &entries {
+                shell_println!("{:<4} {:<15} {:<10} {:<25} {:<10} {}",
+                    e.id, e.name,
+                    format!("{:?}", e.provider),
+                    e.hostname,
+                    format!("{:?}", e.status),
+                    e.last_ip);
+            }
+        }
+        "get" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: dyndns get <id>"); return; }
+            };
+            match dyndns::get_entry(id) {
+                Ok(e) => {
+                    shell_println!("ID:          {}", e.id);
+                    shell_println!("Name:        {}", e.name);
+                    shell_println!("Provider:    {:?}", e.provider);
+                    shell_println!("Hostname:    {}", e.hostname);
+                    shell_println!("Username:    {}", e.username);
+                    shell_println!("URL:         {}", e.update_url);
+                    shell_println!("Interval:    {} s", e.interval_s);
+                    shell_println!("Enabled:     {}", e.enabled);
+                    shell_println!("Status:      {:?}", e.status);
+                    shell_println!("Last IP:     {}", e.last_ip);
+                    shell_println!("Updates:     {}", e.update_count);
+                    shell_println!("Failures:    {}", e.fail_count);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: dyndns add <name> <provider> <hostname> <user>");
+                shell_println!("Providers: dynu, noip, duckdns, cloudflare, freedns, custom");
+                return;
+            }
+            let provider = match parts[2] {
+                "dynu" => dyndns::DynDnsProvider::Dynu,
+                "noip" => dyndns::DynDnsProvider::NoIp,
+                "duckdns" | "duck" => dyndns::DynDnsProvider::DuckDns,
+                "cloudflare" | "cf" => dyndns::DynDnsProvider::Cloudflare,
+                "freedns" => dyndns::DynDnsProvider::FreeDns,
+                "custom" => dyndns::DynDnsProvider::Custom,
+                _ => { shell_println!("Unknown provider."); return; }
+            };
+            match dyndns::add_entry(parts[1], provider, parts[3], parts[4]) {
+                Ok(id) => shell_println!("Added DDNS entry {} (id={}).", parts[1], id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: dyndns remove <id>"); return; }
+            };
+            match dyndns::remove_entry(id) {
+                Ok(()) => shell_println!("Removed DDNS entry {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: dyndns enable <id>"); return; }
+            };
+            match dyndns::set_enabled(id, true) {
+                Ok(()) => shell_println!("Enabled entry {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: dyndns disable <id>"); return; }
+            };
+            match dyndns::set_enabled(id, false) {
+                Ok(()) => shell_println!("Disabled entry {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "interval" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dyndns interval <id> <seconds>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let secs: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid seconds."); return; }
+            };
+            match dyndns::set_interval(id, secs) {
+                Ok(()) => shell_println!("Set interval to {} s.", secs),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "update" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dyndns update <id> <ip>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            match dyndns::update_now(id, parts[2]) {
+                Ok(()) => shell_println!("Updated DDNS entry with IP {}.", parts[2]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "forwards" | "fwd" => {
+            let fwds = dyndns::list_forwards();
+            if fwds.is_empty() {
+                shell_println!("No port forwards configured.");
+                return;
+            }
+            shell_println!("{:<4} {:<20} {:<6} {:<6} {:<6} {:<16} {:<6} {}",
+                "ID", "DESCRIPTION", "EXT", "INT", "PROTO", "INTERNAL_IP", "ACT", "METHOD");
+            for f in &fwds {
+                shell_println!("{:<4} {:<20} {:<6} {:<6} {:<6} {:<16} {:<6} {:?}",
+                    f.id, f.description,
+                    f.external_port, f.internal_port,
+                    format!("{:?}", f.protocol),
+                    f.internal_ip, f.active, f.method);
+            }
+        }
+        "addfwd" => {
+            if parts.len() < 6 {
+                shell_println!("Usage: dyndns addfwd <desc> <ext_port> <int_port> <proto> <ip>");
+                shell_println!("Proto: tcp, udp, both");
+                return;
+            }
+            let ext: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid external port."); return; }
+            };
+            let int: u16 = match parts.get(3).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid internal port."); return; }
+            };
+            let proto = match parts[4] {
+                "tcp" => dyndns::ForwardProtocol::Tcp,
+                "udp" => dyndns::ForwardProtocol::Udp,
+                "both" => dyndns::ForwardProtocol::Both,
+                _ => { shell_println!("Unknown protocol."); return; }
+            };
+            match dyndns::add_forward(parts[1], ext, int, proto, parts[5], dyndns::NatMethod::Upnp) {
+                Ok(id) => shell_println!("Added port forward (id={}).", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmfwd" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: dyndns rmfwd <id>"); return; }
+            };
+            match dyndns::remove_forward(id) {
+                Ok(()) => shell_println!("Removed port forward {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "router" => {
+            match dyndns::router_info() {
+                Some(ri) => {
+                    shell_println!("Router IP:    {}", ri.ip);
+                    shell_println!("External IP:  {}", ri.external_ip);
+                    shell_println!("Model:        {}", ri.model);
+                    shell_println!("UPnP:         {}", ri.upnp_available);
+                    shell_println!("NAT-PMP:      {}", ri.natpmp_available);
+                }
+                None => shell_println!("No router detected."),
+            }
+        }
+        "stats" => {
+            let (entries, fwds, router, ops) = dyndns::stats();
+            shell_println!("DDNS entries:  {}", entries);
+            shell_println!("Forwards:      {}", fwds);
+            shell_println!("Router:        {}", if router { "detected" } else { "none" });
+            shell_println!("Operations:    {}", ops);
+        }
+        "clear" => {
+            dyndns::clear_all();
+            shell_println!("Cleared all dynamic DNS configuration.");
+        }
+        "test" => {
+            match dyndns::self_test() {
+                Ok(()) => shell_println!("dyndns: all tests passed."),
+                Err(e) => shell_println!("dyndns: test failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("dyndns — dynamic DNS and port forwarding");
+            shell_println!();
+            shell_println!("DDNS:");
+            shell_println!("  list / ls                     List DDNS entries");
+            shell_println!("  get <id>                      Show entry details");
+            shell_println!("  add <name> <prov> <host> <user>  Add entry");
+            shell_println!("  remove / rm <id>              Remove entry");
+            shell_println!("  enable <id>                   Enable entry");
+            shell_println!("  disable <id>                  Disable entry");
+            shell_println!("  interval <id> <seconds>       Set update interval");
+            shell_println!("  update <id> <ip>              Force update");
+            shell_println!();
+            shell_println!("Port Forwarding:");
+            shell_println!("  forwards / fwd                List forwards");
+            shell_println!("  addfwd <desc> <ext> <int> <proto> <ip>  Add forward");
+            shell_println!("  rmfwd <id>                    Remove forward");
+            shell_println!();
+            shell_println!("Other:");
+            shell_println!("  router                        Show router info");
+            shell_println!("  init / stats / clear / test");
+            shell_println!();
+            shell_println!("Providers: dynu, noip, duckdns, cloudflare, freedns, custom");
+            shell_println!("Alias: ddns");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -30579,7 +30823,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -64,6 +64,7 @@ pub mod directio;
 pub mod display;
 pub mod dirsync;
 pub mod dragdrop;
+pub mod dyndns;
 pub mod encrypt;
 pub mod ext4;
 pub mod fat;

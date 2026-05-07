@@ -42,6 +42,7 @@ pub mod cache;
 pub mod cas;
 pub mod clipboard;
 pub mod changetrack;
+pub mod columnview;
 pub mod compress;
 #[allow(dead_code)]
 pub mod cpio;

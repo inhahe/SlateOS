@@ -3084,7 +3084,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 const COMMANDS: &[&str] = &[
     "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
-    "clip", "clipboard", "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
+    "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "find", "findex", "finfo", "fops", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
@@ -4381,6 +4381,7 @@ fn dispatch(line: &str) {
         "fileops" | "fops" => cmd_fileops(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
+        "columnview" | "colview" => cmd_columnview(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -15760,6 +15761,92 @@ fn cmd_template(args: &str) {
     }
 }
 
+/// `columnview` — file explorer detail column configuration.
+fn cmd_columnview(args: &str) {
+    use crate::fs::columnview;
+    columnview::init();
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "compute" | "dir" => {
+            let dir_arg = parts.get(1).copied().unwrap_or(".");
+            let dir = resolve_path(dir_arg);
+            match columnview::compute_columns(&dir) {
+                Ok(cols) => {
+                    shell_println!("Columns for {}:", dir);
+                    shell_println!("{:4} {:24} {:16} {:8} {:6}", "POS", "ID", "HEADER", "TYPE", "WIDTH");
+                    for c in &cols {
+                        let type_str = match c.def.col_type {
+                            columnview::ColumnType::Text => "text",
+                            columnview::ColumnType::Integer => "int",
+                            columnview::ColumnType::Size => "size",
+                            columnview::ColumnType::DateTime => "date",
+                            columnview::ColumnType::Duration => "dur",
+                            columnview::ColumnType::Boolean => "bool",
+                            columnview::ColumnType::Dimensions => "dim",
+                        };
+                        shell_println!("{:4} {:24} {:16} {:8} {:6}",
+                            c.position, c.def.id, c.def.header, type_str, c.width);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "ls" | "" => {
+            let cols = columnview::list_columns();
+            shell_println!("{:24} {:16} {:8} {:6} {:10}", "ID", "HEADER", "TYPE", "WIDTH", "APPLIES");
+            for c in &cols {
+                let type_str = match c.col_type {
+                    columnview::ColumnType::Text => "text",
+                    columnview::ColumnType::Integer => "int",
+                    columnview::ColumnType::Size => "size",
+                    columnview::ColumnType::DateTime => "date",
+                    columnview::ColumnType::Duration => "dur",
+                    columnview::ColumnType::Boolean => "bool",
+                    columnview::ColumnType::Dimensions => "dim",
+                };
+                let applies = if c.applies_to.is_empty() {
+                    String::from("*")
+                } else {
+                    alloc::format!("{} types", c.applies_to.len())
+                };
+                shell_println!("{:24} {:16} {:8} {:6} {:10}", c.id, c.header, type_str, c.default_width, applies);
+            }
+        }
+        "prefs" => {
+            let prefs = columnview::list_preferences();
+            if prefs.is_empty() {
+                shell_println!("No user preferences set.");
+            } else {
+                shell_println!("{:30} {:24} {:8} {:6} {:4}", "DIR", "COLUMN", "VISIBLE", "WIDTH", "POS");
+                for p in &prefs {
+                    shell_println!("{:30} {:24} {:8} {:6} {:4}",
+                        p.directory, p.column_id, p.visible, p.width, p.position);
+                }
+            }
+        }
+        "stats" => {
+            let (col_count, pref_count, compute_count) = columnview::stats();
+            shell_println!("Column view statistics:");
+            shell_println!("  Columns:    {}/{}", col_count, 512);
+            shell_println!("  User prefs: {}/{}", pref_count, 256);
+            shell_println!("  Computes:   {}", compute_count);
+        }
+        "reset" => {
+            columnview::reset_stats();
+            shell_println!("Column view statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: columnview <command>");
+            shell_println!("  list|ls               List all column definitions (default)");
+            shell_println!("  compute <dir>         Compute columns for a directory");
+            shell_println!("  prefs                 Show user preferences");
+            shell_println!("  stats                 Show statistics");
+            shell_println!("  reset                 Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -21328,7 +21415,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

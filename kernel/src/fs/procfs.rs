@@ -151,6 +151,7 @@ const ROOT_FILES: &[&str] = &[
     "fileops",
     "preview",
     "templates",
+    "columnview",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2727,6 +2728,45 @@ fn gen_templates() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_columnview() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (col_count, pref_count, compute_count) = super::columnview::stats();
+
+    out.push_str("Column View\n");
+    out.push_str("===========\n\n");
+    out.push_str(&format!("Columns:    {}/{}\n", col_count, 512));
+    out.push_str(&format!("User prefs: {}/{}\n", pref_count, 256));
+    out.push_str(&format!("Computes:   {}\n\n", compute_count));
+
+    let cols = super::columnview::list_columns();
+    if !cols.is_empty() {
+        out.push_str(&format!("{:24} {:16} {:8} {:6} {}\n",
+            "ID", "HEADER", "TYPE", "WIDTH", "APPLIES TO"));
+        for c in cols.iter().take(30) {
+            let type_str = match c.col_type {
+                super::columnview::ColumnType::Text => "text",
+                super::columnview::ColumnType::Integer => "int",
+                super::columnview::ColumnType::Size => "size",
+                super::columnview::ColumnType::DateTime => "date",
+                super::columnview::ColumnType::Duration => "dur",
+                super::columnview::ColumnType::Boolean => "bool",
+                super::columnview::ColumnType::Dimensions => "dim",
+            };
+            let applies = if c.applies_to.is_empty() {
+                String::from("*")
+            } else {
+                format!("{}", c.applies_to.len())
+            };
+            out.push_str(&format!("{:24} {:16} {:8} {:6} {}\n",
+                c.id, c.header, type_str, c.default_width, applies));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2819,6 +2859,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fileops" => Ok(gen_fileops()),
         "preview" => Ok(gen_preview()),
         "templates" => Ok(gen_templates()),
+        "columnview" => Ok(gen_columnview()),
         _ => Err(KernelError::NotFound),
     }
 }

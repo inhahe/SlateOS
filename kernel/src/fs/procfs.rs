@@ -160,6 +160,7 @@ const ROOT_FILES: &[&str] = &[
     "templates",
     "toolbar",
     "queryable",
+    "immutable",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2803,6 +2804,29 @@ fn gen_queryable() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_immutable() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (flagged, set_ops, check_ops) = super::immutable::stats();
+
+    out.push_str("Immutable / Append-Only File Flags\n");
+    out.push_str("==================================\n\n");
+    out.push_str(&format!("Flagged files: {}/{}\n", flagged, 65536));
+    out.push_str(&format!("Set ops:       {}\n", set_ops));
+    out.push_str(&format!("Check ops:     {}\n\n", check_ops));
+
+    let flagged_files = super::immutable::list_flagged();
+    if !flagged_files.is_empty() {
+        out.push_str(&format!("{:40} {}\n", "PATH", "FLAGS"));
+        for (path, flags) in &flagged_files {
+            out.push_str(&format!("{:40} {}\n", path, super::immutable::flags_to_string(*flags)));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3128,6 +3152,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "templates" => Ok(gen_templates()),
         "toolbar" => Ok(gen_toolbar()),
         "queryable" => Ok(gen_queryable()),
+        "immutable" => Ok(gen_immutable()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

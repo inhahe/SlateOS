@@ -3094,6 +3094,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
+    "fflags",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
@@ -4400,6 +4401,7 @@ fn dispatch(line: &str) {
         "statusbar" => cmd_statusbar(args),
         "toolbar" => cmd_toolbar(args),
         "queryable" | "qattr" => cmd_queryable(args),
+        "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
@@ -16817,6 +16819,159 @@ fn cmd_queryable(args: &str) {
     }
 }
 
+/// `fflags` — immutable / append-only / file protection flags.
+fn cmd_fflags(args: &str) {
+    use crate::fs::immutable;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "set" => {
+            // fflags set <path> <flag> [flag...]
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() || parts.len() < 3 {
+                shell_println!("Usage: fflags set <path> <flag> [flag...]");
+                shell_println!("  Flags: immutable, append-only, no-delete, compressed,");
+                shell_println!("         no-backup, no-index, system, hidden");
+                shell_println!("  Short: i, a, d, c, b, n, s, h");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            let mut bits: immutable::FlagBits = 0;
+            for &flag_name in parts.iter().skip(2) {
+                match immutable::parse_flag_name(flag_name) {
+                    Some(b) => bits |= b,
+                    None => { shell_println!("Unknown flag: {}", flag_name); return; }
+                }
+            }
+            match immutable::set_flags(&path, bits) {
+                Ok(()) => shell_println!("Set flags on {}: {}", path, immutable::flags_to_string(bits)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clear" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() || parts.len() < 3 {
+                shell_println!("Usage: fflags clear <path> <flag> [flag...]");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            let mut bits: immutable::FlagBits = 0;
+            for &flag_name in parts.iter().skip(2) {
+                match immutable::parse_flag_name(flag_name) {
+                    Some(b) => bits |= b,
+                    None => { shell_println!("Unknown flag: {}", flag_name); return; }
+                }
+            }
+            match immutable::clear_flags(&path, bits) {
+                Ok(()) => shell_println!("Cleared flags on {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" | "show" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: fflags get <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            let flags = immutable::get_flags(&path);
+            if flags == 0 {
+                shell_println!("{}: no flags", path);
+            } else {
+                shell_println!("{}: {}", path, immutable::flags_to_string(flags));
+            }
+        }
+        "rm" | "remove" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: fflags rm <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match immutable::remove_flags(&path) {
+                Ok(()) => shell_println!("All flags removed from {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            let check_type = parts.get(1).copied().unwrap_or("");
+            let path_arg = parts.get(2).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: fflags check <write|append|delete|truncate|meta|link> <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            let result = match check_type {
+                "write" => immutable::check_write(&path, false),
+                "append" => immutable::check_write(&path, true),
+                "delete" => immutable::check_delete(&path),
+                "truncate" => immutable::check_truncate(&path),
+                "meta" | "metadata" => immutable::check_metadata(&path),
+                "link" => immutable::check_link(&path),
+                _ => { shell_println!("Unknown check: {}", check_type); return; }
+            };
+            match result {
+                Ok(()) => shell_println!("{} on {}: ALLOWED", check_type, path),
+                Err(e) => shell_println!("{} on {}: BLOCKED ({:?})", check_type, path, e),
+            }
+        }
+        "list" | "" => {
+            let filter_flag = parts.get(1).and_then(|n| immutable::parse_flag_name(n));
+            let flagged = match filter_flag {
+                Some(flag) => {
+                    let paths = immutable::list_with_flag(flag);
+                    paths.into_iter().map(|p| {
+                        let f = immutable::get_flags(&p);
+                        (p, f)
+                    }).collect::<Vec<_>>()
+                }
+                None => immutable::list_flagged(),
+            };
+            if flagged.is_empty() {
+                shell_println!("No flagged files");
+            } else {
+                shell_println!("{} flagged files:", flagged.len());
+                for (path, flags) in &flagged {
+                    shell_println!("  {:40} {}", path, immutable::flags_to_string(*flags));
+                }
+            }
+        }
+        "test" => {
+            match immutable::self_test() {
+                Ok(()) => shell_println!("All immutable self-tests passed"),
+                Err(e) => shell_println!("Immutable self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (flagged, set_ops, check_ops) = immutable::stats();
+            shell_println!("Flagged files: {}", flagged);
+            shell_println!("Set ops:       {}", set_ops);
+            shell_println!("Check ops:     {}", check_ops);
+        }
+        "reset" => {
+            immutable::clear_all();
+            immutable::reset_stats();
+            shell_println!("Immutable store cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: fflags <subcommand>");
+            shell_println!("  set <path> <flags...>    Set flags on file");
+            shell_println!("  clear <path> <flags...>  Clear specific flags");
+            shell_println!("  get <path>               Show flags on file");
+            shell_println!("  rm <path>                Remove all flags");
+            shell_println!("  check <op> <path>        Check if operation allowed");
+            shell_println!("    ops: write, append, delete, truncate, meta, link");
+            shell_println!("  list [flag]              List flagged files");
+            shell_println!("  test                     Run self-tests");
+            shell_println!("  stats                    Show statistics");
+            shell_println!("  reset                    Clear all data and stats");
+            shell_println!("  Flags: immutable(i), append-only(a), no-delete(d),");
+            shell_println!("         compressed(c), no-backup(b), no-index(n),");
+            shell_println!("         system(s), hidden(h)");
+        }
+    }
+}
+
 /// `preview` — file preview/thumbnail generation.
 fn cmd_preview(args: &str) {
     use crate::fs::preview;
@@ -23133,7 +23288,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

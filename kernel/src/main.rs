@@ -675,6 +675,12 @@ extern "C" fn kmain() -> ! {
     // -device hda-duplex`.
     hda::init(boot_info.hhdm_offset);
 
+    // Virtio-sound driver: modern VM audio via virtio.
+    // QEMU: `-device virtio-sound-pci,audiodev=a0 -audiodev sdl,id=a0`
+    if let Err(e) = virtio::sound::init(boot_info.hhdm_offset) {
+        serial_println!("[virtio-snd] Init: {:?} (non-fatal)", e);
+    }
+
     console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
 
     // Step 20d-3: Initialize networking stack.
@@ -1298,6 +1304,9 @@ extern "C" fn kmain() -> ! {
 
     // PC speaker self-test.
     pcspk::self_test();
+
+    // Virtio-sound self-test.
+    virtio::sound::self_test();
 
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {

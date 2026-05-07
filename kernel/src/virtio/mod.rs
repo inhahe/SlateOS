@@ -19,6 +19,7 @@
 pub mod blk;
 pub mod net;
 pub mod queue;
+pub mod sound;
 
 // ---------------------------------------------------------------------------
 // Legacy PCI transport register offsets (from BAR0)

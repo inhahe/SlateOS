@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4819,6 +4819,7 @@ fn dispatch(line: &str) {
         "sysinfo" | "hwinfo" => cmd_sysinfo(args),
         "perfmon" | "resmon" => cmd_perfmon(args),
         "focusassist" | "dnd" => cmd_focusassist(args),
+        "storageclean" | "sclean" => cmd_storageclean(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -4931,6 +4932,7 @@ fn dispatch(line: &str) {
         "slimit" | "sl" => cmd_service_limits(args),
         "iommu" => cmd_iommu(),
         "cgroup" => cmd_cgroup(args),
+        "pidns" => cmd_pidns(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
@@ -25021,6 +25023,225 @@ fn cmd_focusassist(args: &str) {
     }
 }
 
+/// `storageclean` / `sclean` — storage cleanup and disk space analysis.
+fn cmd_storageclean(args: &str) {
+    use crate::fs::storageclean;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            storageclean::init_defaults();
+            shell_println!("Storage cleanup initialized.");
+        }
+        "show" | "" => {
+            let (items, freed, scans, cleans, ops) = storageclean::stats();
+            shell_println!("=== Storage Cleanup ===");
+            shell_println!("Cached items:  {}", items);
+            shell_println!("Total freed:   {}", storageclean::format_size(freed));
+            shell_println!("Scans:         {}", scans);
+            shell_println!("Cleanups:      {}", cleans);
+            shell_println!("Ops:           {}", ops);
+            if let Ok(cfg) = storageclean::config() {
+                shell_println!("\nAuto-clean:    {}", if cfg.auto_enabled { "ON" } else { "off" });
+                shell_println!("Threshold:     {}%", cfg.auto_clean_threshold_pct);
+                shell_println!("Large file:    {}", storageclean::format_size(cfg.large_file_threshold));
+                shell_println!("Old downloads: {} days", cfg.old_download_days);
+                shell_println!("Log retention: {} days", cfg.log_retention_days);
+            }
+        }
+        "scan" => {
+            match storageclean::scan() {
+                Ok(report) => {
+                    shell_println!("Scan complete ({} us):", report.scan_duration_us);
+                    shell_println!("  Total reclaimable: {}",
+                        storageclean::format_size(report.total_reclaimable_bytes));
+                    shell_println!("  Items: {}", report.total_items);
+                    if !report.categories.is_empty() {
+                        shell_println!("\nBreakdown:");
+                        for cat in &report.categories {
+                            shell_println!("  {:<20} {:>5} items  {}{}",
+                                cat.category.label(), cat.item_count,
+                                storageclean::format_size(cat.total_bytes),
+                                if cat.recommended { " *" } else { "" });
+                        }
+                        shell_println!("\n* = recommended for cleanup");
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clean" => {
+            let cat_name = parts.get(1).copied().unwrap_or("all");
+            let cats = if cat_name == "all" {
+                storageclean::CleanCategory::all().to_vec()
+            } else if let Some(cat) = storageclean::parse_category(cat_name) {
+                alloc::vec![cat]
+            } else {
+                shell_println!("Unknown category '{}'. Use: trash, temp, thumbs, logs, pkg, large, dl, dupes, all", cat_name);
+                return;
+            };
+            match storageclean::clean(&cats) {
+                Ok(result) => {
+                    shell_println!("Cleaned {} items, freed {}",
+                        result.items_cleaned, storageclean::format_size(result.freed_bytes));
+                    if result.errors > 0 {
+                        shell_println!("  {} errors", result.errors);
+                    }
+                    for (cat, freed) in &result.category_freed {
+                        shell_println!("  {}: {}", cat.label(), storageclean::format_size(*freed));
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "items" => {
+            let cat_name = parts.get(1).copied().unwrap_or("");
+            let items = if let Some(cat) = storageclean::parse_category(cat_name) {
+                storageclean::items_for_category(cat)
+            } else {
+                storageclean::scan_items()
+            };
+            if items.is_empty() {
+                shell_println!("No items. Run 'sclean scan' first.");
+            } else {
+                for item in items.iter().take(50) {
+                    shell_println!("  [{:?}] {} ({})",
+                        item.category, item.path,
+                        storageclean::format_size(item.size_bytes));
+                }
+                if items.len() > 50 {
+                    shell_println!("  ... and {} more", items.len() - 50);
+                }
+            }
+        }
+        "auto" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            match val {
+                "on" => {
+                    let _ = storageclean::set_auto_enabled(true);
+                    shell_println!("Auto-cleanup: ON");
+                }
+                "off" => {
+                    let _ = storageclean::set_auto_enabled(false);
+                    shell_println!("Auto-cleanup: OFF");
+                }
+                _ => shell_println!("Usage: sclean auto <on|off>"),
+            }
+        }
+        "threshold" => {
+            if let Some(pct) = parts.get(1).and_then(|s| s.parse::<u8>().ok()) {
+                match storageclean::set_auto_threshold(pct) {
+                    Ok(()) => shell_println!("Auto-clean threshold: {}%", pct),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: sclean threshold <0-100>");
+            }
+        }
+        "largefile" => {
+            if let Some(size_str) = parts.get(1) {
+                let bytes = parse_size_arg(size_str);
+                if bytes > 0 {
+                    let _ = storageclean::set_large_threshold(bytes);
+                    shell_println!("Large file threshold: {}", storageclean::format_size(bytes));
+                } else {
+                    shell_println!("Invalid size. Use: 100M, 1G, etc.");
+                }
+            } else {
+                shell_println!("Usage: sclean largefile <size>");
+            }
+        }
+        "olddays" => {
+            if let Some(days) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                let _ = storageclean::set_old_download_days(days);
+                shell_println!("Old download threshold: {} days", days);
+            } else {
+                shell_println!("Usage: sclean olddays <days>");
+            }
+        }
+        "logdays" => {
+            if let Some(days) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                let _ = storageclean::set_log_retention(days);
+                shell_println!("Log retention: {} days", days);
+            } else {
+                shell_println!("Usage: sclean logdays <days>");
+            }
+        }
+        "exclude" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            if path.is_empty() {
+                let excl = storageclean::exclusions();
+                if excl.is_empty() {
+                    shell_println!("No exclusions.");
+                } else {
+                    for e in &excl {
+                        shell_println!("  {}", e);
+                    }
+                }
+            } else {
+                let _ = storageclean::add_exclusion(path);
+                shell_println!("Added exclusion: {}", path);
+            }
+        }
+        "unexclude" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            if path.is_empty() {
+                shell_println!("Usage: sclean unexclude <path>");
+            } else {
+                match storageclean::remove_exclusion(path) {
+                    Ok(()) => shell_println!("Removed exclusion: {}", path),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "stats" => {
+            let (items, freed, scans, cleans, ops) = storageclean::stats();
+            shell_println!("items={} freed={} scans={} cleans={} ops={}",
+                items, storageclean::format_size(freed), scans, cleans, ops);
+        }
+        "test" => {
+            storageclean::self_test();
+            shell_println!("Self-tests passed.");
+        }
+        _ => {
+            shell_println!("storageclean / sclean — Storage cleanup & disk analysis");
+            shell_println!("Subcommands:");
+            shell_println!("  show           Show cleanup status and config");
+            shell_println!("  scan           Scan for reclaimable space");
+            shell_println!("  clean [cat]    Clean up (trash/temp/thumbs/logs/pkg/large/dl/all)");
+            shell_println!("  items [cat]    Show scanned items");
+            shell_println!("  auto <on|off>  Enable/disable automatic cleanup");
+            shell_println!("  threshold <%%>  Set auto-clean disk usage threshold");
+            shell_println!("  largefile <sz> Set large file threshold (e.g., 100M)");
+            shell_println!("  olddays <n>    Set old download age threshold");
+            shell_println!("  logdays <n>    Set log retention days");
+            shell_println!("  exclude [path] Add exclusion / list exclusions");
+            shell_println!("  unexclude <p>  Remove exclusion");
+            shell_println!("  init           Initialize defaults");
+            shell_println!("  stats          Show counters");
+            shell_println!("  test           Run self-tests");
+        }
+    }
+}
+
+fn parse_size_arg(s: &str) -> u64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    let (num_part, suffix) = if s.ends_with('G') || s.ends_with('g') {
+        (&s[..s.len()-1], 1024u64 * 1024 * 1024)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        (&s[..s.len()-1], 1024u64 * 1024)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        (&s[..s.len()-1], 1024u64)
+    } else {
+        (s, 1u64)
+    };
+    num_part.parse::<u64>().unwrap_or(0).saturating_mul(suffix)
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -30445,6 +30666,112 @@ fn cmd_cgroup(args: &str) {
 /// Usage:
 ///   capreq                — list pending requests
 ///   capreq all            — list all requests (including resolved)
+/// `pidns` — PID namespace management.
+///
+/// Usage:
+///   pidns              — list active PID namespaces
+///   pidns create [P]   — create under parent P (default: root)
+///   pidns delete ID    — delete empty namespace
+///   pidns stats ID     — detailed stats
+///   pidns test         — run self-test
+fn cmd_pidns(args: &str) {
+    use crate::pidns;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let count = pidns::active_count();
+            crate::console_println!("=== PID Namespaces ({} active) ===", count);
+            crate::console_println!(
+                "{:<5} {:<7} {:<7} {:<10} {:<5}",
+                "ID", "Parent", "Procs", "Children", "Init"
+            );
+            for id in 0..pidns::MAX_NAMESPACES as u32 {
+                if let Some(s) = pidns::stats(id) {
+                    let parent = if s.parent == u32::MAX {
+                        alloc::format!("-")
+                    } else {
+                        alloc::format!("{}", s.parent)
+                    };
+                    let init = if s.has_init { "yes" } else { "no" };
+                    crate::console_println!(
+                        "{:<5} {:<7} {:<7} {:<10} {:<5}",
+                        id, parent, s.nr_procs, s.nr_children, init
+                    );
+                }
+            }
+        }
+        "create" => {
+            let parent: u32 = parts.get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            match pidns::create(parent) {
+                Ok(id) => crate::console_println!("Created PID namespace {} (parent: {})", id, parent),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" | "rm" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: pidns delete <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            match pidns::delete(id) {
+                Ok(()) => crate::console_println!("Deleted PID namespace {}", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "stats" | "info" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: pidns stats <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            let Some(s) = pidns::stats(id) else {
+                crate::console_println!("PID namespace {} not found", id);
+                return;
+            };
+            crate::console_println!("=== PID Namespace {} ===", id);
+            let parent = if s.parent == u32::MAX { alloc::format!("none (root)") }
+                         else { alloc::format!("{}", s.parent) };
+            crate::console_println!("  Parent:     {}", parent);
+            crate::console_println!("  Processes:  {}", s.nr_procs);
+            crate::console_println!("  Children:   {}", s.nr_children);
+            crate::console_println!("  Has init:   {}", if s.has_init { "yes" } else { "no" });
+            if let Some(init) = pidns::init_pid(id) {
+                crate::console_println!("  Init PID:   {} (global)", init);
+            }
+            // Show PID mappings.
+            let pids = pidns::list_pids(id);
+            if !pids.is_empty() {
+                crate::console_println!("  PID mappings:");
+                for (local, global) in &pids {
+                    crate::console_println!("    local {} → global {}", local, global);
+                }
+            }
+        }
+        "test" => {
+            pidns::self_test();
+        }
+        _ => {
+            crate::console_println!("Usage: pidns [list|create|delete|stats|test]");
+            crate::console_println!("  pidns              — list active PID namespaces");
+            crate::console_println!("  pidns create [P]   — create under parent P (default: root)");
+            crate::console_println!("  pidns delete ID    — delete empty namespace");
+            crate::console_println!("  pidns stats ID     — detailed stats with PID mappings");
+            crate::console_println!("  pidns test         — run self-test");
+        }
+    }
+}
+
 ///   capreq approve ID     — approve a pending request
 ///   capreq deny ID        — deny a pending request
 ///   capreq test           — submit a test request
@@ -32799,7 +33126,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
@@ -32807,7 +33134,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

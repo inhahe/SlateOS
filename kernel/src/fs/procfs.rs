@@ -190,6 +190,7 @@ const ROOT_FILES: &[&str] = &[
     "detailcols",
     "partmgr",
     "locale",
+    "useracct",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3799,6 +3800,55 @@ fn gen_locale() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_useracct() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (user_count, group_count, session_count, login_count) = super::useracct::stats();
+
+    out.push_str("User Accounts\n");
+    out.push_str("=============\n\n");
+    out.push_str(&format!("Users:    {}\n", user_count));
+    out.push_str(&format!("Groups:   {}\n", group_count));
+    out.push_str(&format!("Sessions: {}\n", session_count));
+    out.push_str(&format!("Logins:   {}\n", login_count));
+
+    let users = super::useracct::list_users();
+    if !users.is_empty() {
+        out.push_str("\nUsers:\n");
+        for u in &users {
+            let type_str = match u.account_type {
+                super::useracct::AccountType::Administrator => "admin",
+                super::useracct::AccountType::Standard => "standard",
+                super::useracct::AccountType::Guest => "guest",
+                super::useracct::AccountType::System => "system",
+            };
+            let status = if u.locked {
+                "locked"
+            } else if !u.enabled {
+                "disabled"
+            } else {
+                "active"
+            };
+            out.push_str(&format!(
+                "  {} (uid={}, type={}, status={})\n",
+                u.username, u.uid, type_str, status
+            ));
+        }
+    }
+
+    let groups = super::useracct::list_groups();
+    if !groups.is_empty() {
+        out.push_str("\nGroups:\n");
+        for g in &groups {
+            let kind = if g.system_group { "system" } else { "user" };
+            out.push_str(&format!("  {} (gid={}, {})\n", g.name, g.gid, kind));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4154,6 +4204,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "detailcols" => Ok(gen_detailcols()),
         "partmgr" => Ok(gen_partmgr()),
         "locale" => Ok(gen_locale()),
+        "useracct" => Ok(gen_useracct()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

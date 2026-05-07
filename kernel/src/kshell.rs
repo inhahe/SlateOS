@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4794,6 +4794,7 @@ fn dispatch(line: &str) {
         "detailcols" | "dcols" => cmd_detailcols(args),
         "partmgr" | "pmgr" => cmd_partmgr(args),
         "locale" | "lcl" => cmd_locale(args),
+        "useracct" | "uacct" => cmd_useracct(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20192,6 +20193,66 @@ fn cmd_locale(args: &str) {
     }
 }
 
+/// `useracct` / `uacct` — user accounts, groups, sessions.
+fn cmd_useracct(args: &str) {
+    use crate::fs::useracct;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "ls" => { let users = useracct::list_users(); if users.is_empty() { shell_println!("No users"); } else { for u in &users { let t = match u.account_type { useracct::AccountType::Administrator => "admin", useracct::AccountType::Standard => "standard", useracct::AccountType::Guest => "guest", useracct::AccountType::System => "system" }; let s = if u.locked { "locked" } else if !u.enabled { "disabled" } else { "active" }; shell_println!("  uid={} {} ({}) [{}] home={}", u.uid, u.username, t, s, u.home_dir); } } }
+        "add" | "create" => { if parts.len() < 3 { shell_println!("Usage: useracct add <username> <password> [admin|standard|guest]"); } else { let name = parts[1]; let pass = parts[2]; let acct_type = match parts.get(3).copied().unwrap_or("standard") { "admin" | "administrator" => useracct::AccountType::Administrator, "guest" => useracct::AccountType::Guest, _ => useracct::AccountType::Standard }; match useracct::create_user(name, name, pass, acct_type) { Ok(uid) => shell_println!("Created user '{}' (uid={})", name, uid), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "remove" | "rm" | "del" => { if parts.len() < 2 { shell_println!("Usage: useracct remove <uid>"); } else { match parts[1].parse::<u64>() { Ok(uid) => match useracct::remove_user(uid) { Ok(()) => shell_println!("Removed user uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid uid") } } }
+        "info" | "show" => { if parts.len() < 2 { shell_println!("Usage: useracct info <uid|username>"); } else { let result = if let Ok(uid) = parts[1].parse::<u64>() { useracct::get_user(uid) } else { useracct::get_user_by_name(parts[1]) }; match result { Ok(u) => { let t = match u.account_type { useracct::AccountType::Administrator => "Administrator", useracct::AccountType::Standard => "Standard", useracct::AccountType::Guest => "Guest", useracct::AccountType::System => "System" }; let m = match u.login_method { useracct::LoginMethod::Password => "password", useracct::LoginMethod::Pin => "pin", useracct::LoginMethod::Fingerprint => "fingerprint", useracct::LoginMethod::NoPassword => "none" }; shell_println!("User: {} (uid={})", u.username, u.uid); shell_println!("  Display name: {}", u.display_name); shell_println!("  Type:         {}", t); shell_println!("  Login method: {}", m); shell_println!("  Home:         {}", u.home_dir); shell_println!("  Shell:        {}", u.shell); shell_println!("  Avatar:       {}", if u.avatar.is_empty() { "(default)" } else { &u.avatar }); shell_println!("  Auto-login:   {}", u.auto_login); shell_println!("  Enabled:      {}", u.enabled); shell_println!("  Locked:       {}", u.locked); shell_println!("  Groups:       {:?}", u.groups); }, Err(e) => shell_println!("Error: {:?}", e) } } }
+        "whoami" => { match useracct::current_user() { Some(u) => shell_println!("{} (uid={})", u.username, u.uid), None => shell_println!("No active session") } }
+        "login" => { if parts.len() < 3 { shell_println!("Usage: useracct login <username> <password>"); } else { match useracct::authenticate(parts[1], parts[2]) { Ok(sid) => shell_println!("Logged in as '{}' (session={})", parts[1], sid), Err(e) => shell_println!("Auth failed: {:?}", e) } } }
+        "logout" => { if parts.len() < 2 { shell_println!("Usage: useracct logout <session_id>"); } else { match parts[1].parse::<u64>() { Ok(sid) => match useracct::logout(sid) { Ok(()) => shell_println!("Logged out session {}", sid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid session id") } } }
+        "sessions" | "sess" => { let sessions = useracct::list_sessions(); if sessions.is_empty() { shell_println!("No active sessions"); } else { for s in &sessions { shell_println!("  session={} uid={} user={} active={}", s.session_id, s.uid, s.username, s.active); } } }
+        "passwd" | "password" => { if parts.len() < 3 { shell_println!("Usage: useracct passwd <uid> <new_password>"); } else { match parts[1].parse::<u64>() { Ok(uid) => match useracct::change_password(uid, parts[2]) { Ok(()) => shell_println!("Password changed for uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid uid") } } }
+        "enable" => { if parts.len() < 2 { shell_println!("Usage: useracct enable <uid>"); } else { match parts[1].parse::<u64>() { Ok(uid) => match useracct::set_enabled(uid, true) { Ok(()) => shell_println!("Enabled uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid uid") } } }
+        "disable" => { if parts.len() < 2 { shell_println!("Usage: useracct disable <uid>"); } else { match parts[1].parse::<u64>() { Ok(uid) => match useracct::set_enabled(uid, false) { Ok(()) => shell_println!("Disabled uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid uid") } } }
+        "unlock" => { if parts.len() < 2 { shell_println!("Usage: useracct unlock <uid>"); } else { match parts[1].parse::<u64>() { Ok(uid) => match useracct::unlock(uid) { Ok(()) => shell_println!("Unlocked uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid uid") } } }
+        "type" => { if parts.len() < 3 { shell_println!("Usage: useracct type <uid> <admin|standard|guest>"); } else { match parts[1].parse::<u64>() { Ok(uid) => { let acct_type = match parts[2] { "admin" | "administrator" => useracct::AccountType::Administrator, "guest" => useracct::AccountType::Guest, "system" => useracct::AccountType::System, _ => useracct::AccountType::Standard }; match useracct::set_account_type(uid, acct_type) { Ok(()) => shell_println!("Set type for uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid uid") } } }
+        "display" | "dname" => { if parts.len() < 3 { shell_println!("Usage: useracct display <uid> <name...>"); } else { match parts[1].parse::<u64>() { Ok(uid) => { let name = parts[2..].join(" "); match useracct::set_display_name(uid, &name) { Ok(()) => shell_println!("Set display name for uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid uid") } } }
+        "avatar" => { if parts.len() < 3 { shell_println!("Usage: useracct avatar <uid> <path>"); } else { match parts[1].parse::<u64>() { Ok(uid) => match useracct::set_avatar(uid, parts[2]) { Ok(()) => shell_println!("Set avatar for uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid uid") } } }
+        "autologin" => { if parts.len() < 3 { shell_println!("Usage: useracct autologin <uid> <on|off>"); } else { match parts[1].parse::<u64>() { Ok(uid) => { let on = matches!(parts[2], "on" | "true" | "yes" | "1"); match useracct::set_auto_login(uid, on) { Ok(()) => shell_println!("Auto-login {} for uid={}", if on { "enabled" } else { "disabled" }, uid), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid uid") } } }
+        "groups" | "grp" => { let groups = useracct::list_groups(); if groups.is_empty() { shell_println!("No groups"); } else { for g in &groups { let kind = if g.system_group { "system" } else { "user" }; shell_println!("  gid={} {} ({}) — {}", g.gid, g.name, kind, g.description); } } }
+        "addgroup" | "gadd" => { if parts.len() < 2 { shell_println!("Usage: useracct addgroup <name> [description] [--system]"); } else { let sys = parts.iter().any(|p| *p == "--system"); let desc = parts.get(2).copied().unwrap_or(""); match useracct::create_group(parts[1], desc, sys) { Ok(gid) => shell_println!("Created group '{}' (gid={})", parts[1], gid), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "rmgroup" | "gdel" => { if parts.len() < 2 { shell_println!("Usage: useracct rmgroup <gid>"); } else { match parts[1].parse::<u64>() { Ok(gid) => match useracct::remove_group(gid) { Ok(()) => shell_println!("Removed group gid={}", gid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid gid") } } }
+        "join" => { if parts.len() < 3 { shell_println!("Usage: useracct join <uid> <gid>"); } else { match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) { (Ok(uid), Ok(gid)) => match useracct::add_to_group(uid, gid) { Ok(()) => shell_println!("Added uid={} to gid={}", uid, gid), Err(e) => shell_println!("Error: {:?}", e) }, _ => shell_println!("Invalid uid/gid") } } }
+        "leave" => { if parts.len() < 3 { shell_println!("Usage: useracct leave <uid> <gid>"); } else { match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) { (Ok(uid), Ok(gid)) => match useracct::remove_from_group(uid, gid) { Ok(()) => shell_println!("Removed uid={} from gid={}", uid, gid), Err(e) => shell_println!("Error: {:?}", e) }, _ => shell_println!("Invalid uid/gid") } } }
+        "stats" => { let (uc, gc, sc, lc) = useracct::stats(); shell_println!("Users: {}  Groups: {}  Sessions: {}  Total logins: {}", uc, gc, sc, lc); }
+        "init" => { useracct::init_defaults(); shell_println!("User accounts initialized with defaults"); }
+        "test" => { match useracct::self_test() { Ok(()) => shell_println!("useracct: all tests passed"), Err(e) => shell_println!("useracct: test FAILED: {:?}", e) } }
+        _ => {
+            shell_println!("useracct — user accounts, groups, sessions");
+            shell_println!("  list|ls          List users");
+            shell_println!("  add <user> <pw> [type]  Create user");
+            shell_println!("  remove <uid>     Remove user");
+            shell_println!("  info <uid|name>  Show user details");
+            shell_println!("  whoami           Current user");
+            shell_println!("  login <u> <pw>   Authenticate");
+            shell_println!("  logout <sid>     End session");
+            shell_println!("  sessions         List sessions");
+            shell_println!("  passwd <uid> <pw> Change password");
+            shell_println!("  enable <uid>     Enable account");
+            shell_println!("  disable <uid>    Disable account");
+            shell_println!("  unlock <uid>     Unlock account");
+            shell_println!("  type <uid> <t>   Set account type");
+            shell_println!("  display <uid> <n> Set display name");
+            shell_println!("  avatar <uid> <p> Set avatar path");
+            shell_println!("  autologin <uid> <on|off>  Toggle auto-login");
+            shell_println!("  groups           List groups");
+            shell_println!("  addgroup <name>  Create group");
+            shell_println!("  rmgroup <gid>    Remove group");
+            shell_println!("  join <uid> <gid> Add user to group");
+            shell_println!("  leave <uid> <gid> Remove from group");
+            shell_println!("  stats            Show statistics");
+            shell_println!("  init             Load defaults");
+            shell_println!("  test             Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27721,7 +27782,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

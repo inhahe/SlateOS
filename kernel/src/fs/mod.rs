@@ -144,6 +144,7 @@ pub mod transaction;
 pub mod trash;
 pub mod undelete;
 pub mod usage;
+pub mod useracct;
 pub mod vdesktop;
 pub mod vfs;
 pub mod viewstate;

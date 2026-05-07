@@ -99,6 +99,7 @@ pub mod symlink_security;
 pub mod sysfs;
 pub mod tags;
 pub mod tar;
+pub mod templates;
 pub mod thumbcache;
 pub mod tmpwatch;
 pub mod transaction;

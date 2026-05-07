@@ -150,6 +150,7 @@ const ROOT_FILES: &[&str] = &[
     "dragdrop",
     "fileops",
     "preview",
+    "templates",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2702,6 +2703,30 @@ fn gen_preview() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_templates() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (count, creates, total_bytes) = super::templates::stats();
+
+    out.push_str("File Templates\n");
+    out.push_str("==============\n\n");
+    out.push_str(&format!("Templates:   {}/{}\n", count, 256));
+    out.push_str(&format!("Creates:     {}\n", creates));
+    out.push_str(&format!("Bytes:       {}\n\n", total_bytes));
+
+    let templates = super::templates::list();
+    if !templates.is_empty() {
+        out.push_str(&format!("{:6} {:12} {:24} {:8} {}\n", "ID", "CATEGORY", "NAME", "EXT", "SOURCE"));
+        for t in &templates {
+            out.push_str(&format!("{:6} {:12} {:24} {:8} {}\n",
+                t.id, t.category.label(), t.name, t.extension, t.source));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2793,6 +2818,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dragdrop" => Ok(gen_dragdrop()),
         "fileops" => Ok(gen_fileops()),
         "preview" => Ok(gen_preview()),
+        "templates" => Ok(gen_templates()),
         _ => Err(KernelError::NotFound),
     }
 }

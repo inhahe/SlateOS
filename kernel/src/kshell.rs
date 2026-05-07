@@ -3097,7 +3097,7 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "test",
+    "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "template", "test",
     "then", "thumbcache", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "ulimit",
     "overlay",
@@ -4380,6 +4380,7 @@ fn dispatch(line: &str) {
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
         "preview" => cmd_preview(args),
+        "template" => cmd_template(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -15621,6 +15622,144 @@ fn cmd_preview(args: &str) {
     }
 }
 
+/// `template` — file template management.
+fn cmd_template(args: &str) {
+    use crate::fs::templates;
+    templates::init();
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "ls" | "" => {
+            let tmpl_list = templates::list();
+            if tmpl_list.is_empty() {
+                shell_println!("No templates registered.");
+            } else {
+                shell_println!("{:6} {:12} {:24} {:8} {}", "ID", "CATEGORY", "NAME", "EXT", "SOURCE");
+                for t in &tmpl_list {
+                    shell_println!("{:6} {:12} {:24} {:8} {}", t.id, t.category.label(), t.name, t.extension, t.source);
+                }
+            }
+        }
+        "create" | "new" => {
+            // template create <name_or_id> [dir]
+            let name_or_id = parts.get(1).copied().unwrap_or("");
+            if name_or_id.is_empty() {
+                shell_println!("Usage: template create <name_or_id> [directory]");
+                return;
+            }
+            let dir = parts.get(2).map(|d| resolve_path(d))
+                .unwrap_or_else(get_cwd);
+
+            // Try by ID first, then by name.
+            let template = if let Ok(id) = name_or_id.parse::<u64>() {
+                templates::get(id)
+            } else {
+                templates::get_by_name(name_or_id)
+            };
+
+            match template {
+                Some(t) => {
+                    match templates::create(t.id, &dir) {
+                        Ok(path) => shell_println!("Created: {}", path),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                None => shell_println!("Template '{}' not found.", name_or_id),
+            }
+        }
+        "add" => {
+            // template add <name> <ext> <default_name> [content]
+            if parts.len() < 4 {
+                shell_println!("Usage: template add <name> <ext> <default_name> [content]");
+                return;
+            }
+            let name = parts.get(1).copied().unwrap_or("");
+            let ext = parts.get(2).copied().unwrap_or("");
+            let default_name = parts.get(3).copied().unwrap_or("");
+            let content = if parts.len() > 4 {
+                let text: String = parts[4..].join(" ");
+                templates::TemplateContent::Inline(text.into_bytes())
+            } else {
+                templates::TemplateContent::Empty
+            };
+            match templates::register(name, ext, default_name,
+                    templates::Category::User, content,
+                    "text-plain", "application/octet-stream", "kshell") {
+                Ok(id) => shell_println!("Registered template {} (id={}).", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    if templates::unregister(id) {
+                        shell_println!("Removed template {}.", id);
+                    } else {
+                        shell_println!("Template {} not found.", id);
+                    }
+                } else {
+                    shell_println!("Invalid template ID.");
+                }
+            } else {
+                shell_println!("Usage: template remove <id>");
+            }
+        }
+        "info" => {
+            let name_or_id = parts.get(1).copied().unwrap_or("");
+            if name_or_id.is_empty() {
+                shell_println!("Usage: template info <name_or_id>");
+                return;
+            }
+            let template = if let Ok(id) = name_or_id.parse::<u64>() {
+                templates::get(id)
+            } else {
+                templates::get_by_name(name_or_id)
+            };
+            match template {
+                Some(t) => {
+                    shell_println!("Template: {}", t.name);
+                    shell_println!("  ID:        {}", t.id);
+                    shell_println!("  Extension: {}", t.extension);
+                    shell_println!("  Default:   {}", t.default_name);
+                    shell_println!("  Category:  {}", t.category.label());
+                    shell_println!("  MIME:      {}", t.mime_type);
+                    shell_println!("  Source:    {}", t.source);
+                    shell_println!("  Visible:   {}", t.visible);
+                    let content_desc = match &t.content {
+                        templates::TemplateContent::Inline(d) => alloc::format!("inline ({} bytes)", d.len()),
+                        templates::TemplateContent::FileRef(p) => alloc::format!("file: {}", p),
+                        templates::TemplateContent::Empty => String::from("empty"),
+                        templates::TemplateContent::Directory => String::from("directory"),
+                    };
+                    shell_println!("  Content:   {}", content_desc);
+                }
+                None => shell_println!("Template '{}' not found.", name_or_id),
+            }
+        }
+        "stats" => {
+            let (count, creates, bytes) = templates::stats();
+            shell_println!("Template statistics:");
+            shell_println!("  Templates: {}/{}", count, 256);
+            shell_println!("  Creates:   {}", creates);
+            shell_println!("  Bytes:     {}", bytes);
+        }
+        "reset" => {
+            templates::reset_stats();
+            shell_println!("Template statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: template <command>");
+            shell_println!("  list|ls               List all templates (default)");
+            shell_println!("  create <name> [dir]   Create file from template");
+            shell_println!("  add <n> <ext> <def>   Register custom template");
+            shell_println!("  remove <id>           Remove template");
+            shell_println!("  info <name_or_id>     Show template details");
+            shell_println!("  stats                 Show statistics");
+            shell_println!("  reset                 Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -21189,7 +21328,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

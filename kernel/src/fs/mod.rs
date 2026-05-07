@@ -51,6 +51,7 @@ pub mod encrypt;
 pub mod ext4;
 pub mod fat;
 pub mod fcompress;
+pub mod freeze;
 pub mod fstrim;
 pub mod handle;
 pub mod health;

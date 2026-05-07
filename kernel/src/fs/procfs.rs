@@ -138,6 +138,7 @@ const ROOT_FILES: &[&str] = &[
     "fstrim",
     "sparse",
     "readdir_plus",
+    "freeze",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2365,6 +2366,39 @@ fn gen_readdir_plus() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/freeze` — filesystem freeze/thaw status.
+fn gen_freeze() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (freezes, thaws, auto_thaws, blocked, frozen) = super::freeze::stats();
+
+    out.push_str("Filesystem Freeze/Thaw\n");
+    out.push_str("======================\n\n");
+    out.push_str(&format!("Currently frozen: {}/{}\n", frozen, 16));
+    out.push_str(&format!("Freeze ops:       {}\n", freezes));
+    out.push_str(&format!("Thaw ops:         {}\n", thaws));
+    out.push_str(&format!("Auto-thaws:       {}\n", auto_thaws));
+    out.push_str(&format!("Blocked writes:   {}\n\n", blocked));
+
+    let list = super::freeze::list_frozen();
+    if list.is_empty() {
+        out.push_str("No frozen filesystems.\n");
+    } else {
+        out.push_str(&format!("{:20} {:>5} {:>12} {:>12} {:>8} {}\n",
+            "MOUNTPOINT", "LEVEL", "DURATION", "UNTIL_THAW", "BLOCKED", "REASON"));
+        for entry in &list {
+            let dur_s = entry.frozen_duration_ns / 1_000_000_000;
+            let until_s = entry.time_until_thaw_ns / 1_000_000_000;
+            out.push_str(&format!("{:20} {:>5} {:>10}s {:>10}s {:>8} {}\n",
+                entry.mountpoint, entry.freeze_level,
+                dur_s, until_s, entry.blocked_writes, entry.reason));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2444,6 +2478,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fstrim" => Ok(gen_fstrim()),
         "sparse" => Ok(gen_sparse()),
         "readdir_plus" => Ok(gen_readdir_plus()),
+        "freeze" => Ok(gen_freeze()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
-    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fstrim", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4368,6 +4368,7 @@ fn dispatch(line: &str) {
         "fstrim" => cmd_fstrim(args),
         "sparse" => cmd_sparse(args),
         "lsplus" => cmd_lsplus(args),
+        "fsfreeze" => cmd_fsfreeze(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14178,6 +14179,103 @@ fn cmd_lsplus(args: &str) {
     }
 }
 
+fn cmd_fsfreeze(args: &str) {
+    use crate::fs::freeze;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "freeze" | "f" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fsfreeze freeze <mountpoint> [reason]");
+                return;
+            }
+            let mp = resolve_path(parts[1]);
+            let reason = if parts.len() > 2 {
+                parts[2..].join(" ")
+            } else {
+                alloc::string::String::from("manual")
+            };
+            match freeze::freeze(&mp, &reason) {
+                Ok(r) => {
+                    if r.was_initial {
+                        shell_println!("Frozen: {} (level {})", mp, r.freeze_level);
+                    } else {
+                        shell_println!("Freeze level increased: {} (level {})", mp, r.freeze_level);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "thaw" | "t" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fsfreeze thaw <mountpoint>");
+                return;
+            }
+            let mp = resolve_path(parts[1]);
+            match freeze::thaw(&mp) {
+                Ok(r) => {
+                    if r.fully_thawed {
+                        shell_println!("Thawed: {} ({} writes were blocked)", mp, r.blocked_writes);
+                    } else {
+                        shell_println!("Freeze level decreased: {} (level {})", mp, r.freeze_level);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "force" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fsfreeze force <mountpoint>");
+                return;
+            }
+            let mp = resolve_path(parts[1]);
+            match freeze::force_thaw(&mp) {
+                Ok(r) => shell_println!("Force-thawed: {} ({} writes blocked)", mp, r.blocked_writes),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "show" | "" => {
+            let list = freeze::list_frozen();
+            if list.is_empty() {
+                shell_println!("No frozen filesystems.");
+            } else {
+                shell_println!("{:20} {:>5} {:>8} {:>8} {:>8} {}",
+                    "MOUNTPOINT", "LEVEL", "DUR(s)", "TTL(s)", "BLOCKED", "REASON");
+                shell_println!("{}", "-".repeat(70));
+                for entry in &list {
+                    let dur_s = entry.frozen_duration_ns / 1_000_000_000;
+                    let ttl_s = entry.time_until_thaw_ns / 1_000_000_000;
+                    shell_println!("{:20} {:>5} {:>8} {:>8} {:>8} {}",
+                        entry.mountpoint, entry.freeze_level,
+                        dur_s, ttl_s, entry.blocked_writes, entry.reason);
+                }
+            }
+        }
+        "stats" => {
+            let (freezes, thaws, auto_thaws, blocked, frozen) = freeze::stats();
+            shell_println!("Freeze Statistics");
+            shell_println!("  Frozen now:     {}/16", frozen);
+            shell_println!("  Freeze ops:     {}", freezes);
+            shell_println!("  Thaw ops:       {}", thaws);
+            shell_println!("  Auto-thaws:     {}", auto_thaws);
+            shell_println!("  Blocked writes: {}", blocked);
+        }
+        "reset" => {
+            freeze::reset_stats();
+            shell_println!("Freeze statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: fsfreeze <command>");
+            shell_println!("  freeze <mount> [reason]  Freeze filesystem");
+            shell_println!("  thaw <mount>             Thaw (decrement level)");
+            shell_println!("  force <mount>            Force-thaw (ignore level)");
+            shell_println!("  list|show                List frozen filesystems (default)");
+            shell_println!("  stats                    Show statistics");
+            shell_println!("  reset                    Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -19554,7 +19652,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

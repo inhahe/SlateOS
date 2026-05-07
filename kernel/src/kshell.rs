@@ -3095,7 +3095,7 @@ const COMMANDS: &[&str] = &[
     "prefetch", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
-    "strings", "tac", "tr",
+    "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
@@ -4363,6 +4363,7 @@ fn dispatch(line: &str) {
         "ionice" => cmd_ionice(args),
         "atime" => cmd_atime(args),
         "prefetch" => cmd_prefetch(args),
+        "splice" => cmd_splice(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13633,6 +13634,91 @@ fn cmd_prefetch(args: &str) {
     }
 }
 
+fn cmd_splice(args: &str) {
+    use crate::fs::splice;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "copy" | "cp" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: splice copy <src> <dst> [src_offset] [dst_offset] [len]");
+                return;
+            }
+            let src = resolve_path(parts[1]);
+            let dst = resolve_path(parts[2]);
+            let src_off: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let dst_off: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let len: usize = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(1024 * 1024);
+            match splice::copy_file_range(&src, src_off, &dst, dst_off, len) {
+                Ok(r) => shell_println!("Copied {} bytes ({} chunks): {} -> {}",
+                    r.bytes_transferred, r.chunks, src, dst),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "send" | "sendfile" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: splice send <src> <dst> [offset] [len]");
+                return;
+            }
+            let src = resolve_path(parts[1]);
+            let dst = resolve_path(parts[2]);
+            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let len: usize = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1024 * 1024);
+            match splice::sendfile(&src, &dst, offset, len) {
+                Ok(r) => shell_println!("Sent {} bytes ({} chunks): {} -> {}",
+                    r.bytes_transferred, r.chunks, src, dst),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pipe" | "splice" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: splice pipe <src> <dst> [src_offset] [len]");
+                return;
+            }
+            let src = resolve_path(parts[1]);
+            let dst = resolve_path(parts[2]);
+            let src_off: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let len: usize = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1024 * 1024);
+            match splice::splice(&src, src_off, &dst, len) {
+                Ok(r) => shell_println!("Spliced {} bytes ({} chunks): {} -> {}",
+                    r.bytes_transferred, r.chunks, src, dst),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "tee" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: splice tee <src> <dst> [offset] [len]");
+                return;
+            }
+            let src = resolve_path(parts[1]);
+            let dst = resolve_path(parts[2]);
+            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let len: usize = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1024 * 1024);
+            match splice::tee(&src, offset, &dst, len) {
+                Ok(r) => shell_println!("Tee'd {} bytes: {} -> {}",
+                    r.bytes_transferred, src, dst),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" | "show" | "" => {
+            shell_println!("{}", splice::summary());
+        }
+        "reset" => {
+            splice::reset_stats();
+            shell_println!("Splice statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: splice <command>");
+            shell_println!("  copy <src> <dst> [soff] [doff] [len]  Copy file range (server-side)");
+            shell_println!("  send <src> <dst> [off] [len]          Sendfile (file to dest)");
+            shell_println!("  pipe <src> <dst> [soff] [len]         Splice (pipe-style transfer)");
+            shell_println!("  tee <src> <dst> [off] [len]           Tee (dup without consuming)");
+            shell_println!("  stats|show                            Show statistics (default)");
+            shell_println!("  reset                                 Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18971,7 +19057,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

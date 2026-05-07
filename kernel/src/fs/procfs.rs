@@ -133,6 +133,7 @@ const ROOT_FILES: &[&str] = &[
     "ioprio",
     "atime",
     "prefetch",
+    "splice",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2228,6 +2229,28 @@ fn gen_prefetch() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/splice` — zero-copy I/O transfer statistics.
+fn gen_splice() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let s = super::splice::stats();
+    let total_ops = s.splice_ops + s.sendfile_ops + s.copy_range_ops + s.tee_ops;
+    let total_bytes = s.splice_bytes + s.sendfile_bytes + s.copy_range_bytes + s.tee_bytes;
+
+    out.push_str("Zero-Copy I/O Transfer (splice)\n");
+    out.push_str("===============================\n\n");
+    out.push_str(&format!("{:20} {:>10} {:>12}\n", "OPERATION", "OPS", "BYTES"));
+    out.push_str(&format!("{:20} {:>10} {:>12}\n", "splice", s.splice_ops, s.splice_bytes));
+    out.push_str(&format!("{:20} {:>10} {:>12}\n", "sendfile", s.sendfile_ops, s.sendfile_bytes));
+    out.push_str(&format!("{:20} {:>10} {:>12}\n", "copy_file_range", s.copy_range_ops, s.copy_range_bytes));
+    out.push_str(&format!("{:20} {:>10} {:>12}\n", "tee", s.tee_ops, s.tee_bytes));
+    out.push_str(&format!("{:20} {:>10} {:>12}\n", "TOTAL", total_ops, total_bytes));
+    out.push_str(&format!("\nErrors: {}\n", s.errors));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2302,6 +2325,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "ioprio" => Ok(gen_ioprio()),
         "atime" => Ok(gen_atime()),
         "prefetch" => Ok(gen_prefetch()),
+        "splice" => Ok(gen_splice()),
         _ => Err(KernelError::NotFound),
     }
 }

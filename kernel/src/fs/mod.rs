@@ -76,6 +76,7 @@ pub mod quota;
 pub mod reclaim;
 pub mod search;
 pub mod snapshot;
+pub mod splice;
 #[allow(dead_code)]
 pub mod rar;
 pub mod rlimit;

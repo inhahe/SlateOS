@@ -33,6 +33,7 @@ pub mod audit;
 pub mod associations;
 pub mod backup;
 pub mod batch;
+pub mod bench;
 #[allow(dead_code)]
 pub mod bzip2;
 pub mod cache;

@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
-    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4359,6 +4359,7 @@ fn dispatch(line: &str) {
         "linkcheck" => cmd_linkcheck(args),
         "fsprofile" => cmd_fsprofile(args),
         "fspolicy" => cmd_fspolicy(args),
+        "fsbench" => cmd_fsbench(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13263,6 +13264,115 @@ fn cmd_fspolicy(args: &str) {
     }
 }
 
+/// Filesystem microbenchmark suite — measure I/O performance against targets.
+fn cmd_fsbench(args: &str) {
+    use crate::fs::bench;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "all" | "" => {
+            let dir = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/tmp") };
+            shell_println!("Running filesystem benchmark suite in {}...", dir);
+            match bench::run_all(&dir) {
+                Ok(report) => {
+                    shell_println!();
+                    shell_println!("  {:18} {:>8} {:>10} {:>10} {:>10} {:>8}",
+                        "BENCHMARK", "ITERS", "TOTAL(ms)", "AVG(ns)", "OPS/s", "TARGET");
+                    shell_println!("  {}", "-".repeat(72));
+                    for r in &report.results {
+                        let target_str = match r.meets_target() {
+                            Some(true) => "  PASS",
+                            Some(false) => "  FAIL",
+                            None => "     -",
+                        };
+                        shell_println!("  {:18} {:>8} {:>10} {:>10} {:>10} {}",
+                            r.name, r.iterations,
+                            r.total_ns / 1_000_000,
+                            r.avg_ns(),
+                            r.ops_per_sec(),
+                            target_str);
+                        if r.bytes > 0 {
+                            let mbps = r.throughput_bps() / 1_000_000;
+                            if mbps > 0 {
+                                shell_println!("  {:18} {:>8} throughput: {} MB/s", "", "", mbps);
+                            }
+                        }
+                    }
+                    shell_println!();
+                    shell_println!("  Suite total: {} ms | Targets: {}/{} passed",
+                        report.total_ns / 1_000_000,
+                        report.targets_met.0, report.targets_met.1);
+                }
+                Err(e) => shell_println!("Benchmark failed: {:?}", e),
+            }
+        }
+        "read" => {
+            let path = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/tmp/_bench_read") };
+            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
+            match bench::bench_sequential_read(&path, iters) {
+                Ok(r) => {
+                    shell_println!("Sequential read: {} iterations", r.iterations);
+                    shell_println!("  Avg: {}ns | {} ops/s | {} MB/s",
+                        r.avg_ns(), r.ops_per_sec(), r.throughput_bps() / 1_000_000);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "write" => {
+            let dir = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/tmp") };
+            let size: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(4096);
+            let iters: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+            match bench::bench_sequential_write(&dir, size, iters) {
+                Ok(r) => {
+                    shell_println!("Sequential write ({}B): {} iterations", size, r.iterations);
+                    shell_println!("  Avg: {}ns | {} ops/s | {} MB/s",
+                        r.avg_ns(), r.ops_per_sec(), r.throughput_bps() / 1_000_000);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "meta" => {
+            let dir = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/tmp") };
+            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+            match bench::bench_metadata(&dir, iters) {
+                Ok(r) => {
+                    shell_println!("Metadata cycle (create+stat+delete): {} iterations", r.iterations);
+                    shell_println!("  Avg: {}ns | {} ops/s | target: {}ns {}",
+                        r.avg_ns(), r.ops_per_sec(), r.target_ns,
+                        if r.meets_target() == Some(true) { "PASS" } else { "FAIL" });
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "lookup" => {
+            let path = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/tmp") };
+            let iters: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            match bench::bench_path_lookup(&path, iters) {
+                Ok(r) => {
+                    shell_println!("Path lookup ({}): {} iterations", path, r.iterations);
+                    shell_println!("  Avg: {}ns | {} ops/s | target: {}ns {}",
+                        r.avg_ns(), r.ops_per_sec(), r.target_ns,
+                        if r.meets_target() == Some(true) { "PASS" } else { "FAIL" });
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (runs, last_ns) = bench::stats();
+            shell_println!("Benchmarks run: {} | Last suite: {} ms", runs, last_ns / 1_000_000);
+        }
+        _ => {
+            shell_println!("Usage: fsbench <command> [options]");
+            shell_println!("  all [dir]              Run full suite (default: /tmp)");
+            shell_println!("  read [path] [iters]    Sequential read benchmark");
+            shell_println!("  write [dir] [sz] [n]   Sequential write benchmark");
+            shell_println!("  meta [dir] [iters]     Metadata cycle (create+stat+delete)");
+            shell_println!("  lookup [path] [iters]  VFS path resolution latency");
+            shell_println!("  stats                  Show run history");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18601,7 +18711,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -129,6 +129,7 @@ const ROOT_FILES: &[&str] = &[
     "linkcheck",
     "profile",
     "fspolicy",
+    "fsbench",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2117,6 +2118,27 @@ fn gen_fspolicy() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/fsbench` — filesystem benchmark results.
+fn gen_fsbench() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (runs, last_ns) = super::bench::stats();
+
+    out.push_str("Filesystem Benchmarks\n");
+    out.push_str("=====================\n\n");
+    out.push_str(&format!("Suites run:     {}\n", runs));
+    out.push_str(&format!("Last suite:     {} ms\n\n", last_ns / 1_000_000));
+    out.push_str("Targets (from design spec):\n");
+    out.push_str("  Path lookup:      500 ns/component (cached)\n");
+    out.push_str("  Metadata cycle:   10,000 ns (create+stat+delete)\n");
+    out.push_str("  File open:        5,000 ns (cached path)\n");
+    out.push_str("  Small read (4K):  2,000 ns\n\n");
+    out.push_str("Run `fsbench all` in kshell for full results.\n");
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2187,6 +2209,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "linkcheck" => Ok(gen_linkcheck()),
         "profile" => Ok(gen_profile()),
         "fspolicy" => Ok(gen_fspolicy()),
+        "fsbench" => Ok(gen_fsbench()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -1046,6 +1046,26 @@ pub fn current_task_id() -> TaskId {
     load_current_task()
 }
 
+/// Get the cgroup ID of the current task (non-blocking).
+///
+/// Returns `ROOT_CGROUP` if the scheduler lock is contended or the
+/// task isn't found.  Designed for use in allocation paths where
+/// blocking is not acceptable (e.g., page fault handler).
+#[must_use]
+#[allow(dead_code)] // Public API for cgroup memory controller integration.
+pub fn current_task_cgroup() -> crate::cgroup::CgroupId {
+    let task_id = load_current_task();
+    if task_id == 0 {
+        return crate::cgroup::ROOT_CGROUP;
+    }
+    if let Some(state) = SCHED.try_lock() {
+        if let Some(task) = state.tasks.get(&task_id) {
+            return task.cgroup_id;
+        }
+    }
+    crate::cgroup::ROOT_CGROUP
+}
+
 /// Block the current task and yield to the next runnable task.
 ///
 /// The current task is set to [`Blocked`](TaskState::Blocked) and is

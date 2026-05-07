@@ -660,6 +660,53 @@ fn update_mem_peak(node: &CgroupNode, new_val: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Public API: current-task helpers (scheduler integration)
+// ---------------------------------------------------------------------------
+
+/// Check whether the current task's cgroup allows allocating `count`
+/// frames.  Charges them if allowed.
+#[allow(dead_code)] // Public API for page fault handler integration (proc zone).
+///
+/// This is the integration point for the memory controller: the page
+/// fault handler (demand paging, stack growth) calls this before
+/// allocating physical frames.  If the task's cgroup is over its memory
+/// limit, the charge is rejected and the fault handler should fail with
+/// OOM (or trigger reclamation within the group).
+///
+/// Returns `Ok(())` if the charge was accepted (within limits or the
+/// group has no memory limit).  Returns `Err(OutOfMemory)` if the
+/// group's limit would be exceeded.
+///
+/// The caller should call [`mem_uncharge`] when the frame is later
+/// freed (e.g., on process exit, munmap, swap-out).
+pub fn try_charge_current_mem(count: u64) -> KernelResult<()> {
+    let cgroup_id = current_task_cgroup();
+    mem_charge(cgroup_id, count)
+}
+
+/// Uncharge frames from the current task's cgroup.
+///
+/// Convenience wrapper around [`mem_uncharge`] that looks up the
+/// current task's cgroup automatically.
+#[allow(dead_code)] // Public API for page free path integration (proc zone).
+pub fn uncharge_current_mem(count: u64) {
+    let cgroup_id = current_task_cgroup();
+    mem_uncharge(cgroup_id, count);
+}
+
+/// Look up the current task's cgroup ID.
+///
+/// Delegates to `sched::current_task_cgroup()` which uses try_lock
+/// to avoid deadlock when called from the page fault handler.
+/// Falls back to ROOT_CGROUP if the lock is contended or during
+/// early boot.
+#[inline]
+#[allow(dead_code)] // Called by try_charge_current_mem / uncharge_current_mem.
+fn current_task_cgroup() -> CgroupId {
+    crate::sched::current_task_cgroup()
+}
+
+// ---------------------------------------------------------------------------
 // Public API: queries
 // ---------------------------------------------------------------------------
 

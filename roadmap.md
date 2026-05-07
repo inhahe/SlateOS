@@ -958,7 +958,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [ ] Port Btrfs (CoW, snapshots, checksums)
 - [ ] Port F2FS (SSD optimization)
 - [ ] NTFS read/write support
-- [ ] Queryable file metadata / indexed attributes (BeOS BFS-inspired)
+- [x] Queryable file metadata / indexed attributes (fs::queryable): BeOS BFS-inspired typed attribute store per design.txt lines 35-37 and 249; AttrValue (Text/Int/Bool/Bytes) with per-file attribute maps; relational query engine with CompareOp (Equal/NotEqual/LessThan/LessEqual/GreaterThan/GreaterEqual/Contains/StartsWith/EndsWith); QueryMode (All=AND/Any=OR); indexed queries via reverse index (attr_name → BTreeMap<value_key, Set<path>>); attribute schemas with category:name convention (Audio:*/Image:*/Document:*/Email:*/App:*); 27 built-in schemas; register_builtins(); create_index/drop_index; rename_path support; unique_values discovery; 65536 max files, 64 attrs/file, 1024 indexed attrs; `queryable`/`qattr` kshell command (set/get/rm/list/clear/query/index/schema/test/stats/reset); /proc/queryable; 7 self-tests
 - [x] Application-level atomic write transactions (Vfs::atomic_write, write-temp-sync-rename pattern, atomic_write_preserve for metadata, VFS self-test)
 
 ### 5.3 Additional schedulers (if needed)

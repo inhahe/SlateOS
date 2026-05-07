@@ -159,6 +159,7 @@ const ROOT_FILES: &[&str] = &[
     "statusbar",
     "templates",
     "toolbar",
+    "queryable",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2765,6 +2766,43 @@ fn gen_toolbar() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_queryable() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (files, total_attrs, sets, gets, queries, indexes) = super::queryable::stats();
+
+    out.push_str("Queryable File Metadata (BFS-inspired)\n");
+    out.push_str("======================================\n\n");
+    out.push_str(&format!("Files:       {}/{}\n", files, 65536));
+    out.push_str(&format!("Attributes:  {}\n", total_attrs));
+    out.push_str(&format!("Indexes:     {}/{}\n", indexes, 1024));
+    out.push_str(&format!("Set ops:     {}\n", sets));
+    out.push_str(&format!("Get ops:     {}\n", gets));
+    out.push_str(&format!("Queries:     {}\n\n", queries));
+
+    let indexed = super::queryable::list_indexes();
+    if !indexed.is_empty() {
+        out.push_str("Indexed attributes:\n");
+        for name in &indexed {
+            out.push_str(&format!("  {}\n", name));
+        }
+        out.push('\n');
+    }
+
+    let schemas = super::queryable::list_schemas();
+    if !schemas.is_empty() {
+        out.push_str(&format!("Schemas: {}\n", schemas.len()));
+        out.push_str(&format!("{:30} {:8} {:8} {}\n", "NAME", "TYPE", "INDEXED", "DESCRIPTION"));
+        for s in &schemas {
+            let idx = if s.indexed { "yes" } else { "no" };
+            out.push_str(&format!("{:30} {:8} {:8} {}\n", s.name, s.value_type, idx, s.description));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3089,6 +3127,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "statusbar" => Ok(gen_statusbar()),
         "templates" => Ok(gen_templates()),
         "toolbar" => Ok(gen_toolbar()),
+        "queryable" => Ok(gen_queryable()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

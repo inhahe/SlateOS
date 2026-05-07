@@ -3092,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
-    "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
+    "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4399,6 +4399,7 @@ fn dispatch(line: &str) {
         "sidebar" => cmd_sidebar(args),
         "statusbar" => cmd_statusbar(args),
         "toolbar" => cmd_toolbar(args),
+        "queryable" | "qattr" => cmd_queryable(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
@@ -16545,6 +16546,277 @@ fn cmd_toolbar(args: &str) {
     }
 }
 
+/// `queryable` / `qattr` — queryable file metadata (BFS-inspired).
+fn cmd_queryable(args: &str) {
+    use crate::fs::queryable;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "set" => {
+            // qattr set <path> <name> <type> <value>
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            let attr_name = parts.get(2).copied().unwrap_or("");
+            let type_name = parts.get(3).copied().unwrap_or("text");
+            let val_str = parts.get(4).copied().unwrap_or("");
+            if path_arg.is_empty() || attr_name.is_empty() || val_str.is_empty() {
+                shell_println!("Usage: qattr set <path> <name> <text|int|bool> <value>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            let value = match type_name {
+                "int" | "i" => {
+                    match val_str.parse::<i64>() {
+                        Ok(n) => queryable::AttrValue::Int(n),
+                        Err(_) => { shell_println!("Invalid integer: {}", val_str); return; }
+                    }
+                }
+                "bool" | "b" => {
+                    match val_str {
+                        "true" | "1" | "yes" => queryable::AttrValue::Bool(true),
+                        "false" | "0" | "no" => queryable::AttrValue::Bool(false),
+                        _ => { shell_println!("Invalid bool: {}", val_str); return; }
+                    }
+                }
+                _ => queryable::AttrValue::Text(String::from(val_str)),
+            };
+            match queryable::set_attr(&path, attr_name, value) {
+                Ok(()) => shell_println!("Set {}={} on {}", attr_name, val_str, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            let attr_name = parts.get(2).copied().unwrap_or("");
+            if path_arg.is_empty() || attr_name.is_empty() {
+                shell_println!("Usage: qattr get <path> <name>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match queryable::get_attr(&path, attr_name) {
+                Ok(val) => {
+                    let display = match &val {
+                        queryable::AttrValue::Text(s) => alloc::format!("\"{}\"", s),
+                        queryable::AttrValue::Int(n) => alloc::format!("{}", n),
+                        queryable::AttrValue::Bool(b) => alloc::format!("{}", b),
+                        queryable::AttrValue::Bytes(b) => alloc::format!("[{} bytes]", b.len()),
+                    };
+                    shell_println!("{}={} ({})", attr_name, display, val.type_name());
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rm" | "remove" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            let attr_name = parts.get(2).copied().unwrap_or("");
+            if path_arg.is_empty() || attr_name.is_empty() {
+                shell_println!("Usage: qattr rm <path> <name>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match queryable::remove_attr(&path, attr_name) {
+                Ok(()) => shell_println!("Removed {} from {}", attr_name, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "ls" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: qattr list <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match queryable::list_attrs(&path) {
+                Ok(attrs) => {
+                    if attrs.is_empty() {
+                        shell_println!("No attributes on {}", path);
+                    } else {
+                        shell_println!("{} attributes on {}:", attrs.len(), path);
+                        for (name, val) in &attrs {
+                            let display = match val {
+                                queryable::AttrValue::Text(s) => alloc::format!("\"{}\"", s),
+                                queryable::AttrValue::Int(n) => alloc::format!("{}", n),
+                                queryable::AttrValue::Bool(b) => alloc::format!("{}", b),
+                                queryable::AttrValue::Bytes(b) => alloc::format!("[{} bytes]", b.len()),
+                            };
+                            shell_println!("  {} = {} ({})", name, display, val.type_name());
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clear" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: qattr clear <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match queryable::clear_attrs(&path) {
+                Ok(n) => shell_println!("Cleared {} attributes from {}", n, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "query" | "q" => {
+            // qattr query <attr> <op> <value> [root]
+            let attr_name = parts.get(1).copied().unwrap_or("");
+            let op_str = parts.get(2).copied().unwrap_or("=");
+            let val_str = parts.get(3).copied().unwrap_or("");
+            let root = parts.get(4).map(|p| resolve_path(p));
+            if attr_name.is_empty() || val_str.is_empty() {
+                shell_println!("Usage: qattr query <attr> <op> <value> [root]");
+                shell_println!("  ops: = != < <= > >= contains starts-with ends-with");
+                return;
+            }
+            let op = match op_str {
+                "=" | "==" | "eq" => queryable::CompareOp::Equal,
+                "!=" | "ne" => queryable::CompareOp::NotEqual,
+                "<" | "lt" => queryable::CompareOp::LessThan,
+                "<=" | "le" => queryable::CompareOp::LessEqual,
+                ">" | "gt" => queryable::CompareOp::GreaterThan,
+                ">=" | "ge" => queryable::CompareOp::GreaterEqual,
+                "contains" | "~" => queryable::CompareOp::Contains,
+                "starts-with" | "^" => queryable::CompareOp::StartsWith,
+                "ends-with" | "$" => queryable::CompareOp::EndsWith,
+                _ => { shell_println!("Unknown operator: {}", op_str); return; }
+            };
+            // Auto-detect type: try int first, then text.
+            let value = if let Ok(n) = val_str.parse::<i64>() {
+                queryable::AttrValue::Int(n)
+            } else {
+                queryable::AttrValue::Text(String::from(val_str))
+            };
+            let pred = queryable::Predicate {
+                attr_name: String::from(attr_name),
+                op,
+                value,
+            };
+            let results = queryable::query(
+                &[pred],
+                queryable::QueryMode::All,
+                root.as_deref(),
+            );
+            if results.is_empty() {
+                shell_println!("No matches");
+            } else {
+                shell_println!("{} results:", results.len());
+                for r in &results {
+                    let vals: Vec<String> = r.matched_attrs.iter().map(|(k, v)| {
+                        let d = match v {
+                            queryable::AttrValue::Text(s) => alloc::format!("\"{}\"", s),
+                            queryable::AttrValue::Int(n) => alloc::format!("{}", n),
+                            queryable::AttrValue::Bool(b) => alloc::format!("{}", b),
+                            queryable::AttrValue::Bytes(b) => alloc::format!("[{} bytes]", b.len()),
+                        };
+                        alloc::format!("{}={}", k, d)
+                    }).collect();
+                    shell_println!("  {} ({})", r.path, vals.join(", "));
+                }
+            }
+        }
+        "index" => {
+            let idx_sub = parts.get(1).copied().unwrap_or("");
+            match idx_sub {
+                "create" => {
+                    let attr_name = parts.get(2).copied().unwrap_or("");
+                    if attr_name.is_empty() {
+                        shell_println!("Usage: qattr index create <attr_name>");
+                        return;
+                    }
+                    match queryable::create_index(attr_name) {
+                        Ok(()) => shell_println!("Index created for {}", attr_name),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "drop" => {
+                    let attr_name = parts.get(2).copied().unwrap_or("");
+                    if attr_name.is_empty() {
+                        shell_println!("Usage: qattr index drop <attr_name>");
+                        return;
+                    }
+                    match queryable::drop_index(attr_name) {
+                        Ok(()) => shell_println!("Index dropped for {}", attr_name),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "list" | "" => {
+                    let indexes = queryable::list_indexes();
+                    if indexes.is_empty() {
+                        shell_println!("No indexed attributes");
+                    } else {
+                        shell_println!("{} indexed attributes:", indexes.len());
+                        for name in &indexes {
+                            let count = queryable::count_with_attr(name);
+                            shell_println!("  {} ({} files)", name, count);
+                        }
+                    }
+                }
+                _ => shell_println!("Usage: qattr index <create|drop|list> [attr_name]"),
+            }
+        }
+        "schema" => {
+            let schema_sub = parts.get(1).copied().unwrap_or("");
+            match schema_sub {
+                "init" => {
+                    match queryable::register_builtins() {
+                        Ok(()) => shell_println!("Built-in schemas registered"),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "list" | "" => {
+                    let schemas = queryable::list_schemas();
+                    if schemas.is_empty() {
+                        shell_println!("No schemas registered (use 'qattr schema init')");
+                    } else {
+                        shell_println!("{} schemas:", schemas.len());
+                        shell_println!("{:30} {:8} {:8} {}", "NAME", "TYPE", "INDEXED", "DESCRIPTION");
+                        for s in &schemas {
+                            let idx = if s.indexed { "yes" } else { "no" };
+                            shell_println!("{:30} {:8} {:8} {}", s.name, s.value_type, idx, s.description);
+                        }
+                    }
+                }
+                _ => shell_println!("Usage: qattr schema <init|list>"),
+            }
+        }
+        "test" => {
+            match queryable::self_test() {
+                Ok(()) => shell_println!("All queryable self-tests passed"),
+                Err(e) => shell_println!("Queryable self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (files, total_attrs, sets, gets, queries, indexes) = queryable::stats();
+            shell_println!("Files:      {}", files);
+            shell_println!("Attributes: {}", total_attrs);
+            shell_println!("Indexes:    {}", indexes);
+            shell_println!("Set ops:    {}", sets);
+            shell_println!("Get ops:    {}", gets);
+            shell_println!("Queries:    {}", queries);
+        }
+        "reset" => {
+            queryable::clear_all();
+            queryable::reset_stats();
+            shell_println!("Queryable store cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: qattr <subcommand>");
+            shell_println!("  set <path> <name> [text|int|bool] <value>");
+            shell_println!("  get <path> <name>");
+            shell_println!("  rm <path> <name>");
+            shell_println!("  list <path>             List file attributes");
+            shell_println!("  clear <path>            Remove all attributes");
+            shell_println!("  query <attr> <op> <val> [root]");
+            shell_println!("    ops: = != < <= > >= contains starts-with ends-with");
+            shell_println!("  index create|drop|list  Manage attribute indexes");
+            shell_println!("  schema init|list        Manage attribute schemas");
+            shell_println!("  test                    Run self-tests");
+            shell_println!("  stats                   Show statistics");
+            shell_println!("  reset                   Clear all data and stats");
+        }
+    }
+}
+
 /// `preview` — file preview/thumbnail generation.
 fn cmd_preview(args: &str) {
     use crate::fs::preview;
@@ -22861,7 +23133,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

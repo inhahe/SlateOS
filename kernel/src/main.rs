@@ -282,6 +282,10 @@ extern "C" fn kmain() -> ! {
     // The slab allocator uses the frame allocator for backing memory.
     mm::heap::init(boot_info.hhdm_offset);
 
+    // Now that the heap is available, tell the console it can allocate
+    // its screen text buffer and scrollback ring.
+    console::notify_heap_available();
+
     // Verify heap allocations work.
     if let Err(e) = mm::heap::self_test() {
         serial_println!("FATAL: Heap allocator self-test failed: {}", e);

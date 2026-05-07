@@ -38,6 +38,7 @@
 //! the lock internally, so callers do not need to worry about
 //! synchronization.
 
+use alloc::vec::Vec;
 use core::fmt;
 use core::ptr;
 use spin::Mutex;
@@ -338,6 +339,162 @@ enum AnsiState {
     Csi,
 }
 
+// ---------------------------------------------------------------------------
+// Scrollback buffer
+// ---------------------------------------------------------------------------
+
+/// Maximum number of scrollback lines retained.
+const SCROLLBACK_MAX: usize = 1000;
+
+/// Maximum characters per scrollback line.
+const SCROLLBACK_LINE_MAX: usize = 256;
+
+/// A single cell in the scrollback buffer: character + colors.
+#[derive(Clone, Copy)]
+struct ScrollCell {
+    /// ASCII character (or 0 for empty).
+    ch: u8,
+    /// Foreground color.
+    fg: u32,
+    /// Background color.
+    bg: u32,
+}
+
+impl ScrollCell {
+    const EMPTY: Self = Self {
+        ch: b' ',
+        fg: DEFAULT_FG,
+        bg: DEFAULT_BG,
+    };
+}
+
+/// A single scrollback line (variable-width).
+struct ScrollLine {
+    cells: Vec<ScrollCell>,
+}
+
+impl ScrollLine {
+    fn new(cols: usize) -> Self {
+        Self {
+            cells: alloc::vec![ScrollCell::EMPTY; cols],
+        }
+    }
+}
+
+/// Ring buffer of scrollback lines.
+struct ScrollbackBuffer {
+    lines: Vec<ScrollLine>,
+    /// Index of the oldest line (ring start).
+    start: usize,
+    /// Number of valid lines.
+    count: usize,
+    /// Width (columns) of each line.
+    cols: usize,
+}
+
+impl ScrollbackBuffer {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            start: 0,
+            count: 0,
+            cols: 0,
+        }
+    }
+
+    /// Initialize with the given column width.  Pre-allocates storage.
+    fn init(&mut self, cols: usize) {
+        self.cols = cols;
+        self.lines.clear();
+        let alloc_count = SCROLLBACK_MAX.min(200); // Start smaller, grow as needed.
+        self.lines.reserve(alloc_count);
+        self.start = 0;
+        self.count = 0;
+    }
+
+    /// Push a new line into the scrollback buffer.
+    fn push(&mut self, line: ScrollLine) {
+        if self.lines.len() < SCROLLBACK_MAX {
+            // Still growing — just append.
+            self.lines.push(line);
+            self.count = self.lines.len();
+        } else {
+            // Full — overwrite oldest.
+            let idx = (self.start.wrapping_add(self.count)) % SCROLLBACK_MAX;
+            if let Some(slot) = self.lines.get_mut(idx) {
+                *slot = line;
+            }
+            // Advance start to drop oldest.
+            if self.count >= SCROLLBACK_MAX {
+                self.start = (self.start.wrapping_add(1)) % SCROLLBACK_MAX;
+            } else {
+                self.count = self.count.saturating_add(1);
+            }
+        }
+    }
+
+    /// Get a line by reverse index (0 = most recent, count-1 = oldest).
+    fn get_rev(&self, rev_idx: usize) -> Option<&ScrollLine> {
+        if rev_idx >= self.count {
+            return None;
+        }
+        let abs_idx = if self.lines.len() < SCROLLBACK_MAX {
+            // Not yet wrapped — simple index from end.
+            self.count.checked_sub(1)?.checked_sub(rev_idx)?
+        } else {
+            let end = (self.start.wrapping_add(self.count)) % SCROLLBACK_MAX;
+            (end.wrapping_add(SCROLLBACK_MAX).wrapping_sub(1).wrapping_sub(rev_idx))
+                % SCROLLBACK_MAX
+        };
+        self.lines.get(abs_idx)
+    }
+
+    /// Search for a substring in the scrollback, returning matching
+    /// reverse indices.
+    fn search(&self, query: &str) -> Vec<usize> {
+        let mut matches = Vec::new();
+        if query.is_empty() {
+            return matches;
+        }
+        for rev_idx in 0..self.count {
+            if let Some(line) = self.get_rev(rev_idx) {
+                let text: alloc::string::String =
+                    line.cells.iter().map(|c| c.ch as char).collect();
+                let trimmed = text.trim_end();
+                if trimmed.contains(query) {
+                    matches.push(rev_idx);
+                }
+            }
+        }
+        matches
+    }
+}
+
+/// Global scrollback buffer (separate mutex to avoid holding CONSOLE
+/// lock during potentially slow buffer operations).
+static SCROLLBACK: Mutex<ScrollbackBuffer> = Mutex::new(ScrollbackBuffer {
+    lines: Vec::new(),
+    start: 0,
+    count: 0,
+    cols: 0,
+});
+
+/// Current scroll offset (0 = at bottom/live, >0 = viewing older lines).
+static SCROLL_OFFSET: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Set to true once the kernel heap allocator is ready.
+/// Until this is true, screen_buf and scrollback cannot be allocated.
+static HEAP_AVAILABLE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Notify the console that the heap allocator is now available.
+///
+/// Must be called exactly once, after `mm::heap::init()`.
+pub fn notify_heap_available() {
+    HEAP_AVAILABLE.store(true, core::sync::atomic::Ordering::Release);
+}
+
 /// Internal console state, protected by a mutex.
 // The console needs many boolean flags for VT100 attribute tracking
 // (bold, dim, underline, reverse, invisible, strikethrough, etc.).
@@ -415,6 +572,9 @@ struct ConsoleInner {
     ansi_cur_param: u16,
     /// Whether we've seen a digit for the current parameter.
     ansi_has_digit: bool,
+    /// Text buffer mirroring the screen content (cols × rows cells).
+    /// Used for scrollback capture and find-in-screen.
+    screen_buf: Vec<ScrollCell>,
 }
 
 impl ConsoleInner {
@@ -457,6 +617,24 @@ impl ConsoleInner {
             ansi_param_count: 0,
             ansi_cur_param: 0,
             ansi_has_digit: false,
+            screen_buf: Vec::new(),
+        }
+    }
+
+    /// Lazily allocate the screen text buffer and scrollback.
+    ///
+    /// No-op if already allocated or if the heap is not yet available.
+    fn ensure_screen_buf(&mut self) {
+        if !self.screen_buf.is_empty() {
+            return; // Already allocated.
+        }
+        if !HEAP_AVAILABLE.load(core::sync::atomic::Ordering::Acquire) {
+            return; // Heap not ready yet — skip silently.
+        }
+        if self.cols > 0 && self.rows > 0 {
+            let total = (self.cols as usize).saturating_mul(self.rows as usize);
+            self.screen_buf = alloc::vec![ScrollCell::EMPTY; total];
+            SCROLLBACK.lock().init(self.cols as usize);
         }
     }
 
@@ -544,6 +722,8 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
     con.cursor_row = 0;
     con.scroll_top = 0;
     con.scroll_bottom = rows.saturating_sub(1);
+    // screen_buf and scrollback are allocated lazily (after the heap
+    // is available) because console init runs before the heap allocator.
     con.initialized = true;
 
     // Clear the screen to the background color so we start fresh.
@@ -572,6 +752,57 @@ pub fn framebuffer_info() -> Option<(u64, u32, u32, u32)> {
         return None;
     }
     Some((con.fb_addr, con.fb_width, con.fb_height, con.fb_pitch))
+}
+
+// ---------------------------------------------------------------------------
+// Scrollback and search
+// ---------------------------------------------------------------------------
+
+/// Number of lines currently in the scrollback buffer.
+pub fn scrollback_count() -> usize {
+    SCROLLBACK.lock().count
+}
+
+/// Get the text of a scrollback line by reverse index (0 = most recent).
+pub fn scrollback_line(rev_idx: usize) -> Option<alloc::string::String> {
+    let sb = SCROLLBACK.lock();
+    sb.get_rev(rev_idx).map(|line| {
+        line.cells.iter().map(|c| c.ch as char).collect::<alloc::string::String>()
+    })
+}
+
+/// Search the scrollback buffer for a substring.
+/// Returns a list of matching line texts (newest first).
+pub fn scrollback_search(query: &str) -> Vec<alloc::string::String> {
+    let sb = SCROLLBACK.lock();
+    let indices = sb.search(query);
+    let mut results = Vec::with_capacity(indices.len());
+    for idx in &indices {
+        if let Some(line) = sb.get_rev(*idx) {
+            let text: alloc::string::String =
+                line.cells.iter().map(|c| c.ch as char).collect();
+            results.push(text.trim_end().into());
+        }
+    }
+    results
+}
+
+/// Get the current screen content as text lines (for screen-level search).
+pub fn screen_text() -> Vec<alloc::string::String> {
+    let con = CONSOLE.lock();
+    let cols = con.cols as usize;
+    let rows = con.rows as usize;
+    let mut lines = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let start = row.wrapping_mul(cols);
+        let end = start.wrapping_add(cols);
+        if let Some(slice) = con.screen_buf.get(start..end) {
+            let text: alloc::string::String =
+                slice.iter().map(|c| c.ch as char).collect();
+            lines.push(text.trim_end().into());
+        }
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +954,7 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
 /// characters are rendered by drawing the glyph across two cell widths
 /// (the second cell is blanked to prevent stale pixels).
 fn render_codepoint(con: &mut ConsoleInner, cp: u32) {
+    con.ensure_screen_buf();
     let (glyph, is_wide) = crate::unicode::glyph_for_codepoint(cp);
     let col = con.cursor_col;
     let row = con.cursor_row;
@@ -730,6 +962,15 @@ fn render_codepoint(con: &mut ConsoleInner, cp: u32) {
     let pitch = con.fb_pitch;
     let fg = effective_fg(con);
     let bg = effective_bg(con);
+
+    // Record the character in the screen text buffer.
+    let buf_idx = (row as usize).wrapping_mul(con.cols as usize).wrapping_add(col as usize);
+    if let Some(cell) = con.screen_buf.get_mut(buf_idx) {
+        // Store ASCII byte directly; non-ASCII gets '?' placeholder for search.
+        cell.ch = if cp < 0x80 { cp as u8 } else { b'?' };
+        cell.fg = fg;
+        cell.bg = bg;
+    }
 
     // Draw the glyph at the current position.
     draw_glyph_bitmap(fb, pitch, col, row, &glyph, fg, bg,
@@ -2012,6 +2253,37 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
     let fb = con.fb_addr;
     let pitch = con.fb_pitch;
     let rows = con.rows;
+    let cols = con.cols as usize;
+
+    // Capture the top row into the scrollback buffer before scrolling.
+    if con.scroll_top == 0 && !con.screen_buf.is_empty() {
+        let mut sline = ScrollLine::new(cols);
+        for col_idx in 0..cols {
+            if let Some(cell) = con.screen_buf.get(col_idx) {
+                if let Some(dst) = sline.cells.get_mut(col_idx) {
+                    *dst = *cell;
+                }
+            }
+        }
+        SCROLLBACK.lock().push(sline);
+    }
+
+    // Shift the screen text buffer up by one row.
+    if !con.screen_buf.is_empty() {
+        let total = cols.saturating_mul(rows as usize);
+        // Copy rows 1..rows to rows 0..rows-1.
+        for i in cols..total {
+            let val = con.screen_buf.get(i).copied().unwrap_or(ScrollCell::EMPTY);
+            if let Some(dst) = con.screen_buf.get_mut(i.wrapping_sub(cols)) {
+                *dst = val;
+            }
+        }
+        // Clear the last row of the text buffer.
+        let last_row_start = total.saturating_sub(cols);
+        for cell in con.screen_buf.get_mut(last_row_start..total).into_iter().flatten() {
+            *cell = ScrollCell::EMPTY;
+        }
+    }
 
     // If cursor is within a scroll region, use region-aware scrolling.
     if con.scroll_top != 0 || con.scroll_bottom != rows.saturating_sub(1) {

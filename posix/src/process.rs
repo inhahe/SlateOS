@@ -162,22 +162,7 @@ pub extern "C" fn fork() -> PidT {
     -1
 }
 
-/// Execute a program.
-///
-/// Replaces the current process image with a new program.
-///
-/// **Not yet implemented** — requires kernel support for in-place
-/// process replacement.  Returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
-pub extern "C" fn execve(
-    _path: *const u8,
-    _argv: *const *const u8,
-    _envp: *const *const u8,
-) -> i32 {
-    // TODO: Implement via native exec syscall.
-    errno::set_errno(errno::ENOSYS);
-    -1
-}
+// execve is implemented in spawn.rs with real ELF loading.
 
 /// Get the task/thread ID (Linux-specific, but commonly used).
 #[unsafe(no_mangle)]

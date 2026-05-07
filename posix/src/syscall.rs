@@ -38,6 +38,7 @@ pub const SYS_SCHED_SET_PROFILE: u64 = 53;
 // Process management
 pub const SYS_PROCESS_SPAWN: u64 = 500;
 pub const SYS_PROCESS_WAIT: u64 = 501;
+pub const SYS_PROCESS_EXEC: u64 = 503;
 pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;

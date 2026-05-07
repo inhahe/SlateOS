@@ -208,6 +208,7 @@ const ROOT_FILES: &[&str] = &[
     "vpn",
     "dyndns",
     "loginscreen",
+    "appnotify",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4528,6 +4529,33 @@ fn gen_loginscreen() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_appnotify() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (app_count, sound_count, type_count, ops) = super::appnotify::stats();
+
+    out.push_str("App Notification Settings\n");
+    out.push_str("=========================\n\n");
+    out.push_str(&format!("Registered apps:     {}\n", app_count));
+    out.push_str(&format!("System sounds:       {}\n", sound_count));
+    out.push_str(&format!("Notification types:  {}\n", type_count));
+    out.push_str(&format!("Operations:          {}\n", ops));
+
+    let apps = super::appnotify::list_apps();
+    if !apps.is_empty() {
+        out.push_str("\nApps:\n");
+        for app in &apps {
+            let status = if app.enabled { "on" } else { "off" };
+            out.push_str(&format!("  {} ({}) [{}] types={}\n",
+                app.display_name, app.app_id, status,
+                app.notification_types.len()));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4901,6 +4929,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "vpn" => Ok(gen_vpn()),
         "dyndns" => Ok(gen_dyndns()),
         "loginscreen" => Ok(gen_loginscreen()),
+        "appnotify" => Ok(gen_appnotify()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

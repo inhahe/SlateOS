@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4812,6 +4812,7 @@ fn dispatch(line: &str) {
         "vpn" => cmd_vpn(args),
         "dyndns" | "ddns" => cmd_dyndns(args),
         "loginscreen" | "logscr" => cmd_loginscreen(args),
+        "appnotify" | "anotify" => cmd_appnotify(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -23223,6 +23224,312 @@ fn cmd_loginscreen(args: &str) {
     }
 }
 
+/// `appnotify` / `anotify` — per-application notification settings.
+fn cmd_appnotify(args: &str) {
+    use crate::fs::appnotify;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "list" | "ls" => {
+            let apps = appnotify::list_apps();
+            if apps.is_empty() {
+                shell_println!("No apps registered");
+            } else {
+                shell_println!("{:<20} {:<16} {:<7} {:<6} Types", "App ID", "Display Name", "Enabled", "Sound");
+                for app in &apps {
+                    let snd = match &app.sound {
+                        appnotify::SoundChoice::SystemDefault => "default",
+                        appnotify::SoundChoice::Named(_) => "custom",
+                        appnotify::SoundChoice::Silent => "silent",
+                    };
+                    shell_println!("{:<20} {:<16} {:<7} {:<6} {}",
+                        app.app_id, app.display_name,
+                        if app.enabled { "yes" } else { "no" },
+                        snd, app.notification_types.len());
+                }
+            }
+        }
+        "show" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: appnotify show <app-id>");
+            } else {
+                match appnotify::get_app(parts[1]) {
+                    Ok(app) => {
+                        shell_println!("App:        {} ({})", app.display_name, app.app_id);
+                        shell_println!("Enabled:    {}", app.enabled);
+                        let snd = match &app.sound {
+                            appnotify::SoundChoice::SystemDefault => String::from("system default"),
+                            appnotify::SoundChoice::Named(n) => alloc::format!("custom: {}", n),
+                            appnotify::SoundChoice::Silent => String::from("silent"),
+                        };
+                        shell_println!("Sound:      {}", snd);
+                        shell_println!("Display:    {:?}", app.display_mode);
+                        shell_println!("Critical:   {}", app.allow_critical);
+                        shell_println!("Rate limit: {}/min", app.rate_limit);
+                        shell_println!("Group:      {}", app.group_notifications);
+                        if !app.notification_types.is_empty() {
+                            shell_println!("\nNotification types:");
+                            for t in &app.notification_types {
+                                let en = if t.enabled { "on" } else { "off" };
+                                shell_println!("  {} [{}] - {}", t.type_key, en, t.description);
+                            }
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "register" | "reg" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify register <app-id> <display-name>");
+            } else {
+                let name = parts[2..].join(" ");
+                match appnotify::register_app(parts[1], &name) {
+                    Ok(()) => shell_println!("Registered: {} ({})", name, parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unregister" | "unreg" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: appnotify unregister <app-id>");
+            } else {
+                match appnotify::unregister_app(parts[1]) {
+                    Ok(()) => shell_println!("Unregistered: {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "enable" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: appnotify enable <app-id>");
+            } else {
+                match appnotify::set_app_enabled(parts[1], true) {
+                    Ok(()) => shell_println!("Enabled: {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "disable" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: appnotify disable <app-id>");
+            } else {
+                match appnotify::set_app_enabled(parts[1], false) {
+                    Ok(()) => shell_println!("Disabled: {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "sound" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify sound <app-id> <default|silent|filename>");
+            } else {
+                let snd = match parts[2] {
+                    "default" => appnotify::SoundChoice::SystemDefault,
+                    "silent" | "none" => appnotify::SoundChoice::Silent,
+                    name => appnotify::SoundChoice::Named(String::from(name)),
+                };
+                match appnotify::set_app_sound(parts[1], snd) {
+                    Ok(()) => shell_println!("Sound set for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "display" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify display <app-id> <banner-pane|pane|banner|suppress>");
+            } else {
+                let mode = match parts[2] {
+                    "banner-pane" | "both" => appnotify::DisplayMode::BannerAndPane,
+                    "pane" | "pane-only" => appnotify::DisplayMode::PaneOnly,
+                    "banner" | "banner-only" => appnotify::DisplayMode::BannerOnly,
+                    "suppress" | "off" => appnotify::DisplayMode::Suppressed,
+                    _ => { shell_println!("Unknown mode: {}", parts[2]); return; }
+                };
+                match appnotify::set_app_display_mode(parts[1], mode) {
+                    Ok(()) => shell_println!("Display mode set for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "critical" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify critical <app-id> <on|off>");
+            } else {
+                let allow = matches!(parts[2], "on" | "yes" | "true");
+                match appnotify::set_allow_critical(parts[1], allow) {
+                    Ok(()) => shell_println!("Critical {} for {}", if allow { "allowed" } else { "denied" }, parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "ratelimit" | "rate" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify ratelimit <app-id> <per-minute|0>");
+            } else {
+                match parts[2].parse::<u32>() {
+                    Ok(v) => match appnotify::set_rate_limit(parts[1], v) {
+                        Ok(()) => shell_println!("Rate limit set to {}/min for {}", v, parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    },
+                    Err(_) => shell_println!("Invalid number"),
+                }
+            }
+        }
+        "group" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify group <app-id> <on|off>");
+            } else {
+                let g = matches!(parts[2], "on" | "yes" | "true");
+                match appnotify::set_group(parts[1], g) {
+                    Ok(()) => shell_println!("Grouping {} for {}", if g { "enabled" } else { "disabled" }, parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "addtype" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: appnotify addtype <app-id> <type-key> <description...>");
+            } else {
+                let desc = parts[3..].join(" ");
+                match appnotify::register_notification_type(
+                    parts[1], parts[2], &desc, appnotify::SoundChoice::SystemDefault,
+                ) {
+                    Ok(()) => shell_println!("Added type '{}' to {}", parts[2], parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rmtype" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify rmtype <app-id> <type-key>");
+            } else {
+                match appnotify::unregister_notification_type(parts[1], parts[2]) {
+                    Ok(()) => shell_println!("Removed type '{}' from {}", parts[2], parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "type-enable" | "ten" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify type-enable <app-id> <type-key>");
+            } else {
+                match appnotify::set_type_enabled(parts[1], parts[2], true) {
+                    Ok(()) => shell_println!("Enabled '{}' for {}", parts[2], parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "type-disable" | "tdis" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify type-disable <app-id> <type-key>");
+            } else {
+                match appnotify::set_type_enabled(parts[1], parts[2], false) {
+                    Ok(()) => shell_println!("Disabled '{}' for {}", parts[2], parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "type-sound" | "tsnd" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: appnotify type-sound <app-id> <type-key> <default|silent|filename>");
+            } else {
+                let snd = match parts[3] {
+                    "default" => Some(appnotify::SoundChoice::SystemDefault),
+                    "silent" | "none" => Some(appnotify::SoundChoice::Silent),
+                    "clear" | "reset" => None,
+                    name => Some(appnotify::SoundChoice::Named(String::from(name))),
+                };
+                match appnotify::set_type_sound(parts[1], parts[2], snd) {
+                    Ok(()) => shell_println!("Type sound set for {}:{}", parts[1], parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "effective" | "eff" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appnotify effective <app-id> <type-key>");
+            } else {
+                let eff = appnotify::effective_settings(parts[1], parts[2]);
+                shell_println!("Show:     {}", eff.show);
+                shell_println!("Sound:    {}", eff.sound.as_deref().unwrap_or("(system default)"));
+                shell_println!("Display:  {:?}", eff.display_mode);
+                shell_println!("Priority: {:?}", eff.priority);
+            }
+        }
+        "sounds" => {
+            let cat = parts.get(1).copied();
+            let sounds = match cat {
+                Some(c) => appnotify::sounds_by_category(c),
+                None => appnotify::list_sounds(),
+            };
+            if sounds.is_empty() {
+                shell_println!("No sounds registered");
+            } else {
+                shell_println!("{:<20} {:<16} {}", "Filename", "Label", "Category");
+                for s in &sounds {
+                    shell_println!("{:<20} {:<16} {}", s.filename, s.label, s.category);
+                }
+            }
+        }
+        "addsound" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: appnotify addsound <filename> <label> <category>");
+            } else {
+                match appnotify::register_sound(parts[1], parts[2], parts[3]) {
+                    Ok(()) => shell_println!("Added sound: {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "init" => {
+            appnotify::init_defaults();
+            shell_println!("Initialised app notification defaults");
+        }
+        "stats" => {
+            let (apps, sounds, types, ops) = appnotify::stats();
+            shell_println!("Apps:     {}", apps);
+            shell_println!("Sounds:   {}", sounds);
+            shell_println!("Types:    {}", types);
+            shell_println!("Ops:      {}", ops);
+        }
+        "test" => {
+            match appnotify::self_test() {
+                Ok(()) => shell_println!("appnotify: all tests passed"),
+                Err(e) => shell_println!("appnotify: test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("appnotify — per-app notification settings");
+            shell_println!("Usage: appnotify <subcommand>");
+            shell_println!("  list              List registered apps");
+            shell_println!("  show <app>        Show app details and types");
+            shell_println!("  register <id> <name>  Register app");
+            shell_println!("  unregister <id>   Remove app");
+            shell_println!("  enable <id>       Enable app notifications");
+            shell_println!("  disable <id>      Disable app notifications");
+            shell_println!("  sound <id> <s>    Set app sound (default|silent|file)");
+            shell_println!("  display <id> <m>  Set display mode");
+            shell_println!("  critical <id> <v> Allow/deny critical notifications");
+            shell_println!("  ratelimit <id> <n>  Set rate limit per minute");
+            shell_println!("  group <id> <v>    Enable/disable grouping");
+            shell_println!("  addtype <id> <key> <desc>  Register notification type");
+            shell_println!("  rmtype <id> <key> Remove notification type");
+            shell_println!("  type-enable <id> <key>   Enable type");
+            shell_println!("  type-disable <id> <key>  Disable type");
+            shell_println!("  type-sound <id> <key> <s>  Set type sound override");
+            shell_println!("  effective <id> <key>  Show effective settings");
+            shell_println!("  sounds [category]  List system sounds");
+            shell_println!("  addsound <f> <l> <c>  Register system sound");
+            shell_println!("  init              Load defaults");
+            shell_println!("  stats             Show statistics");
+            shell_println!("  test              Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -31001,7 +31308,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

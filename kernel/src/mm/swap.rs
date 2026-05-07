@@ -1332,6 +1332,9 @@ pub unsafe fn swap_out_page(
     // SAFETY: pml4_phys is valid, virt is frame-aligned and mapped.
     let phys_frame = unsafe { page_table::unmap_frame(pml4_phys, virt)? };
 
+    // Remove reverse mapping — this frame is no longer mapped at this virt.
+    super::rmap::remove(phys_frame.addr(), pml4_phys, virt.as_u64());
+
     // Step 4: Write swap entries into the PTEs.
     let swap_pte = PageTableEntry::from_raw(swap_entry.to_pte_raw());
     // SAFETY: pml4_phys valid, virt frame-aligned, PTEs now non-present.
@@ -1445,6 +1448,9 @@ pub unsafe fn swap_in_page(
     unsafe {
         page_table::map_frame(pml4_phys, virt, new_frame, flags)?;
     }
+
+    // Register reverse mapping — this frame is now mapped at this virt.
+    super::rmap::add(new_frame.addr(), pml4_phys, virt.as_u64());
 
     // Step 6: Free the swap slot.
     {

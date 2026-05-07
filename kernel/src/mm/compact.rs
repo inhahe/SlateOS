@@ -387,7 +387,13 @@ unsafe fn migrate_page(old_phys: u64, new_phys: u64) -> bool {
 ///
 /// Scans rmap entries looking for privately-mapped pages (count == 1).
 /// For each eligible page, attempts to allocate a frame at a lower address
-/// and migrate the page contents there.
+/// and migrate the page contents there.  This consolidates free space into
+/// larger contiguous blocks, enabling higher-order buddy allocations.
+///
+/// Based on Linux `mm/compaction.c` `compact_zone()`: scan private pages,
+/// try to relocate each to a lower-addressed free frame.  If the new frame
+/// is at a higher address than the old one, skip it (we want to move pages
+/// DOWN, not up — the goal is to open up contiguous blocks at the top).
 ///
 /// Returns the number of pages successfully migrated.
 #[allow(clippy::arithmetic_side_effects)]
@@ -398,23 +404,90 @@ pub fn try_compact() -> usize {
 
     REQUESTS.fetch_add(1, Ordering::Relaxed);
 
-    let mut migrated = 0;
     let rmap_st = rmap::stats();
-
     if rmap_st.entries_used == 0 {
         RUNNING.store(false, Ordering::Release);
         return 0; // Nothing to migrate.
     }
 
-    // For now, we don't have an iterator over rmap entries.
-    // The actual migration will be triggered when page migration candidates
-    // are identified (e.g., by the frame allocator on high-order failure).
-    // This function serves as the entry point for future scanning.
-    //
-    // TODO: Add rmap iteration API to scan for migration candidates.
+    let mut migrated = 0usize;
+    let mut failures = 0usize;
 
-    serial_println!("[compact] try_compact: {} rmap entries, {} migrated",
-        rmap_st.entries_used, migrated);
+    // Collect candidate frames in batches.  Each batch holds up to 32
+    // privately-mapped frame addresses from the rmap table.
+    let mut candidates = [0u64; 32];
+    let mut scan_idx: usize = 0;
+
+    // Scan up to 4 batches (128 candidates total, well under MAX_MIGRATE_PER_PASS).
+    for _batch in 0..4u32 {
+        if migrated >= MAX_MIGRATE_PER_PASS {
+            break;
+        }
+
+        let (found, next_idx) = rmap::collect_private_frames(&mut candidates, scan_idx);
+        scan_idx = next_idx;
+
+        if found == 0 {
+            break; // No more candidates.
+        }
+
+        for i in 0..found {
+            if migrated >= MAX_MIGRATE_PER_PASS {
+                break;
+            }
+
+            let old_phys = candidates[i];
+            if old_phys == 0 {
+                continue;
+            }
+
+            // Try to allocate a new frame.  The buddy allocator naturally
+            // returns low-address frames first, so if old_phys is at a high
+            // address, the new frame will likely be lower.
+            let new_frame = match frame::alloc_frame() {
+                Ok(f) => f,
+                Err(_) => break, // OOM — stop compacting.
+            };
+
+            let new_phys = new_frame.addr();
+
+            // Only migrate if the new frame is at a LOWER address.
+            // Moving to a higher address doesn't help defragmentation.
+            if new_phys >= old_phys {
+                // New frame is same or higher — not helpful.  Free it.
+                // SAFETY: new_frame is freshly allocated and unmapped.
+                let _ = unsafe { frame::free_frame(new_frame) };
+                continue;
+            }
+
+            // Attempt the actual page migration.
+            // SAFETY: old_phys is a valid mapped frame (from rmap),
+            // new_frame is freshly allocated and not mapped.
+            let success = unsafe { migrate_page(old_phys, new_phys) };
+
+            if !success {
+                // Migration failed — free the new frame.
+                // SAFETY: new_frame was allocated above, not mapped on failure.
+                let _ = unsafe { frame::free_frame(new_frame) };
+                failures += 1;
+                MIGRATION_FAILURES.fetch_add(1, Ordering::Relaxed);
+            } else {
+                migrated += 1;
+            }
+        }
+
+        // If we wrapped back to 0, we've scanned everything.
+        if next_idx == 0 {
+            break;
+        }
+    }
+
+    if migrated > 0 || failures > 0 {
+        serial_println!(
+            "[compact] try_compact: {} rmap entries, {} migrated, {} failed",
+            rmap_st.entries_used, migrated, failures
+        );
+    }
 
     RUNNING.store(false, Ordering::Release);
     migrated

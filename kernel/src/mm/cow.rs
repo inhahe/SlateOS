@@ -207,6 +207,14 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
         let _ = unsafe { frame::ref_dec(frame) };
     }
 
+    // Update reverse mapping: the new frame is now mapped at this virtual
+    // address in this address space.  Remove the old frame's rmap entry
+    // (it was shared, now we have our own copy).
+    if pages_resolved > 0 {
+        super::rmap::remove(frame_base, pml4_phys, group_virt_base);
+        super::rmap::add(new_phys, pml4_phys, group_virt_base);
+    }
+
     // Flush TLB for the entire frame group.
     crate::tlb::flush_range(group_virt_base, HW_PAGES_PER_FRAME as u32);
 

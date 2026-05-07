@@ -335,6 +335,41 @@ pub fn is_private(frame_phys: u64) -> bool {
     mapper_count(frame_phys) == 1
 }
 
+/// Collect a batch of privately-mapped frame addresses for compaction.
+///
+/// Scans the rmap table and returns up to `max` frame addresses that have
+/// exactly one mapper (private pages).  These are candidates for migration
+/// during memory compaction — they only need one PTE update.
+///
+/// The scan starts from index `start_idx` (modulo table size) and wraps
+/// around.  Returns the next start index for continuation.
+///
+/// Shared pages (mapper_count > 1) and overflowed entries are skipped.
+pub fn collect_private_frames(out: &mut [u64], start_idx: usize) -> (usize, usize) {
+    let table = TABLE.lock();
+    let mut found = 0;
+    let start = start_idx % RMAP_TABLE_SIZE;
+
+    for i in 0..RMAP_TABLE_SIZE {
+        if found >= out.len() {
+            // Return next index for continuation.
+            return (found, (start + i) % RMAP_TABLE_SIZE);
+        }
+
+        let idx = (start + i) % RMAP_TABLE_SIZE;
+        let entry = &table.entries[idx];
+
+        // Only collect privately-mapped, non-overflow frames.
+        if !entry.is_free() && entry.mapper_count == 1 && !entry.overflow {
+            out[found] = entry.frame_phys;
+            found += 1;
+        }
+    }
+
+    // Full scan completed — wrap to 0.
+    (found, 0)
+}
+
 /// Statistics for the rmap subsystem.
 #[derive(Debug, Clone, Copy)]
 pub struct RmapStats {

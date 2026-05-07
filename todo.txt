@@ -100,6 +100,15 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   write_journal_superblock) now use to_be_bytes.  Journal is now
   compatible with Linux-formatted ext4 images.
 
+- kernel-process: Wire rmap::add() into proc/pcb.rs try_resolve_fault().
+  After the map_frame call at line ~831, add:
+    crate::mm::rmap::add(phys_frame.addr(), pml4_phys, frame_base);
+  This enables compaction to find and migrate user-space demand-paged
+  frames.  Without it, rmap has no entries for demand-paged user pages
+  and compaction cannot relocate them.  The mm-zone rmap wiring is done
+  for cow.rs (CoW copy), swap.rs (swap-out/swap-in), and compact.rs
+  (migration), but try_resolve_fault is in proc/ which is process zone.
+
 ## Cross-Zone Bug Reports
 
 - (FIXED) rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics

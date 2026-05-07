@@ -116,6 +116,7 @@ const ROOT_FILES: &[&str] = &[
     "changetrack",
     "fcompress",
     "encryption",
+    "dedup",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1779,6 +1780,22 @@ fn gen_encryption() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_dedup() -> Vec<u8> {
+    use crate::fs::dedup;
+    let s = dedup::stats();
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!("Deduplication: {}\n\n", if dedup::is_enabled() { "enabled" } else { "disabled" }));
+    out.push_str(&format!("  scans run:       {}\n", s.scans_run));
+    out.push_str(&format!("  total files:     {}\n", s.total_files));
+    out.push_str(&format!("  dup groups:      {}\n", s.total_groups));
+    out.push_str(&format!("  dup files:       {}\n", s.total_duplicates));
+    out.push_str(&format!("  potential savings:{} bytes\n", s.total_savings));
+    out.push_str(&format!("  active:          {}\n", s.active));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1836,6 +1853,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "changetrack" => Ok(gen_changetrack()),
         "fcompress" => Ok(gen_fcompress()),
         "encryption" => Ok(gen_encryption()),
+        "dedup" => Ok(gen_dedup()),
         _ => Err(KernelError::NotFound),
     }
 }

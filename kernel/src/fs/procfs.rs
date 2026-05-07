@@ -145,6 +145,7 @@ const ROOT_FILES: &[&str] = &[
     "fswalk",
     "findex",
     "thumbcache",
+    "bookmarks",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2561,6 +2562,30 @@ fn gen_thumbcache() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_bookmarks() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (resolves, adds, count) = super::bookmarks::stats();
+
+    out.push_str("Filesystem Bookmarks\n");
+    out.push_str("====================\n\n");
+    out.push_str(&format!("Bookmarks: {}/{}\n", count, 128));
+    out.push_str(&format!("Resolves:  {}\n", resolves));
+    out.push_str(&format!("Adds:      {}\n\n", adds));
+
+    let bookmarks = super::bookmarks::list_visible();
+    if !bookmarks.is_empty() {
+        out.push_str(&format!("{:12} {:8} {:30} {}\n", "NAME", "CAT", "PATH", "LABEL"));
+        for bm in &bookmarks {
+            out.push_str(&format!("{:12} {:8} {:30} {}\n",
+                bm.name, bm.category.label(), bm.path, bm.label));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2647,6 +2672,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fswalk" => Ok(gen_fswalk()),
         "findex" => Ok(gen_findex()),
         "thumbcache" => Ok(gen_thumbcache()),
+        "bookmarks" => Ok(gen_bookmarks()),
         _ => Err(KernelError::NotFound),
     }
 }

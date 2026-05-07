@@ -33,6 +33,7 @@ pub mod archive;
 pub mod audit;
 pub mod associations;
 pub mod backup;
+pub mod bookmarks;
 pub mod batch;
 pub mod bench;
 #[allow(dead_code)]

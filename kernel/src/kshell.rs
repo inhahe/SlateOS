@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "ar", "backup", "base64", "batch", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
+    "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "findex", "finfo", "fold", "free",
@@ -4375,6 +4375,7 @@ fn dispatch(line: &str) {
         "fswalk" | "walk" => cmd_fswalk(args),
         "findex" => cmd_findex(args),
         "thumbcache" | "tcache" => cmd_thumbcache(args),
+        "bookmark" | "bm" => cmd_bookmark(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14944,6 +14945,116 @@ fn cmd_thumbcache(args: &str) {
     }
 }
 
+fn cmd_bookmark(args: &str) {
+    use crate::fs::bookmarks::{self, Category};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "show" | "" => {
+            let bm_list = bookmarks::list_visible();
+            if bm_list.is_empty() {
+                shell_println!("No bookmarks.");
+            } else {
+                let mut current_cat = "";
+                for bm in &bm_list {
+                    let cat = bm.category.label();
+                    if cat != current_cat {
+                        if !current_cat.is_empty() { shell_println!(""); }
+                        shell_println!("{}:", cat);
+                        current_cat = cat;
+                    }
+                    let vis = if bm.system { "(sys)" } else { "" };
+                    shell_println!("  {:12} {:30} {} {}", bm.name, bm.path, bm.label, vis);
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: bookmark add <name> <path> [label] [category]");
+                shell_println!("  Categories: places, favorites (default), devices, network");
+                return;
+            }
+            let name = parts[1];
+            let path = resolve_path(parts[2]);
+            let label = if parts.len() > 3 { parts[3] } else { "" };
+            let category = parts.get(4)
+                .and_then(|s| Category::from_name(s))
+                .unwrap_or(Category::Favorites);
+            match bookmarks::add(name, &path, label, category) {
+                Ok(()) => shell_println!("Bookmark '{}' added: {}", name, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rm" | "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: bookmark remove <name>");
+                return;
+            }
+            match bookmarks::remove(parts[1]) {
+                Ok(()) => shell_println!("Bookmark '{}' removed.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "go" | "cd" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: bookmark go <name>");
+                return;
+            }
+            if let Some(path) = bookmarks::resolve(parts[1]) {
+                bookmarks::record_access(parts[1]);
+                // Update CWD like cmd_cd does.
+                {
+                    let mut cwd = CWD.lock();
+                    cwd.clear();
+                    cwd.push_str(&path);
+                }
+                shell_println!("{}", path);
+            } else {
+                shell_println!("Unknown bookmark: {}", parts[1]);
+            }
+        }
+        "rename" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: bookmark rename <old-name> <new-name>");
+                return;
+            }
+            match bookmarks::rename(parts[1], parts[2]) {
+                Ok(()) => shell_println!("Renamed '{}' → '{}'", parts[1], parts[2]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "validate" => {
+            let results = bookmarks::validate();
+            for (name, path, exists) in &results {
+                let status = if *exists { "OK" } else { "MISSING" };
+                shell_println!("{:12} {:30} {}", name, path, status);
+            }
+        }
+        "stats" => {
+            let (resolves, adds, count) = bookmarks::stats();
+            shell_println!("Bookmark Statistics");
+            shell_println!("  Bookmarks: {}/128", count);
+            shell_println!("  Resolves:  {}", resolves);
+            shell_println!("  Adds:      {}", adds);
+        }
+        "reset" => {
+            bookmarks::reset_stats();
+            shell_println!("Bookmark statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: bookmark <command>");
+            shell_println!("  list|show                    List bookmarks (default)");
+            shell_println!("  add <name> <path> [lbl] [cat] Add bookmark");
+            shell_println!("  remove <name>                Remove bookmark");
+            shell_println!("  go <name>                    Navigate to bookmark");
+            shell_println!("  rename <old> <new>           Rename bookmark");
+            shell_println!("  validate                     Check paths exist");
+            shell_println!("  stats                        Show statistics");
+            shell_println!("  reset                        Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -20417,7 +20528,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

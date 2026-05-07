@@ -67,6 +67,7 @@ pub mod ext4;
 pub mod fat;
 pub mod fcomment;
 pub mod fcompress;
+pub mod fontmgr;
 pub mod fileinfo;
 pub mod fileops;
 pub mod filepicker;

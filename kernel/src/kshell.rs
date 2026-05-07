@@ -3446,7 +3446,7 @@ const COMMANDS: &[&str] = &[
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
-    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fontmgr", "fonts", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4744,6 +4744,7 @@ fn dispatch(line: &str) {
         "directio" => cmd_directio(args),
         "fstrim" => cmd_fstrim(args),
         "fstune" => cmd_fstune(args),
+        "fontmgr" | "fonts" => cmd_fontmgr(args),
         "sparse" => cmd_sparse(args),
         "lsplus" => cmd_lsplus(args),
         "fsfreeze" => cmd_fsfreeze(args),
@@ -20998,6 +20999,117 @@ fn cmd_timezone(args: &str) {
     }
 }
 
+/// `fontmgr` / `fonts` — font registry and rendering settings.
+fn cmd_fontmgr(args: &str) {
+    use crate::fs::fontmgr;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let cat = match parts.get(1).copied().unwrap_or("all") {
+                "sans" => Some(fontmgr::FontCategory::SansSerif), "serif" => Some(fontmgr::FontCategory::Serif), "mono" => Some(fontmgr::FontCategory::Monospace), "display" => Some(fontmgr::FontCategory::Display), "hand" => Some(fontmgr::FontCategory::Handwriting), "symbol" => Some(fontmgr::FontCategory::Symbol), _ => None,
+            };
+            let fonts = fontmgr::list_fonts(cat);
+            if fonts.is_empty() { shell_println!("No fonts"); return; }
+            shell_println!("{:<6} {:<20} {:<12} {:<6} {:<8} {}", "ID", "FAMILY", "STYLE", "FMT", "GLYPHS", "SYS");
+            for f in &fonts {
+                let st = match f.style { fontmgr::FontStyle::Regular => "regular", fontmgr::FontStyle::Bold => "bold", fontmgr::FontStyle::Italic => "italic", fontmgr::FontStyle::BoldItalic => "bold-it", fontmgr::FontStyle::Light => "light", fontmgr::FontStyle::Medium => "medium", fontmgr::FontStyle::SemiBold => "semibold", fontmgr::FontStyle::ExtraBold => "xbold", fontmgr::FontStyle::Thin => "thin" };
+                let fmt = match f.format { fontmgr::FontFormat::TrueType => "ttf", fontmgr::FontFormat::OpenType => "otf", fontmgr::FontFormat::Woff => "woff", fontmgr::FontFormat::Woff2 => "woff2", fontmgr::FontFormat::Bitmap => "bmp" };
+                shell_println!("{:<6} {:<20} {:<12} {:<6} {:<8} {}", f.id, f.family, st, fmt, f.glyph_count, if f.system { "yes" } else { "no" });
+            }
+        }
+        "families" => {
+            let fams = fontmgr::list_families();
+            for f in &fams { shell_println!("{}", f); }
+        }
+        "info" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fontmgr::get_font(id) {
+                Ok(f) => {
+                    shell_println!("ID:       {}", f.id);
+                    shell_println!("Family:   {}", f.family);
+                    shell_println!("Style:    {:?}", f.style);
+                    shell_println!("Format:   {:?}", f.format);
+                    shell_println!("Category: {:?}", f.category);
+                    shell_println!("Path:     {}", f.path);
+                    shell_println!("Version:  {}", f.version);
+                    shell_println!("Glyphs:   {}", f.glyph_count);
+                    shell_println!("System:   {}", f.system);
+                    shell_println!("Enabled:  {}", f.enabled);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "install" => {
+            let family = parts.get(1).copied().unwrap_or("Unknown");
+            let path = parts.get(2).copied().unwrap_or("/fonts/new.ttf");
+            match fontmgr::install_font(family, fontmgr::FontStyle::Regular, fontmgr::FontFormat::TrueType, fontmgr::FontCategory::SansSerif, path, "1.0", 0) {
+                Ok(id) => shell_println!("Installed {} (ID {})", family, id), Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "uninstall" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fontmgr::uninstall_font(id) { Ok(()) => shell_println!("Uninstalled"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "enable" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fontmgr::set_enabled(id, true) { Ok(()) => shell_println!("Enabled"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "disable" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fontmgr::set_enabled(id, false) { Ok(()) => shell_println!("Disabled"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "default" => {
+            let role = match parts.get(1).copied().unwrap_or("ui") {
+                "doc" | "document" => fontmgr::FontRole::Document, "mono" | "monospace" => fontmgr::FontRole::Monospace, "title" | "titlebar" => fontmgr::FontRole::Titlebar, "fallback" => fontmgr::FontRole::Fallback, _ => fontmgr::FontRole::Ui,
+            };
+            let family = parts.get(2).copied().unwrap_or("");
+            if family.is_empty() {
+                let defs = fontmgr::default_fonts();
+                shell_println!("UI:        {}", defs.ui);
+                shell_println!("Document:  {}", defs.document);
+                shell_println!("Monospace: {}", defs.monospace);
+                shell_println!("Titlebar:  {}", defs.titlebar);
+                shell_println!("Fallback:  {}", defs.fallback);
+            } else {
+                match fontmgr::set_default(role, family) { Ok(()) => shell_println!("Default set"), Err(e) => shell_println!("Error: {:?}", e) }
+            }
+        }
+        "size" => {
+            let pt: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if pt == 0 { shell_println!("Size: {} pt", fontmgr::render_settings().global_size_pt); }
+            else { match fontmgr::set_global_size(pt) { Ok(()) => shell_println!("Size: {} pt", pt), Err(e) => shell_println!("Error: {:?}", e) } }
+        }
+        "hint" => {
+            match parts.get(1).copied().unwrap_or("slight") {
+                "none" => fontmgr::set_hint_mode(fontmgr::HintMode::None), "medium" | "med" => fontmgr::set_hint_mode(fontmgr::HintMode::Medium), "full" => fontmgr::set_hint_mode(fontmgr::HintMode::Full), _ => fontmgr::set_hint_mode(fontmgr::HintMode::Slight),
+            };
+            shell_println!("Hinting set");
+        }
+        "antialias" | "aa" => {
+            match parts.get(1).copied().unwrap_or("subpixel") {
+                "none" | "off" => fontmgr::set_antialias(fontmgr::AntialiasMode::None), "gray" | "grayscale" => fontmgr::set_antialias(fontmgr::AntialiasMode::Grayscale), _ => fontmgr::set_antialias(fontmgr::AntialiasMode::Subpixel),
+            };
+            shell_println!("Antialiasing set");
+        }
+        "dpi" => {
+            let dpi: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if dpi == 0 { shell_println!("DPI: {}", fontmgr::render_settings().dpi); }
+            else { match fontmgr::set_dpi(dpi) { Ok(()) => shell_println!("DPI: {}", dpi), Err(e) => shell_println!("Error: {:?}", e) } }
+        }
+        "find" => {
+            let family = parts.get(1).copied().unwrap_or("");
+            let fonts = fontmgr::find_family(family);
+            if fonts.is_empty() { shell_println!("No fonts for '{}'", family); }
+            else { for f in &fonts { shell_println!("ID {} {} {:?}", f.id, f.family, f.style); } }
+        }
+        "stats" => { let (t, f, s, ops) = fontmgr::stats(); shell_println!("Fonts: {}  Families: {}  System: {}  Ops: {}", t, f, s, ops); }
+        "init" => { fontmgr::init_defaults(); shell_println!("Defaults initialised"); }
+        "test" => { match fontmgr::self_test() { Ok(()) => shell_println!("All tests passed"), Err(e) => shell_println!("Test failed: {:?}", e) } }
+        _ => shell_println!("Usage: fontmgr <list|families|info|install|uninstall|enable|disable|default|size|hint|antialias|dpi|find|stats|init|test>"),
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -28527,7 +28639,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

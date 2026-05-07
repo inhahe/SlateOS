@@ -139,6 +139,7 @@ const ROOT_FILES: &[&str] = &[
     "directio",
     "fstrim",
     "fstune",
+    "fontmgr",
     "sparse",
     "readdir_plus",
     "freeze",
@@ -2525,6 +2526,59 @@ fn gen_fstune() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/fontmgr` — font registry status.
+fn gen_fontmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, families, system, ops) = super::fontmgr::stats();
+    let defs = super::fontmgr::default_fonts();
+    let rs = super::fontmgr::render_settings();
+
+    out.push_str("Font Manager\n");
+    out.push_str("============\n\n");
+    out.push_str(&format!("Total fonts:  {}\n", total));
+    out.push_str(&format!("Families:     {}\n", families));
+    out.push_str(&format!("System fonts: {}\n", system));
+    out.push_str(&format!("Operations:   {}\n", ops));
+    out.push_str(&format!("\nDefaults:\n"));
+    out.push_str(&format!("  UI:         {}\n", defs.ui));
+    out.push_str(&format!("  Document:   {}\n", defs.document));
+    out.push_str(&format!("  Monospace:  {}\n", defs.monospace));
+    out.push_str(&format!("  Titlebar:   {}\n", defs.titlebar));
+    out.push_str(&format!("  Fallback:   {}\n", defs.fallback));
+    out.push_str(&format!("\nRendering:\n"));
+    out.push_str(&format!("  Size:       {} pt\n", rs.global_size_pt));
+    out.push_str(&format!("  Hinting:    {:?}\n", rs.hint_mode));
+    out.push_str(&format!("  Antialias:  {:?}\n", rs.antialias));
+    out.push_str(&format!("  Subpixel:   {:?}\n", rs.subpixel_order));
+    out.push_str(&format!("  DPI:        {}\n", rs.dpi));
+
+    let fonts = super::fontmgr::list_fonts(None);
+    if !fonts.is_empty() {
+        out.push_str(&format!("\n{:<6} {:<20} {:<12} {:<10} {:<8} {}\n",
+            "ID", "FAMILY", "STYLE", "FMT", "GLYPHS", "SYS"));
+        for f in &fonts {
+            let st = match f.style {
+                super::fontmgr::FontStyle::Regular => "regular",
+                super::fontmgr::FontStyle::Bold => "bold",
+                super::fontmgr::FontStyle::Italic => "italic",
+                super::fontmgr::FontStyle::BoldItalic => "bold-italic",
+                super::fontmgr::FontStyle::Light => "light",
+                super::fontmgr::FontStyle::Medium => "medium",
+                super::fontmgr::FontStyle::SemiBold => "semibold",
+                super::fontmgr::FontStyle::ExtraBold => "extrabold",
+                super::fontmgr::FontStyle::Thin => "thin",
+            };
+            let fmt = match f.format { super::fontmgr::FontFormat::TrueType => "ttf", super::fontmgr::FontFormat::OpenType => "otf", super::fontmgr::FontFormat::Woff => "woff", super::fontmgr::FontFormat::Woff2 => "woff2", super::fontmgr::FontFormat::Bitmap => "bmp" };
+            out.push_str(&format!("{:<6} {:<20} {:<12} {:<10} {:<8} {}\n",
+                f.id, f.family, st, fmt, f.glyph_count, if f.system { "yes" } else { "no" }));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Generate `/proc/sparse` — sparse file management status.
 fn gen_sparse() -> Vec<u8> {
     use alloc::format;
@@ -4534,6 +4588,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "directio" => Ok(gen_directio()),
         "fstrim" => Ok(gen_fstrim()),
         "fstune" => Ok(gen_fstune()),
+        "fontmgr" => Ok(gen_fontmgr()),
         "sparse" => Ok(gen_sparse()),
         "readdir_plus" => Ok(gen_readdir_plus()),
         "freeze" => Ok(gen_freeze()),

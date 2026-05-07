@@ -48,11 +48,11 @@ use crate::font;
 // Colors (BGRA format: 0xAARRGGBB stored as u32 in little-endian memory)
 // ---------------------------------------------------------------------------
 
-/// Foreground: light gray (0xCCCCCC), fully opaque.
-const FG_COLOR: u32 = 0x00CC_CCCC;
+/// Default foreground: light gray (0xCCCCCC).
+const DEFAULT_FG: u32 = 0x00CC_CCCC;
 
-/// Background: black, fully opaque.
-const BG_COLOR: u32 = 0x0000_0000;
+/// Default background: black.
+const DEFAULT_BG: u32 = 0x0000_0000;
 
 /// Glyph dimensions in pixels.
 const GLYPH_WIDTH: u32 = 8;
@@ -62,15 +62,25 @@ const GLYPH_HEIGHT: u32 = 16;
 const TAB_STOP: u32 = 8;
 
 // ---------------------------------------------------------------------------
-// Console state
+// Configurable color scheme
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// ANSI color table (standard 8 + bright 8 = 16 colors)
-// ---------------------------------------------------------------------------
+/// A complete color scheme for the console: default foreground/background
+/// and the 16-color ANSI palette.
+#[derive(Clone, Copy)]
+pub struct ColorScheme {
+    /// Name of this scheme (for display).
+    pub name: &'static str,
+    /// Default foreground color (BGRA).
+    pub fg: u32,
+    /// Default background color (BGRA).
+    pub bg: u32,
+    /// ANSI 16-color palette (indices 0–15).
+    pub palette: [u32; 16],
+}
 
-/// Standard ANSI 16-color palette (BGRA format).
-const ANSI_COLORS: [u32; 16] = [
+/// Standard VGA ANSI palette — the classic default.
+const DEFAULT_PALETTE: [u32; 16] = [
     0x0000_0000, // 0  Black
     0x00AA_0000, // 1  Red
     0x0000_AA00, // 2  Green
@@ -88,6 +98,234 @@ const ANSI_COLORS: [u32; 16] = [
     0x0055_FFFF, // 14 Bright cyan
     0x00FF_FFFF, // 15 Bright white
 ];
+
+/// The currently active color scheme.
+static COLOR_SCHEME: Mutex<ColorScheme> = Mutex::new(ColorScheme {
+    name: "default",
+    fg: DEFAULT_FG,
+    bg: DEFAULT_BG,
+    palette: DEFAULT_PALETTE,
+});
+
+// ---------------------------------------------------------------------------
+// Built-in color schemes
+// ---------------------------------------------------------------------------
+
+/// Classic dark terminal (default).
+pub const SCHEME_DEFAULT: ColorScheme = ColorScheme {
+    name: "default",
+    fg: 0x00CC_CCCC,
+    bg: 0x0000_0000,
+    palette: DEFAULT_PALETTE,
+};
+
+/// Solarized Dark.
+pub const SCHEME_SOLARIZED_DARK: ColorScheme = ColorScheme {
+    name: "solarized-dark",
+    fg: 0x0083_9496,  // base0
+    bg: 0x0000_2B36,  // base03
+    palette: [
+        0x0007_3642, // 0  base02
+        0x00DC_322F, // 1  red
+        0x0085_9900, // 2  green
+        0x00B5_8900, // 3  yellow
+        0x0026_8BD2, // 4  blue
+        0x00D3_3682, // 5  magenta
+        0x002A_A198, // 6  cyan
+        0x00EE_E8D5, // 7  base2
+        0x0000_2B36, // 8  base03
+        0x00CB_4B16, // 9  orange
+        0x0058_6E75, // 10 base01
+        0x0065_7B83, // 11 base00
+        0x0083_9496, // 12 base0
+        0x006C_71C4, // 13 violet
+        0x0093_A1A1, // 14 base1
+        0x00FD_F6E3, // 15 base3
+    ],
+};
+
+/// Monokai (dark, vibrant).
+pub const SCHEME_MONOKAI: ColorScheme = ColorScheme {
+    name: "monokai",
+    fg: 0x00F8_F8F2,  // foreground
+    bg: 0x0027_2822,  // background
+    palette: [
+        0x0027_2822, // 0  background
+        0x00F9_2672, // 1  red (pink)
+        0x00A6_E22E, // 2  green
+        0x00F4_BF75, // 3  yellow
+        0x0066_D9EF, // 4  blue (cyan-blue)
+        0x00AE_81FF, // 5  magenta (purple)
+        0x00A1_EFE4, // 6  cyan
+        0x00F8_F8F2, // 7  foreground
+        0x0075_715E, // 8  dark gray (comment)
+        0x00F9_2672, // 9  bright red
+        0x00A6_E22E, // 10 bright green
+        0x00E6_DB74, // 11 bright yellow (string)
+        0x0066_D9EF, // 12 bright blue
+        0x00AE_81FF, // 13 bright magenta
+        0x00A1_EFE4, // 14 bright cyan
+        0x00F9_F8F5, // 15 bright white
+    ],
+};
+
+/// Dracula (dark, purple-accented).
+pub const SCHEME_DRACULA: ColorScheme = ColorScheme {
+    name: "dracula",
+    fg: 0x00F8_F8F2,
+    bg: 0x0028_2A36,
+    palette: [
+        0x0021_222C, // 0  current line
+        0x00FF_5555, // 1  red
+        0x0050_FA7B, // 2  green
+        0x00F1_FA8C, // 3  yellow
+        0x00BD_93F9, // 4  purple
+        0x00FF_79C6, // 5  pink
+        0x008B_E9FD, // 6  cyan
+        0x00F8_F8F2, // 7  foreground
+        0x0062_72A4, // 8  comment
+        0x00FF_6E6E, // 9  bright red
+        0x0069_FF94, // 10 bright green
+        0x00FF_FFA5, // 11 bright yellow
+        0x00D6_ACFF, // 12 bright purple
+        0x00FF_92DF, // 13 bright pink
+        0x00A4_FFFF, // 14 bright cyan
+        0x00FF_FFFF, // 15 bright white
+    ],
+};
+
+/// Gruvbox Dark.
+pub const SCHEME_GRUVBOX: ColorScheme = ColorScheme {
+    name: "gruvbox",
+    fg: 0x00EB_DBB2,
+    bg: 0x0028_2828,
+    palette: [
+        0x0028_2828, // 0  bg
+        0x00CC_241D, // 1  red
+        0x0098_971A, // 2  green
+        0x00D7_9921, // 3  yellow
+        0x0045_8588, // 4  blue
+        0x00B1_6286, // 5  purple
+        0x0068_9D6A, // 6  aqua
+        0x00A8_9984, // 7  fg4
+        0x0092_8374, // 8  gray
+        0x00FB_4934, // 9  bright red
+        0x00B8_BB26, // 10 bright green
+        0x00FA_BD2F, // 11 bright yellow
+        0x0083_A598, // 12 bright blue
+        0x00D3_869B, // 13 bright purple
+        0x008E_C07C, // 14 bright aqua
+        0x00EB_DBB2, // 15 fg
+    ],
+};
+
+/// Light theme (dark text on white background).
+pub const SCHEME_LIGHT: ColorScheme = ColorScheme {
+    name: "light",
+    fg: 0x0033_3333,
+    bg: 0x00F5_F5F5,
+    palette: [
+        0x0000_0000, // 0  black
+        0x00CC_0000, // 1  red
+        0x0000_6600, // 2  green
+        0x0080_6600, // 3  yellow/brown
+        0x0000_0099, // 4  blue
+        0x0088_0088, // 5  magenta
+        0x0000_7777, // 6  cyan
+        0x00AA_AAAA, // 7  light gray
+        0x0066_6666, // 8  dark gray
+        0x00FF_0000, // 9  bright red
+        0x0000_AA00, // 10 bright green
+        0x00CC_8800, // 11 bright yellow
+        0x0000_55CC, // 12 bright blue
+        0x00CC_00CC, // 13 bright magenta
+        0x0000_AAAA, // 14 bright cyan
+        0x0033_3333, // 15 bright white (dark for readability)
+    ],
+};
+
+/// All built-in schemes for enumeration.
+pub const BUILTIN_SCHEMES: &[&ColorScheme] = &[
+    &SCHEME_DEFAULT,
+    &SCHEME_SOLARIZED_DARK,
+    &SCHEME_MONOKAI,
+    &SCHEME_DRACULA,
+    &SCHEME_GRUVBOX,
+    &SCHEME_LIGHT,
+];
+
+/// Set the active color scheme.  Applies the new default FG/BG and palette
+/// immediately.  The screen is cleared and the console is reset to the
+/// new defaults.
+pub fn set_scheme(scheme: &ColorScheme) {
+    {
+        let mut cs = COLOR_SCHEME.lock();
+        *cs = *scheme;
+    }
+    apply_scheme();
+}
+
+/// Get a copy of the current color scheme.
+pub fn get_scheme() -> ColorScheme {
+    *COLOR_SCHEME.lock()
+}
+
+/// Set just the default foreground and background colors (without
+/// changing the palette).
+pub fn set_default_colors(fg: u32, bg: u32) {
+    {
+        let mut cs = COLOR_SCHEME.lock();
+        cs.fg = fg;
+        cs.bg = bg;
+    }
+    apply_scheme();
+}
+
+/// Apply the current color scheme to the console.
+fn apply_scheme() {
+    let scheme = *COLOR_SCHEME.lock();
+    let mut con = CONSOLE.lock();
+    if !con.initialized {
+        return;
+    }
+    con.default_fg = scheme.fg;
+    con.default_bg = scheme.bg;
+    con.fg_color = scheme.fg;
+    con.bg_color = scheme.bg;
+    con.palette = scheme.palette;
+    con.bold = false;
+    con.dim = false;
+    con.underline = false;
+    con.reverse = false;
+    con.invisible = false;
+    con.strikethrough = false;
+    // Clear to the new background.
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let width = con.fb_width;
+    let height = con.fb_height;
+    let bg = scheme.bg;
+    drop(con);
+    for y in 0..height {
+        for x in 0..width {
+            put_pixel(fb, pitch, x, y, bg);
+        }
+    }
+    let mut con = CONSOLE.lock();
+    con.cursor_col = 0;
+    con.cursor_row = 0;
+}
+
+/// Look up the ANSI color at index `idx` (0–15) from the console's palette.
+///
+/// Must be called while holding the CONSOLE lock (pass the inner ref).
+fn ansi_color(con: &ConsoleInner, idx: usize) -> u32 {
+    con.palette.get(idx).copied().unwrap_or(0x00FF_FFFF)
+}
+
+// ---------------------------------------------------------------------------
+// Console state
+// ---------------------------------------------------------------------------
 
 /// ANSI escape sequence parser state.
 #[derive(Clone, Copy, PartialEq)]
@@ -123,10 +361,16 @@ struct ConsoleInner {
     cursor_row: u32,
     /// Whether init() has been called.
     initialized: bool,
-    /// Current foreground color.
+    /// The scheme's default foreground color (used on SGR reset).
+    default_fg: u32,
+    /// The scheme's default background color (used on SGR reset).
+    default_bg: u32,
+    /// Current foreground color (may differ from default after SGR).
     fg_color: u32,
-    /// Current background color.
+    /// Current background color (may differ from default after SGR).
     bg_color: u32,
+    /// The active 16-color ANSI palette.
+    palette: [u32; 16],
     /// Whether bold/bright mode is active.
     bold: bool,
     /// Whether dim/faint mode is active (SGR 2).
@@ -186,8 +430,11 @@ impl ConsoleInner {
             cursor_col: 0,
             cursor_row: 0,
             initialized: false,
-            fg_color: FG_COLOR,
-            bg_color: BG_COLOR,
+            default_fg: DEFAULT_FG,
+            default_bg: DEFAULT_BG,
+            fg_color: DEFAULT_FG,
+            bg_color: DEFAULT_BG,
+            palette: DEFAULT_PALETTE,
             bold: false,
             dim: false,
             underline: false,
@@ -198,8 +445,8 @@ impl ConsoleInner {
             scroll_bottom: 0, // Set properly in init()
             saved_cursor_col: 0,
             saved_cursor_row: 0,
-            saved_fg_color: FG_COLOR,
-            saved_bg_color: BG_COLOR,
+            saved_fg_color: DEFAULT_FG,
+            saved_bg_color: DEFAULT_BG,
             saved_bold: false,
             ansi_private: false,
             utf8_buf: [0; 4],
@@ -342,13 +589,14 @@ pub fn clear() {
     let width = con.fb_width;
     let height = con.fb_height;
     let pitch = con.fb_pitch;
+    let bg = con.default_bg;
     drop(con);
 
     // Write each pixel row-by-row.  We respect `pitch` which may
     // include padding bytes beyond the visible width.
     for y in 0..height {
         for x in 0..width {
-            put_pixel(fb, pitch, x, y, BG_COLOR);
+            put_pixel(fb, pitch, x, y, bg);
         }
     }
 
@@ -526,8 +774,8 @@ fn putchar_escape(con: &mut ConsoleInner, c: u8) {
         }
         b'c' => {
             // RIS (Reset to Initial State) — ESC c
-            con.fg_color = FG_COLOR;
-            con.bg_color = BG_COLOR;
+            con.fg_color = con.default_fg;
+            con.bg_color = con.default_bg;
             con.bold = false;
             con.dim = false;
             con.underline = false;
@@ -857,8 +1105,8 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
 fn handle_sgr(con: &mut ConsoleInner) {
     // If no parameters, treat as reset (SGR 0).
     if con.ansi_param_count == 0 {
-        con.fg_color = FG_COLOR;
-        con.bg_color = BG_COLOR;
+        con.fg_color = con.default_fg;
+        con.bg_color = con.default_bg;
         con.bold = false;
         con.dim = false;
         con.underline = false;
@@ -874,8 +1122,8 @@ fn handle_sgr(con: &mut ConsoleInner) {
         match param {
             0 => {
                 // Reset all attributes.
-                con.fg_color = FG_COLOR;
-                con.bg_color = BG_COLOR;
+                con.fg_color = con.default_fg;
+                con.bg_color = con.default_bg;
                 con.bold = false;
                 con.dim = false;
                 con.underline = false;
@@ -932,7 +1180,7 @@ fn handle_sgr(con: &mut ConsoleInner) {
             30..=37 => {
                 let idx = (param - 30) as usize;
                 let color_idx = if con.bold { idx + 8 } else { idx };
-                con.fg_color = ANSI_COLORS[color_idx];
+                con.fg_color = ansi_color(con, color_idx);
             }
             38 => {
                 // Extended foreground color.
@@ -941,7 +1189,7 @@ fn handle_sgr(con: &mut ConsoleInner) {
                     // 256-color mode.
                     if i + 2 < con.ansi_param_count {
                         let n = con.ansi_params[i + 2] as usize;
-                        con.fg_color = color_256(n);
+                        con.fg_color = color_256(con, n);
                         i += 2; // Skip the 5;n parameters.
                     }
                 } else if i + 1 < con.ansi_param_count && con.ansi_params[i + 1] == 2 {
@@ -957,12 +1205,12 @@ fn handle_sgr(con: &mut ConsoleInner) {
             }
             39 => {
                 // Default foreground color.
-                con.fg_color = FG_COLOR;
+                con.fg_color = con.default_fg;
             }
             // Standard background colors (40-47).
             40..=47 => {
                 let idx = (param - 40) as usize;
-                con.bg_color = ANSI_COLORS[idx];
+                con.bg_color = ansi_color(con, idx);
             }
             48 => {
                 // Extended background color.
@@ -970,7 +1218,7 @@ fn handle_sgr(con: &mut ConsoleInner) {
                     // 256-color mode.
                     if i + 2 < con.ansi_param_count {
                         let n = con.ansi_params[i + 2] as usize;
-                        con.bg_color = color_256(n);
+                        con.bg_color = color_256(con, n);
                         i += 2;
                     }
                 } else if i + 1 < con.ansi_param_count && con.ansi_params[i + 1] == 2 {
@@ -986,17 +1234,17 @@ fn handle_sgr(con: &mut ConsoleInner) {
             }
             49 => {
                 // Default background color.
-                con.bg_color = BG_COLOR;
+                con.bg_color = con.default_bg;
             }
             // Bright foreground colors (90-97).
             90..=97 => {
                 let idx = (param - 90) as usize + 8;
-                con.fg_color = ANSI_COLORS[idx];
+                con.fg_color = ansi_color(con, idx);
             }
             // Bright background colors (100-107).
             100..=107 => {
                 let idx = (param - 100) as usize + 8;
-                con.bg_color = ANSI_COLORS[idx];
+                con.bg_color = ansi_color(con, idx);
             }
             _ => {
                 // Unsupported SGR parameter — ignore.
@@ -1012,9 +1260,9 @@ fn handle_sgr(con: &mut ConsoleInner) {
 /// 232-255: 24-step grayscale ramp.
 // Color arithmetic is intentionally wrapping/truncating for palette math.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn color_256(n: usize) -> u32 {
+fn color_256(con: &ConsoleInner, n: usize) -> u32 {
     match n {
-        0..=15 => ANSI_COLORS[n],
+        0..=15 => ansi_color(con, n),
         16..=231 => {
             // 6×6×6 color cube: index = 16 + 36*r + 6*g + b
             let idx = n - 16;
@@ -1032,7 +1280,7 @@ fn color_256(n: usize) -> u32 {
             let gray = ((n - 232) * 10 + 8) as u32;
             (gray << 16) | (gray << 8) | gray
         }
-        _ => FG_COLOR, // Out of range — use default.
+        _ => con.default_fg, // Out of range — use default.
     }
 }
 
@@ -1670,13 +1918,13 @@ fn put_pixel(fb: u64, pitch: u32, x: u32, y: u32, color: u32) {
 
 /// Draw a single glyph at text position (col, row) using default colors.
 fn draw_glyph(fb: u64, pitch: u32, col: u32, row: u32, ch: u8) {
-    draw_glyph_colored(fb, pitch, col, row, ch, FG_COLOR);
+    draw_glyph_colored(fb, pitch, col, row, ch, DEFAULT_FG);
 }
 
 /// Draw a single glyph at text position (col, row) with a custom
-/// foreground color.  Background is always [`BG_COLOR`].
+/// foreground color.  Background is always [`DEFAULT_BG`].
 fn draw_glyph_colored(fb: u64, pitch: u32, col: u32, row: u32, ch: u8, fg: u32) {
-    draw_glyph_full(fb, pitch, col, row, ch, fg, BG_COLOR, false, false);
+    draw_glyph_full(fb, pitch, col, row, ch, fg, DEFAULT_BG, false, false);
 }
 
 /// Draw a single glyph with full attribute support.
@@ -1793,12 +2041,13 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
         }
     }
 
-    // Clear the last row.
+    // Clear the last row with the scheme's background color.
     let last_row_start_y = rows.saturating_sub(1).saturating_mul(GLYPH_HEIGHT);
     let fb_width = con.fb_width;
+    let bg = con.default_bg;
     for y in last_row_start_y..last_row_start_y.saturating_add(GLYPH_HEIGHT) {
         for x in 0..fb_width {
-            put_pixel(fb, pitch, x, y, BG_COLOR);
+            put_pixel(fb, pitch, x, y, bg);
         }
     }
 
@@ -1912,17 +2161,17 @@ pub fn self_test() {
         write_str_no_serial("\x1b[0m");
         write_str_no_serial("\x1b[31m"); // Red
         let con = CONSOLE.lock();
-        assert_eq!(con.fg_color, ANSI_COLORS[1], "fg should be red");
+        assert_eq!(con.fg_color, ansi_color(&con, 1), "fg should be red");
         drop(con);
 
         write_str_no_serial("\x1b[94m"); // Bright blue
         let con = CONSOLE.lock();
-        assert_eq!(con.fg_color, ANSI_COLORS[12], "fg should be bright blue");
+        assert_eq!(con.fg_color, ansi_color(&con, 12), "fg should be bright blue");
         drop(con);
 
         write_str_no_serial("\x1b[39m"); // Default fg
         let con = CONSOLE.lock();
-        assert_eq!(con.fg_color, FG_COLOR, "fg should be default");
+        assert_eq!(con.fg_color, con.default_fg, "fg should be default");
         crate::serial_println!("[console]   Foreground color: OK");
     }
 
@@ -1931,9 +2180,9 @@ pub fn self_test() {
         write_str_no_serial("\x1b[0m");
         // 256-color index 196 = bright red from the cube.
         // Index 196 = 16 + 36*5 + 6*0 + 0 → pure red
-        let expected = color_256(196);
         write_str_no_serial("\x1b[38;5;196m");
         let con = CONSOLE.lock();
+        let expected = color_256(&con, 196);
         assert_eq!(con.fg_color, expected, "256-color fg");
         drop(con);
         write_str_no_serial("\x1b[0m");
@@ -1976,7 +2225,7 @@ pub fn self_test() {
         let con = CONSOLE.lock();
         assert_eq!(con.cursor_row, 9, "DECRC row");
         assert_eq!(con.cursor_col, 19, "DECRC col");
-        assert_eq!(con.fg_color, ANSI_COLORS[2], "DECRC fg color");
+        assert_eq!(con.fg_color, ansi_color(&con, 2), "DECRC fg color");
         crate::serial_println!("[console]   DECSC/DECRC cursor save/restore: OK");
     }
 
@@ -2012,8 +2261,8 @@ pub fn self_test() {
         assert!(!con.underline, "RIS underline");
         assert!(!con.reverse, "RIS reverse");
         assert!(!con.dim, "RIS dim");
-        assert_eq!(con.fg_color, FG_COLOR, "RIS fg");
-        assert_eq!(con.bg_color, BG_COLOR, "RIS bg");
+        assert_eq!(con.fg_color, con.default_fg, "RIS fg");
+        assert_eq!(con.bg_color, con.default_bg, "RIS bg");
         assert_eq!(con.scroll_top, 0, "RIS scroll_top");
         crate::serial_println!("[console]   Full reset (RIS): OK");
     }

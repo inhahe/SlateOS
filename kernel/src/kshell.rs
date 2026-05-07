@@ -3344,7 +3344,7 @@ const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
-    "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
+    "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
@@ -4564,6 +4564,7 @@ fn dispatch(line: &str) {
         "clear" | "cls" => cmd_clear(),
         "ansi" | "termtest" => cmd_ansi_test(),
         "unicode" | "unicodetest" => cmd_unicode_test(),
+        "color" | "colorscheme" => cmd_colorscheme(args),
         "uptime" => cmd_uptime(),
         "dmesg" => cmd_dmesg(args),
         "echo" => cmd_echo(args),
@@ -5936,6 +5937,89 @@ fn cmd_clear() {
 ///   history          — list all history entries (numbered)
 ///   history N        — list last N entries
 ///   history clear    — clear history (memory and file)
+/// `color` / `colorscheme` — change the console color scheme.
+///
+/// Usage:
+///   color                   — show current scheme and list available schemes
+///   color <name>            — apply a built-in scheme
+///   color fg RRGGBB         — set default foreground (hex RGB)
+///   color bg RRGGBB         — set default background (hex RGB)
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_colorscheme(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "" => {
+            // Show current scheme and list available.
+            let current = crate::console::get_scheme();
+            shell_println!("Current scheme: {}", current.name);
+            shell_println!(
+                "  FG: #{:06X}  BG: #{:06X}",
+                current.fg,
+                current.bg,
+            );
+            shell_println!("\nAvailable schemes:");
+            for scheme in crate::console::BUILTIN_SCHEMES {
+                let marker = if scheme.name == current.name { " *" } else { "" };
+                shell_println!("  {}{}", scheme.name, marker);
+            }
+            shell_println!("\nUsage: color <name> | color fg RRGGBB | color bg RRGGBB");
+        }
+        "fg" => {
+            if let Some(&hex) = parts.get(1) {
+                if let Some(color) = parse_hex_color(hex) {
+                    let scheme = crate::console::get_scheme();
+                    crate::console::set_default_colors(color, scheme.bg);
+                    shell_println!("Foreground set to #{:06X}", color);
+                } else {
+                    shell_println!("Invalid hex color. Use: color fg RRGGBB");
+                }
+            } else {
+                shell_println!("Usage: color fg RRGGBB");
+            }
+        }
+        "bg" => {
+            if let Some(&hex) = parts.get(1) {
+                if let Some(color) = parse_hex_color(hex) {
+                    let scheme = crate::console::get_scheme();
+                    crate::console::set_default_colors(scheme.fg, color);
+                    shell_println!("Background set to #{:06X}", color);
+                } else {
+                    shell_println!("Invalid hex color. Use: color bg RRGGBB");
+                }
+            } else {
+                shell_println!("Usage: color bg RRGGBB");
+            }
+        }
+        name => {
+            // Look up a built-in scheme by name.
+            for scheme in crate::console::BUILTIN_SCHEMES {
+                if scheme.name == name {
+                    crate::console::set_scheme(scheme);
+                    shell_println!("Applied color scheme: {}", name);
+                    return;
+                }
+            }
+            shell_println!("Unknown scheme '{}'. Available:", name);
+            for scheme in crate::console::BUILTIN_SCHEMES {
+                shell_println!("  {}", scheme.name);
+            }
+        }
+    }
+}
+
+/// Parse a hex color string (e.g., "FF0000") into a BGRA u32.
+fn parse_hex_color(s: &str) -> Option<u32> {
+    // Strip optional '#' prefix.
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 {
+        return None;
+    }
+    let val = u32::from_str_radix(hex, 16).ok()?;
+    Some(val)
+}
+
 ///   history search P — search history for pattern P
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_history(args: &str) {

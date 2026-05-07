@@ -201,6 +201,7 @@ const ROOT_FILES: &[&str] = &[
     "bootcfg",
     "swapcfg",
     "timezone",
+    "autostart",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4284,6 +4285,38 @@ fn gen_timezone() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_autostart() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, enabled, system, ops) = super::autostart::stats();
+
+    out.push_str("Autostart Items\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Total items:   {}\n", total));
+    out.push_str(&format!("Enabled:       {}\n", enabled));
+    out.push_str(&format!("System:        {}\n", system));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    let items = super::autostart::list_items();
+    if !items.is_empty() {
+        out.push_str(&format!("\n{:<4} {:<20} {:<16} {:<10} {:<8} {:<6} {}\n",
+            "ID", "NAME", "PHASE", "CONDITION", "ENABLED", "ORDER", "COMMAND"));
+        for it in &items {
+            out.push_str(&format!("{:<4} {:<20} {:<16} {:<10} {:<8} {:<6} {}\n",
+                it.id,
+                it.name,
+                format!("{:?}", it.phase),
+                format!("{:?}", it.condition),
+                it.enabled,
+                it.order,
+                it.command));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4650,6 +4683,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "bootcfg" => Ok(gen_bootcfg()),
         "swapcfg" => Ok(gen_swapcfg()),
         "timezone" => Ok(gen_timezone()),
+        "autostart" => Ok(gen_autostart()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

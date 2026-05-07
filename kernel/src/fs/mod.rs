@@ -75,6 +75,7 @@ pub mod policy;
 pub mod prefetch;
 pub mod profile;
 pub mod quota;
+pub mod readdir_plus;
 pub mod reclaim;
 pub mod search;
 pub mod snapshot;

@@ -137,6 +137,7 @@ const ROOT_FILES: &[&str] = &[
     "directio",
     "fstrim",
     "sparse",
+    "readdir_plus",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2344,6 +2345,26 @@ fn gen_sparse() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/readdir_plus` — enhanced listing statistics.
+fn gen_readdir_plus() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (calls, entries, fetched, errors) = super::readdir_plus::stats();
+
+    out.push_str("Enhanced Directory Listing (readdir+)\n");
+    out.push_str("=====================================\n\n");
+    out.push_str(&format!("Calls:            {}\n", calls));
+    out.push_str(&format!("Entries returned:  {}\n", entries));
+    out.push_str(&format!("Metadata fetched:  {}\n", fetched));
+    out.push_str(&format!("Metadata errors:   {}\n", errors));
+    if calls > 0 {
+        out.push_str(&format!("Avg entries/call: {:.1}\n", entries as f64 / calls as f64));
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2422,6 +2443,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "directio" => Ok(gen_directio()),
         "fstrim" => Ok(gen_fstrim()),
         "sparse" => Ok(gen_sparse()),
+        "readdir_plus" => Ok(gen_readdir_plus()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -318,10 +318,12 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] IOMMU page table setup (DMA remapping)
   - [x] Per-device DMA sandboxing for driver isolation
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
-- [-] virtio drivers (disk, network, GPU) for VM development/testing
+- [-] virtio drivers (disk, network, GPU, sound) for VM development/testing
   - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, interrupt-driven completion with polling fallback)
   - [x] virtio-net driver (legacy PCI transport, RX/TX queues, MAC read, interrupt acknowledgment)
+  - [x] virtio-sound driver (legacy PCI transport, 4 virtqueues, PCM stream lifecycle, 48kHz/S16/stereo playback)
   - [x] Shared PCI IRQ handling (level-triggered, ISR reads device status to deassert)
+  - [ ] virtio-gpu driver (2D framebuffer, cursor, multi-head)
 
 ### 2.2 Essential drivers
 - [-] Keyboard (PS/2 and USB HID)
@@ -633,6 +635,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Direct I/O (fs::directio): O_DIRECT-equivalent cache-bypass file access for databases/VMs; dio_read/dio_write with 512-byte alignment tracking; dio_read_file/dio_write_file whole-file variants; 128-entry path registration for automatic DIO (prefix-match); unaligned operation detection and statistics; cache invalidation via prefetch DontNeed advisory; 4 MiB max transfer cap; `directio` kshell command (read/write/register/unregister/list/stats/reset/clear); /proc/directio; 6 self-tests
   - [x] SSD TRIM/discard (fs::fstrim): flash storage lifecycle management; 3 modes (Manual/Periodic/Continuous); discard range queueing with adjacent-range coalescing; 1024-entry queue with overflow auto-flush; per-device capability registration; batch flush with device filtering; coalesce_ranges merge algorithm for sorted non-overlapping output; configurable periodic interval; `fstrim` kshell command (run/mode/pending/notify/drop/stats/reset); /proc/fstrim; 6 self-tests
   - [x] Sparse file management (fs::sparse): hole punching, zero range, collapse/insert range, region mapping; 256-entry LRU tracking table with per-file hole lists (max 64 regions with gap-merge overflow); punch_hole zeroes range and notifies fstrim; collapse_range shifts data down (file shrinks); insert_range shifts data up with zero fill; map_regions builds data/hole region list; seek_data/seek_hole for SEEK_DATA/SEEK_HOLE equivalents; `sparse` kshell command (punch/zero/collapse/insert/map/list/stats/clear/reset); /proc/sparse; 6 self-tests
+  - [x] Enhanced directory listing (fs::readdir_plus): batched readdir+stat to avoid N+1 metadata queries; DirEntryPlus with full FileMeta; 8 sort orders (name/size/mtime/type, asc/desc); type filtering (files/dirs/symlinks); glob pattern matching with * and ? wildcards; hidden file filtering; pagination (offset+limit) for large directories; `lsplus` kshell command with -s/--sort, -t/--type, -p/--pattern, -A, --stats flags; /proc/readdir_plus; 6 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

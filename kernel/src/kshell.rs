@@ -14142,7 +14142,7 @@ fn cmd_lsplus(args: &str) {
     }
 
     if dir_path.is_empty() {
-        dir_path = cwd();
+        dir_path = get_cwd();
     }
 
     let opts = ListOptions {

@@ -176,6 +176,7 @@ const ROOT_FILES: &[&str] = &[
     "wallpaper",
     "credentials",
     "power",
+    "display",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3350,6 +3351,47 @@ fn gen_power() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_display() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (monitor_count, mode_changes) = super::display::stats();
+
+    out.push_str("Display Settings\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Monitors:      {}\n", monitor_count));
+    out.push_str(&format!("Mode changes:  {}\n\n", mode_changes));
+
+    let monitors = super::display::list_monitors();
+    if !monitors.is_empty() {
+        for m in &monitors {
+            let active = if let Some(mode) = m.modes.get(m.active_mode) {
+                format!("{}x{}@{}Hz", mode.width, mode.height, mode.refresh_hz)
+            } else {
+                String::from("(none)")
+            };
+            let orient = match m.orientation {
+                super::display::Orientation::Landscape => "landscape",
+                super::display::Orientation::Portrait => "portrait",
+                super::display::Orientation::LandscapeFlipped => "landscape-flip",
+                super::display::Orientation::PortraitFlipped => "portrait-flip",
+            };
+            out.push_str(&format!("{}{}: {} — {} scale={}% orient={} pos=({},{}) {}\n",
+                if m.primary { "*" } else { " " },
+                m.id, m.name, active, m.scale_percent, orient,
+                m.pos_x, m.pos_y,
+                if m.enabled { "ON" } else { "OFF" }));
+        }
+    }
+
+    if let Some(p) = super::display::pending_change() {
+        out.push_str(&format!("\nPending change: monitor={} revert in {}s\n",
+            p.monitor_id, p.timeout_secs));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3691,6 +3733,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "wallpaper" => Ok(gen_wallpaper()),
         "credentials" => Ok(gen_credentials()),
         "power" => Ok(gen_power()),
+        "display" => Ok(gen_display()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

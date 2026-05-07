@@ -53,6 +53,7 @@ pub mod dedup;
 pub mod deskicons;
 pub mod devfs;
 pub mod directio;
+pub mod display;
 pub mod dirsync;
 pub mod dragdrop;
 pub mod encrypt;

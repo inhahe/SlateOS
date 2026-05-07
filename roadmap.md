@@ -1013,7 +1013,13 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] Work stealing: skips registered deadline tasks (CPU affinity)
   - [x] Scheduler trait implementation, WorkloadProfile integration
   - [x] 9 self-tests: admission control, EDF ordering, throttling, replenishment, fallback, dequeue, utilization accounting, has_ready/has_real_work, steal protection
-- [ ] Selectable in settings, requires reboot to switch
+- [x] Selectable in settings, requires reboot to switch
+  - [x] SchedulerBackend enum: PriorityRR (0), EEVDF (1), Deadline (2) — match dispatch, no dyn Trait
+  - [x] PerCpuScheduler refactored to use SchedulerBackend (was hardcoded PriorityRoundRobin)
+  - [x] sched.backend sysctl parameter (read/write via sysctl command, takes effect on reboot)
+  - [x] Desired vs active backend tracking (AtomicU8, set_desired/active_backend API)
+  - [x] Boot log shows active backend name
+  - [x] 11 self-tests: backend creation, dispatch for all 3 backends, time slices, profiles, deadline-specific ops
 
 ### 5.4 Advanced security
 - [ ] Per-process filesystem namespaces for sandboxing

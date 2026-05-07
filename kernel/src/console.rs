@@ -373,9 +373,14 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
         }
         b'\n' => {
             con.cursor_col = 0;
-            con.cursor_row = con.cursor_row.saturating_add(1);
-            if con.cursor_row >= con.rows {
+            if con.cursor_row >= con.scroll_bottom {
+                // At scroll region bottom — scroll the region up.
                 scroll_up_locked(con);
+            } else if con.cursor_row >= con.rows.saturating_sub(1) {
+                // At absolute bottom — scroll full screen.
+                scroll_up_locked(con);
+            } else {
+                con.cursor_row = con.cursor_row.saturating_add(1);
             }
         }
         b'\r' => {
@@ -390,9 +395,12 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
             let next = (con.cursor_col / TAB_STOP).saturating_add(1).saturating_mul(TAB_STOP);
             if next >= con.cols {
                 con.cursor_col = 0;
-                con.cursor_row = con.cursor_row.saturating_add(1);
-                if con.cursor_row >= con.rows {
+                if con.cursor_row >= con.scroll_bottom {
                     scroll_up_locked(con);
+                } else if con.cursor_row >= con.rows.saturating_sub(1) {
+                    scroll_up_locked(con);
+                } else {
+                    con.cursor_row = con.cursor_row.saturating_add(1);
                 }
             } else {
                 con.cursor_col = next;
@@ -416,9 +424,14 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
             con.cursor_col = col.saturating_add(1);
             if con.cursor_col >= con.cols {
                 con.cursor_col = 0;
-                con.cursor_row = con.cursor_row.saturating_add(1);
-                if con.cursor_row >= con.rows {
+                if con.cursor_row >= con.scroll_bottom {
+                    // At scroll region bottom — scroll region up.
                     scroll_up_locked(con);
+                } else if con.cursor_row >= con.rows.saturating_sub(1) {
+                    // At absolute bottom — scroll full screen.
+                    scroll_up_locked(con);
+                } else {
+                    con.cursor_row = con.cursor_row.saturating_add(1);
                 }
             }
         }

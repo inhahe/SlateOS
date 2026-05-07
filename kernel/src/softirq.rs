@@ -254,6 +254,13 @@ pub unsafe fn process_pending() {
     // --- CPU time accounting: entering softirq context ---
     crate::cputime::enter_softirq();
 
+    crate::ktrace::record(
+        crate::ktrace::Category::Irq,
+        crate::ktrace::event::SOFTIRQ_ENTER,
+        cpu as u64,
+        0,
+    );
+
     // Enable interrupts so hardware IRQs can preempt softirq work.
     //
     // SAFETY: We've already sent EOI, so the LAPIC won't re-deliver
@@ -294,6 +301,13 @@ pub unsafe fn process_pending() {
             break;
         }
     }
+
+    crate::ktrace::record(
+        crate::ktrace::Category::Irq,
+        crate::ktrace::event::SOFTIRQ_EXIT,
+        cpu as u64,
+        loops as u64,
+    );
 
     // --- CPU time accounting: leaving softirq context ---
     crate::cputime::exit_softirq();

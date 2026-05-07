@@ -194,6 +194,7 @@ const ROOT_FILES: &[&str] = &[
     "progmgr",
     "scriptlang",
     "osreset",
+    "bootcfg",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3963,6 +3964,48 @@ fn gen_osreset() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_bootcfg() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (entry_count, event_count, boots, _changes) = super::bootcfg::stats();
+    let cfg = super::bootcfg::get_config();
+
+    let loader = match cfg.loader_type {
+        super::bootcfg::BootloaderType::Grub2 => "GRUB2",
+        super::bootcfg::BootloaderType::SystemdBoot => "systemd-boot",
+        super::bootcfg::BootloaderType::CustomUefi => "Custom UEFI",
+        super::bootcfg::BootloaderType::DirectUefi => "Direct UEFI",
+    };
+    let console = match cfg.console_mode {
+        super::bootcfg::ConsoleMode::Text => "text",
+        super::bootcfg::ConsoleMode::Graphical => "graphical",
+        super::bootcfg::ConsoleMode::Verbose => "verbose",
+        super::bootcfg::ConsoleMode::Silent => "silent",
+    };
+
+    out.push_str("Boot Configuration\n");
+    out.push_str("==================\n\n");
+    out.push_str(&format!("Loader:    {}\n", loader));
+    out.push_str(&format!("Timeout:   {}s\n", cfg.timeout_secs));
+    out.push_str(&format!("Console:   {}\n", console));
+    out.push_str(&format!("Activity:  {}\n", cfg.show_boot_activity));
+    out.push_str(&format!("Entries:   {}\n", entry_count));
+    out.push_str(&format!("Boot log:  {} events ({} total)\n", event_count, boots));
+
+    let entries = super::bootcfg::list_entries();
+    if !entries.is_empty() {
+        out.push_str("\nEntries:\n");
+        for e in &entries {
+            let def = if e.is_default { " [DEFAULT]" } else { "" };
+            let hid = if e.hidden { " (hidden)" } else { "" };
+            out.push_str(&format!("  #{} {} — {}{}{}\n", e.position, e.name, e.kernel_path, def, hid));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4322,6 +4365,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "progmgr" => Ok(gen_progmgr()),
         "scriptlang" => Ok(gen_scriptlang()),
         "osreset" => Ok(gen_osreset()),
+        "bootcfg" => Ok(gen_bootcfg()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

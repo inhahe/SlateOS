@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4798,6 +4798,7 @@ fn dispatch(line: &str) {
         "progmgr" | "prog" => cmd_progmgr(args),
         "scriptlang" | "slang" => cmd_scriptlang(args),
         "osreset" | "reset" => cmd_osreset(args),
+        "bootcfg" | "boot" => cmd_bootcfg(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20406,6 +20407,52 @@ fn cmd_osreset(args: &str) {
     }
 }
 
+/// `bootcfg` / `boot` — bootloader and boot entry management.
+fn cmd_bootcfg(args: &str) {
+    use crate::fs::bootcfg;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "config" => { let cfg = bootcfg::get_config(); let loader = match cfg.loader_type { bootcfg::BootloaderType::Grub2 => "GRUB2", bootcfg::BootloaderType::SystemdBoot => "systemd-boot", bootcfg::BootloaderType::CustomUefi => "Custom UEFI", bootcfg::BootloaderType::DirectUefi => "Direct UEFI" }; let console = match cfg.console_mode { bootcfg::ConsoleMode::Text => "text", bootcfg::ConsoleMode::Graphical => "graphical", bootcfg::ConsoleMode::Verbose => "verbose", bootcfg::ConsoleMode::Silent => "silent" }; shell_println!("Bootloader: {}", loader); shell_println!("Timeout:    {}s", cfg.timeout_secs); shell_println!("Console:    {}", console); shell_println!("Activity:   {}", cfg.show_boot_activity); shell_println!("Secure Boot:{}", cfg.secure_boot); shell_println!("ESP:        {}", cfg.esp_path); shell_println!("GRUB cfg:   {}", cfg.grub_config_path); shell_println!("GFX mode:   {}", cfg.gfx_mode); shell_println!("Dual boot:  {}", cfg.dual_boot); }
+        "entries" | "ls" => { let entries = bootcfg::list_entries(); if entries.is_empty() { shell_println!("No boot entries"); } else { for e in &entries { let kind = match e.kind { bootcfg::EntryKind::OurOs => "os", bootcfg::EntryKind::Linux => "linux", bootcfg::EntryKind::Windows => "windows", bootcfg::EntryKind::MacOs => "macos", bootcfg::EntryKind::Recovery => "recovery", bootcfg::EntryKind::MemTest => "memtest", bootcfg::EntryKind::FirmwareSettings => "firmware", bootcfg::EntryKind::Custom => "custom" }; let def = if e.is_default { " *" } else { "" }; let hid = if e.hidden { " (hidden)" } else { "" }; shell_println!("  #{} id={} {} [{}]{}{}", e.position, e.id, e.name, kind, def, hid); } } }
+        "add" => { if parts.len() < 4 { shell_println!("Usage: bootcfg add <name> <kernel_path> <params...> [--type os|linux|windows|recovery]"); } else { let kind = if parts.iter().any(|p| *p == "linux") { bootcfg::EntryKind::Linux } else if parts.iter().any(|p| *p == "windows") { bootcfg::EntryKind::Windows } else if parts.iter().any(|p| *p == "recovery") { bootcfg::EntryKind::Recovery } else { bootcfg::EntryKind::OurOs }; let params = parts[3..].iter().filter(|p| !["--type", "os", "linux", "windows", "recovery"].contains(p)).copied().collect::<Vec<_>>().join(" "); match bootcfg::add_entry(parts[1], kind, parts[2], "", &params, false) { Ok(id) => shell_println!("Added entry '{}' (id={})", parts[1], id), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "remove" | "rm" => { if parts.len() < 2 { shell_println!("Usage: bootcfg remove <entry_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match bootcfg::remove_entry(id) { Ok(()) => shell_println!("Removed entry {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "default" | "def" => { if parts.len() < 2 { shell_println!("Usage: bootcfg default <entry_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match bootcfg::set_default(id) { Ok(()) => shell_println!("Set default to entry {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "params" => { if parts.len() < 3 { shell_println!("Usage: bootcfg params <entry_id> <parameters...>"); } else { match parts[1].parse::<u64>() { Ok(id) => { let params = parts[2..].join(" "); match bootcfg::set_parameters(id, &params) { Ok(()) => shell_println!("Set parameters for entry {}", id), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid id") } } }
+        "hide" => { if parts.len() < 2 { shell_println!("Usage: bootcfg hide <entry_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match bootcfg::set_hidden(id, true) { Ok(()) => shell_println!("Hidden entry {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "unhide" => { if parts.len() < 2 { shell_println!("Usage: bootcfg unhide <entry_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match bootcfg::set_hidden(id, false) { Ok(()) => shell_println!("Unhidden entry {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "timeout" => { if parts.len() < 2 { shell_println!("Usage: bootcfg timeout <seconds>"); } else { match parts[1].parse::<u32>() { Ok(s) => match bootcfg::set_timeout(s) { Ok(()) => shell_println!("Timeout set to {}s", s), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid seconds") } } }
+        "console" => { if parts.len() < 2 { shell_println!("Usage: bootcfg console <text|graphical|verbose|silent>"); } else { let mode = match parts[1] { "text" => bootcfg::ConsoleMode::Text, "verbose" => bootcfg::ConsoleMode::Verbose, "silent" => bootcfg::ConsoleMode::Silent, _ => bootcfg::ConsoleMode::Graphical }; match bootcfg::set_console_mode(mode) { Ok(()) => shell_println!("Console mode set to {}", parts[1]), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "activity" => { if parts.len() < 2 { shell_println!("Usage: bootcfg activity <on|off>"); } else { let on = matches!(parts[1], "on" | "true" | "yes" | "1"); match bootcfg::set_boot_activity(on) { Ok(()) => shell_println!("Boot activity listing: {}", if on { "on" } else { "off" }), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "gfx" => { if parts.len() < 2 { shell_println!("Usage: bootcfg gfx <resolution>"); } else { match bootcfg::set_gfx_mode(parts[1]) { Ok(()) => shell_println!("GFX mode set to {}", parts[1]), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "loader" => { if parts.len() < 2 { shell_println!("Usage: bootcfg loader <grub2|systemd|custom|direct>"); } else { let lt = match parts[1] { "grub2" | "grub" => bootcfg::BootloaderType::Grub2, "systemd" | "sd-boot" => bootcfg::BootloaderType::SystemdBoot, "direct" => bootcfg::BootloaderType::DirectUefi, _ => bootcfg::BootloaderType::CustomUefi }; match bootcfg::set_loader_type(lt) { Ok(()) => shell_println!("Loader type set"), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "log" => { let limit = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10); let log = bootcfg::boot_log(limit); if log.is_empty() { shell_println!("No boot events"); } else { for ev in &log { let ok = if ev.success { "OK" } else { "FAIL" }; shell_println!("  #{} {} [{}] {}ms — {}", ev.id, ev.entry_name, ok, ev.duration_ms, ev.reason); } } }
+        "stats" => { let (ec, evc, boots, ch) = bootcfg::stats(); shell_println!("Entries: {}  Events: {}  Total boots: {}  Changes: {}", ec, evc, boots, ch); }
+        "init" => { bootcfg::init_defaults(); shell_println!("Boot configuration initialized with defaults"); }
+        "test" => { match bootcfg::self_test() { Ok(()) => shell_println!("bootcfg: all tests passed"), Err(e) => shell_println!("bootcfg: test FAILED: {:?}", e) } }
+        _ => {
+            shell_println!("bootcfg — bootloader and boot entry management");
+            shell_println!("  show             Show configuration");
+            shell_println!("  entries          List boot entries");
+            shell_println!("  add <n> <k> <p>  Add entry");
+            shell_println!("  remove <id>      Remove entry");
+            shell_println!("  default <id>     Set default entry");
+            shell_println!("  params <id> <p>  Set kernel params");
+            shell_println!("  hide <id>        Hide entry");
+            shell_println!("  unhide <id>      Unhide entry");
+            shell_println!("  timeout <sec>    Set menu timeout");
+            shell_println!("  console <mode>   Set console mode");
+            shell_println!("  activity <on|off> Boot activity listing");
+            shell_println!("  gfx <res>        Set GFX resolution");
+            shell_println!("  loader <type>    Set bootloader type");
+            shell_println!("  log [n]          Show boot log");
+            shell_println!("  stats            Show statistics");
+            shell_println!("  init             Load defaults");
+            shell_println!("  test             Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27935,7 +27982,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

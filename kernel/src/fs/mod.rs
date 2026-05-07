@@ -35,6 +35,7 @@ pub mod audit;
 pub mod appregistry;
 pub mod associations;
 pub mod backup;
+pub mod bootcfg;
 pub mod bookmarks;
 pub mod batch;
 pub mod bench;

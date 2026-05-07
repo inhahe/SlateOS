@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
-    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4357,6 +4357,7 @@ fn dispatch(line: &str) {
         "archive" => cmd_archive(args),
         "batch" => cmd_batch(args),
         "linkcheck" => cmd_linkcheck(args),
+        "fsprofile" => cmd_fsprofile(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13067,6 +13068,101 @@ fn cmd_linkcheck(args: &str) {
     }
 }
 
+/// Filesystem I/O profiling — enable/disable, view reports, manage counters.
+fn cmd_fsprofile(args: &str) {
+    use crate::fs::profile;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "on" | "enable" => {
+            profile::enable();
+            shell_println!("Filesystem I/O profiling enabled.");
+        }
+        "off" | "disable" => {
+            profile::disable();
+            shell_println!("Filesystem I/O profiling disabled.");
+        }
+        "reset" | "clear" => {
+            profile::reset();
+            shell_println!("Profiling counters reset.");
+        }
+        "report" | "show" | "" => {
+            let (total_ops, total_bytes, enabled) = profile::stats();
+            shell_println!("Filesystem I/O Profile");
+            shell_println!("  Status:  {}", if enabled { "ENABLED" } else { "disabled" });
+            shell_println!("  Total ops:   {}", total_ops);
+            shell_println!("  Total bytes: {}", total_bytes);
+
+            if total_ops == 0 {
+                if !enabled {
+                    shell_println!();
+                    shell_println!("  (enable with: fsprofile on)");
+                }
+                return;
+            }
+
+            let rpt = profile::report();
+            shell_println!("  Duration:    {} ms", rpt.duration_ns / 1_000_000);
+            shell_println!();
+            shell_println!("  {:10} {:>8} {:>12} {:>10} {:>10} {:>10}",
+                "OPERATION", "COUNT", "BYTES", "AVG(ns)", "MIN(ns)", "MAX(ns)");
+            shell_println!("  {}", "-".repeat(64));
+            for (kind, stats) in &rpt.ops {
+                shell_println!("  {:10} {:>8} {:>12} {:>10} {:>10} {:>10}",
+                    kind.label(), stats.count, stats.bytes,
+                    stats.avg_ns(), stats.min_ns, stats.max_ns);
+            }
+
+            // Show throughput for ops that transferred data.
+            let read_tput = rpt.ops.iter()
+                .find(|(k, _)| *k == profile::OpKind::Read)
+                .map(|(_, s)| s.throughput_bps());
+            let write_tput = rpt.ops.iter()
+                .find(|(k, _)| *k == profile::OpKind::Write)
+                .map(|(_, s)| s.throughput_bps());
+            if read_tput.is_some() || write_tput.is_some() {
+                shell_println!();
+                shell_println!("  Throughput:");
+                if let Some(bps) = read_tput {
+                    if bps > 1_000_000 {
+                        shell_println!("    Read:  {} MB/s", bps / 1_000_000);
+                    } else {
+                        shell_println!("    Read:  {} KB/s", bps / 1_000);
+                    }
+                }
+                if let Some(bps) = write_tput {
+                    if bps > 1_000_000 {
+                        shell_println!("    Write: {} MB/s", bps / 1_000_000);
+                    } else {
+                        shell_println!("    Write: {} KB/s", bps / 1_000);
+                    }
+                }
+            }
+
+            if !rpt.hot_paths.is_empty() {
+                shell_println!();
+                shell_println!("  Hot paths (most accessed):");
+                for (path, count) in &rpt.hot_paths {
+                    shell_println!("    {:6} {}", count, path);
+                }
+            }
+        }
+        "stats" => {
+            let (total_ops, total_bytes, enabled) = profile::stats();
+            shell_println!("Ops: {} | Bytes: {} | {}", total_ops, total_bytes,
+                if enabled { "ENABLED" } else { "disabled" });
+        }
+        _ => {
+            shell_println!("Usage: fsprofile <command>");
+            shell_println!("  on|enable      Start profiling filesystem I/O");
+            shell_println!("  off|disable    Stop profiling");
+            shell_println!("  report|show    Show detailed report (default)");
+            shell_println!("  reset|clear    Reset all counters");
+            shell_println!("  stats          Quick summary");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18405,7 +18501,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

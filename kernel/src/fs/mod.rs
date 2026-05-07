@@ -66,6 +66,7 @@ pub mod notify;
 pub mod overlay;
 pub mod pipe;
 pub mod procfs;
+pub mod profile;
 pub mod quota;
 pub mod reclaim;
 pub mod search;

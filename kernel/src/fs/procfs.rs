@@ -127,6 +127,7 @@ const ROOT_FILES: &[&str] = &[
     "archives",
     "batch",
     "linkcheck",
+    "profile",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2028,6 +2029,55 @@ fn gen_linkcheck() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/profile` — filesystem I/O profiling statistics.
+fn gen_profile() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total_ops, total_bytes, enabled) = super::profile::stats();
+
+    out.push_str("Filesystem I/O Profile\n");
+    out.push_str("======================\n\n");
+    out.push_str(&format!("Status:      {}\n", if enabled { "enabled" } else { "disabled" }));
+    out.push_str(&format!("Total ops:   {}\n", total_ops));
+    out.push_str(&format!("Total bytes: {}\n", total_bytes));
+
+    if enabled && total_ops > 0 {
+        let rpt = super::profile::report();
+        out.push_str(&format!("Duration:    {} ms\n\n", rpt.duration_ns / 1_000_000));
+
+        out.push_str("Per-Operation Breakdown\n");
+        out.push_str("-----------------------\n");
+        for (kind, stats) in &rpt.ops {
+            out.push_str(&format!(
+                "  {:10} count={:<8} bytes={:<12} avg={:<8}ns min={:<8}ns max={}ns\n",
+                kind.label(), stats.count, stats.bytes,
+                stats.avg_ns(), stats.min_ns, stats.max_ns,
+            ));
+            if stats.bytes > 0 {
+                let bps = stats.throughput_bps();
+                if bps > 1_000_000 {
+                    out.push_str(&format!("             throughput: {} MB/s\n", bps / 1_000_000));
+                } else if bps > 1_000 {
+                    out.push_str(&format!("             throughput: {} KB/s\n", bps / 1_000));
+                } else {
+                    out.push_str(&format!("             throughput: {} B/s\n", bps));
+                }
+            }
+        }
+
+        if !rpt.hot_paths.is_empty() {
+            out.push_str("\nHot Paths (most accessed)\n");
+            out.push_str("-------------------------\n");
+            for (path, count) in &rpt.hot_paths {
+                out.push_str(&format!("  {:6} {}\n", count, path));
+            }
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2096,6 +2146,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "archives" => Ok(gen_archives()),
         "batch" => Ok(gen_batch()),
         "linkcheck" => Ok(gen_linkcheck()),
+        "profile" => Ok(gen_profile()),
         _ => Err(KernelError::NotFound),
     }
 }

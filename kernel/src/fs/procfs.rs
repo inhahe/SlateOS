@@ -152,6 +152,7 @@ const ROOT_FILES: &[&str] = &[
     "deskicons",
     "fileops",
     "fileselect",
+    "filetype",
     "openwith",
     "preview",
     "sidebar",
@@ -2879,6 +2880,22 @@ fn gen_fileselect() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_filetype() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (lookups, registers, type_count, app_icons) = super::filetype::stats();
+
+    out.push_str("File Types\n");
+    out.push_str("==========\n\n");
+    out.push_str(&format!("Types:       {}\n", type_count));
+    out.push_str(&format!("App icons:   {}\n", app_icons));
+    out.push_str(&format!("Lookups:     {}\n", lookups));
+    out.push_str(&format!("Registers:   {}\n", registers));
+
+    out.into_bytes()
+}
+
 fn gen_sidebar() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3038,6 +3055,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "deskicons" => Ok(gen_deskicons()),
         "fileops" => Ok(gen_fileops()),
         "fileselect" => Ok(gen_fileselect()),
+        "filetype" => Ok(gen_filetype()),
         "openwith" => Ok(gen_openwith()),
         "preview" => Ok(gen_preview()),
         "sidebar" => Ok(gen_sidebar()),

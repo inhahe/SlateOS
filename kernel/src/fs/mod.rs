@@ -60,6 +60,7 @@ pub mod fcompress;
 pub mod fileinfo;
 pub mod fileops;
 pub mod fileselect;
+pub mod filetype;
 pub mod findex;
 pub mod freeze;
 pub mod fstrim;

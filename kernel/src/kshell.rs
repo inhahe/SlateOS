@@ -3086,7 +3086,7 @@ const COMMANDS: &[&str] = &[
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "find", "findex", "finfo", "fops", "fsel", "fold", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
@@ -4394,6 +4394,7 @@ fn dispatch(line: &str) {
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
         "fileselect" | "fsel" => cmd_fileselect(args),
+        "filetype" | "ftype" => cmd_filetype(args),
         "openw" => cmd_openwith(args),
         "sidebar" => cmd_sidebar(args),
         "statusbar" => cmd_statusbar(args),
@@ -15995,6 +15996,93 @@ fn check_char(state: crate::fs::fileselect::CheckState) -> char {
     }
 }
 
+/// `filetype` / `ftype` — file type and icon registry.
+fn cmd_filetype(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            crate::fs::filetype::init();
+            let (_, _, types, _) = crate::fs::filetype::stats();
+            shell_println!("File type registry initialized ({} types)", types);
+        }
+        "list" => {
+            let types = crate::fs::filetype::list_types();
+            if types.is_empty() {
+                shell_println!("(no file types registered — run 'filetype init')");
+            } else {
+                shell_println!("{:<25} {:<20} {:<15} {}", "MIME", "Description", "Icon", "Exts");
+                shell_println!("{}", "-".repeat(70));
+                for (mime, desc, icon, ext_count) in &types {
+                    shell_println!("{:<25} {:<20} {:<15} {}", mime, desc, icon, ext_count);
+                }
+            }
+        }
+        "icon" => {
+            // filetype icon <path>
+            if let Some(path) = parts.get(1) {
+                let resolved = resolve_path(path);
+                let icon = crate::fs::filetype::icon_for_file(&resolved);
+                shell_println!("File: {}", resolved);
+                shell_println!("  MIME:        {}", icon.mime);
+                shell_println!("  Description: {}", icon.description);
+                shell_println!("  Icon:        {}", icon.icon);
+                shell_println!("  Category:    {:?}", icon.category);
+                shell_println!("  Source:      {:?}", icon.source);
+            } else {
+                shell_println!("Usage: filetype icon <path>");
+            }
+        }
+        "register" => {
+            // filetype register <mime> <description> <icon> [ext1 ext2...]
+            if parts.len() < 4 {
+                shell_println!("Usage: filetype register <mime> <desc> <icon> [ext...]");
+                return;
+            }
+            let mime = parts[1];
+            let desc = parts[2];
+            let icon = parts[3];
+            let exts: Vec<&str> = parts[4..].to_vec();
+            match crate::fs::filetype::register_type(mime, desc, icon, &exts) {
+                Ok(()) => shell_println!("Registered: {} ({})", mime, desc),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "ext" => {
+            // filetype ext <extension>
+            if let Some(ext) = parts.get(1) {
+                match crate::fs::filetype::mime_for_extension(ext) {
+                    Some(mime) => shell_println!(".{} → {}", ext, mime),
+                    None => shell_println!("No type registered for .{}", ext),
+                }
+            } else {
+                shell_println!("Usage: filetype ext <extension>");
+            }
+        }
+        "stats" => {
+            let (lookups, registers, types, app_icons) = crate::fs::filetype::stats();
+            shell_println!("Types:       {}", types);
+            shell_println!("App icons:   {}", app_icons);
+            shell_println!("Lookups:     {}", lookups);
+            shell_println!("Registers:   {}", registers);
+        }
+        "reset" => {
+            crate::fs::filetype::reset_stats();
+            shell_println!("File type stats reset");
+        }
+        _ => {
+            shell_println!("Usage: filetype <subcommand>");
+            shell_println!("  init                Initialize defaults");
+            shell_println!("  list                List registered types");
+            shell_println!("  icon <path>         Resolve icon for file");
+            shell_println!("  register <m> <d> <i> [ext...]  Register type");
+            shell_println!("  ext <extension>     Lookup MIME by extension");
+            shell_println!("  stats               Show statistics");
+            shell_println!("  reset               Reset statistics");
+        }
+    }
+}
+
 /// `openw` — Open With dialog infrastructure.
 fn cmd_openwith(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -22597,7 +22685,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "openw" | "sidebar" | "statusbar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

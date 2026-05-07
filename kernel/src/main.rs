@@ -131,6 +131,7 @@ mod rtc;
 mod rtl8139;
 mod sched;
 mod sched_fairness;
+mod scfilter;
 mod sched_migrate;
 mod sclatency;
 mod security;
@@ -1292,6 +1293,12 @@ extern "C" fn kmain() -> ! {
     // into a single lifecycle with create/start/stop/delete state machine.
     container::init();
     container::self_test();
+
+    // Step 22e⅞++++p10: Syscall filter (seccomp-equivalent) init + self-test.
+    // Per-process bitmap-based syscall allow/deny lists for container
+    // sandboxing.  O(1) check per syscall, fork-inheritable, tighten-only.
+    scfilter::init();
+    scfilter::self_test();
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.

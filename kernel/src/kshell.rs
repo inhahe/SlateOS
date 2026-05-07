@@ -4936,6 +4936,7 @@ fn dispatch(line: &str) {
         "userns" => cmd_userns(args),
         "netns" => cmd_netns(args),
         "container" | "ct" => cmd_container(args),
+        "scfilter" | "seccomp" => cmd_scfilter(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
@@ -31348,6 +31349,145 @@ fn cmd_container(args: &str) {
     }
 }
 
+fn cmd_scfilter(args: &str) {
+    use crate::scfilter;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let count = scfilter::active_count();
+            crate::console_println!("Active syscall filters: {}", count);
+        }
+        "install" => {
+            let Some(pid_str) = parts.get(1) else {
+                crate::console_println!("Usage: scfilter install <pid> [deny-all]");
+                return;
+            };
+            let Ok(pid) = pid_str.parse::<u64>() else {
+                crate::console_println!("Invalid PID");
+                return;
+            };
+            let mode = parts.get(2).copied().unwrap_or("allow-all");
+            let result = if mode == "deny-all" {
+                scfilter::install_deny_all(pid)
+            } else {
+                scfilter::install(pid)
+            };
+            match result {
+                Ok(()) => crate::console_println!(
+                    "Installed {} filter for PID {}", mode, pid
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let Some(pid_str) = parts.get(1) else {
+                crate::console_println!("Usage: scfilter remove <pid>");
+                return;
+            };
+            let Ok(pid) = pid_str.parse::<u64>() else {
+                crate::console_println!("Invalid PID");
+                return;
+            };
+            scfilter::remove(pid);
+            crate::console_println!("Removed filter for PID {}", pid);
+        }
+        "deny" => {
+            // scfilter deny <pid> <syscall_nr>
+            if parts.len() < 3 {
+                crate::console_println!("Usage: scfilter deny <pid> <syscall_nr>");
+                return;
+            }
+            let Ok(pid) = parts[1].parse::<u64>() else {
+                crate::console_println!("Invalid PID");
+                return;
+            };
+            let Ok(nr) = parts[2].parse::<u64>() else {
+                crate::console_println!("Invalid syscall number");
+                return;
+            };
+            match scfilter::deny(pid, nr) {
+                Ok(()) => crate::console_println!("Denied syscall {} for PID {}", nr, pid),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "allow" => {
+            if parts.len() < 3 {
+                crate::console_println!("Usage: scfilter allow <pid> <syscall_nr>");
+                return;
+            }
+            let Ok(pid) = parts[1].parse::<u64>() else {
+                crate::console_println!("Invalid PID");
+                return;
+            };
+            let Ok(nr) = parts[2].parse::<u64>() else {
+                crate::console_println!("Invalid syscall number");
+                return;
+            };
+            match scfilter::allow(pid, nr) {
+                Ok(()) => crate::console_println!("Allowed syscall {} for PID {}", nr, pid),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            if parts.len() < 3 {
+                crate::console_println!("Usage: scfilter check <pid> <syscall_nr>");
+                return;
+            }
+            let Ok(pid) = parts[1].parse::<u64>() else {
+                crate::console_println!("Invalid PID");
+                return;
+            };
+            let Ok(nr) = parts[2].parse::<u64>() else {
+                crate::console_println!("Invalid syscall number");
+                return;
+            };
+            let allowed = scfilter::check(pid, nr);
+            crate::console_println!(
+                "Syscall {} for PID {}: {}", nr, pid,
+                if allowed { "ALLOWED" } else { "DENIED" }
+            );
+        }
+        "info" => {
+            let Some(pid_str) = parts.get(1) else {
+                crate::console_println!("Usage: scfilter info <pid>");
+                return;
+            };
+            let Ok(pid) = pid_str.parse::<u64>() else {
+                crate::console_println!("Invalid PID");
+                return;
+            };
+            if !scfilter::has_filter(pid) {
+                crate::console_println!("No filter installed for PID {}", pid);
+                return;
+            }
+            let allowed = scfilter::allowed_count(pid).unwrap_or(0);
+            let denied = scfilter::deny_count(pid);
+            crate::console_println!("=== Syscall Filter for PID {} ===", pid);
+            crate::console_println!("  Allowed syscalls: {}/{}", allowed, scfilter::MAX_SYSCALL_NR);
+            crate::console_println!("  Denied attempts:  {}", denied);
+        }
+        "test" => {
+            scfilter::self_test();
+        }
+        _ => {
+            crate::console_println!("Usage: scfilter [list|install|remove|deny|allow|check|info|test]");
+            crate::console_println!("  scfilter                           — show active filter count");
+            crate::console_println!("  scfilter install PID [deny-all]    — install filter");
+            crate::console_println!("  scfilter remove PID                — remove filter");
+            crate::console_println!("  scfilter deny PID NR               — deny syscall NR");
+            crate::console_println!("  scfilter allow PID NR              — allow syscall NR");
+            crate::console_println!("  scfilter check PID NR              — test if allowed");
+            crate::console_println!("  scfilter info PID                  — show filter stats");
+            crate::console_println!("  scfilter test                      — run self-test");
+            crate::console_println!();
+            crate::console_println!("Aliases: seccomp");
+        }
+    }
+}
+
 ///   capreq approve ID     — approve a pending request
 ///   capreq deny ID        — deny a pending request
 ///   capreq test           — submit a test request
@@ -33710,7 +33850,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

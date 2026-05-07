@@ -100,34 +100,22 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   write_journal_superblock) now use to_be_bytes.  Journal is now
   compatible with Linux-formatted ext4 images.
 
-- kernel-process: Wire rmap::add() into proc/pcb.rs try_resolve_fault().
-  After the map_frame call at line ~831, add:
-    crate::mm::rmap::add(phys_frame.addr(), pml4_phys, frame_base);
-  This enables compaction to find and migrate user-space demand-paged
-  frames.  Without it, rmap has no entries for demand-paged user pages
-  and compaction cannot relocate them.  The mm-zone rmap wiring is done
-  for cow.rs (CoW copy), swap.rs (swap-out/swap-in), and compact.rs
-  (migration), but try_resolve_fault is in proc/ which is process zone.
+- (DONE) kernel-process: Wire rmap::add() into proc/pcb.rs try_resolve_fault().
+  Added crate::mm::rmap::add(phys_frame.addr(), pml4_phys, frame_base) after
+  successful map_frame.  Compaction can now find and migrate demand-paged
+  user frames.
 
-- kernel-ipc: Wire scfilter::check() into syscall/dispatch.rs.
-  After the bounds check (line ~457 in dispatch.rs), before looking up
-  the handler, add:
-    let task_id = crate::sched::current_task_id();
-    if !crate::scfilter::check(task_id, nr) {
-        return SyscallResult::err(KernelError::PermissionDenied);
-    }
-  This enforces per-process syscall filters for container sandboxing.
-  The scfilter module and API are fully ready in scfilter.rs.
+- (DONE) kernel-ipc: Wire scfilter::check() into syscall/dispatch.rs.
+  Added scfilter check between bounds check and handler lookup.  Denied
+  syscalls return PermissionDenied without invoking the handler.  Container
+  syscall sandboxing is now fully enforced.
 
-- kernel-process: Wire cgroup memory controller into demand paging.
-  In proc/pcb.rs try_resolve_fault(), before allocating a frame, call:
-    if crate::cgroup::try_charge_current_mem(1).is_err() {
-        return Err(KernelError::OutOfMemory);
-    }
-  And on process exit / munmap frame free, call:
-    crate::cgroup::uncharge_current_mem(1);
-  This enforces per-group memory limits on user-space page allocation.
-  The cgroup infrastructure and API are fully ready in cgroup.rs.
+- (DONE) kernel-process: Wire cgroup memory controller into demand paging.
+  Added try_charge_current_mem(1) before frame allocation in try_resolve_fault().
+  On alloc failure, uncharges the pre-charged frame.  Cgroup memory limits
+  are now enforced on user-space demand-paged allocations.  (Note: uncharge
+  on free is handled by the per-frame cgroup tracking in frame.rs — the
+  frame allocator calls uncharge_cgroup_free() on every free_frame() call.)
 
 - net zone: Integrate netns module with net/ globals.  Currently the net/
   module uses a single global IFACE static in interface.rs, a global ARP_CACHE

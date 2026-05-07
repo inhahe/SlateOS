@@ -459,6 +459,18 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    // Syscall filter check (seccomp equivalent).
+    //
+    // Before looking up the handler, verify this syscall is allowed
+    // for the calling task.  Denied syscalls return PermissionDenied
+    // without ever invoking the handler.  This enforces per-process
+    // syscall sandboxing for containers.
+    let task_id = crate::sched::current_task_id();
+    if !crate::scfilter::check(task_id, nr) {
+        crate::sclatency::exit(sc_start, nr);
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
     // Look up handler.
     //
     // SAFETY: idx is bounds-checked above.

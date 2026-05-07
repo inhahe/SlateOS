@@ -811,9 +811,24 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     let frame_base = fault_addr & !(FRAME_SIZE as u64 - 1);
     let virt = VirtAddr::new(frame_base);
 
+    // Enforce cgroup memory limits before allocating.
+    //
+    // If this process belongs to a cgroup with a memory limit, charge
+    // one frame before allocation.  The charge is released when the
+    // frame is freed (via the per-frame cgroup tracking in frame.rs).
+    // If the group is over its limit, reject the fault — the process
+    // will receive SIGSEGV (or our equivalent structured exception).
+    if crate::cgroup::try_charge_current_mem(1).is_err() {
+        return false;
+    }
+
     let phys_frame = match frame::alloc_frame() {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(_) => {
+            // Alloc failed — uncharge the frame we pre-charged.
+            crate::cgroup::uncharge_current_mem(1);
+            return false;
+        }
     };
 
     // Zero the frame via HHDM.
@@ -847,6 +862,13 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // Register the new page as reclaimable so the swap subsystem's
     // Clock algorithm can evict it under memory pressure.
     crate::mm::swap::register_reclaimable(pml4_phys, frame_base, flags);
+
+    // Register reverse mapping so the compaction subsystem can find
+    // and migrate this frame.  Without rmap entries, compaction cannot
+    // relocate demand-paged user pages.  The mm-zone rmap wiring
+    // covers cow.rs, swap.rs, and compact.rs; this covers the initial
+    // demand-page allocation in the process zone.
+    crate::mm::rmap::add(phys_frame.addr(), pml4_phys, frame_base);
 
     serial_println!(
         "[fault] Demand-paged user frame for pid {} at {:#x}",

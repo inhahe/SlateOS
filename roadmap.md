@@ -1104,6 +1104,8 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] alloc_order/alloc_order_constrained refactored to charge after releasing allocator lock (clean lock ordering)
     - [x] Rollback on cgroup OOM: frame freed back via free_order_inner (no double-uncharge)
     - [x] 4 self-tests: fast-exit disabled path, per-frame tracking round-trip, charge/uncharge, limit enforcement
+    - [x] Demand paging integration (try_charge_current_mem before frame alloc in try_resolve_fault)
+    - [x] Reverse mapping integration (rmap::add after demand-page map_frame in try_resolve_fault)
   - [x] I/O controller (bandwidth limits per group)
     - [x] IoLimit struct: ops_max + bytes_max per period (0 = unlimited)
     - [x] set_io_limit(), io_charge(), io_period_reset() API
@@ -1130,7 +1132,10 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] Per-process deny count audit tracking
     - [x] kshell `scfilter`/`seccomp` command
     - [x] 14 self-tests
-    - [ ] Wire into syscall/dispatch.rs (kernel-ipc zone)
+    - [x] Wire into syscall/dispatch.rs (kernel-ipc zone)
+      - [x] scfilter::check(task_id, nr) called after bounds check, before handler lookup
+      - [x] Denied syscalls return PermissionDenied without invoking handler
+      - [x] current_task_id() used for caller identification
   - [ ] OCI-compatible container image format parsing
   - [ ] Port Docker (or equivalent container runtime)
 

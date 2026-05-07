@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4813,6 +4813,7 @@ fn dispatch(line: &str) {
         "dyndns" | "ddns" => cmd_dyndns(args),
         "loginscreen" | "logscr" => cmd_loginscreen(args),
         "appnotify" | "anotify" => cmd_appnotify(args),
+        "kernelbuild" | "kbuild" => cmd_kernelbuild(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -23530,6 +23531,255 @@ fn cmd_appnotify(args: &str) {
     }
 }
 
+/// `kernelbuild` / `kbuild` — kernel and OS component build configuration.
+fn cmd_kernelbuild(args: &str) {
+    use crate::fs::kernelbuild;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "list" | "ls" => {
+            let comps = kernelbuild::list_components();
+            if comps.is_empty() {
+                shell_println!("No components registered");
+            } else {
+                shell_println!("{:<16} {:<16} {:<14} {:<12} Params", "ID", "Name", "Type", "Status");
+                for c in &comps {
+                    shell_println!("{:<16} {:<16} {:<14} {:<12} {}",
+                        c.id, c.name,
+                        alloc::format!("{:?}", c.comp_type),
+                        alloc::format!("{:?}", c.status),
+                        c.params.len());
+                }
+            }
+        }
+        "info" | "show" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: kernelbuild info <component-id>");
+            } else {
+                match kernelbuild::get_component(parts[1]) {
+                    Ok(c) => {
+                        shell_println!("ID:          {}", c.id);
+                        shell_println!("Name:        {}", c.name);
+                        shell_println!("Type:        {:?}", c.comp_type);
+                        shell_println!("Source:      {}", c.source_dir);
+                        shell_println!("Output:      {}", c.output_path);
+                        shell_println!("Status:      {:?}", c.status);
+                        shell_println!("Opt level:   {:?}", c.opt_level);
+                        shell_println!("Builds:      {}", c.build_count);
+                        shell_println!("Auto-build:  {}", c.auto_rebuild);
+                        shell_println!("Critical:    {}", c.system_critical);
+                        if !c.dependencies.is_empty() {
+                            shell_println!("Deps:        {}", c.dependencies.join(", "));
+                        }
+                        if !c.params.is_empty() {
+                            shell_println!("\nParameters:");
+                            for p in &c.params {
+                                let reqs = if p.requires_full_rebuild { " [full-rebuild]" } else { "" };
+                                shell_println!("  {} = {} (default: {}){}", p.key, p.value, p.default_value, reqs);
+                                if !p.allowed.is_empty() {
+                                    shell_println!("    allowed: {}", p.allowed.join(", "));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "register" | "reg" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: kernelbuild register <id> <name> <type> <source-dir>");
+                shell_println!("Types: kernel, module, service, utility, library, bootloader");
+            } else {
+                let ct = match parts[3] {
+                    "kernel" => Some(kernelbuild::ComponentType::Kernel),
+                    "module" => Some(kernelbuild::ComponentType::KernelModule),
+                    "service" => Some(kernelbuild::ComponentType::SystemService),
+                    "utility" => Some(kernelbuild::ComponentType::CoreUtility),
+                    "library" | "lib" => Some(kernelbuild::ComponentType::SharedLibrary),
+                    "bootloader" | "boot" => Some(kernelbuild::ComponentType::Bootloader),
+                    _ => { shell_println!("Unknown type: {}", parts[3]); None }
+                };
+                if let Some(ct) = ct {
+                    let output = if parts.len() > 5 { parts[5] } else { "/dev/null" };
+                    match kernelbuild::register_component(parts[1], parts[2], ct, parts[4], output) {
+                        Ok(()) => shell_println!("Registered: {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            }
+        }
+        "remove" | "rm" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: kernelbuild remove <component-id>");
+            } else {
+                match kernelbuild::remove_component(parts[1]) {
+                    Ok(()) => shell_println!("Removed: {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "param" | "set" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: kernelbuild param <component-id> <key> <value>");
+            } else {
+                match kernelbuild::set_param(parts[1], parts[2], parts[3]) {
+                    Ok(()) => shell_println!("Set {}={} for {}", parts[2], parts[3], parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "addparam" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: kernelbuild addparam <comp-id> <key> <default> <desc...>");
+            } else {
+                let desc = parts[4..].join(" ");
+                match kernelbuild::add_param(parts[1], parts[2], &desc, parts[3], &[], false) {
+                    Ok(()) => shell_println!("Added param {} to {}", parts[2], parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "resetparam" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: kernelbuild resetparam <component-id> <key>");
+            } else {
+                match kernelbuild::reset_param(parts[1], parts[2]) {
+                    Ok(()) => shell_println!("Reset {} for {}", parts[2], parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "resetall" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: kernelbuild resetall <component-id>");
+            } else {
+                match kernelbuild::reset_all_params(parts[1]) {
+                    Ok(()) => shell_println!("Reset all params for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "opt" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: kernelbuild opt <component-id> <debug|o1|o2|release|size>");
+            } else {
+                let level = match parts[2] {
+                    "debug" => Some(kernelbuild::OptLevel::Debug),
+                    "o1" | "O1" => Some(kernelbuild::OptLevel::O1),
+                    "o2" | "O2" => Some(kernelbuild::OptLevel::O2),
+                    "release" => Some(kernelbuild::OptLevel::Release),
+                    "size" | "os" | "Os" => Some(kernelbuild::OptLevel::Size),
+                    _ => { shell_println!("Unknown level: {}", parts[2]); None }
+                };
+                if let Some(level) = level {
+                    match kernelbuild::set_opt_level(parts[1], level) {
+                        Ok(()) => shell_println!("Opt level set to {:?} for {}", level, parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            }
+        }
+        "auto" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: kernelbuild auto <component-id> <on|off>");
+            } else {
+                let on = matches!(parts[2], "on" | "yes" | "true");
+                match kernelbuild::set_auto_rebuild(parts[1], on) {
+                    Ok(()) => shell_println!("Auto-rebuild {} for {}", if on { "enabled" } else { "disabled" }, parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "dep" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: kernelbuild dep <component-id> <dependency-id>");
+            } else {
+                match kernelbuild::add_dependency(parts[1], parts[2]) {
+                    Ok(()) => shell_println!("Added dep {} → {}", parts[1], parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "build" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: kernelbuild build <component-id>");
+            } else {
+                match kernelbuild::build(parts[1]) {
+                    Ok(()) => shell_println!("Build successful: {}", parts[1]),
+                    Err(e) => shell_println!("Build error: {:?}", e),
+                }
+            }
+        }
+        "changed" => {
+            let changed = kernelbuild::scan_changed();
+            if changed.is_empty() {
+                shell_println!("All components up to date");
+            } else {
+                shell_println!("Components with source changes:");
+                for id in &changed {
+                    shell_println!("  {}", id);
+                }
+            }
+        }
+        "logs" => {
+            let comp_id = parts.get(1).copied();
+            let logs = match comp_id {
+                Some(id) => kernelbuild::build_logs(id),
+                None => kernelbuild::all_build_logs(),
+            };
+            if logs.is_empty() {
+                shell_println!("No build logs");
+            } else {
+                for l in &logs {
+                    let status = if l.success { "OK" } else { "FAIL" };
+                    shell_println!("[{}] {} {}ms - {}", status, l.component_id, l.duration_ms, l.output);
+                }
+            }
+        }
+        "init" => {
+            kernelbuild::init_defaults();
+            shell_println!("Initialised kernel build defaults");
+        }
+        "stats" => {
+            let (comps, built, changed, ops) = kernelbuild::stats();
+            shell_println!("Components:     {}", comps);
+            shell_println!("Up to date:     {}", built);
+            shell_println!("Source changed: {}", changed);
+            shell_println!("Operations:     {}", ops);
+        }
+        "test" => {
+            match kernelbuild::self_test() {
+                Ok(()) => shell_println!("kernelbuild: all tests passed"),
+                Err(e) => shell_println!("kernelbuild: test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("kernelbuild — kernel/OS component build configuration");
+            shell_println!("Usage: kernelbuild <subcommand>");
+            shell_println!("  list              List components");
+            shell_println!("  info <id>         Show component details");
+            shell_println!("  register <id> <name> <type> <src>  Register component");
+            shell_println!("  remove <id>       Remove component");
+            shell_println!("  param <id> <k> <v>  Set build parameter");
+            shell_println!("  addparam <id> <k> <def> <desc>  Add parameter");
+            shell_println!("  resetparam <id> <k>  Reset parameter to default");
+            shell_println!("  resetall <id>     Reset all params to defaults");
+            shell_println!("  opt <id> <level>  Set optimisation level");
+            shell_println!("  auto <id> <on|off>  Toggle auto-rebuild");
+            shell_println!("  dep <id> <dep-id> Add dependency");
+            shell_println!("  build <id>        Build component");
+            shell_println!("  changed           List changed components");
+            shell_println!("  logs [id]         Show build logs");
+            shell_println!("  init              Load defaults");
+            shell_println!("  stats             Show statistics");
+            shell_println!("  test              Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -31308,7 +31558,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

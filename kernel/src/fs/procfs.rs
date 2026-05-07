@@ -209,6 +209,7 @@ const ROOT_FILES: &[&str] = &[
     "dyndns",
     "loginscreen",
     "appnotify",
+    "kernelbuild",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4556,6 +4557,31 @@ fn gen_appnotify() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_kernelbuild() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (comp_count, built, changed, ops) = super::kernelbuild::stats();
+
+    out.push_str("Kernel Build Configuration\n");
+    out.push_str("==========================\n\n");
+    out.push_str(&format!("Components:     {}\n", comp_count));
+    out.push_str(&format!("Up to date:     {}\n", built));
+    out.push_str(&format!("Source changed: {}\n", changed));
+    out.push_str(&format!("Operations:     {}\n", ops));
+
+    let comps = super::kernelbuild::list_components();
+    if !comps.is_empty() {
+        out.push_str("\nComponents:\n");
+        for c in &comps {
+            out.push_str(&format!("  {} ({:?}) [{:?}] params={}\n",
+                c.name, c.comp_type, c.status, c.params.len()));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4930,6 +4956,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dyndns" => Ok(gen_dyndns()),
         "loginscreen" => Ok(gen_loginscreen()),
         "appnotify" => Ok(gen_appnotify()),
+        "kernelbuild" => Ok(gen_kernelbuild()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

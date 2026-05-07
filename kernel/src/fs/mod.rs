@@ -96,6 +96,7 @@ pub mod integrity;
 pub mod iso9660;
 pub mod journal;
 pub mod kbsettings;
+pub mod kernelbuild;
 pub mod keylayout;
 pub mod linkcheck;
 pub mod locale;

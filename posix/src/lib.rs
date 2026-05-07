@@ -77,6 +77,7 @@ pub mod process;
 pub mod setjmp;
 pub mod spawn;
 pub mod stat;
+pub mod stdio;
 pub mod stdlib;
 pub mod string;
 pub mod syscall;

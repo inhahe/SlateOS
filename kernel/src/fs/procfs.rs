@@ -186,6 +186,7 @@ const ROOT_FILES: &[&str] = &[
     "winsnap",
     "colorpicker",
     "cursorsettings",
+    "kbsettings",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3675,6 +3676,43 @@ fn gen_cursorsettings() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_kbsettings() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let cfg = super::kbsettings::config();
+    let (prof_count, override_count, changes) = super::kbsettings::stats();
+
+    out.push_str("Keyboard Settings\n");
+    out.push_str("=================\n\n");
+    out.push_str(&format!("Preset:          {}\n", cfg.preset.label()));
+    out.push_str(&format!("Repeat delay:    {}ms\n", cfg.repeat_delay_ms));
+    out.push_str(&format!("Repeat rate:     {}ms\n", cfg.repeat_rate_ms));
+    out.push_str(&format!("NumLock boot:    {}\n", cfg.numlock_boot.label()));
+    out.push_str(&format!("CapsLock toggle: {}\n", cfg.caps_lock_toggle));
+    out.push_str(&format!("Sticky Keys:     {}{}\n", cfg.sticky_keys,
+        if cfg.sticky_lock_on_double { " (lock on double)" } else { "" }));
+    out.push_str(&format!("Filter Keys:     {}{}\n", cfg.filter_keys,
+        if cfg.filter_keys { alloc::format!(" (hold={}ms debounce={}ms)", cfg.filter_min_hold_ms, cfg.filter_debounce_ms) } else { String::new() }));
+    out.push_str(&format!("Toggle sounds:   {}\n", cfg.toggle_keys_sound));
+    out.push_str(&format!("Bounce Keys:     {}{}\n", cfg.bounce_keys,
+        if cfg.bounce_keys { alloc::format!(" ({}ms)", cfg.bounce_ms) } else { String::new() }));
+    out.push_str(&format!("Compose key:     {}\n", cfg.compose_key));
+    out.push_str(&format!("Ctrl+Alt=AltGr:  {}\n", cfg.ctrl_alt_as_altgr));
+    out.push_str(&format!("Profiles:        {}\n", prof_count));
+    out.push_str(&format!("Overrides:       {}\n", override_count));
+    out.push_str(&format!("Changes:         {}\n\n", changes));
+
+    let profiles = super::kbsettings::list_profiles();
+    for p in &profiles {
+        out.push_str(&format!("{}: {} delay={}ms rate={}ms{}\n",
+            p.name, p.preset.label(), p.repeat_delay_ms, p.repeat_rate_ms,
+            if p.active { " [active]" } else { "" }));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4026,6 +4064,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "winsnap" => Ok(gen_winsnap()),
         "colorpicker" => Ok(gen_colorpicker()),
         "cursorsettings" => Ok(gen_cursorsettings()),
+        "kbsettings" => Ok(gen_kbsettings()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -85,6 +85,7 @@ pub mod ioprio;
 pub mod integrity;
 pub mod iso9660;
 pub mod journal;
+pub mod kbsettings;
 pub mod keylayout;
 pub mod linkcheck;
 #[allow(dead_code)]

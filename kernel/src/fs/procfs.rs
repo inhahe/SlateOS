@@ -211,6 +211,7 @@ const ROOT_FILES: &[&str] = &[
     "appnotify",
     "kernelbuild",
     "wakesensor",
+    "netsettings",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4600,6 +4601,37 @@ fn gen_wakesensor() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netsettings() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (ifaces, connected, saved, ops) = super::netsettings::stats();
+    let ri = super::netsettings::router_info();
+
+    out.push_str("Network Settings\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Hostname:    {}\n", super::netsettings::hostname()));
+    out.push_str(&format!("Interfaces:  {} ({} connected)\n", ifaces, connected));
+    out.push_str(&format!("Saved WiFi:  {}\n", saved));
+    out.push_str(&format!("Gateway:     {} {}\n", ri.gateway_ip,
+        if ri.reachable { "(reachable)" } else { "(unreachable)" }));
+    if !ri.external_ipv4.is_empty() {
+        out.push_str(&format!("External IP: {}\n", ri.external_ipv4));
+    }
+    out.push_str(&format!("Operations:  {}\n", ops));
+
+    let interfaces = super::netsettings::list_interfaces();
+    if !interfaces.is_empty() {
+        out.push_str("\nInterfaces:\n");
+        for i in &interfaces {
+            out.push_str(&format!("  {} ({:?}) {:?} {}\n",
+                i.name, i.iface_type, i.link_state, i.ipv4.address));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4976,6 +5008,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "appnotify" => Ok(gen_appnotify()),
         "kernelbuild" => Ok(gen_kernelbuild()),
         "wakesensor" => Ok(gen_wakesensor()),
+        "netsettings" => Ok(gen_netsettings()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4815,6 +4815,7 @@ fn dispatch(line: &str) {
         "appnotify" | "anotify" => cmd_appnotify(args),
         "kernelbuild" | "kbuild" => cmd_kernelbuild(args),
         "wakesensor" | "wsensor" => cmd_wakesensor(args),
+        "netsettings" | "netcfg" => cmd_netsettings(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -24032,6 +24033,310 @@ fn cmd_wakesensor(args: &str) {
     }
 }
 
+/// `netsettings` / `netcfg` — comprehensive network settings.
+fn cmd_netsettings(args: &str) {
+    use crate::fs::netsettings;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "list" | "ifaces" => {
+            let ifaces = netsettings::list_interfaces();
+            if ifaces.is_empty() {
+                shell_println!("No interfaces");
+            } else {
+                shell_println!("{:<8} {:<12} {:<10} {:<8} {:<16} {}", "Name", "Type", "State", "Speed", "IPv4", "MAC");
+                for i in &ifaces {
+                    let speed = if i.speed_mbps > 0 { alloc::format!("{}M", i.speed_mbps) } else { String::from("-") };
+                    shell_println!("{:<8} {:<12} {:<10} {:<8} {:<16} {}",
+                        i.name, alloc::format!("{:?}", i.iface_type),
+                        alloc::format!("{:?}", i.link_state),
+                        speed, i.ipv4.address, i.mac_address);
+                }
+            }
+        }
+        "show" | "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: netsettings show <interface>");
+            } else {
+                match netsettings::get_interface(parts[1]) {
+                    Ok(i) => {
+                        shell_println!("Interface: {} ({})", i.display_name, i.name);
+                        shell_println!("Type:      {:?}", i.iface_type);
+                        shell_println!("State:     {:?}", i.link_state);
+                        shell_println!("MAC:       {}", i.mac_address);
+                        shell_println!("MTU:       {}", i.mtu);
+                        shell_println!("Speed:     {} Mbps", i.speed_mbps);
+                        shell_println!("\nIPv4:");
+                        shell_println!("  Method:  {:?}", i.ipv4.method);
+                        shell_println!("  Address: {}", i.ipv4.address);
+                        shell_println!("  Netmask: {}", i.ipv4.netmask);
+                        shell_println!("  Gateway: {}", i.ipv4.gateway);
+                        shell_println!("\nIPv6:");
+                        shell_println!("  Method:  {:?}", i.ipv6.method);
+                        shell_println!("  Address: {}", i.ipv6.address);
+                        shell_println!("  Prefix:  /{}", i.ipv6.prefix_len);
+                        shell_println!("  Privacy: {}", i.ipv6.privacy_extensions);
+                        shell_println!("\nDNS:");
+                        shell_println!("  Auto:    {}", i.dns.auto_dns);
+                        if !i.dns.servers.is_empty() {
+                            shell_println!("  Servers: {}", i.dns.servers.join(", "));
+                        }
+                        if !i.dns.doh_url.is_empty() {
+                            shell_println!("  DoH:     {}", i.dns.doh_url);
+                        }
+                        if !i.connected_ssid.is_empty() {
+                            shell_println!("\nWi-Fi:     {}", i.connected_ssid);
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: netsettings add <name> <type> <mac>");
+                shell_println!("Types: ethernet, wifi, loopback, virtual, vpn");
+            } else {
+                let it = match parts[2] {
+                    "ethernet" | "eth" => Some(netsettings::InterfaceType::Ethernet),
+                    "wifi" | "wlan" => Some(netsettings::InterfaceType::Wifi),
+                    "loopback" | "lo" => Some(netsettings::InterfaceType::Loopback),
+                    "virtual" | "virt" => Some(netsettings::InterfaceType::Virtual),
+                    "vpn" => Some(netsettings::InterfaceType::Vpn),
+                    _ => { shell_println!("Unknown type: {}", parts[2]); None }
+                };
+                if let Some(it) = it {
+                    let mac = if parts.len() > 3 { parts[3] } else { "00:00:00:00:00:00" };
+                    match netsettings::add_interface(parts[1], parts[1], it, mac) {
+                        Ok(()) => shell_println!("Added: {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            }
+        }
+        "remove" | "rm" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: netsettings remove <interface>");
+            } else {
+                match netsettings::remove_interface(parts[1]) {
+                    Ok(()) => shell_println!("Removed: {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "up" => {
+            if parts.len() < 2 { shell_println!("Usage: netsettings up <interface>"); }
+            else { match netsettings::set_link_state(parts[1], netsettings::LinkState::Up) {
+                Ok(()) => shell_println!("{} up", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }}
+        }
+        "down" => {
+            if parts.len() < 2 { shell_println!("Usage: netsettings down <interface>"); }
+            else { match netsettings::set_link_state(parts[1], netsettings::LinkState::Down) {
+                Ok(()) => shell_println!("{} down", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }}
+        }
+        "ipv4" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: netsettings ipv4 <iface> <auto|manual> <addr> [mask] [gw]");
+            } else {
+                let method = match parts[2] {
+                    "auto" | "dhcp" => netsettings::IpMethod::Auto,
+                    "manual" | "static" => netsettings::IpMethod::Manual,
+                    "off" | "disabled" => netsettings::IpMethod::Disabled,
+                    _ => { shell_println!("Method: auto, manual, off"); return; }
+                };
+                let addr = parts.get(3).copied().unwrap_or("");
+                let mask = parts.get(4).copied().unwrap_or("255.255.255.0");
+                let gw = parts.get(5).copied().unwrap_or("");
+                match netsettings::set_ipv4(parts[1], method, addr, mask, gw) {
+                    Ok(()) => shell_println!("IPv4 set for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "ipv6" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: netsettings ipv6 <iface> <auto|manual|off> [addr] [prefix] [gw]");
+            } else {
+                let method = match parts[2] {
+                    "auto" | "slaac" => netsettings::IpMethod::Auto,
+                    "manual" | "static" => netsettings::IpMethod::Manual,
+                    "off" | "disabled" => netsettings::IpMethod::Disabled,
+                    _ => { shell_println!("Method: auto, manual, off"); return; }
+                };
+                let addr = parts.get(3).copied().unwrap_or("");
+                let prefix: u8 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(64);
+                let gw = parts.get(5).copied().unwrap_or("");
+                match netsettings::set_ipv6(parts[1], method, addr, prefix, gw) {
+                    Ok(()) => shell_println!("IPv6 set for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "dns" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: netsettings dns <iface> <auto|server1,server2,...>");
+            } else {
+                if parts[2] == "auto" {
+                    match netsettings::set_dns(parts[1], true, &[]) {
+                        Ok(()) => shell_println!("DNS set to auto for {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    let servers: Vec<&str> = parts[2].split(',').collect();
+                    match netsettings::set_dns(parts[1], false, &servers) {
+                        Ok(()) => shell_println!("DNS servers set for {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            }
+        }
+        "doh" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: netsettings doh <iface> <url|off>");
+            } else {
+                let url = if parts[2] == "off" { "" } else { parts[2] };
+                match netsettings::set_doh(parts[1], url) {
+                    Ok(()) => shell_println!("DoH set for {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "mtu" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: netsettings mtu <iface> <value>");
+            } else {
+                match parts[2].parse::<u32>() {
+                    Ok(v) => match netsettings::set_mtu(parts[1], v) {
+                        Ok(()) => shell_println!("MTU set to {} for {}", v, parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    },
+                    Err(_) => shell_println!("Invalid MTU"),
+                }
+            }
+        }
+        "scan" | "wifi" => {
+            let nets = netsettings::wifi_scan();
+            if nets.is_empty() {
+                shell_println!("No Wi-Fi networks found");
+            } else {
+                shell_println!("{:<24} {:<6} {:<14} {:<6} {:<4} {}", "SSID", "Signal", "Security", "Band", "Ch", "Saved");
+                for n in &nets {
+                    let band = match n.band {
+                        netsettings::WifiBand::Band2g => "2.4G",
+                        netsettings::WifiBand::Band5g => "5G",
+                        netsettings::WifiBand::Band6g => "6G",
+                    };
+                    shell_println!("{:<24} {:<6} {:<14} {:<6} {:<4} {}",
+                        n.ssid, n.signal, alloc::format!("{:?}", n.security),
+                        band, n.channel, if n.saved { "yes" } else { "" });
+                }
+            }
+        }
+        "connect" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: netsettings connect <iface> <ssid> [password]");
+            } else {
+                let pass = parts.get(3).copied().unwrap_or("");
+                match netsettings::connect_wifi(parts[1], parts[2], pass) {
+                    Ok(()) => shell_println!("Connected to {}", parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "disconnect" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: netsettings disconnect <iface>");
+            } else {
+                match netsettings::disconnect_wifi(parts[1]) {
+                    Ok(()) => shell_println!("Disconnected"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "saved" => {
+            let nets = netsettings::saved_networks();
+            if nets.is_empty() {
+                shell_println!("No saved networks");
+            } else {
+                shell_println!("{:<24} {:<14} {:<10} {}", "SSID", "Security", "Auto", "Priority");
+                for n in &nets {
+                    shell_println!("{:<24} {:<14} {:<10} {}",
+                        n.ssid, alloc::format!("{:?}", n.security),
+                        if n.auto_connect { "yes" } else { "no" }, n.priority);
+                }
+            }
+        }
+        "forget" => {
+            if parts.len() < 2 { shell_println!("Usage: netsettings forget <ssid>"); }
+            else { match netsettings::forget_network(parts[1]) {
+                Ok(()) => shell_println!("Forgot: {}", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }}
+        }
+        "router" | "gateway" => {
+            let ri = netsettings::router_info();
+            shell_println!("Gateway:     {} {}", ri.gateway_ip, if ri.reachable { "(reachable)" } else { "(unreachable)" });
+            if !ri.model.is_empty() { shell_println!("Model:       {}", ri.model); }
+            if !ri.external_ipv4.is_empty() { shell_println!("External v4: {}", ri.external_ipv4); }
+            if !ri.external_ipv6.is_empty() { shell_println!("External v6: {}", ri.external_ipv6); }
+        }
+        "hostname" => {
+            if parts.len() < 2 {
+                shell_println!("Hostname: {}", netsettings::hostname());
+            } else {
+                netsettings::set_hostname(parts[1]);
+                shell_println!("Hostname set to {}", parts[1]);
+            }
+        }
+        "init" => {
+            netsettings::init_defaults();
+            shell_println!("Initialised network settings defaults");
+        }
+        "stats" => {
+            let (ifaces, connected, saved, ops) = netsettings::stats();
+            shell_println!("Interfaces:  {} ({} connected)", ifaces, connected);
+            shell_println!("Saved WiFi:  {}", saved);
+            shell_println!("Operations:  {}", ops);
+        }
+        "test" => {
+            match netsettings::self_test() {
+                Ok(()) => shell_println!("netsettings: all tests passed"),
+                Err(e) => shell_println!("netsettings: test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("netsettings — comprehensive network configuration");
+            shell_println!("Usage: netsettings <subcommand>");
+            shell_println!("  list              List interfaces");
+            shell_println!("  show <iface>      Show interface details");
+            shell_println!("  add <name> <type> <mac>  Add interface");
+            shell_println!("  remove <name>     Remove interface");
+            shell_println!("  up/down <iface>   Set link state");
+            shell_println!("  ipv4 <iface> <method> <addr> [mask] [gw]");
+            shell_println!("  ipv6 <iface> <method> [addr] [prefix] [gw]");
+            shell_println!("  dns <iface> <auto|servers>  Set DNS");
+            shell_println!("  doh <iface> <url|off>  Set DNS-over-HTTPS");
+            shell_println!("  mtu <iface> <val> Set MTU");
+            shell_println!("  scan              Scan Wi-Fi networks");
+            shell_println!("  connect <iface> <ssid> [pass]  Connect WiFi");
+            shell_println!("  disconnect <iface>  Disconnect WiFi");
+            shell_println!("  saved             List saved networks");
+            shell_println!("  forget <ssid>     Forget saved network");
+            shell_println!("  router            Show gateway/router info");
+            shell_println!("  hostname [name]   Get/set hostname");
+            shell_println!("  init              Load defaults");
+            shell_println!("  stats             Show statistics");
+            shell_println!("  test              Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -31810,7 +32115,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

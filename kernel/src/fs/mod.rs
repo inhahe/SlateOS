@@ -108,6 +108,7 @@ pub mod mime;
 pub mod mmtune;
 pub mod mount_ns;
 pub mod netindicator;
+pub mod netsettings;
 pub mod notifcenter;
 pub mod notify;
 pub mod openwith;

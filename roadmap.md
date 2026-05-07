@@ -1065,15 +1065,21 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] Self-tests: memtype accounting, compaction subsystem, VMA management
 
 ### 5.5 Container support
-- [-] Namespace primitives (PID, network, mount, user)
+- [x] Namespace primitives (PID, network, mount, user)
   - [x] PID namespace: hierarchical PID isolation (max 64 namespaces)
     - [x] Per-namespace PID number space (local PIDs from 1, monotonic)
     - [x] Bidirectional PID translation (global ↔ local)
     - [x] Visibility hierarchy: parent sees children, not vice versa
     - [x] Init process tracking (PID 1, exit triggers cleanup signal)
     - [x] 18 self-tests: lifecycle, alloc/free, translation, visibility, init, separate spaces
-  - [ ] Network namespace: separate routing tables, interface assignments
-  - [ ] Mount namespace: separate mount point trees
+  - [x] Network namespace: per-container network isolation
+    - [x] Independent interface config (IP, subnet, gateway, DNS) per namespace
+    - [x] Per-namespace routing table with longest-prefix-match + metric tie-breaking
+    - [x] Process attach/detach tracking
+    - [x] kshell `netns` command: list/create/delete/ifconfig/route/stats/up/down/test
+    - [x] 18 self-tests: lifecycle, routing, isolation, metric, table full
+    - [ ] Integration with net/ module globals (ARP, firewall, sockets) — net zone task
+  - [x] Mount namespace: separate mount point trees (implemented as fs::mount_ns)
   - [x] User namespace: UID/GID remapping for rootless containers
     - [x] IdMapping ranges (up to 16 per namespace) translate inner ↔ outer IDs
     - [x] Hierarchical namespace tree with parent/child tracking

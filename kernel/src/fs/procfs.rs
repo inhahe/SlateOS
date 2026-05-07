@@ -140,6 +140,7 @@ const ROOT_FILES: &[&str] = &[
     "readdir_plus",
     "freeze",
     "sealing",
+    "recent",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2427,6 +2428,41 @@ fn gen_sealing() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_recent() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (recorded, queried, evicted, excluded, count, enabled) = super::recent::stats();
+
+    out.push_str("Recent Files Tracking\n");
+    out.push_str("=====================\n\n");
+    out.push_str(&format!("Status:          {}\n", if enabled { "enabled" } else { "disabled" }));
+    out.push_str(&format!("Tracked entries: {}/{}\n", count, 1024));
+    out.push_str(&format!("Recorded:        {}\n", recorded));
+    out.push_str(&format!("Queried:         {}\n", queried));
+    out.push_str(&format!("Evicted:         {}\n", evicted));
+    out.push_str(&format!("Excluded:        {}\n\n", excluded));
+
+    let retention_ns = super::recent::get_retention_ns();
+    let retention_days = retention_ns / (24 * 60 * 60 * 1_000_000_000);
+    out.push_str(&format!("Retention:       {} days\n\n", retention_days));
+
+    let entries = super::recent::most_recent(20);
+    if entries.is_empty() {
+        out.push_str("No recent files.\n");
+    } else {
+        out.push_str(&format!("{:40} {:8} {:>5} {}\n", "PATH", "TYPE", "COUNT", "SOURCE"));
+        for e in &entries {
+            out.push_str(&format!(
+                "{:40} {:8} {:>5} {}\n",
+                e.path, e.access_type.label(), e.access_count, e.source,
+            ));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2508,6 +2544,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "readdir_plus" => Ok(gen_readdir_plus()),
         "freeze" => Ok(gen_freeze()),
         "sealing" => Ok(gen_sealing()),
+        "recent" => Ok(gen_recent()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -1479,6 +1479,11 @@ extern "C" fn kmain() -> ! {
     // Step 22k6: Kernel trace buffer self-test.
     ktrace::self_test();
 
+    // Step 22k7: EEVDF scheduler self-test.
+    if let Err(e) = sched::eevdf::self_test() {
+        serial_println!("EEVDF self-test FAILED: {:?}", e);
+    }
+
     // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();
 

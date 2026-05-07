@@ -69,7 +69,7 @@ impl StolenTasks {
 
     /// Push a stolen task.  Silently drops if full (saturates at MAX_STEAL).
     #[inline]
-    fn push(&mut self, id: TaskId, priority: u8) {
+    pub(crate) fn push(&mut self, id: TaskId, priority: u8) {
         if self.len < MAX_STEAL {
             self.data[self.len] = (id, priority);
             self.len += 1;

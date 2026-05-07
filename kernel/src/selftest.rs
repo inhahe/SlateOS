@@ -216,6 +216,12 @@ fn all_suites() -> Vec<TestSuite> {
         category: "sched",
     });
     suites.push(TestSuite {
+        name: "eevdf",
+        description: "EEVDF scheduler algorithm (vruntime, deadlines, fairness)",
+        run: || { crate::sched::eevdf::self_test().is_ok() },
+        category: "sched",
+    });
+    suites.push(TestSuite {
         name: "cet",
         description: "Intel CET (shadow stacks + IBT) detection",
         run: || { crate::cet::self_test(); true },

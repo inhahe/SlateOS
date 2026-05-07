@@ -812,7 +812,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] AC97 legacy audio driver: Intel ICH family (8 device IDs), dual-BAR PIO (NAM mixer + NABM bus master), cold reset, codec config, BDL ring buffer DMA playback, variable rate audio
 - [x] Audio mixing (per-app volume control)
   - [x] Software mixer: 8 concurrent streams, per-stream volume/mute, master volume/mute, 48kHz/S16/stereo, 32-bit intermediate summing with i16 clamping, ring buffers (16KB/stream), kshell `mixer` command
-- [ ] System notification sounds
+- [x] System notification sounds
+  - [x] 7 event types (Error/Warning/Success/Notification/Critical/BootComplete/Shutdown), procedural PCM generation (sweeps, fades, multi-tone sequences), mixer integration with PC speaker fallback, separate notification volume
 - [ ] Sound history (which apps played/are playing sound)
 
 ### 3.7 File type associations

@@ -379,19 +379,21 @@ pub fn self_test() {
 
         let s = stats();
         let delta = s.total_samples.saturating_sub(baseline.total_samples);
-        assert_eq!(delta, 5, "expected exactly 5 manually-recorded samples");
-        // Kernel text: 3 new.
+        // APs may contribute extra samples between baseline and final check,
+        // so we assert >= rather than ==.  Our 5 must be present.
+        assert!(delta >= 5, "expected at least 5 manually-recorded samples, got {}", delta);
+        // Kernel text: at least 3 new (APs in kernel text can add more).
         let kt_delta = s.bucket_counts[AddrClass::KernelText as usize]
             .saturating_sub(baseline.bucket_counts[AddrClass::KernelText as usize]);
-        assert_eq!(kt_delta, 3);
-        // User code: 1 new.
+        assert!(kt_delta >= 3, "expected at least 3 kernel_text samples, got {}", kt_delta);
+        // User code: exactly 1 new (APs don't run in userspace during boot).
         let uc_delta = s.bucket_counts[AddrClass::UserCode as usize]
             .saturating_sub(baseline.bucket_counts[AddrClass::UserCode as usize]);
         assert_eq!(uc_delta, 1);
-        // HHDM: 1 new.
+        // HHDM: at least 1 new (APs with HHDM addresses can add more).
         let hh_delta = s.bucket_counts[AddrClass::Hhdm as usize]
             .saturating_sub(baseline.bucket_counts[AddrClass::Hhdm as usize]);
-        assert_eq!(hh_delta, 1);
+        assert!(hh_delta >= 1, "expected at least 1 hhdm sample, got {}", hh_delta);
 
         // Disable while still in no-interrupt context so no spurious
         // samples can arrive before we inspect the ring buffer.

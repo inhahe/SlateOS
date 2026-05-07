@@ -75,6 +75,7 @@ pub mod handle;
 pub mod health;
 pub mod hotkeys;
 pub mod history;
+pub mod ime;
 pub mod immutable;
 pub mod index;
 pub mod intercept;

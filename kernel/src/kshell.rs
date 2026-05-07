@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4785,6 +4785,7 @@ fn dispatch(line: &str) {
         "keylayout" | "kbl" => cmd_keylayout(args),
         "screenshot" | "scap" => cmd_screenshot(args),
         "a11y" | "accessibility" => cmd_a11y(args),
+        "ime" => cmd_ime(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -19916,6 +19917,33 @@ fn cmd_a11y(args: &str) {
     }
 }
 
+/// `ime` — input method editor (multilingual text input, emoji).
+fn cmd_ime(args: &str) {
+    use crate::fs::ime;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "register" | "reg" => { let id = parts.get(1).copied().unwrap_or(""); let name = parts.get(2).copied().unwrap_or("Method"); let lang = parts.get(3).copied().unwrap_or("en"); let ind = parts.get(4).copied().unwrap_or("?"); let compose = parts.get(5).copied() != Some("false"); if id.is_empty() { shell_println!("Usage: ime reg <id> [name] [lang] [indicator] [compose]"); } else { match ime::register_method(id, name, lang, ind, compose) { Ok(()) => shell_println!("Registered '{}' ({} [{}])", id, name, lang), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "unregister" | "unreg" => { let id = parts.get(1).copied().unwrap_or(""); match ime::unregister_method(id) { Ok(()) => shell_println!("Unregistered '{}'", id), Err(e) => shell_println!("Error: {:?}", e), } }
+        "list" | "ls" => { let methods = ime::list_methods(); if methods.is_empty() { shell_println!("No input methods"); } else { let active = ime::active(); for m in &methods { shell_println!("{}{}: {} ({}) [{}]{}", if m.id == active {"*"} else {" "}, m.id, m.name, m.language, m.indicator, if m.builtin {" built-in"} else {""}); } } }
+        "use" | "activate" => { let id = parts.get(1).copied().unwrap_or(""); match ime::set_active(id) { Ok(()) => shell_println!("Active: {} [{}]", if id.is_empty() {"(none)"} else {id}, ime::active_indicator()), Err(e) => shell_println!("Error: {:?}", e), } }
+        "active" => { shell_println!("Active: {} [{}]", { let a = ime::active(); if a.is_empty() { String::from("(none)") } else { a } }, ime::active_indicator()); }
+        "cycle" => { let next = ime::cycle_next(); shell_println!("Switched to: {} [{}]", if next.is_empty() {"(none)"} else {&next}, ime::active_indicator()); }
+        "type" | "key" => { for ch in parts.get(1).copied().unwrap_or("").chars() { match ime::process_key(ch) { ime::ImeResult::Consumed => shell_println!("  '{}' → consumed", ch), ime::ImeResult::Commit(t) => shell_println!("  '{}' → commit '{}'", ch, t), ime::ImeResult::PassThrough => shell_println!("  '{}' → passthrough", ch), ime::ImeResult::Cancelled => shell_println!("  '{}' → cancelled", ch), } } }
+        "commit" => { let idx = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0); match ime::commit_candidate(idx) { Ok(t) => shell_println!("Committed: {}", t), Err(e) => shell_println!("Error: {:?}", e), } }
+        "cancel" => { ime::cancel_composition(); shell_println!("Composition cancelled"); }
+        "comp" | "composition" => { let c = ime::composition(); if c.active { shell_println!("Buffer: '{}' ({} candidates, selected={})", c.buffer, c.candidates.len(), c.selected); for (i, cand) in c.candidates.iter().enumerate() { shell_println!("  [{}]{} {}", i, if i == c.selected {" *"} else {""}, cand); } } else { shell_println!("No active composition"); } }
+        "emoji" => { let query = if parts.len() > 1 { parts[1..].join(" ") } else { String::new() }; if query.is_empty() { let recent = ime::recent_emoji(); if recent.is_empty() { shell_println!("No recent emoji"); } else { shell_println!("Recent: {}", recent.join(" ")); } } else { let results = ime::search_emoji(&query); if results.is_empty() { shell_println!("No emoji found for '{}'", query); } else { for e in &results { shell_println!("  {} {} ({})", e.emoji, e.name, e.category); } } } }
+        "pick" => { let emoji = parts.get(1).copied().unwrap_or(""); if emoji.is_empty() { shell_println!("Usage: ime pick <emoji>"); } else { ime::select_emoji(emoji); shell_println!("Selected: {}", emoji); } }
+        "picker" => { match parts.get(1).copied().unwrap_or("") { "open" => { ime::set_emoji_picker(true); shell_println!("Emoji picker: open"); } "close" => { ime::set_emoji_picker(false); shell_println!("Emoji picker: closed"); } _ => { shell_println!("Emoji picker: {}", if ime::emoji_picker_open() {"open"} else {"closed"}); } } }
+        "init" => { match ime::init_defaults() { Ok(()) => shell_println!("IME defaults initialized"), Err(e) => shell_println!("Error: {:?}", e), } }
+        "test" => { match ime::self_test() { Ok(()) => shell_println!("All IME tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (mc, ec, cc, kc) = ime::stats(); shell_println!("Methods:{} Emoji:{} Commits:{} Keys:{}", mc, ec, cc, kc); }
+        "reset" => { ime::clear_all(); ime::reset_stats(); shell_println!("IME reset"); }
+        _ => { shell_println!("ime: register/unregister/list/use/active/cycle/type/commit/cancel/comp/emoji/pick/picker/init/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27445,7 +27473,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -181,6 +181,7 @@ const ROOT_FILES: &[&str] = &[
     "keylayout",
     "screenshot",
     "a11y",
+    "ime",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3511,6 +3512,39 @@ fn gen_a11y() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_ime() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (mc, ec, cc, kc) = super::ime::stats();
+
+    out.push_str("Input Methods\n");
+    out.push_str("=============\n\n");
+    out.push_str(&format!("Methods:  {}\n", mc));
+    out.push_str(&format!("Emoji:    {}\n", ec));
+    out.push_str(&format!("Commits:  {}\n", cc));
+    out.push_str(&format!("Keys:     {}\n", kc));
+    out.push_str(&format!("Active:   {} [{}]\n\n",
+        { let a = super::ime::active(); if a.is_empty() { String::from("(none)") } else { a } },
+        super::ime::active_indicator()));
+
+    let methods = super::ime::list_methods();
+    for m in &methods {
+        out.push_str(&format!("{}{}: {} ({}){}\n",
+            if m.id == super::ime::active() { "*" } else { " " },
+            m.id, m.name, m.language,
+            if m.builtin { " [built-in]" } else { "" }));
+    }
+
+    let comp = super::ime::composition();
+    if comp.active {
+        out.push_str(&format!("\nComposing: '{}' ({} candidates)\n",
+            comp.buffer, comp.candidates.len()));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3857,6 +3891,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "keylayout" => Ok(gen_keylayout()),
         "screenshot" => Ok(gen_screenshot()),
         "a11y" => Ok(gen_a11y()),
+        "ime" => Ok(gen_ime()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

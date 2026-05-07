@@ -57,6 +57,7 @@ mod ahci;
 mod boot;
 mod cap;
 mod cet;
+mod compositor;
 mod console;
 mod cpu;
 mod cpu_hotplug;

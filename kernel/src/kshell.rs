@@ -4679,6 +4679,7 @@ fn cmd_help() {
     crate::console_println!("  net       Show network interface info");
     crate::console_println!("  mouse     Show PS/2 mouse status and recent events");
     crate::console_println!("  gfx [sub] Framebuffer graphics (demo/cursor/clear)");
+    crate::console_println!("  desktop   Launch graphical desktop compositor demo");
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
     crate::console_println!("  ping IP   Send ICMP echo requests (ping)");
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
@@ -13407,6 +13408,10 @@ fn cmd_mouse() {
     }
 }
 
+fn cmd_desktop() {
+    crate::compositor::demo();
+}
+
 fn cmd_gfx(args: &str) {
     if !crate::fb::is_initialized() {
         crate::console_println!("Framebuffer graphics: not initialized");
@@ -16673,7 +16678,7 @@ fn is_builtin(name: &str) -> bool {
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mouse" | "gfx" | "dhcp" | "ping" | "dns" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mouse" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

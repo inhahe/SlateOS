@@ -166,6 +166,7 @@ const ROOT_FILES: &[&str] = &[
     "notifcenter",
     "appregistry",
     "systray",
+    "taskbar",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2988,6 +2989,59 @@ fn gen_systray() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_taskbar() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (pinned_n, running_n, window_n, pin_ops, win_ops) = super::taskbar::stats();
+    let cfg = super::taskbar::config();
+
+    out.push_str("Taskbar\n");
+    out.push_str("=======\n\n");
+    out.push_str(&format!("Pinned:     {}/{}\n", pinned_n, 64));
+    out.push_str(&format!("Running:    {}/{}\n", running_n, 256));
+    out.push_str(&format!("Windows:    {}\n", window_n));
+    out.push_str(&format!("Pin ops:    {}\n", pin_ops));
+    out.push_str(&format!("Window ops: {}\n\n", win_ops));
+
+    let pos = match cfg.position {
+        super::taskbar::TaskbarPosition::Bottom => "bottom",
+        super::taskbar::TaskbarPosition::Top => "top",
+        super::taskbar::TaskbarPosition::Left => "left",
+        super::taskbar::TaskbarPosition::Right => "right",
+    };
+    out.push_str(&format!("Position:   {}\n", pos));
+    out.push_str(&format!("Names:      {}\n", if cfg.show_names { "yes" } else { "no" }));
+    out.push_str(&format!("Grouping:   {}\n", if cfg.group_windows { "yes" } else { "no" }));
+    out.push_str(&format!("Auto-hide:  {}\n", if cfg.auto_hide { "yes" } else { "no" }));
+    out.push_str(&format!("Small icons:{}\n\n", if cfg.small_icons { " yes" } else { " no" }));
+
+    let pinned = super::taskbar::pinned_apps();
+    if !pinned.is_empty() {
+        out.push_str("Pinned:\n");
+        for p in &pinned {
+            out.push_str(&format!("  [{}] {} ({})\n", p.position, p.name, p.app_id));
+        }
+        out.push_str("\n");
+    }
+
+    let running = super::taskbar::running_apps();
+    if !running.is_empty() {
+        out.push_str("Running:\n");
+        for e in &running {
+            let state = match e.state {
+                super::taskbar::EntryState::Normal => "",
+                super::taskbar::EntryState::Attention => " [!]",
+                super::taskbar::EntryState::NotResponding => " [NR]",
+                super::taskbar::EntryState::Loading => " [...]",
+            };
+            out.push_str(&format!("  {} ({} windows){}\n", e.name, e.windows.len(), state));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3319,6 +3373,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "notifcenter" => Ok(gen_notifcenter()),
         "appregistry" => Ok(gen_appregistry()),
         "systray" => Ok(gen_systray()),
+        "taskbar" => Ok(gen_taskbar()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

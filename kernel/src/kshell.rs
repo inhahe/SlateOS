@@ -3082,8 +3082,8 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray",
+    "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
+    "systray", "tray", "taskbar",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4302,6 +4302,7 @@ fn dispatch(line: &str) {
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
+        "ansi" | "termtest" => cmd_ansi_test(),
         "uptime" => cmd_uptime(),
         "dmesg" => cmd_dmesg(args),
         "echo" => cmd_echo(args),
@@ -4407,6 +4408,7 @@ fn dispatch(line: &str) {
         "notifcenter" | "notif" => cmd_notifcenter(args),
         "appregistry" | "appreg" => cmd_appregistry(args),
         "systray" | "tray" => cmd_systray(args),
+        "taskbar" => cmd_taskbar(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -5653,6 +5655,60 @@ fn cmd_ps() {
 
 fn cmd_clear() {
     crate::console::clear();
+}
+
+/// Demonstrate VT100/xterm ANSI escape sequence capabilities.
+///
+/// Shows: colors, attributes (bold/dim/underline/reverse/strikethrough),
+/// 256-color palette, cursor movement, scroll region, and insert/delete
+/// operations.
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_ansi_test() {
+    // Header
+    shell_println!("\x1b[1;37m=== ANSI/VT100 Terminal Test ===\x1b[0m\n");
+
+    // 1. Standard 16 colors (foreground)
+    shell_print!("Standard colors:  ");
+    for i in 0u8..8 {
+        let code = 30 + i;
+        shell_print!("\x1b[{}m\u{2588}\u{2588}\x1b[0m", code);
+    }
+    shell_println!();
+    shell_print!("Bright colors:    ");
+    for i in 0u8..8 {
+        let code = 90 + i;
+        shell_print!("\x1b[{}m\u{2588}\u{2588}\x1b[0m", code);
+    }
+    shell_println!("\n");
+
+    // 2. Text attributes
+    shell_println!("Attributes:");
+    shell_println!("  \x1b[1mBold text\x1b[0m        \x1b[2mDim text\x1b[0m         \x1b[4mUnderline\x1b[0m");
+    shell_println!("  \x1b[7mReverse video\x1b[0m    \x1b[9mStrikethrough\x1b[0m    \x1b[1;4;32mBold+UL+Green\x1b[0m");
+    shell_println!();
+
+    // 3. 256-color palette sample (first 32 of the 6x6×6 cube)
+    shell_print!("256-color cube:   ");
+    for i in 16u16..48 {
+        shell_print!("\x1b[38;5;{}m#\x1b[0m", i);
+    }
+    shell_println!();
+    shell_print!("Grayscale ramp:   ");
+    for i in 232u16..256 {
+        shell_print!("\x1b[38;5;{}m-\x1b[0m", i);
+    }
+    shell_println!("\n");
+
+    // 4. Cursor movement demo
+    shell_println!("Cursor movement test:");
+    shell_print!("  [  ] Save/restore");
+    // Save cursor, move right, print, restore
+    shell_print!("\x1b[s");                    // Save position
+    shell_print!("\x1b[4D\x1b[32mOK\x1b[0m"); // Move left 4, print OK in green
+    shell_print!("\x1b[u");                    // Restore position
+    shell_println!(" <- saved/restored position");
+
+    shell_println!("\n\x1b[1;37m=== Test Complete ===\x1b[0m");
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -17573,6 +17629,259 @@ fn cmd_appregistry(args: &str) {
     }
 }
 
+/// `taskbar` — taskbar management: pinned apps, running windows, configuration.
+fn cmd_taskbar(args: &str) {
+    use crate::fs::taskbar;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "pin" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let name = parts.get(2).copied().unwrap_or("");
+            if app_id.is_empty() || name.is_empty() {
+                shell_println!("Usage: taskbar pin <app-id> <name> [icon]");
+                return;
+            }
+            let icon = parts.get(3).copied().unwrap_or("icon-default");
+            match taskbar::pin(app_id, name, icon) {
+                Ok(()) => shell_println!("Pinned: {} ({})", name, app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unpin" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            if app_id.is_empty() {
+                shell_println!("Usage: taskbar unpin <app-id>");
+                return;
+            }
+            match taskbar::unpin(app_id) {
+                Ok(()) => shell_println!("Unpinned: {}", app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reorder" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let pos = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            if app_id.is_empty() || pos.is_none() {
+                shell_println!("Usage: taskbar reorder <app-id> <position>");
+                return;
+            }
+            match taskbar::reorder_pinned(app_id, pos.unwrap_or(0)) {
+                Ok(()) => shell_println!("Reordered: {}", app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pinned" => {
+            let pins = taskbar::pinned_apps();
+            if pins.is_empty() {
+                shell_println!("No pinned apps");
+            } else {
+                shell_println!("{} pinned apps:", pins.len());
+                for p in &pins {
+                    shell_println!("  [{}] {} ({})", p.position, p.name, p.app_id);
+                }
+            }
+        }
+        "addwin" | "window" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let win_id = parts.get(2).and_then(|s| s.parse::<u64>().ok());
+            let title = parts.get(3).copied().unwrap_or("Untitled");
+            if app_id.is_empty() || win_id.is_none() {
+                shell_println!("Usage: taskbar addwin <app-id> <window-id> [title] [name] [icon]");
+                return;
+            }
+            let name = parts.get(4).copied().unwrap_or(app_id);
+            let icon = parts.get(5).copied().unwrap_or("icon-default");
+            match taskbar::add_window(app_id, name, icon, win_id.unwrap_or(0), title) {
+                Ok(()) => shell_println!("Added window {} to {}", win_id.unwrap_or(0), app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmwin" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let win_id = parts.get(2).and_then(|s| s.parse::<u64>().ok());
+            if app_id.is_empty() || win_id.is_none() {
+                shell_println!("Usage: taskbar rmwin <app-id> <window-id>");
+                return;
+            }
+            match taskbar::remove_window(app_id, win_id.unwrap_or(0)) {
+                Ok(()) => shell_println!("Removed window {}", win_id.unwrap_or(0)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "running" | "list" | "" => {
+            let running = taskbar::running_apps();
+            let pins = taskbar::pinned_apps();
+            if pins.is_empty() && running.is_empty() {
+                shell_println!("Taskbar is empty");
+            } else {
+                if !pins.is_empty() {
+                    shell_println!("Pinned ({}):", pins.len());
+                    for p in &pins {
+                        let is_running = taskbar::get_running(&p.app_id).is_some();
+                        let mark = if is_running { " *" } else { "" };
+                        shell_println!("  [{}] {}{}", p.position, p.name, mark);
+                    }
+                }
+                if !running.is_empty() {
+                    shell_println!("Running ({}):", running.len());
+                    for e in &running {
+                        let state = match e.state {
+                            taskbar::EntryState::Normal => "",
+                            taskbar::EntryState::Attention => " [!]",
+                            taskbar::EntryState::NotResponding => " [NR]",
+                            taskbar::EntryState::Loading => " [...]",
+                        };
+                        let badge = e.badge.as_deref().unwrap_or("");
+                        let badge_str = if badge.is_empty() {
+                            String::new()
+                        } else {
+                            alloc::format!(" ({})", badge)
+                        };
+                        shell_println!("  {}{}{} — {} windows", e.name, state, badge_str, e.windows.len());
+                        for w in &e.windows {
+                            let active = if w.active { " *" } else { "" };
+                            let min = if w.minimized { " [min]" } else { "" };
+                            shell_println!("    #{}: {}{}{}", w.window_id, w.title, active, min);
+                        }
+                    }
+                }
+            }
+        }
+        "progress" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let val = parts.get(2).copied().unwrap_or("");
+            if app_id.is_empty() || val.is_empty() {
+                shell_println!("Usage: taskbar progress <app-id> <none|pulse|0-100|pause:N|error:N>");
+                return;
+            }
+            let ps = if val == "none" {
+                taskbar::ProgressState::None
+            } else if val == "pulse" {
+                taskbar::ProgressState::Indeterminate
+            } else if let Some(rest) = val.strip_prefix("pause:") {
+                taskbar::ProgressState::Paused(rest.parse::<u8>().unwrap_or(0))
+            } else if let Some(rest) = val.strip_prefix("error:") {
+                taskbar::ProgressState::Error(rest.parse::<u8>().unwrap_or(0))
+            } else {
+                taskbar::ProgressState::Normal(val.parse::<u8>().unwrap_or(0))
+            };
+            match taskbar::set_progress(app_id, ps) {
+                Ok(()) => shell_println!("Progress set for {}", app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "badge" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let badge = parts.get(2).copied();
+            if app_id.is_empty() {
+                shell_println!("Usage: taskbar badge <app-id> [text]  (omit to clear)");
+                return;
+            }
+            match taskbar::set_badge(app_id, badge) {
+                Ok(()) => shell_println!("Badge set for {}", app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "attention" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            if app_id.is_empty() {
+                shell_println!("Usage: taskbar attention <app-id>");
+                return;
+            }
+            match taskbar::request_attention(app_id) {
+                Ok(()) => shell_println!("Attention requested for {}", app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "config" | "cfg" => {
+            let key = parts.get(1).copied().unwrap_or("");
+            let val = parts.get(2).copied().unwrap_or("");
+            if key.is_empty() {
+                let cfg = taskbar::config();
+                let pos = match cfg.position {
+                    taskbar::TaskbarPosition::Bottom => "bottom",
+                    taskbar::TaskbarPosition::Top => "top",
+                    taskbar::TaskbarPosition::Left => "left",
+                    taskbar::TaskbarPosition::Right => "right",
+                };
+                shell_println!("Position:    {}", pos);
+                shell_println!("Show names:  {}", if cfg.show_names { "yes" } else { "no" });
+                shell_println!("Grouping:    {}", if cfg.group_windows { "yes" } else { "no" });
+                shell_println!("Auto-hide:   {}", if cfg.auto_hide { "yes" } else { "no" });
+                shell_println!("Small icons: {}", if cfg.small_icons { "yes" } else { "no" });
+                return;
+            }
+            match key {
+                "position" | "pos" => {
+                    let p = match val {
+                        "bottom" => taskbar::TaskbarPosition::Bottom,
+                        "top" => taskbar::TaskbarPosition::Top,
+                        "left" => taskbar::TaskbarPosition::Left,
+                        "right" => taskbar::TaskbarPosition::Right,
+                        _ => { shell_println!("Unknown position: {}", val); return; }
+                    };
+                    taskbar::set_position(p);
+                    shell_println!("Position: {}", val);
+                }
+                "names" => {
+                    taskbar::set_show_names(val == "on" || val == "yes" || val == "true");
+                    shell_println!("Show names: {}", val);
+                }
+                "group" | "grouping" => {
+                    taskbar::set_grouping(val == "on" || val == "yes" || val == "true");
+                    shell_println!("Grouping: {}", val);
+                }
+                "autohide" | "auto-hide" => {
+                    taskbar::set_auto_hide(val == "on" || val == "yes" || val == "true");
+                    shell_println!("Auto-hide: {}", val);
+                }
+                "small" | "small-icons" => {
+                    taskbar::set_small_icons(val == "on" || val == "yes" || val == "true");
+                    shell_println!("Small icons: {}", val);
+                }
+                _ => shell_println!("Unknown config key: {}", key),
+            }
+        }
+        "test" => {
+            match taskbar::self_test() {
+                Ok(()) => shell_println!("All taskbar self-tests passed"),
+                Err(e) => shell_println!("Taskbar self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (pinned_n, running_n, window_n, pin_ops, win_ops) = taskbar::stats();
+            shell_println!("Pinned:     {}", pinned_n);
+            shell_println!("Running:    {}", running_n);
+            shell_println!("Windows:    {}", window_n);
+            shell_println!("Pin ops:    {}", pin_ops);
+            shell_println!("Window ops: {}", win_ops);
+        }
+        "reset" => {
+            taskbar::clear_all();
+            taskbar::reset_stats();
+            shell_println!("Taskbar cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: taskbar <subcommand>");
+            shell_println!("  pin <id> <name> [icon]                Pin app to taskbar");
+            shell_println!("  unpin <id>                            Unpin app");
+            shell_println!("  reorder <id> <pos>                    Reorder pinned app");
+            shell_println!("  pinned                                List pinned apps");
+            shell_println!("  addwin <id> <winid> [title] [n] [i]   Add window");
+            shell_println!("  rmwin <id> <winid>                    Remove window");
+            shell_println!("  list                                  Show full taskbar");
+            shell_println!("  progress <id> <none|pulse|0-100>      Set progress");
+            shell_println!("  badge <id> [text]                     Set/clear badge");
+            shell_println!("  attention <id>                        Flash for attention");
+            shell_println!("  config [key] [val]                    Get/set config");
+            shell_println!("  test                                  Run self-tests");
+            shell_println!("  stats                                 Show statistics");
+            shell_println!("  reset                                 Clear all");
+        }
+    }
+}
+
 /// `systray` / `tray` — system tray icon management.
 fn cmd_systray(args: &str) {
     use crate::fs::systray;
@@ -24312,7 +24621,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

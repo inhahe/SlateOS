@@ -116,6 +116,7 @@ pub mod sysfs;
 pub mod systray;
 pub mod tags;
 pub mod tar;
+pub mod taskbar;
 pub mod templates;
 pub mod toolbar;
 pub mod thumbcache;

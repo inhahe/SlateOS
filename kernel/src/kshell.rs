@@ -3083,6 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
+    "systray", "tray",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4405,6 +4406,7 @@ fn dispatch(line: &str) {
         "rundialog" | "rund" => cmd_rundialog(args),
         "notifcenter" | "notif" => cmd_notifcenter(args),
         "appregistry" | "appreg" => cmd_appregistry(args),
+        "systray" | "tray" => cmd_systray(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -17571,6 +17573,276 @@ fn cmd_appregistry(args: &str) {
     }
 }
 
+/// `systray` / `tray` — system tray icon management.
+fn cmd_systray(args: &str) {
+    use crate::fs::systray;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "add" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            let app_id = parts.get(2).copied().unwrap_or("");
+            let tooltip = parts.get(3).copied().unwrap_or("");
+            if id.is_empty() || app_id.is_empty() {
+                shell_println!("Usage: tray add <icon-id> <app-id> [tooltip] [icon]");
+                return;
+            }
+            let icon_name = parts.get(4).copied().unwrap_or("icon-default");
+            let now = crate::timekeeping::clock_monotonic();
+            match systray::add_icon(systray::TrayIcon {
+                id: String::from(id),
+                app_id: String::from(app_id),
+                tooltip: String::from(if tooltip.is_empty() { id } else { tooltip }),
+                icon: String::from(icon_name),
+                badge: None,
+                click_action: systray::ClickAction::ToggleWindow,
+                menu_items: Vec::new(),
+                visibility: systray::IconVisibility::Visible,
+                order: 0,
+                window_visible: true,
+                added_ns: now,
+            }) {
+                Ok(()) => shell_println!("Added tray icon: {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() {
+                shell_println!("Usage: tray remove <icon-id>");
+                return;
+            }
+            match systray::remove_icon(id) {
+                Ok(()) => shell_println!("Removed: {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" | "info" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() {
+                shell_println!("Usage: tray get <icon-id>");
+                return;
+            }
+            match systray::get_icon(id) {
+                Some(icon) => {
+                    shell_println!("ID:       {}", icon.id);
+                    shell_println!("App:      {}", icon.app_id);
+                    shell_println!("Tooltip:  {}", icon.tooltip);
+                    shell_println!("Icon:     {}", icon.icon);
+                    shell_println!("Badge:    {}", icon.badge.as_deref().unwrap_or("(none)"));
+                    let vis = match icon.visibility {
+                        systray::IconVisibility::Visible => "visible",
+                        systray::IconVisibility::Overflow => "overflow",
+                        systray::IconVisibility::Hidden => "hidden",
+                    };
+                    shell_println!("Visible:  {}", vis);
+                    shell_println!("Order:    {}", icon.order);
+                    let action = match icon.click_action {
+                        systray::ClickAction::ShowWindow => "show-window",
+                        systray::ClickAction::ToggleWindow => "toggle-window",
+                        systray::ClickAction::ContextMenu => "context-menu",
+                        systray::ClickAction::Custom => "custom",
+                    };
+                    shell_println!("Click:    {}", action);
+                    shell_println!("Window:   {}", if icon.window_visible { "visible" } else { "hidden" });
+                    if !icon.menu_items.is_empty() {
+                        shell_println!("Menu ({} items):", icon.menu_items.len());
+                        for item in &icon.menu_items {
+                            if item.separator {
+                                shell_println!("  --------");
+                            } else {
+                                let check = if item.checked { "[x]" } else { "[ ]" };
+                                let en = if item.enabled { "" } else { " (disabled)" };
+                                shell_println!("  {} {}{}", check, item.label, en);
+                            }
+                        }
+                    }
+                }
+                None => shell_println!("Icon not found: {}", id),
+            }
+        }
+        "list" | "" => {
+            let visible = systray::visible_icons();
+            let overflow = systray::overflow_icons();
+            if visible.is_empty() && overflow.is_empty() {
+                shell_println!("No tray icons");
+            } else {
+                if !visible.is_empty() {
+                    shell_println!("Visible ({}):", visible.len());
+                    for icon in &visible {
+                        let badge = icon.badge.as_deref().unwrap_or("");
+                        let badge_str = if badge.is_empty() {
+                            String::new()
+                        } else {
+                            alloc::format!(" [{}]", badge)
+                        };
+                        shell_println!("  {:20} {}{}", icon.id, icon.tooltip, badge_str);
+                    }
+                }
+                if !overflow.is_empty() {
+                    shell_println!("Overflow ({}):", overflow.len());
+                    for icon in &overflow {
+                        shell_println!("  {:20} {}", icon.id, icon.tooltip);
+                    }
+                }
+            }
+        }
+        "badge" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            let badge = parts.get(2).copied();
+            if id.is_empty() {
+                shell_println!("Usage: tray badge <icon-id> [text]  (omit text to clear)");
+                return;
+            }
+            match systray::set_badge(id, badge) {
+                Ok(()) => {
+                    let msg = badge.unwrap_or("(cleared)");
+                    shell_println!("Badge set: {} → {}", id, msg);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "tooltip" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            let text = parts.get(2).copied().unwrap_or("");
+            if id.is_empty() || text.is_empty() {
+                shell_println!("Usage: tray tooltip <icon-id> <text>");
+                return;
+            }
+            match systray::set_tooltip(id, text) {
+                Ok(()) => shell_println!("Tooltip set: {} → {}", id, text),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "visibility" | "vis" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            let vis_str = parts.get(2).copied().unwrap_or("");
+            if id.is_empty() || vis_str.is_empty() {
+                shell_println!("Usage: tray vis <icon-id> <visible|overflow|hidden>");
+                return;
+            }
+            let vis = match vis_str {
+                "visible" | "show" => systray::IconVisibility::Visible,
+                "overflow" | "over" => systray::IconVisibility::Overflow,
+                "hidden" | "hide" => systray::IconVisibility::Hidden,
+                _ => { shell_println!("Unknown visibility: {}", vis_str); return; }
+            };
+            match systray::set_visibility(id, vis) {
+                Ok(()) => shell_println!("Visibility set: {} → {}", id, vis_str),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "override" | "ov" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let ov_str = parts.get(2).copied().unwrap_or("");
+            if app_id.is_empty() {
+                // List overrides.
+                let overrides = systray::list_overrides();
+                if overrides.is_empty() {
+                    shell_println!("No overrides set");
+                } else {
+                    shell_println!("{} overrides:", overrides.len());
+                    for (aid, ov) in &overrides {
+                        let s = match ov {
+                            systray::TrayOverride::Default => "default",
+                            systray::TrayOverride::AlwaysStartInTray => "always-tray",
+                            systray::TrayOverride::AlwaysStartInTaskbar => "always-taskbar",
+                            systray::TrayOverride::NoTrayIcon => "no-tray",
+                            systray::TrayOverride::TrayOnly => "tray-only",
+                        };
+                        shell_println!("  {:30} {}", aid, s);
+                    }
+                }
+                return;
+            }
+            if ov_str.is_empty() {
+                // Show current override for this app.
+                let ov = systray::get_override(app_id);
+                let s = match ov {
+                    systray::TrayOverride::Default => "default",
+                    systray::TrayOverride::AlwaysStartInTray => "always-tray",
+                    systray::TrayOverride::AlwaysStartInTaskbar => "always-taskbar",
+                    systray::TrayOverride::NoTrayIcon => "no-tray",
+                    systray::TrayOverride::TrayOnly => "tray-only",
+                };
+                shell_println!("{}: {}", app_id, s);
+                return;
+            }
+            let ov = match ov_str {
+                "default" | "none" => systray::TrayOverride::Default,
+                "always-tray" | "tray" => systray::TrayOverride::AlwaysStartInTray,
+                "always-taskbar" | "taskbar" => systray::TrayOverride::AlwaysStartInTaskbar,
+                "no-tray" | "notray" => systray::TrayOverride::NoTrayIcon,
+                "tray-only" | "trayonly" => systray::TrayOverride::TrayOnly,
+                _ => { shell_println!("Unknown override: {}", ov_str); return; }
+            };
+            match systray::set_override(app_id, ov) {
+                Ok(()) => shell_println!("Override set: {} → {}", app_id, ov_str),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "click" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            let click_type = parts.get(2).copied().unwrap_or("primary");
+            if id.is_empty() {
+                shell_println!("Usage: tray click <icon-id> [primary|secondary|double|middle]");
+                return;
+            }
+            let ct = match click_type {
+                "secondary" | "right" => systray::ClickType::Secondary,
+                "double" | "dbl" => systray::ClickType::Double,
+                "middle" | "mid" => systray::ClickType::Middle,
+                _ => systray::ClickType::Primary,
+            };
+            match systray::handle_click(id, ct) {
+                Ok(action) => {
+                    let a = match action {
+                        systray::ClickAction::ShowWindow => "show-window",
+                        systray::ClickAction::ToggleWindow => "toggle-window",
+                        systray::ClickAction::ContextMenu => "context-menu",
+                        systray::ClickAction::Custom => "custom",
+                    };
+                    shell_println!("Click on {}: action = {}", id, a);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "test" => {
+            match systray::self_test() {
+                Ok(()) => shell_println!("All system tray self-tests passed"),
+                Err(e) => shell_println!("System tray self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (icons, overrides, adds, clicks) = systray::stats();
+            shell_println!("Icons:     {}", icons);
+            shell_println!("Overrides: {}", overrides);
+            shell_println!("Add ops:   {}", adds);
+            shell_println!("Click ops: {}", clicks);
+        }
+        "reset" => {
+            systray::clear_all();
+            systray::reset_stats();
+            shell_println!("System tray cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: tray <subcommand>");
+            shell_println!("  add <id> <app-id> [tooltip] [icon]  Add tray icon");
+            shell_println!("  remove <id>                         Remove icon");
+            shell_println!("  get <id>                            Show icon details");
+            shell_println!("  list                                List all icons");
+            shell_println!("  badge <id> [text]                   Set/clear badge");
+            shell_println!("  tooltip <id> <text>                 Update tooltip");
+            shell_println!("  vis <id> <visible|overflow|hidden>  Change visibility");
+            shell_println!("  override [app] [type]               Get/set app override");
+            shell_println!("  click <id> [type]                   Simulate click");
+            shell_println!("  test                                Run self-tests");
+            shell_println!("  stats                               Show statistics");
+            shell_println!("  reset                               Clear all data and stats");
+        }
+    }
+}
+
 /// `fflags` — immutable / append-only / file protection flags.
 fn cmd_fflags(args: &str) {
     use crate::fs::immutable;
@@ -24040,7 +24312,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

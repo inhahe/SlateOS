@@ -165,6 +165,7 @@ const ROOT_FILES: &[&str] = &[
     "rundialog",
     "notifcenter",
     "appregistry",
+    "systray",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2946,6 +2947,47 @@ fn gen_appregistry() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_systray() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (icon_count, override_count, add_ops, click_ops) = super::systray::stats();
+
+    out.push_str("System Tray\n");
+    out.push_str("===========\n\n");
+    out.push_str(&format!("Icons:     {}/{}\n", icon_count, 128));
+    out.push_str(&format!("Overrides: {}/{}\n", override_count, 256));
+    out.push_str(&format!("Add ops:   {}\n", add_ops));
+    out.push_str(&format!("Click ops: {}\n\n", click_ops));
+
+    let visible = super::systray::visible_icons();
+    if !visible.is_empty() {
+        out.push_str(&format!("{:20} {:20} {:8} {}\n", "ID", "TOOLTIP", "ORDER", "BADGE"));
+        for icon in &visible {
+            let badge = icon.badge.as_deref().unwrap_or("-");
+            out.push_str(&format!("{:20} {:20} {:8} {}\n",
+                icon.id, icon.tooltip, icon.order, badge));
+        }
+    }
+
+    let overrides = super::systray::list_overrides();
+    if !overrides.is_empty() {
+        out.push_str("\nOverrides:\n");
+        for (app_id, ov) in &overrides {
+            let ov_str = match ov {
+                super::systray::TrayOverride::Default => "default",
+                super::systray::TrayOverride::AlwaysStartInTray => "always-tray",
+                super::systray::TrayOverride::AlwaysStartInTaskbar => "always-taskbar",
+                super::systray::TrayOverride::NoTrayIcon => "no-tray",
+                super::systray::TrayOverride::TrayOnly => "tray-only",
+            };
+            out.push_str(&format!("  {:30} {}\n", app_id, ov_str));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3276,6 +3318,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "rundialog" => Ok(gen_rundialog()),
         "notifcenter" => Ok(gen_notifcenter()),
         "appregistry" => Ok(gen_appregistry()),
+        "systray" => Ok(gen_systray()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

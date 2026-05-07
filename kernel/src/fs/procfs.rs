@@ -162,6 +162,7 @@ const ROOT_FILES: &[&str] = &[
     "queryable",
     "immutable",
     "fcomment",
+    "rundialog",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2854,6 +2855,43 @@ fn gen_fcomment() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_rundialog() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (recent_count, alias_count, cache_count, bookmark_count, runs, completions) =
+        super::rundialog::stats();
+
+    out.push_str("Run Dialog (Ctrl+R)\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Recent:      {}/{}\n", recent_count, 256));
+    out.push_str(&format!("Aliases:     {}/{}\n", alias_count, 512));
+    out.push_str(&format!("PATH cache:  {}\n", cache_count));
+    out.push_str(&format!("Bookmarks:   {}/{}\n", bookmark_count, 64));
+    out.push_str(&format!("Run ops:     {}\n", runs));
+    out.push_str(&format!("Completions: {}\n\n", completions));
+
+    let recent = super::rundialog::recent(10);
+    if !recent.is_empty() {
+        out.push_str("Recent commands:\n");
+        for cmd in &recent {
+            out.push_str(&format!("  {} (x{}) → {}\n",
+                cmd.command, cmd.run_count, cmd.resolved_path));
+        }
+        out.push('\n');
+    }
+
+    let aliases = super::rundialog::list_aliases();
+    if !aliases.is_empty() {
+        out.push_str("Aliases:\n");
+        for (name, target) in &aliases {
+            out.push_str(&format!("  {} → {}\n", name, target));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3181,6 +3219,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "queryable" => Ok(gen_queryable()),
         "immutable" => Ok(gen_immutable()),
         "fcomment" => Ok(gen_fcomment()),
+        "rundialog" => Ok(gen_rundialog()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

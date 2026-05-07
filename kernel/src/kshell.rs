@@ -3095,7 +3095,7 @@ const COMMANDS: &[&str] = &[
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "fcomment", "fflags",
-    "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
+    "rmdir", "run", "rundialog", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "template", "test",
@@ -4402,6 +4402,7 @@ fn dispatch(line: &str) {
         "toolbar" => cmd_toolbar(args),
         "queryable" | "qattr" => cmd_queryable(args),
         "fcomment" => cmd_fcomment(args),
+        "rundialog" | "rund" => cmd_rundialog(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -16956,6 +16957,217 @@ fn cmd_fcomment(args: &str) {
     }
 }
 
+/// `rundialog` / `rund` — run dialog backend.
+fn cmd_rundialog(args: &str) {
+    use crate::fs::rundialog;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "run" => {
+            let cmd_text = if parts.len() > 1 {
+                parts[1..].join(" ")
+            } else {
+                shell_println!("Usage: rundialog run <command>");
+                return;
+            };
+            match rundialog::resolve(&cmd_text) {
+                Ok(result) => {
+                    let src = match result.source {
+                        rundialog::CompletionSource::Recent => "recent",
+                        rundialog::CompletionSource::Path => "PATH",
+                        rundialog::CompletionSource::Alias => "alias",
+                        rundialog::CompletionSource::Bookmark => "bookmark",
+                    };
+                    shell_println!("Resolved: {} (via {})", result.path, src);
+                    if !result.args.is_empty() {
+                        shell_println!("Args: {:?}", result.args);
+                    }
+                    rundialog::record(&cmd_text, &result.path);
+                    shell_println!("Recorded in history");
+                }
+                Err(e) => shell_println!("Could not resolve '{}': {:?}", cmd_text, e),
+            }
+        }
+        "complete" | "comp" => {
+            let prefix = parts.get(1).copied().unwrap_or("");
+            let comps = rundialog::completions(prefix);
+            if comps.is_empty() {
+                shell_println!("No completions for '{}'", prefix);
+            } else {
+                shell_println!("{} completions:", comps.len());
+                for c in &comps {
+                    let src = match c.source {
+                        rundialog::CompletionSource::Recent => "recent",
+                        rundialog::CompletionSource::Path => "PATH",
+                        rundialog::CompletionSource::Alias => "alias",
+                        rundialog::CompletionSource::Bookmark => "bookmark",
+                    };
+                    shell_println!("  {:20} [{:8}] {}", c.text, src, c.description);
+                }
+            }
+        }
+        "recent" => {
+            let limit = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+            let recent = rundialog::recent(limit);
+            if recent.is_empty() {
+                shell_println!("No recent commands");
+            } else {
+                shell_println!("{} recent commands:", recent.len());
+                for cmd in &recent {
+                    shell_println!("  {:30} x{:<4} {}", cmd.command, cmd.run_count, cmd.resolved_path);
+                }
+            }
+        }
+        "alias" => {
+            let alias_sub = parts.get(1).copied().unwrap_or("list");
+            match alias_sub {
+                "add" => {
+                    let name = parts.get(2).copied().unwrap_or("");
+                    let path = parts.get(3).copied().unwrap_or("");
+                    if name.is_empty() || path.is_empty() {
+                        shell_println!("Usage: rundialog alias add <name> <path>");
+                        return;
+                    }
+                    match rundialog::register_alias(name, path) {
+                        Ok(()) => shell_println!("Alias '{}' → '{}'", name, path),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" => {
+                    let name = parts.get(2).copied().unwrap_or("");
+                    if name.is_empty() {
+                        shell_println!("Usage: rundialog alias rm <name>");
+                        return;
+                    }
+                    match rundialog::remove_alias(name) {
+                        Ok(()) => shell_println!("Alias '{}' removed", name),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "list" | "" => {
+                    let aliases = rundialog::list_aliases();
+                    if aliases.is_empty() {
+                        shell_println!("No aliases");
+                    } else {
+                        shell_println!("{} aliases:", aliases.len());
+                        for (name, target) in &aliases {
+                            shell_println!("  {:20} → {}", name, target);
+                        }
+                    }
+                }
+                _ => shell_println!("Usage: rundialog alias <add|rm|list>"),
+            }
+        }
+        "bookmark" | "bm" => {
+            let bm_sub = parts.get(1).copied().unwrap_or("list");
+            match bm_sub {
+                "add" => {
+                    let cmd_text = if parts.len() > 2 {
+                        parts[2..].join(" ")
+                    } else {
+                        shell_println!("Usage: rundialog bookmark add <command>");
+                        return;
+                    };
+                    match rundialog::add_bookmark(&cmd_text) {
+                        Ok(()) => shell_println!("Bookmarked: {}", cmd_text),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" => {
+                    let cmd_text = if parts.len() > 2 {
+                        parts[2..].join(" ")
+                    } else {
+                        shell_println!("Usage: rundialog bookmark rm <command>");
+                        return;
+                    };
+                    match rundialog::remove_bookmark(&cmd_text) {
+                        Ok(()) => shell_println!("Bookmark removed"),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "list" | "" => {
+                    let bm = rundialog::list_bookmarks();
+                    if bm.is_empty() {
+                        shell_println!("No bookmarks");
+                    } else {
+                        shell_println!("{} bookmarks:", bm.len());
+                        for cmd in &bm {
+                            shell_println!("  {}", cmd);
+                        }
+                    }
+                }
+                _ => shell_println!("Usage: rundialog bookmark <add|rm|list>"),
+            }
+        }
+        "path" => {
+            let path_sub = parts.get(1).copied().unwrap_or("show");
+            match path_sub {
+                "show" | "" => {
+                    let dirs = rundialog::get_path();
+                    if dirs.is_empty() {
+                        shell_println!("No PATH directories set");
+                    } else {
+                        shell_println!("PATH ({} dirs):", dirs.len());
+                        for d in &dirs {
+                            shell_println!("  {}", d);
+                        }
+                    }
+                }
+                "refresh" => {
+                    match rundialog::refresh_path_cache() {
+                        Ok(n) => shell_println!("Found {} executables in PATH", n),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "clear" => {
+                    rundialog::clear_path_cache();
+                    shell_println!("PATH cache cleared");
+                }
+                _ => shell_println!("Usage: rundialog path <show|refresh|clear>"),
+            }
+        }
+        "init" => {
+            match rundialog::init_defaults() {
+                Ok(()) => shell_println!("Run dialog defaults initialized"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "test" => {
+            match rundialog::self_test() {
+                Ok(()) => shell_println!("All run dialog self-tests passed"),
+                Err(e) => shell_println!("Run dialog self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (recent, aliases, cache, bookmarks, runs, completions) = rundialog::stats();
+            shell_println!("Recent:      {}", recent);
+            shell_println!("Aliases:     {}", aliases);
+            shell_println!("PATH cache:  {}", cache);
+            shell_println!("Bookmarks:   {}", bookmarks);
+            shell_println!("Run ops:     {}", runs);
+            shell_println!("Completions: {}", completions);
+        }
+        "reset" => {
+            rundialog::clear_all();
+            rundialog::reset_stats();
+            shell_println!("Run dialog cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: rundialog <subcommand>");
+            shell_println!("  run <command>          Resolve and record command");
+            shell_println!("  complete [prefix]      Get completions");
+            shell_println!("  recent [limit]         Show recent commands");
+            shell_println!("  alias add|rm|list      Manage aliases");
+            shell_println!("  bookmark add|rm|list   Manage bookmarks");
+            shell_println!("  path show|refresh|clear  Manage PATH");
+            shell_println!("  init                   Initialize defaults");
+            shell_println!("  test                   Run self-tests");
+            shell_println!("  stats                  Show statistics");
+            shell_println!("  reset                  Clear all data and stats");
+        }
+    }
+}
+
 /// `fflags` — immutable / append-only / file protection flags.
 fn cmd_fflags(args: &str) {
     use crate::fs::immutable;
@@ -23425,7 +23637,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

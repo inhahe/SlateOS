@@ -144,6 +144,7 @@ const ROOT_FILES: &[&str] = &[
     "fileinfo",
     "fswalk",
     "findex",
+    "thumbcache",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2538,6 +2539,28 @@ fn gen_findex() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_thumbcache() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (hits, misses, stores, evicts, count, mem) = super::thumbcache::stats();
+    let hit_rate = if hits + misses > 0 {
+        (hits * 100) / (hits + misses)
+    } else {
+        0
+    };
+
+    out.push_str("Thumbnail Cache\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Cached:     {}/{}\n", count, 2048));
+    out.push_str(&format!("Memory:     {} / {} bytes\n", mem, 16 * 1024 * 1024));
+    out.push_str(&format!("Hit rate:   {}% ({} hits, {} misses)\n", hit_rate, hits, misses));
+    out.push_str(&format!("Stores:     {}\n", stores));
+    out.push_str(&format!("Evictions:  {}\n", evicts));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2623,6 +2646,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fileinfo" => Ok(gen_fileinfo()),
         "fswalk" => Ok(gen_fswalk()),
         "findex" => Ok(gen_findex()),
+        "thumbcache" => Ok(gen_thumbcache()),
         _ => Err(KernelError::NotFound),
     }
 }

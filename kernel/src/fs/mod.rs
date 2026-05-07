@@ -94,6 +94,7 @@ pub mod symlink_security;
 pub mod sysfs;
 pub mod tags;
 pub mod tar;
+pub mod thumbcache;
 pub mod tmpwatch;
 pub mod transaction;
 pub mod trash;

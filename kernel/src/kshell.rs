@@ -3097,8 +3097,8 @@ const COMMANDS: &[&str] = &[
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
-    "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
-    "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
+    "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "test",
+    "then", "thumbcache", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "ulimit",
     "overlay",
     "mkfifo", "lspipe", "pipes",
@@ -4374,6 +4374,7 @@ fn dispatch(line: &str) {
         "fileinfo" | "finfo" => cmd_fileinfo(args),
         "fswalk" | "walk" => cmd_fswalk(args),
         "findex" => cmd_findex(args),
+        "thumbcache" | "tcache" => cmd_thumbcache(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14887,6 +14888,62 @@ fn cmd_findex(args: &str) {
     }
 }
 
+fn cmd_thumbcache(args: &str) {
+    use crate::fs::thumbcache::{self, ThumbSize};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "show" | "" => {
+            let entries = thumbcache::list();
+            if entries.is_empty() {
+                shell_println!("Thumbnail cache is empty.");
+            } else {
+                shell_println!("{:40} {:8} {:>5}x{:<5} {:>8}", "PATH", "SIZE", "W", "H", "BYTES");
+                shell_println!("{}", "-".repeat(75));
+                for (path, size, w, h, bytes) in &entries {
+                    shell_println!("{:40} {:8} {:>5}x{:<5} {:>8}", path, size.label(), w, h, bytes);
+                }
+                shell_println!("\n{} entries, {} bytes used.", entries.len(), thumbcache::memory_used());
+            }
+        }
+        "invalidate" | "inv" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: thumbcache invalidate <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let removed = thumbcache::invalidate(&path);
+            shell_println!("Invalidated {} entries for: {}", removed, path);
+        }
+        "clear" => {
+            thumbcache::clear();
+            shell_println!("Thumbnail cache cleared.");
+        }
+        "stats" => {
+            let (hits, misses, stores, evicts, count, mem) = thumbcache::stats();
+            let hit_rate = if hits + misses > 0 { (hits * 100) / (hits + misses) } else { 0 };
+            shell_println!("Thumbnail Cache Statistics");
+            shell_println!("  Cached:    {}/2048", count);
+            shell_println!("  Memory:    {} / {} bytes", mem, 16 * 1024 * 1024);
+            shell_println!("  Hit rate:  {}% ({} hits, {} misses)", hit_rate, hits, misses);
+            shell_println!("  Stores:    {}", stores);
+            shell_println!("  Evictions: {}", evicts);
+        }
+        "reset" => {
+            thumbcache::reset_stats();
+            shell_println!("Thumbnail cache statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: thumbcache <command>");
+            shell_println!("  list|show                    List cached thumbnails (default)");
+            shell_println!("  invalidate <path>            Invalidate cache for file");
+            shell_println!("  clear                        Clear entire cache");
+            shell_println!("  stats                        Show statistics");
+            shell_println!("  reset                        Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -20360,7 +20417,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

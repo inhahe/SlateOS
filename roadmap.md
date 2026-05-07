@@ -800,8 +800,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 ### 3.6 Audio
 - [-] Audio driver framework
   - [x] Intel HDA controller driver: PCI detection (14 device IDs + class fallback), MMIO BAR0, controller reset, CORB/RIRB command ring setup (256 entries), codec discovery via STATESTS, codec topology probe (AFG walk, DAC/pin node identification), output stream configuration (BDL, 48kHz/16-bit/stereo format), amp unmute, start/stop playback, 440 Hz test tone generator, kshell `audio`/`hda` command
+  - [x] PC speaker driver (PIT channel 2): tone(freq)/off()/beep(freq, dur) API, startup chime, self-test
+  - [x] Virtio-sound driver: PCI probe (legacy 0x1058 + modern 0x1059), legacy I/O transport, 4 virtqueues (control/event/TX/RX), PCM stream info query, set_params/prepare/start/stop/release lifecycle, 440 Hz test tone playback (48kHz/S16/stereo), kshell `audio` integration with fallback chain (virtio→HDA→pcspk)
   - [ ] AC97 legacy audio driver (for older hardware)
-  - [ ] virtio-sound driver (for modern VMs)
 - [ ] Audio mixing (per-app volume control)
 - [ ] System notification sounds
 - [ ] Sound history (which apps played/are playing sound)

@@ -163,6 +163,7 @@ const ROOT_FILES: &[&str] = &[
     "immutable",
     "fcomment",
     "rundialog",
+    "notifcenter",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2892,6 +2893,32 @@ fn gen_rundialog() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_notifcenter() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, unread_n, muted, sends, dismisses) = super::notifcenter::stats();
+
+    out.push_str("Notification Center\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Total:       {}/{}\n", total, 1024));
+    out.push_str(&format!("Unread:      {}\n", unread_n));
+    out.push_str(&format!("Muted apps:  {}\n", muted));
+    out.push_str(&format!("Send ops:    {}\n", sends));
+    out.push_str(&format!("Dismiss ops: {}\n\n", dismisses));
+
+    let summaries = super::notifcenter::app_summaries();
+    if !summaries.is_empty() {
+        out.push_str(&format!("{:20} {:6} {:6} {:6}\n", "APP", "TOTAL", "UNREAD", "MUTED"));
+        for s in &summaries {
+            let muted_s = if s.muted { "yes" } else { "no" };
+            out.push_str(&format!("{:20} {:6} {:6} {:6}\n", s.app, s.total, s.unread, muted_s));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3220,6 +3247,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "immutable" => Ok(gen_immutable()),
         "fcomment" => Ok(gen_fcomment()),
         "rundialog" => Ok(gen_rundialog()),
+        "notifcenter" => Ok(gen_notifcenter()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

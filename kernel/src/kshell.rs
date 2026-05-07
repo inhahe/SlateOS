@@ -3091,7 +3091,7 @@ const COMMANDS: &[&str] = &[
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
-    "move", "net", "nl", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
+    "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "fcomment", "fflags",
@@ -4403,6 +4403,7 @@ fn dispatch(line: &str) {
         "queryable" | "qattr" => cmd_queryable(args),
         "fcomment" => cmd_fcomment(args),
         "rundialog" | "rund" => cmd_rundialog(args),
+        "notifcenter" | "notif" => cmd_notifcenter(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -17168,6 +17169,184 @@ fn cmd_rundialog(args: &str) {
     }
 }
 
+/// `notifcenter` / `notif` — desktop notification center.
+fn cmd_notifcenter(args: &str) {
+    use crate::fs::notifcenter;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "send" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let title = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || title.is_empty() {
+                shell_println!("Usage: notif send <app> <title> [body] [category] [priority]");
+                shell_println!("  categories: info, warning, error, success, progress");
+                shell_println!("  priorities: low, normal, high, critical");
+                return;
+            }
+            let body = parts.get(3).copied().unwrap_or("");
+            let cat = match parts.get(4).copied().unwrap_or("info") {
+                "warning" | "warn" => notifcenter::Category::Warning,
+                "error" | "err" => notifcenter::Category::Error,
+                "success" | "ok" => notifcenter::Category::Success,
+                "progress" | "prog" => notifcenter::Category::Progress,
+                _ => notifcenter::Category::Info,
+            };
+            let pri = match parts.get(5).copied().unwrap_or("normal") {
+                "low" => notifcenter::Priority::Low,
+                "high" => notifcenter::Priority::High,
+                "critical" | "crit" => notifcenter::Priority::Critical,
+                _ => notifcenter::Priority::Normal,
+            };
+            let (id, show) = notifcenter::send(app, title, body, cat, pri);
+            shell_println!("Notification #{}: {} (toast: {})", id,
+                if show { "shown" } else { "muted" },
+                if show { "yes" } else { "no" });
+        }
+        "list" | "" => {
+            let limit = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+            let notifs = notifcenter::history(limit);
+            if notifs.is_empty() {
+                shell_println!("No notifications");
+            } else {
+                shell_println!("{} notifications:", notifs.len());
+                for n in &notifs {
+                    let read_mark = if n.read { " " } else { "*" };
+                    shell_println!("  {} #{:<4} [{}] [{}] {}: {} — {}",
+                        read_mark, n.id, n.category.label(), n.priority.label(),
+                        n.app, n.title, n.body);
+                }
+            }
+        }
+        "unread" => {
+            let notifs = notifcenter::unread();
+            if notifs.is_empty() {
+                shell_println!("No unread notifications");
+            } else {
+                shell_println!("{} unread:", notifs.len());
+                for n in &notifs {
+                    shell_println!("  #{:<4} [{}] {}: {}", n.id, n.category.label(), n.app, n.title);
+                }
+            }
+        }
+        "dismiss" => {
+            let target = parts.get(1).copied().unwrap_or("");
+            match target {
+                "all" => {
+                    let count = notifcenter::dismiss_all();
+                    shell_println!("Dismissed {} notifications", count);
+                }
+                "" => shell_println!("Usage: notif dismiss <id|all|app-name>"),
+                _ => {
+                    if let Ok(id) = target.parse::<u64>() {
+                        match notifcenter::dismiss(id) {
+                            Ok(()) => shell_println!("Dismissed #{}", id),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        let count = notifcenter::dismiss_app(target);
+                        shell_println!("Dismissed {} notifications from {}", count, target);
+                    }
+                }
+            }
+        }
+        "rm" | "remove" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            match id_str.parse::<u64>() {
+                Ok(id) => match notifcenter::remove(id) {
+                    Ok(()) => shell_println!("Removed #{}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                Err(_) => shell_println!("Usage: notif rm <id>"),
+            }
+        }
+        "mute" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: notif mute <app-name>");
+                return;
+            }
+            match notifcenter::mute_app(app) {
+                Ok(()) => shell_println!("Muted {}", app),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unmute" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: notif unmute <app-name>");
+                return;
+            }
+            match notifcenter::unmute_app(app) {
+                Ok(()) => shell_println!("Unmuted {}", app),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "muted" => {
+            let muted = notifcenter::muted_apps();
+            if muted.is_empty() {
+                shell_println!("No muted apps");
+            } else {
+                shell_println!("{} muted apps:", muted.len());
+                for app in &muted {
+                    shell_println!("  {}", app);
+                }
+            }
+        }
+        "apps" => {
+            let summaries = notifcenter::app_summaries();
+            if summaries.is_empty() {
+                shell_println!("No notifications from any app");
+            } else {
+                shell_println!("{:20} {:6} {:6} {:6}", "APP", "TOTAL", "UNREAD", "MUTED");
+                for s in &summaries {
+                    let m = if s.muted { "yes" } else { "no" };
+                    shell_println!("{:20} {:6} {:6} {:6}", s.app, s.total, s.unread, m);
+                }
+            }
+        }
+        "expire" => {
+            let expired = notifcenter::expire();
+            shell_println!("Expired {} notifications", expired);
+        }
+        "test" => {
+            match notifcenter::self_test() {
+                Ok(()) => shell_println!("All notification center self-tests passed"),
+                Err(e) => shell_println!("Notification center self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, unread_n, muted, sends, dismisses) = notifcenter::stats();
+            shell_println!("Total:       {}", total);
+            shell_println!("Unread:      {}", unread_n);
+            shell_println!("Muted apps:  {}", muted);
+            shell_println!("Send ops:    {}", sends);
+            shell_println!("Dismiss ops: {}", dismisses);
+        }
+        "reset" => {
+            notifcenter::clear_all();
+            notifcenter::reset_stats();
+            shell_println!("Notification center cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: notif <subcommand>");
+            shell_println!("  send <app> <title> [body] [cat] [pri]");
+            shell_println!("  list [limit]            Show notification history");
+            shell_println!("  unread                  Show unread notifications");
+            shell_println!("  dismiss <id|all|app>    Mark as read");
+            shell_println!("  rm <id>                 Remove notification");
+            shell_println!("  mute <app>              Mute app's notifications");
+            shell_println!("  unmute <app>            Unmute app");
+            shell_println!("  muted                   List muted apps");
+            shell_println!("  apps                    Per-app summary");
+            shell_println!("  expire                  Remove expired notifications");
+            shell_println!("  test                    Run self-tests");
+            shell_println!("  stats                   Show statistics");
+            shell_println!("  reset                   Clear all data and stats");
+        }
+    }
+}
+
 /// `fflags` — immutable / append-only / file protection flags.
 fn cmd_fflags(args: &str) {
     use crate::fs::immutable;
@@ -23637,7 +23816,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

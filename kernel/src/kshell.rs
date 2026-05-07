@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4817,6 +4817,7 @@ fn dispatch(line: &str) {
         "wakesensor" | "wsensor" => cmd_wakesensor(args),
         "netsettings" | "netcfg" => cmd_netsettings(args),
         "sysinfo" | "hwinfo" => cmd_sysinfo(args),
+        "perfmon" | "resmon" => cmd_perfmon(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -24511,6 +24512,176 @@ fn cmd_sysinfo(args: &str) {
     }
 }
 
+/// `perfmon` / `resmon` — performance monitor and resource tracking.
+fn cmd_perfmon(args: &str) {
+    use crate::fs::perfmon;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "" | "show" | "latest" => {
+            if let Some(cpu) = perfmon::cpu_latest() {
+                shell_println!("CPU:  {}% (sys {}% user {}%) @ {} MHz",
+                    cpu.usage_pct, cpu.system_pct, cpu.user_pct, cpu.freq_mhz);
+                if cpu.temp_mc > 0 {
+                    shell_println!("Temp: {}.{} °C", cpu.temp_mc / 1000, (cpu.temp_mc % 1000) / 100);
+                }
+                shell_println!("Procs: {} Threads: {}", cpu.process_count, cpu.thread_count);
+            } else {
+                shell_println!("No CPU samples yet");
+            }
+            if let Some(mem) = perfmon::mem_latest() {
+                let used_mb = mem.used_bytes / (1024 * 1024);
+                let avail_mb = mem.available_bytes / (1024 * 1024);
+                shell_println!("RAM:  {} MiB used, {} MiB available", used_mb, avail_mb);
+            }
+            let alerts = perfmon::active_alerts();
+            if !alerts.is_empty() {
+                shell_println!("\n{} active alert(s):", alerts.len());
+                for a in &alerts {
+                    shell_println!("  [{}] {}", a.resource, a.message);
+                }
+            }
+        }
+        "cpu" => {
+            let hist = perfmon::cpu_history();
+            if hist.is_empty() {
+                shell_println!("No CPU samples");
+            } else {
+                let n = hist.len().min(10);
+                shell_println!("Last {} CPU samples:", n);
+                for s in hist.iter().rev().take(n) {
+                    shell_println!("  {}% (sys {}%, user {}%) @ {} MHz, {} procs",
+                        s.usage_pct, s.system_pct, s.user_pct, s.freq_mhz, s.process_count);
+                }
+            }
+        }
+        "mem" | "memory" => {
+            let hist = perfmon::mem_history();
+            if hist.is_empty() {
+                shell_println!("No memory samples");
+            } else {
+                let n = hist.len().min(10);
+                shell_println!("Last {} memory samples:", n);
+                for s in hist.iter().rev().take(n) {
+                    let used_mb = s.used_bytes / (1024 * 1024);
+                    let avail_mb = s.available_bytes / (1024 * 1024);
+                    shell_println!("  {} MiB used, {} MiB avail, swap {} MiB, {} faults",
+                        used_mb, avail_mb, s.swap_used_bytes / (1024 * 1024), s.page_faults);
+                }
+            }
+        }
+        "disk" => {
+            let hist = perfmon::disk_history();
+            if hist.is_empty() {
+                shell_println!("No disk samples");
+            } else {
+                let n = hist.len().min(10);
+                shell_println!("Last {} disk samples:", n);
+                for s in hist.iter().rev().take(n) {
+                    shell_println!("  {} R:{} W:{} IOPS r:{} w:{} busy:{}% q:{}",
+                        s.device, s.read_bytes, s.write_bytes,
+                        s.read_iops, s.write_iops, s.busy_pct, s.queue_depth);
+                }
+            }
+        }
+        "net" | "network" => {
+            let hist = perfmon::net_history();
+            if hist.is_empty() {
+                shell_println!("No network samples");
+            } else {
+                let n = hist.len().min(10);
+                shell_println!("Last {} network samples:", n);
+                for s in hist.iter().rev().take(n) {
+                    shell_println!("  {} rx:{} tx:{} pkts r:{} t:{} err:{}",
+                        s.interface, s.rx_bytes, s.tx_bytes,
+                        s.rx_packets, s.tx_packets, s.errors);
+                }
+            }
+        }
+        "alerts" => {
+            let alerts = perfmon::all_alerts();
+            if alerts.is_empty() {
+                shell_println!("No alerts");
+            } else {
+                for a in &alerts {
+                    let status = if a.dismissed { "dismissed" } else { "active" };
+                    shell_println!("[{}] {} {} ({}% >= {}%) [{}]",
+                        a.id, a.resource, a.message, a.value, a.threshold, status);
+                }
+            }
+        }
+        "dismiss" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: perfmon dismiss <id|all>");
+            } else if parts[1] == "all" {
+                perfmon::dismiss_all_alerts();
+                shell_println!("All alerts dismissed");
+            } else {
+                match parts[1].parse::<u64>() {
+                    Ok(id) => match perfmon::dismiss_alert(id) {
+                        Ok(()) => shell_println!("Alert {} dismissed", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    },
+                    Err(_) => shell_println!("Invalid ID"),
+                }
+            }
+        }
+        "config" => {
+            let cfg = perfmon::get_config();
+            shell_println!("Interval:    {} ms", cfg.sample_interval_ms);
+            shell_println!("Max samples: {}", cfg.max_samples);
+            shell_println!("CPU:         {} (alert > {}%)", if cfg.cpu_enabled { "on" } else { "off" }, cfg.cpu_alert_pct);
+            shell_println!("Memory:      {} (alert > {}%)", if cfg.mem_enabled { "on" } else { "off" }, cfg.mem_alert_pct);
+            shell_println!("Disk:        {} (alert > {}%)", if cfg.disk_enabled { "on" } else { "off" }, cfg.disk_alert_pct);
+            shell_println!("Network:     {}", if cfg.net_enabled { "on" } else { "off" });
+        }
+        "interval" => {
+            if parts.len() < 2 { shell_println!("Usage: perfmon interval <ms>"); }
+            else { match parts[1].parse::<u32>() {
+                Ok(v) => { perfmon::set_interval(v); shell_println!("Interval set to {} ms", v.clamp(100, 60000)); }
+                Err(_) => shell_println!("Invalid value"),
+            }}
+        }
+        "init" => {
+            perfmon::init_defaults();
+            shell_println!("Initialised performance monitor defaults");
+        }
+        "stats" => {
+            let (cpus, mems, disks, nets, alerts, ops) = perfmon::stats();
+            shell_println!("CPU samples:  {}", cpus);
+            shell_println!("Mem samples:  {}", mems);
+            shell_println!("Disk samples: {}", disks);
+            shell_println!("Net samples:  {}", nets);
+            shell_println!("Alerts:       {}", alerts);
+            shell_println!("Operations:   {}", ops);
+        }
+        "test" => {
+            match perfmon::self_test() {
+                Ok(()) => shell_println!("perfmon: all tests passed"),
+                Err(e) => shell_println!("perfmon: test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("perfmon — performance monitor / resource tracker");
+            shell_println!("Usage: perfmon <subcommand>");
+            shell_println!("  (no args)         Show latest readings");
+            shell_println!("  cpu               CPU history");
+            shell_println!("  mem               Memory history");
+            shell_println!("  disk              Disk I/O history");
+            shell_println!("  net               Network history");
+            shell_println!("  alerts            Show all alerts");
+            shell_println!("  dismiss <id|all>  Dismiss alert(s)");
+            shell_println!("  config            Show configuration");
+            shell_println!("  interval <ms>     Set sample interval");
+            shell_println!("  init              Load defaults");
+            shell_println!("  stats             Show statistics");
+            shell_println!("  test              Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -32289,7 +32460,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

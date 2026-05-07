@@ -116,6 +116,7 @@ pub mod osreset;
 pub mod overlay;
 pub mod partmgr;
 pub mod pathbar;
+pub mod perfmon;
 pub mod pipe;
 pub mod procfs;
 pub mod policy;

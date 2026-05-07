@@ -213,6 +213,7 @@ const ROOT_FILES: &[&str] = &[
     "wakesensor",
     "netsettings",
     "sysinfo",
+    "perfmon",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4657,6 +4658,31 @@ fn gen_sysinfo() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_perfmon() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (cpu_n, mem_n, disk_n, net_n, alerts_n, ops) = super::perfmon::stats();
+    let cfg = super::perfmon::get_config();
+
+    out.push_str("Performance Monitor\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Interval:    {} ms\n", cfg.sample_interval_ms));
+    out.push_str(&format!("CPU samples: {} ({})\n", cpu_n, if cfg.cpu_enabled { "on" } else { "off" }));
+    out.push_str(&format!("Mem samples: {} ({})\n", mem_n, if cfg.mem_enabled { "on" } else { "off" }));
+    out.push_str(&format!("Disk samples:{} ({})\n", disk_n, if cfg.disk_enabled { "on" } else { "off" }));
+    out.push_str(&format!("Net samples: {} ({})\n", net_n, if cfg.net_enabled { "on" } else { "off" }));
+    out.push_str(&format!("Alerts:      {}\n", alerts_n));
+    out.push_str(&format!("Operations:  {}\n", ops));
+
+    if let Some(cpu) = super::perfmon::cpu_latest() {
+        out.push_str(&format!("\nLatest CPU: {}% ({} MHz, {} procs, {} threads)\n",
+            cpu.usage_pct, cpu.freq_mhz, cpu.process_count, cpu.thread_count));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5035,6 +5061,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "wakesensor" => Ok(gen_wakesensor()),
         "netsettings" => Ok(gen_netsettings()),
         "sysinfo" => Ok(gen_sysinfo()),
+        "perfmon" => Ok(gen_perfmon()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

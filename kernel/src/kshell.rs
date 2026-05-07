@@ -106,7 +106,10 @@ macro_rules! shell_println {
 const MAX_LINE: usize = 256;
 
 /// Maximum number of commands stored in the history ring buffer.
-const HISTORY_SIZE: usize = 64;
+const HISTORY_SIZE: usize = 512;
+
+/// Path where shell history is persisted (in tmpfs/memfs).
+const HISTORY_FILE: &str = "/tmp/.kshell_history";
 
 /// Maximum nesting depth for if/then/else/fi and while/do/done blocks.
 const MAX_NESTING: usize = 16;
@@ -139,6 +142,14 @@ fn last_exit() -> u8 {
 ///
 /// Used to resolve relative paths.  Changed by `cd`.  Starts as "/".
 static CWD: Mutex<String> = Mutex::new(String::new());
+
+/// Shadow copy of shell command history for the `history` command.
+///
+/// Commands are appended here whenever `History::push()` is called,
+/// and cleared when `History::new()` initializes.  This allows the
+/// `cmd_history()` function to list history without needing a reference
+/// to the stack-local `History` struct.
+static SHELL_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Get the current working directory as a new String.
 fn get_cwd() -> String {
@@ -2638,6 +2649,14 @@ impl History {
             self.start = (self.start.wrapping_add(1)) % HISTORY_SIZE;
         }
         self.browse = self.count;
+
+        // Mirror to the global shadow for the `history` command.
+        let mut shadow = SHELL_HISTORY.lock();
+        // Keep shadow in sync: cap at HISTORY_SIZE.
+        if shadow.len() >= HISTORY_SIZE {
+            shadow.remove(0);
+        }
+        shadow.push(String::from(line));
     }
 
     /// Reset the browse position (call at start of each new line).
@@ -2677,6 +2696,108 @@ impl History {
             self.entries.get(abs_idx).map(|s| s.as_str())
         }
     }
+
+    /// Reverse-search for a substring in history starting from the current
+    /// browse position (or from the newest entry if not browsing).
+    /// Returns the matching entry and its browse index, or `None`.
+    fn reverse_search(&self, needle: &str) -> Option<(usize, &str)> {
+        if needle.is_empty() || self.count == 0 {
+            return None;
+        }
+        // Start searching from the most recent entry (browse index 0)
+        // towards the oldest (browse index count-1).
+        for browse_idx in 0..self.count {
+            let abs_idx = (self.start.wrapping_add(
+                self.count.wrapping_sub(1).wrapping_sub(browse_idx),
+            )) % HISTORY_SIZE;
+            if let Some(entry) = self.entries.get(abs_idx) {
+                if !entry.is_empty() && entry.contains(needle) {
+                    return Some((browse_idx, entry.as_str()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Continue a reverse-search from a position *after* `start_browse`.
+    fn reverse_search_from(&self, needle: &str, after_browse: usize) -> Option<(usize, &str)> {
+        if needle.is_empty() || self.count == 0 {
+            return None;
+        }
+        let start = after_browse.saturating_add(1);
+        if start >= self.count {
+            return None;
+        }
+        for browse_idx in start..self.count {
+            let abs_idx = (self.start.wrapping_add(
+                self.count.wrapping_sub(1).wrapping_sub(browse_idx),
+            )) % HISTORY_SIZE;
+            if let Some(entry) = self.entries.get(abs_idx) {
+                if !entry.is_empty() && entry.contains(needle) {
+                    return Some((browse_idx, entry.as_str()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Iterate over entries from newest to oldest.
+    fn iter_newest_first(&self) -> HistoryIter<'_> {
+        HistoryIter { history: self, pos: 0 }
+    }
+
+    /// Save history to a file in the VFS.
+    fn save(&self) {
+        use alloc::string::String;
+        let mut data = String::with_capacity(self.count.saturating_mul(40));
+        for entry in self.iter_newest_first() {
+            data.push_str(entry);
+            data.push('\n');
+        }
+        // Best-effort write; if tmpfs isn't mounted yet, silently skip.
+        let _ = crate::fs::vfs::Vfs::write_file(HISTORY_FILE, data.as_bytes());
+    }
+
+    /// Load history from a file in the VFS.  Entries are ordered newest-first
+    /// in the file, so we push them in reverse order.
+    fn load(&mut self) {
+        let data = match crate::fs::vfs::Vfs::read_file(HISTORY_FILE) {
+            Ok(d) => d,
+            Err(_) => return, // No history file yet — that's fine.
+        };
+        let text = match core::str::from_utf8(&data) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        // Collect lines into a temporary vec so we can push oldest-first.
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        // Push from oldest (last in file) to newest (first in file).
+        for &line in lines.iter().rev() {
+            self.push(line);
+        }
+    }
+}
+
+/// Iterator over history entries, newest first.
+struct HistoryIter<'a> {
+    history: &'a History,
+    pos: usize,
+}
+
+impl<'a> Iterator for HistoryIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.history.count {
+            return None;
+        }
+        let browse_idx = self.pos;
+        self.pos = self.pos.saturating_add(1);
+        let abs_idx = (self.history.start.wrapping_add(
+            self.history.count.wrapping_sub(1).wrapping_sub(browse_idx),
+        )) % HISTORY_SIZE;
+        self.history.entries.get(abs_idx).map(|s| s.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2709,6 +2830,7 @@ pub fn run() -> ! {
 
     let mut line_buf = String::with_capacity(MAX_LINE);
     let mut history = History::new();
+    history.load();
 
     loop {
         // Print prompt: show continuation prompt during multi-line
@@ -2742,6 +2864,8 @@ pub fn run() -> ! {
         // are recallable).  Don't add heredoc body lines to history.
         if !in_heredoc {
             history.push(trimmed);
+            // Persist history to tmpfs (best-effort).
+            history.save();
         }
         execute(trimmed);
     }
@@ -2803,11 +2927,142 @@ fn redraw_from_cursor(buf: &str, cursor: usize) {
     }
 }
 
+/// Enter reverse-incremental-search mode (triggered by Ctrl+R).
+///
+/// Displays a `(reverse-i-search)` prompt.  As the user types, the most
+/// recent matching history entry is shown.  Pressing Ctrl+R again jumps
+/// to the next (older) match.  Enter accepts the match into the line
+/// buffer.  Ctrl+C or ESC cancels and restores the original line.
+fn reverse_search_mode(buf: &mut String, cursor: &mut usize, history: &mut History) {
+    use crate::keyboard;
+
+    let original = buf.clone();
+    let original_cursor = *cursor;
+    let mut query = String::with_capacity(64);
+    // The browse index of the current match (for "search next" via Ctrl+R).
+    let mut current_match_idx: Option<usize> = None;
+
+    // Helper: erase the entire visible line (prompt + content) and reprint
+    // the search prompt with the current query and match.
+    let redraw_search = |q: &str, matched: Option<&str>| {
+        // Use \r to go to start of line, then erase to end (CSI 2K).
+        crate::console::write_str("\r\x1b[2K");
+        crate::console::write_str("(reverse-i-search)`");
+        crate::console::write_str(q);
+        crate::console::write_str("': ");
+        if let Some(m) = matched {
+            crate::console::write_str(m);
+        }
+    };
+
+    redraw_search("", None);
+
+    loop {
+        let ch = keyboard::read_char();
+
+        match ch {
+            0x12 => {
+                // Ctrl+R again — search for the next (older) match.
+                if let Some(idx) = current_match_idx {
+                    if let Some((new_idx, entry)) =
+                        history.reverse_search_from(&query, idx)
+                    {
+                        let entry = String::from(entry);
+                        current_match_idx = Some(new_idx);
+                        redraw_search(&query, Some(&entry));
+                        buf.clear();
+                        buf.push_str(&entry);
+                        *cursor = buf.len();
+                    }
+                    // If no more matches, keep showing the current one.
+                }
+            }
+            b'\n' => {
+                // Accept the current match (already in buf).
+                // Redraw as a normal prompt line.
+                crate::console::write_str("\r\x1b[2K");
+                let prompt = alloc::format!("{}> ", get_cwd());
+                crate::console::write_str(&prompt);
+                for &b in buf.as_bytes() {
+                    crate::console::putchar(b);
+                }
+                *cursor = buf.len();
+                return;
+            }
+            0x03 | 0x1B => {
+                // Ctrl+C or ESC — cancel search, restore original line.
+                buf.clear();
+                buf.push_str(&original);
+                *cursor = original_cursor;
+                crate::console::write_str("\r\x1b[2K");
+                let prompt = alloc::format!("{}> ", get_cwd());
+                crate::console::write_str(&prompt);
+                for &b in buf.as_bytes() {
+                    crate::console::putchar(b);
+                }
+                // Move cursor back to original position.
+                let tail_len = buf.len().saturating_sub(*cursor);
+                for _ in 0..tail_len {
+                    crate::console::putchar(b'\x08');
+                }
+                return;
+            }
+            0x08 | 0x7F => {
+                // Backspace — remove last char from search query.
+                if query.pop().is_some() {
+                    // Re-search from the beginning with shorter query.
+                    if let Some((idx, entry)) = history.reverse_search(&query) {
+                        let entry = String::from(entry);
+                        current_match_idx = Some(idx);
+                        redraw_search(&query, Some(&entry));
+                        buf.clear();
+                        buf.push_str(&entry);
+                        *cursor = buf.len();
+                    } else {
+                        current_match_idx = None;
+                        redraw_search(&query, None);
+                    }
+                }
+            }
+            ch if ch >= 0x20 && ch < 0x7F => {
+                // Printable character — extend search query.
+                query.push(ch as char);
+                if let Some((idx, entry)) = history.reverse_search(&query) {
+                    let entry = String::from(entry);
+                    current_match_idx = Some(idx);
+                    redraw_search(&query, Some(&entry));
+                    buf.clear();
+                    buf.push_str(&entry);
+                    *cursor = buf.len();
+                } else {
+                    current_match_idx = None;
+                    redraw_search(&query, None);
+                    // Keep buf unchanged — no match.
+                }
+            }
+            _ => {
+                // Any other key — accept match and let read_line handle
+                // it on the next iteration.  This handles arrow keys,
+                // Ctrl+A/E, etc. gracefully.
+                crate::console::write_str("\r\x1b[2K");
+                let prompt = alloc::format!("{}> ", get_cwd());
+                crate::console::write_str(&prompt);
+                for &b in buf.as_bytes() {
+                    crate::console::putchar(b);
+                }
+                *cursor = buf.len();
+                return;
+            }
+        }
+    }
+}
+
 /// Read a line from the keyboard with cursor editing and history.
 ///
 /// Supports: printable character insertion at cursor, backspace/delete,
 /// left/right arrow cursor movement, Home/End, Up/Down history browsing,
-/// ESC to clear line.  Returns when Enter is pressed.
+/// Ctrl+R reverse incremental search, ESC to clear line.
+/// Returns when Enter is pressed.
 fn read_line(buf: &mut String, history: &mut History) {
     use crate::keyboard;
 
@@ -2891,6 +3146,10 @@ fn read_line(buf: &mut String, history: &mut History) {
                 for _ in 0..tail_len {
                     crate::console::putchar(b'\x08');
                 }
+            }
+            0x12 => {
+                // Ctrl+R — reverse incremental search through history.
+                reverse_search_mode(buf, &mut cursor, history);
             }
             0x15 => {
                 // Ctrl+U — kill from start of line to cursor.
@@ -3083,7 +3342,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -3122,7 +3381,7 @@ const COMMANDS: &[&str] = &[
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "viewstate", "walk", "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
-    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
+    "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "hist", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
     "fpu", "hda", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
     "ktimer", "ktrace", "lockdep", "lz4", "lz4cat", "rng", "supervisor", "sv", "timers", "trace", "unlz4", "xattr", "xxd", "zip", "zstd", "zstdcat",
@@ -4230,7 +4489,8 @@ fn dispatch(line: &str) {
         "lockstats" | "lockstat" => cmd_lockstats(args),
         "irqoff" => cmd_irqoff(args),
         "idle" => cmd_idle(),
-        "kstat" | "history" => cmd_kstat(args),
+        "kstat" => cmd_kstat(args),
+        "history" | "hist" => cmd_history(args),
         "kwarn" | "warnings" => cmd_kwarn(args),
         "loadavg" => cmd_loadavg(),
         "cputime" | "cpuacct" => cmd_cputime(),
@@ -4418,6 +4678,7 @@ fn dispatch(line: &str) {
         "soundmixer" | "smixer" => cmd_soundmixer(args),
         "wallpaper" | "wp" => cmd_wallpaper(args),
         "credentials" | "cred" => cmd_credentials(args),
+        "power" => cmd_power(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -5668,6 +5929,74 @@ fn cmd_clear() {
 
 /// Demonstrate VT100/xterm ANSI escape sequence capabilities.
 ///
+/// `history` / `hist` — display or search shell command history.
+///
+/// Usage:
+///   history          — list all history entries (numbered)
+///   history N        — list last N entries
+///   history clear    — clear history (memory and file)
+///   history search P — search history for pattern P
+#[allow(clippy::arithmetic_side_effects)]
+fn cmd_history(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "" => {
+            // List all history entries, oldest first, numbered.
+            let shadow = SHELL_HISTORY.lock();
+            if shadow.is_empty() {
+                shell_println!("(no history)");
+                return;
+            }
+            for (i, entry) in shadow.iter().enumerate() {
+                shell_println!("  {:>4}  {}", i + 1, entry);
+            }
+        }
+        "clear" => {
+            let mut shadow = SHELL_HISTORY.lock();
+            shadow.clear();
+            // Also remove the history file.
+            let _ = crate::fs::vfs::Vfs::remove(HISTORY_FILE);
+            shell_println!("History cleared.");
+        }
+        "search" => {
+            let pattern = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if pattern.is_empty() {
+                shell_println!("Usage: history search <pattern>");
+                return;
+            }
+            let shadow = SHELL_HISTORY.lock();
+            let mut found = false;
+            for (i, entry) in shadow.iter().enumerate() {
+                if entry.contains(pattern.as_str()) {
+                    shell_println!("  {:>4}  {}", i + 1, entry);
+                    found = true;
+                }
+            }
+            if !found {
+                shell_println!("No matches for '{}'.", pattern);
+            }
+        }
+        _ => {
+            // Try to parse as a number (show last N entries).
+            if let Ok(n) = sub.parse::<usize>() {
+                let shadow = SHELL_HISTORY.lock();
+                let start = shadow.len().saturating_sub(n);
+                if shadow.is_empty() {
+                    shell_println!("(no history)");
+                    return;
+                }
+                for (i, entry) in shadow.iter().enumerate().skip(start) {
+                    shell_println!("  {:>4}  {}", i + 1, entry);
+                }
+            } else {
+                shell_println!("Usage: history [N | clear | search <pattern>]");
+            }
+        }
+    }
+}
+
 /// Shows: colors, attributes (bold/dim/underline/reverse/strikethrough),
 /// 256-color palette, cursor movement, scroll region, and insert/delete
 /// operations.
@@ -19147,6 +19476,33 @@ fn cmd_credentials(args: &str) {
     }
 }
 
+/// `power` — power management settings.
+fn cmd_power(args: &str) {
+    use crate::fs::power;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "profile" => { if let Some(p) = parts.get(1).and_then(|s| power::PowerProfile::from_str(s)) { power::set_profile(p); shell_println!("Profile: {}", p.label()); } else { shell_println!("Profile: {}", power::current_profile().label()); } }
+        "button" => { if let Some(a) = parts.get(1).and_then(|s| power::PowerAction::from_str(s)) { power::set_power_button_action(a.clone()); shell_println!("Power button: {}", a.label()); } else { shell_println!("Power button: {}", power::config().power_button_action.label()); } }
+        "lid" => { if let Some(a) = parts.get(1).and_then(|s| power::PowerAction::from_str(s)) { power::set_lid_close_action(a.clone()); shell_println!("Lid: {}", a.label()); } else { shell_println!("Lid: {}", power::config().lid_close_action.label()); } }
+        "screenoff" => { if let Some(m) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) { power::set_screen_off_minutes(m); shell_println!("Screen off: {}min", m); } else { shell_println!("Screen off: {}min", power::config().screen_off_minutes); } }
+        "sleepafter" => { if let Some(m) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) { power::set_sleep_minutes(m); shell_println!("Sleep: {}min", m); } else { shell_println!("Sleep: {}min", power::config().sleep_minutes); } }
+        "battery" => { let b = power::battery_status(); if b.present { shell_println!("Battery: {}%{} health={}% {}", b.percent, if b.charging {" charging"} else {""}, b.health, b.source.label()); } else { shell_println!("No battery"); } }
+        "lowbat" => { if let (Some(p), Some(a)) = (parts.get(1).and_then(|s| s.parse::<u8>().ok()), parts.get(2).and_then(|s| power::PowerAction::from_str(s))) { power::set_low_battery(p, a.clone()); shell_println!("Low: {}% -> {}", p, a.label()); } else { let c = power::config(); shell_println!("Low: {}% -> {}", c.low_battery_percent, c.low_battery_action.label()); } }
+        "critical" => { if let (Some(m), Some(a)) = (parts.get(1).and_then(|s| s.parse::<u32>().ok()), parts.get(2).and_then(|s| power::PowerAction::from_str(s))) { power::set_critical_battery(m, a.clone()); shell_println!("Critical: {}min -> {}", m, a.label()); } else { let c = power::config(); shell_println!("Critical: {}min -> {}", c.critical_battery_minutes, c.critical_battery_action.label()); } }
+        "idle" => { let s = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); shell_println!("Idle {}s -> {}", s, power::check_idle(s).label()); }
+        "autosaver" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { power::set_auto_power_saver(true); shell_println!("Auto saver: on"); } "off"|"false" => { power::set_auto_power_saver(false); shell_println!("Auto saver: off"); } _ => { shell_println!("Auto saver: {}", power::config().auto_power_saver); } } }
+        "brightness" => { if let Some(v) = parts.get(1).and_then(|s| s.parse::<u8>().ok()) { power::set_battery_brightness(v); shell_println!("Brightness: {}%", v.min(100)); } else { shell_println!("Brightness: {}%", power::config().battery_brightness); } }
+        "cpulimit" => { if let Some(v) = parts.get(1).and_then(|s| s.parse::<u8>().ok()) { power::set_cpu_battery_limit(v); shell_println!("CPU limit: {}%", v.min(100)); } else { shell_println!("CPU limit: {}%", power::config().cpu_battery_limit); } }
+        "simbat" => { let pct = parts.get(1).and_then(|s| s.parse::<u8>().ok()).unwrap_or(50); let min = parts.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(-1); let ch = parts.get(3).copied() == Some("charging"); power::handle_battery_update(pct, min, ch); shell_println!("Battery: {}% {}min{}", pct, min, if ch {" charging"} else {""}); }
+        "show" | "info" => { let c = power::config(); let b = power::battery_status(); shell_println!("Profile: {}  Button: {}  Lid: {}", c.profile.label(), c.power_button_action.label(), c.lid_close_action.label()); shell_println!("Screen: {}min  Sleep: {}min  AutoSaver: {}", c.screen_off_minutes, c.sleep_minutes, c.auto_power_saver); if b.present { shell_println!("Battery: {}%{}", b.percent, if b.charging {" charging"} else {""}); } }
+        "test" => { match power::self_test() { Ok(()) => shell_println!("All power tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (ev, id, so, bp) = power::stats(); shell_println!("Events:{} Idles:{} Screen:{} Bat:{}", ev, id, if so {"OFF"} else {"ON"}, if bp {"yes"} else {"no"}); }
+        "reset" => { power::clear_all(); power::reset_stats(); shell_println!("Power reset"); }
+        _ => { shell_println!("power: profile/button/lid/screenoff/sleepafter/battery/lowbat/critical/idle/autosaver/brightness/cpulimit/simbat/show/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -26676,7 +27032,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

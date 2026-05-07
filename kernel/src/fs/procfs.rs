@@ -175,6 +175,7 @@ const ROOT_FILES: &[&str] = &[
     "soundmixer",
     "wallpaper",
     "credentials",
+    "power",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3311,6 +3312,44 @@ fn gen_credentials() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_power() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let cfg = super::power::config();
+    let bat = super::power::battery_status();
+    let (events, idles, screen_off, bat_present) = super::power::stats();
+
+    out.push_str("Power Management\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Profile:      {}\n", cfg.profile.label()));
+    out.push_str(&format!("Power btn:    {}\n", cfg.power_button_action.label()));
+    out.push_str(&format!("Lid close:    {}\n", cfg.lid_close_action.label()));
+    out.push_str(&format!("Screen off:   {}min\n", cfg.screen_off_minutes));
+    out.push_str(&format!("Sleep after:  {}min\n", cfg.sleep_minutes));
+    out.push_str(&format!("Screen:       {}\n", if screen_off { "OFF" } else { "ON" }));
+    out.push_str(&format!("Events:       {}\n", events));
+    out.push_str(&format!("Idle checks:  {}\n\n", idles));
+
+    if bat_present {
+        out.push_str(&format!("Battery:      {}%{}\n", bat.percent,
+            if bat.charging { " (charging)" } else { "" }));
+        out.push_str(&format!("Minutes left: {}\n",
+            if bat.minutes_left < 0 { String::from("unknown") }
+            else { format!("{}", bat.minutes_left) }));
+        out.push_str(&format!("Health:       {}%\n", bat.health));
+        out.push_str(&format!("Source:       {}\n", bat.source.label()));
+        out.push_str(&format!("Low bat:      {}% → {}\n",
+            cfg.low_battery_percent, cfg.low_battery_action.label()));
+        out.push_str(&format!("Critical:     {}min → {}\n",
+            cfg.critical_battery_minutes, cfg.critical_battery_action.label()));
+    } else {
+        out.push_str("Battery:      not present\n");
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3651,6 +3690,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "soundmixer" => Ok(gen_soundmixer()),
         "wallpaper" => Ok(gen_wallpaper()),
         "credentials" => Ok(gen_credentials()),
+        "power" => Ok(gen_power()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

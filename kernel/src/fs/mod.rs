@@ -94,6 +94,7 @@ pub mod pathbar;
 pub mod pipe;
 pub mod procfs;
 pub mod policy;
+pub mod power;
 pub mod prefetch;
 pub mod preview;
 pub mod profile;

@@ -4933,6 +4933,7 @@ fn dispatch(line: &str) {
         "iommu" => cmd_iommu(),
         "cgroup" => cmd_cgroup(args),
         "pidns" => cmd_pidns(args),
+        "userns" => cmd_userns(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
@@ -30772,6 +30773,169 @@ fn cmd_pidns(args: &str) {
     }
 }
 
+fn cmd_userns(args: &str) {
+    use crate::userns;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let count = userns::active_count();
+            crate::console_println!("=== User Namespaces ({} active) ===", count);
+            crate::console_println!(
+                "{:<5} {:<7} {:<8} {:<5} {:<5} {:<5} {:<5}",
+                "ID", "Parent", "Owner", "UIDs", "GIDs", "Procs", "Kids"
+            );
+            for id in 0..userns::MAX_NAMESPACES as u32 {
+                if let Some(s) = userns::stats(id) {
+                    let parent = if s.parent == u32::MAX {
+                        alloc::format!("-")
+                    } else {
+                        alloc::format!("{}", s.parent)
+                    };
+                    crate::console_println!(
+                        "{:<5} {:<7} {:<8} {:<5} {:<5} {:<5} {:<5}",
+                        id, parent, s.owner_uid, s.uid_map_count,
+                        s.gid_map_count, s.nr_procs, s.nr_children
+                    );
+                }
+            }
+        }
+        "create" => {
+            let parent: u32 = parts.get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let owner: u32 = parts.get(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            match userns::create(parent, owner) {
+                Ok(id) => crate::console_println!(
+                    "Created user namespace {} (parent: {}, owner UID: {})", id, parent, owner
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" | "rm" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: userns delete <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            match userns::delete(id) {
+                Ok(()) => crate::console_println!("Deleted user namespace {}", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "uidmap" => {
+            // userns uidmap <ns> <inner_start> <outer_start> <count>
+            if parts.len() < 5 {
+                crate::console_println!("Usage: userns uidmap <ns> <inner> <outer> <count>");
+                return;
+            }
+            let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
+            let inner = parts[2].parse::<u32>().unwrap_or(0);
+            let outer = parts[3].parse::<u32>().unwrap_or(0);
+            let count = parts[4].parse::<u32>().unwrap_or(0);
+            match userns::add_uid_mapping(ns, inner, outer, count) {
+                Ok(()) => crate::console_println!(
+                    "Added UID mapping: ns {} inner {}..{} → outer {}..{}",
+                    ns, inner, inner.saturating_add(count).saturating_sub(1),
+                    outer, outer.saturating_add(count).saturating_sub(1)
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "gidmap" => {
+            // userns gidmap <ns> <inner_start> <outer_start> <count>
+            if parts.len() < 5 {
+                crate::console_println!("Usage: userns gidmap <ns> <inner> <outer> <count>");
+                return;
+            }
+            let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
+            let inner = parts[2].parse::<u32>().unwrap_or(0);
+            let outer = parts[3].parse::<u32>().unwrap_or(0);
+            let count = parts[4].parse::<u32>().unwrap_or(0);
+            match userns::add_gid_mapping(ns, inner, outer, count) {
+                Ok(()) => crate::console_println!(
+                    "Added GID mapping: ns {} inner {}..{} → outer {}..{}",
+                    ns, inner, inner.saturating_add(count).saturating_sub(1),
+                    outer, outer.saturating_add(count).saturating_sub(1)
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "stats" | "info" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: userns stats <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            let Some(s) = userns::stats(id) else {
+                crate::console_println!("User namespace {} not found", id);
+                return;
+            };
+            crate::console_println!("=== User Namespace {} ===", id);
+            let parent = if s.parent == u32::MAX {
+                alloc::format!("none (root)")
+            } else {
+                alloc::format!("{}", s.parent)
+            };
+            crate::console_println!("  Parent:      {}", parent);
+            crate::console_println!("  Owner UID:   {}", s.owner_uid);
+            crate::console_println!("  Processes:   {}", s.nr_procs);
+            crate::console_println!("  Children:    {}", s.nr_children);
+            crate::console_println!("  UID ranges:  {}", s.uid_map_count);
+            crate::console_println!("  GID ranges:  {}", s.gid_map_count);
+            // Show UID mappings.
+            let uid_maps = userns::uid_mappings(id);
+            if !uid_maps.is_empty() {
+                crate::console_println!("  UID mappings:");
+                for m in &uid_maps {
+                    crate::console_println!(
+                        "    inner {}..{} → outer {}..{}",
+                        m.inner_start, m.inner_start.saturating_add(m.count).saturating_sub(1),
+                        m.outer_start, m.outer_start.saturating_add(m.count).saturating_sub(1)
+                    );
+                }
+            }
+            // Show GID mappings.
+            let gid_maps = userns::gid_mappings(id);
+            if !gid_maps.is_empty() {
+                crate::console_println!("  GID mappings:");
+                for m in &gid_maps {
+                    crate::console_println!(
+                        "    inner {}..{} → outer {}..{}",
+                        m.inner_start, m.inner_start.saturating_add(m.count).saturating_sub(1),
+                        m.outer_start, m.outer_start.saturating_add(m.count).saturating_sub(1)
+                    );
+                }
+            }
+            // Show UID translation example.
+            crate::console_println!("  Translation example (inner 0 → host): {}", userns::uid_to_host(id, 0));
+        }
+        "test" => {
+            userns::self_test();
+        }
+        _ => {
+            crate::console_println!("Usage: userns [list|create|delete|uidmap|gidmap|stats|test]");
+            crate::console_println!("  userns                         — list active user namespaces");
+            crate::console_println!("  userns create [P] [owner]      — create under parent P with owner UID");
+            crate::console_println!("  userns delete ID               — delete empty namespace");
+            crate::console_println!("  userns uidmap NS I O C         — map inner I..I+C to outer O..O+C");
+            crate::console_println!("  userns gidmap NS I O C         — same for GID");
+            crate::console_println!("  userns stats ID                — detailed stats with mappings");
+            crate::console_println!("  userns test                    — run self-test");
+        }
+    }
+}
+
 ///   capreq approve ID     — approve a pending request
 ///   capreq deny ID        — deny a pending request
 ///   capreq test           — submit a test request
@@ -33134,7 +33298,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

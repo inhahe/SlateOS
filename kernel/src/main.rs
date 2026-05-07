@@ -145,6 +145,7 @@ mod thermal;
 mod timekeeping;
 mod tlb;
 mod unicode;
+mod userns;
 mod virtio;
 mod watchdog;
 #[allow(dead_code)]
@@ -1269,6 +1270,13 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++p6: PID namespace subsystem init + self-test.
     pidns::init();
     pidns::self_test();
+
+    // Step 22e⅞++++p7: User namespace subsystem init + self-test.
+    // UID/GID remapping for rootless containers.  Supports hierarchical
+    // mappings with up to 16 ranges per namespace, process tracking,
+    // and full host UID resolution through nested namespaces.
+    userns::init();
+    userns::self_test();
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.

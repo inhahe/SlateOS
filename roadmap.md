@@ -773,7 +773,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Port find
 - [-] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
-  - [ ] Persistent searchable history, tab completion
+  - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)
   - [x] Unicode support (UTF-8 multi-byte accumulation, procedural box drawing/block element/geometric/arrow/symbol glyph generation, East Asian width detection, comprehensive self-tests)
   - [ ] Configurable colors and font
   - [ ] tmux-like session detach/reattach

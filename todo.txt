@@ -109,6 +109,16 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   for cow.rs (CoW copy), swap.rs (swap-out/swap-in), and compact.rs
   (migration), but try_resolve_fault is in proc/ which is process zone.
 
+- kernel-ipc: Wire scfilter::check() into syscall/dispatch.rs.
+  After the bounds check (line ~457 in dispatch.rs), before looking up
+  the handler, add:
+    let task_id = crate::sched::current_task_id();
+    if !crate::scfilter::check(task_id, nr) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+  This enforces per-process syscall filters for container sandboxing.
+  The scfilter module and API are fully ready in scfilter.rs.
+
 - kernel-process: Wire cgroup memory controller into demand paging.
   In proc/pcb.rs try_resolve_fault(), before allocating a frame, call:
     if crate::cgroup::try_charge_current_mem(1).is_err() {

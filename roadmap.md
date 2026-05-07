@@ -1116,6 +1116,14 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] Process tracking across all sub-resources
     - [x] kshell `container`/`ct` command: list/create/delete/start/stop/info/test
     - [x] 14 self-tests
+  - [x] Syscall filter (seccomp equivalent, kernel/src/scfilter.rs)
+    - [x] Bitmap-based O(1) per-syscall check (1000-bit bitmap)
+    - [x] Allow-all and deny-all modes, per-process filters
+    - [x] Fork inheritance (copy_filter), tighten-only invariant
+    - [x] Per-process deny count audit tracking
+    - [x] kshell `scfilter`/`seccomp` command
+    - [x] 14 self-tests
+    - [ ] Wire into syscall/dispatch.rs (kernel-ipc zone)
   - [ ] OCI-compatible container image format parsing
   - [ ] Port Docker (or equivalent container runtime)
 

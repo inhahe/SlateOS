@@ -172,7 +172,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Scheduler tracepoints: TASK_SPAWN, TASK_EXIT, YIELD, TASK_BLOCK, TASK_WAKE, PREEMPT, WORK_STEAL, CONTEXT_SWITCH, DEFERRED_WAKE
   - [x] Memory tracepoints: FRAME_ALLOC, FRAME_FREE (buddy allocator level, not per-CPU cache), PAGE_FAULT, SWAP_OUT, SWAP_IN, RECLAIM
   - [x] IPC tracepoints: CHANNEL_SEND, CHANNEL_RECV, PIPE_WRITE, PIPE_READ, SEM_CREATE, SEM_SIGNAL, SEM_WAIT, SEM_CLOSE, CP_REGISTER, CP_WAIT, CP_NOTIFY
-  - [x] IRQ tracepoints: IRQ_ENTER, IRQ_EXIT (device IRQ handler)
+  - [x] IRQ tracepoints: IRQ_ENTER, IRQ_EXIT (device IRQ handler), SOFTIRQ_ENTER, SOFTIRQ_EXIT (deferred work)
   - [x] Syscall tracepoints: SYSCALL_ENTER, SYSCALL_EXIT (dispatch wrapper)
   - [x] Timer tracepoints: TIMER_SCHEDULE, TIMER_FIRE, TIMER_CANCEL, TIMER_TICK_SHORT
 - [x] FPU/SSE context save/restore
@@ -1035,12 +1035,15 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 ### 5.4 Advanced security
 - [x] Per-process filesystem namespaces for sandboxing (fs::mount_ns)
 - [x] Interceptor hooks (synchronous, capability-gated) (fs::intercept)
-- [x] Async notification hooks / tracing subsystem (ktrace: 23 tracepoints across 6 categories)
+- [x] Async notification hooks / tracing subsystem (ktrace: 25 tracepoints across 6 categories)
 - [x] Profiling mode for high-frequency events (alloc/dealloc tracing)
   - [x] alloc_trace ring buffer wired to alloc_order/free_order (frame-level tracing)
   - [x] Zero-cost disabled path (single atomic load ~1ns), default disabled
   - [x] mm.alloc_trace sysctl parameter for runtime enable/disable
   - [x] Frame allocator OOM path tries memory compaction before OOM kill
+  - [x] Reverse mapping (rmap) wired into page lifecycle (cow, swap-out, swap-in, compaction)
+  - [x] Memory compaction migration loop uses rmap iteration to find/migrate private pages
+  - [x] Self-tests: memtype accounting, compaction subsystem, VMA management
 
 ### 5.5 Container support
 - [ ] Namespace primitives (PID, network, mount, user)

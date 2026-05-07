@@ -131,6 +131,7 @@ const ROOT_FILES: &[&str] = &[
     "fspolicy",
     "fsbench",
     "ioprio",
+    "atime",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2167,6 +2168,38 @@ fn gen_ioprio() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/atime` — access time policy status.
+fn gen_atime() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let policy = super::atime::global_policy();
+    let st = super::atime::stats();
+    let overrides = super::atime::list_overrides();
+
+    out.push_str("Access Time (atime) Policy\n");
+    out.push_str("==========================\n\n");
+    out.push_str(&format!("Global policy: {}\n", policy.label()));
+    out.push_str(&format!("Checks:        {}\n", st.checks));
+    out.push_str(&format!("Updates:       {}\n", st.updates));
+    out.push_str(&format!("Skipped:       {}\n", st.skipped));
+    if st.checks > 0 {
+        let skip_pct = (st.skipped * 100) / st.checks;
+        out.push_str(&format!("Skip rate:     {}%\n", skip_pct));
+    }
+
+    if !overrides.is_empty() {
+        out.push_str("\nPer-mount overrides:\n");
+        for ovr in &overrides {
+            out.push_str(&format!("  {:20} → {}\n", ovr.mount_path, ovr.policy.label()));
+        }
+    }
+
+    out.push_str("\nAvailable policies: always, relatime, noatime, lazyday\n");
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2239,6 +2272,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fspolicy" => Ok(gen_fspolicy()),
         "fsbench" => Ok(gen_fsbench()),
         "ioprio" => Ok(gen_ioprio()),
+        "atime" => Ok(gen_atime()),
         _ => Err(KernelError::NotFound),
     }
 }

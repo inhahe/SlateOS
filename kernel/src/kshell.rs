@@ -3082,7 +3082,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "archive", "assoc", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
+    "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4361,6 +4361,7 @@ fn dispatch(line: &str) {
         "fspolicy" => cmd_fspolicy(args),
         "fsbench" => cmd_fsbench(args),
         "ionice" => cmd_ionice(args),
+        "atime" => cmd_atime(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13460,6 +13461,94 @@ fn cmd_ionice(args: &str) {
     }
 }
 
+/// Access time (atime) policy management.
+fn cmd_atime(args: &str) {
+    use crate::fs::atime::{self, AtimePolicy};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let policy = atime::global_policy();
+            let st = atime::stats();
+            shell_println!("Atime Policy: {}", policy.label());
+            shell_println!("  Checks: {} | Updates: {} | Skipped: {}",
+                st.checks, st.updates, st.skipped);
+            if st.checks > 0 {
+                shell_println!("  Skip rate: {}%", (st.skipped * 100) / st.checks);
+            }
+            let overrides = atime::list_overrides();
+            if !overrides.is_empty() {
+                shell_println!();
+                shell_println!("  Per-mount overrides:");
+                for ovr in &overrides {
+                    shell_println!("    {:20} → {}", ovr.mount_path, ovr.policy.label());
+                }
+            }
+        }
+        "set" => {
+            let name = if parts.len() >= 2 { parts[1] } else {
+                shell_println!("Usage: atime set <always|relatime|noatime|lazyday>");
+                return;
+            };
+            match AtimePolicy::from_name(name) {
+                Some(p) => {
+                    atime::set_global_policy(p);
+                    shell_println!("Global atime policy set to: {}", p.label());
+                }
+                None => {
+                    shell_println!("Unknown policy: {}", name);
+                    shell_println!("Available: always, relatime, noatime, lazyday");
+                }
+            }
+        }
+        "mount" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: atime mount <path> <policy>");
+                return;
+            }
+            let path = parts[1];
+            match AtimePolicy::from_name(parts[2]) {
+                Some(p) => {
+                    atime::add_override(path, p);
+                    shell_println!("Override: {} → {}", path, p.label());
+                }
+                None => shell_println!("Unknown policy: {}", parts[2]),
+            }
+        }
+        "unmount" | "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: atime remove <mount_path>");
+                return;
+            }
+            if atime::remove_override(parts[1]) {
+                shell_println!("Removed override for {}", parts[1]);
+            } else {
+                shell_println!("No override found for {}", parts[1]);
+            }
+        }
+        "reset" => {
+            atime::reset_stats();
+            shell_println!("Atime statistics reset.");
+        }
+        "stats" => {
+            let st = atime::stats();
+            shell_println!("Checks: {} | Updates: {} | Skipped: {}",
+                st.checks, st.updates, st.skipped);
+        }
+        _ => {
+            shell_println!("Usage: atime <command>");
+            shell_println!("  show                  Show policy and stats (default)");
+            shell_println!("  set <policy>          Set global policy");
+            shell_println!("  mount <path> <policy> Add per-mount override");
+            shell_println!("  remove <path>         Remove per-mount override");
+            shell_println!("  reset                 Reset statistics");
+            shell_println!("  stats                 Show counters only");
+            shell_println!();
+            shell_println!("Policies: always, relatime (default), noatime, lazyday");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18798,7 +18887,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

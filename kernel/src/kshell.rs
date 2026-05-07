@@ -19424,6 +19424,16 @@ fn cmd_usb(args: &str) {
             crate::console_println!("  Ports: {} total, {} connected", ports.len(), connected);
             let devs = crate::xhci::devices();
             crate::console_println!("  Devices: {} enumerated", devs.len());
+            let hid = crate::xhci::hid_interfaces();
+            if !hid.is_empty() {
+                crate::console_println!("  HID: {} interface(s)", hid.len());
+                if crate::xhci::has_keyboard() {
+                    crate::console_println!("    - USB Keyboard (boot protocol)");
+                }
+                if crate::xhci::has_mouse() {
+                    crate::console_println!("    - USB Mouse (boot protocol)");
+                }
+            }
         }
         "ports" => {
             let ports = crate::xhci::port_status();
@@ -19471,17 +19481,40 @@ fn cmd_usb(args: &str) {
                 );
             }
         }
+        "hid" => {
+            let hid = crate::xhci::hid_interfaces();
+            if hid.is_empty() {
+                crate::console_println!("No HID interfaces configured");
+                return;
+            }
+            crate::console_println!("USB HID Interfaces:");
+            for h in &hid {
+                let proto = match h.protocol {
+                    1 => "Keyboard",
+                    2 => "Mouse",
+                    _ => "Unknown",
+                };
+                let subclass = if h.subclass == 1 { "boot" } else { "report" };
+                crate::console_println!(
+                    "  Slot {}: {} ({} protocol), EP{} IN, {} bytes, interval={}",
+                    h.slot_id, proto, subclass,
+                    h.interrupt_ep, h.interrupt_max_packet, h.interval
+                );
+            }
+        }
         "rescan" => {
             crate::console_println!("Rescanning USB ports...");
             crate::xhci::rescan();
             let devs = crate::xhci::devices();
-            crate::console_println!("Found {} device(s)", devs.len());
+            let hid = crate::xhci::hid_interfaces();
+            crate::console_println!("Found {} device(s), {} HID interface(s)", devs.len(), hid.len());
         }
         _ => {
-            crate::console_println!("Usage: usb [status|ports|devices|rescan]");
+            crate::console_println!("Usage: usb [status|ports|devices|hid|rescan]");
             crate::console_println!("  status  - Show USB controller status");
             crate::console_println!("  ports   - List USB ports and connection status");
             crate::console_println!("  devices - List enumerated USB devices");
+            crate::console_println!("  hid     - Show HID interface details");
             crate::console_println!("  rescan  - Re-enumerate devices");
         }
     }

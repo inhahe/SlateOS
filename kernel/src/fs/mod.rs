@@ -45,6 +45,7 @@ pub mod compress;
 pub mod cpio;
 pub mod dedup;
 pub mod devfs;
+pub mod directio;
 pub mod dirsync;
 pub mod encrypt;
 pub mod ext4;

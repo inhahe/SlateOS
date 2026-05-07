@@ -134,6 +134,7 @@ const ROOT_FILES: &[&str] = &[
     "atime",
     "prefetch",
     "splice",
+    "directio",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2251,6 +2252,35 @@ fn gen_splice() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/directio` — direct I/O statistics and registered paths.
+fn gen_directio() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (reads, writes, rbytes, wbytes, unaligned, invalidations, path_count) =
+        super::directio::stats();
+
+    out.push_str("Direct I/O (Cache Bypass)\n");
+    out.push_str("========================\n\n");
+    out.push_str(&format!("Read ops:       {:>10}  ({} bytes)\n", reads, rbytes));
+    out.push_str(&format!("Write ops:      {:>10}  ({} bytes)\n", writes, wbytes));
+    out.push_str(&format!("Unaligned ops:  {:>10}\n", unaligned));
+    out.push_str(&format!("Cache inv.:     {:>10}\n", invalidations));
+    out.push_str(&format!("Registered paths: {}/{}\n\n", path_count, 128));
+
+    let paths = super::directio::list_paths();
+    if paths.is_empty() {
+        out.push_str("No registered direct-I/O paths.\n");
+    } else {
+        out.push_str("Registered paths:\n");
+        for p in &paths {
+            out.push_str(&format!("  {}\n", p));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2326,6 +2356,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "atime" => Ok(gen_atime()),
         "prefetch" => Ok(gen_prefetch()),
         "splice" => Ok(gen_splice()),
+        "directio" => Ok(gen_directio()),
         _ => Err(KernelError::NotFound),
     }
 }

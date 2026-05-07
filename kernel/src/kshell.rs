@@ -3085,7 +3085,7 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
-    "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
+    "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
@@ -4364,6 +4364,7 @@ fn dispatch(line: &str) {
         "atime" => cmd_atime(args),
         "prefetch" => cmd_prefetch(args),
         "splice" => cmd_splice(args),
+        "directio" => cmd_directio(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13719,6 +13720,125 @@ fn cmd_splice(args: &str) {
     }
 }
 
+fn cmd_directio(args: &str) {
+    use crate::fs::directio;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "read" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: directio read <path> [offset] [len]");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let offset: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let len: usize = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(4096);
+            match directio::dio_read(&path, offset, len) {
+                Ok((data, r)) => {
+                    shell_println!("DIO read {} bytes (aligned={}, cache_inv={})",
+                        r.bytes, r.aligned, r.cache_invalidated);
+                    if data.len() <= 64 {
+                        shell_println!("  data: {:?}", &data);
+                    } else {
+                        shell_println!("  data: [{} bytes, first 16: {:?}...]",
+                            data.len(), &data[..16]);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "write" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: directio write <path> <data|hex:AABB..> [offset]");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let data: Vec<u8> = if let Some(hex) = parts[2].strip_prefix("hex:") {
+                // Parse hex bytes.
+                hex.as_bytes().chunks(2).filter_map(|pair| {
+                    if pair.len() == 2 {
+                        let s = core::str::from_utf8(pair).ok()?;
+                        u8::from_str_radix(s, 16).ok()
+                    } else {
+                        None
+                    }
+                }).collect()
+            } else {
+                parts[2].as_bytes().to_vec()
+            };
+            match directio::dio_write(&path, offset, &data) {
+                Ok(r) => shell_println!("DIO wrote {} bytes (aligned={}, cache_inv={})",
+                    r.bytes, r.aligned, r.cache_invalidated),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "register" | "reg" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: directio register <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            if directio::register_path(&path) {
+                shell_println!("Registered {} for direct I/O", path);
+            } else {
+                shell_println!("Already registered: {}", path);
+            }
+        }
+        "unregister" | "unreg" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: directio unregister <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            if directio::unregister_path(&path) {
+                shell_println!("Unregistered: {}", path);
+            } else {
+                shell_println!("Not registered: {}", path);
+            }
+        }
+        "list" | "paths" => {
+            let paths = directio::list_paths();
+            if paths.is_empty() {
+                shell_println!("No registered direct-I/O paths.");
+            } else {
+                shell_println!("Registered DIO paths ({}):", paths.len());
+                for p in &paths {
+                    shell_println!("  {}", p);
+                }
+            }
+        }
+        "stats" | "show" | "" => {
+            let (reads, writes, rbytes, wbytes, unaligned, inv, npaths) = directio::stats();
+            shell_println!("Direct I/O Statistics");
+            shell_println!("  Reads:       {} ({} bytes)", reads, rbytes);
+            shell_println!("  Writes:      {} ({} bytes)", writes, wbytes);
+            shell_println!("  Unaligned:   {}", unaligned);
+            shell_println!("  Cache inv.:  {}", inv);
+            shell_println!("  Reg. paths:  {}/128", npaths);
+        }
+        "reset" => {
+            directio::reset_stats();
+            shell_println!("Direct I/O statistics reset.");
+        }
+        "clear" => {
+            directio::clear_paths();
+            shell_println!("All DIO path registrations cleared.");
+        }
+        _ => {
+            shell_println!("Usage: directio <command>");
+            shell_println!("  read <path> [off] [len]       Read with cache bypass");
+            shell_println!("  write <path> <data> [off]     Write with cache bypass");
+            shell_println!("  register <path>               Register path for auto-DIO");
+            shell_println!("  unregister <path>             Remove path registration");
+            shell_println!("  list|paths                    Show registered DIO paths");
+            shell_println!("  stats|show                    Show statistics (default)");
+            shell_println!("  reset                         Reset counters");
+            shell_println!("  clear                         Clear all path registrations");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -19057,7 +19177,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

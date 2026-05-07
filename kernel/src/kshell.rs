@@ -3085,7 +3085,7 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "assoc", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
-    "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dmesg", "dns", "dpkg", "du",
+    "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
@@ -4350,6 +4350,7 @@ fn dispatch(line: &str) {
         "diskuse" => cmd_diskuse(args),
         "fshealth" => cmd_fshealth(args),
         "fswatch" => cmd_fswatch(args),
+        "dirsync" => cmd_dirsync(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -12256,6 +12257,113 @@ fn cmd_fswatch(args: &str) {
     }
 }
 
+/// `dirsync` — directory comparison and sync.
+fn cmd_dirsync(args: &str) {
+    use crate::fs::dirsync;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "compare" | "cmp" | "diff" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dirsync compare <src> <dst>");
+                return;
+            }
+            let src = parts[1];
+            let dst = parts[2];
+            match dirsync::compare(src, dst) {
+                Ok(diff) => {
+                    shell_println!("Directory Comparison: {} vs {}", src, dst);
+                    shell_println!("  Source files:   {} ({} bytes)", diff.src_file_count, diff.src_total_size);
+                    shell_println!("  Dest files:     {} ({} bytes)", diff.dst_file_count, diff.dst_total_size);
+                    shell_println!("  New files:      {}", diff.new_files.len());
+                    shell_println!("  Modified files: {}", diff.modified_files.len());
+                    shell_println!("  Deleted files:  {}", diff.deleted_files.len());
+                    shell_println!("  Unchanged:      {}", diff.unchanged_files.len());
+                    shell_println!("  New dirs:       {}", diff.new_dirs.len());
+                    shell_println!("  Deleted dirs:   {}", diff.deleted_dirs.len());
+                    if !diff.new_files.is_empty() {
+                        shell_println!();
+                        shell_println!("  New:");
+                        for f in &diff.new_files {
+                            shell_println!("    + {}", f);
+                        }
+                    }
+                    if !diff.modified_files.is_empty() {
+                        shell_println!();
+                        shell_println!("  Modified:");
+                        for f in &diff.modified_files {
+                            shell_println!("    ~ {}", f);
+                        }
+                    }
+                    if !diff.deleted_files.is_empty() {
+                        shell_println!();
+                        shell_println!("  Deleted:");
+                        for f in &diff.deleted_files {
+                            shell_println!("    - {}", f);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "sync" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dirsync sync <src> <dst> [--delete] [--verify] [--dry-run]");
+                return;
+            }
+            let src = parts[1];
+            let dst = parts[2];
+            let flags = &parts[3..];
+            let opts = dirsync::SyncOptions {
+                delete_extra: flags.iter().any(|f| *f == "--delete" || *f == "-d"),
+                verify_content: flags.iter().any(|f| *f == "--verify" || *f == "-v"),
+                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                ..dirsync::SyncOptions::default()
+            };
+            if opts.dry_run {
+                shell_println!("(dry run — no changes will be made)");
+            }
+            match dirsync::sync(src, dst, &opts) {
+                Ok(result) => {
+                    shell_println!("Sync complete: {} -> {}", src, dst);
+                    shell_println!("  Files copied:    {}", result.copied);
+                    shell_println!("  Files deleted:   {}", result.deleted);
+                    shell_println!("  Dirs created:    {}", result.dirs_created);
+                    shell_println!("  Dirs deleted:    {}", result.dirs_deleted);
+                    shell_println!("  Bytes copied:    {}", result.bytes_copied);
+                    if !result.errors.is_empty() {
+                        shell_println!("  Errors:");
+                        for e in &result.errors {
+                            shell_println!("    ! {}", e);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (comps, syncs) = dirsync::stats();
+            shell_println!("Comparisons: {}", comps);
+            shell_println!("Syncs:       {}", syncs);
+        }
+        _ => {
+            shell_println!("Usage: dirsync <command> [args]");
+            shell_println!();
+            shell_println!("Commands:");
+            shell_println!("  compare <src> <dst>                Compare two directory trees");
+            shell_println!("  sync <src> <dst> [flags]           Sync source to destination");
+            shell_println!("  stats                              Show comparison/sync counts");
+            shell_println!();
+            shell_println!("Sync flags:");
+            shell_println!("  --delete, -d    Delete extra files in destination");
+            shell_println!("  --verify, -v    Verify content hash before skipping");
+            shell_println!("  --dry-run, -n   Show what would be done without doing it");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -17537,7 +17645,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

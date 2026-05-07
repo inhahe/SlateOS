@@ -121,6 +121,7 @@ const ROOT_FILES: &[&str] = &[
     "tags",
     "usage",
     "health",
+    "dirsync",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1926,6 +1927,21 @@ fn gen_health() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/dirsync` — directory sync statistics.
+fn gen_dirsync() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (comparisons, syncs) = super::dirsync::stats();
+
+    out.push_str("Directory Sync Statistics\n");
+    out.push_str("========================\n\n");
+    out.push_str(&format!("Comparisons performed: {}\n", comparisons));
+    out.push_str(&format!("Syncs performed:       {}\n", syncs));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1988,6 +2004,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "tags" => Ok(gen_tags()),
         "usage" => Ok(gen_usage()),
         "health" => Ok(gen_health()),
+        "dirsync" => Ok(gen_dirsync()),
         _ => Err(KernelError::NotFound),
     }
 }

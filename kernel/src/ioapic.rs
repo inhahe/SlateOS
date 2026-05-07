@@ -737,6 +737,8 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     //    immediately — the data is lost after EOI.
     if irq == 1 {
         crate::keyboard::handle_scancode();
+    } else if irq == 12 {
+        crate::mouse::handle_irq();
     }
 
     // PCI shared IRQ handling: acknowledge all virtio devices that

@@ -86,6 +86,7 @@ mod kdiag;
 mod kevent;
 mod keyboard;
 mod kobject;
+mod mouse;
 mod klog;
 mod kshell;
 mod ksnapshot;
@@ -999,6 +1000,20 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = keyboard::self_test() {
         serial_println!("FATAL: Keyboard self-test failed: {}", e);
         cpu::halt_loop();
+    }
+
+    // Initialize PS/2 mouse on port 2 (IRQ 12).
+    // Must be after keyboard init (which sets up the i8042 controller).
+    //
+    // SAFETY: IOAPIC and IDT initialized, keyboard already set up the
+    // controller.  Called exactly once.
+    unsafe {
+        mouse::init();
+    }
+
+    if let Err(e) = mouse::self_test() {
+        serial_println!("[mouse] Self-test failed: {} (non-fatal)", e);
+        // Non-fatal: system can boot without a mouse.
     }
 
     // Step 21b: Bootstrap Application Processors (SMP).

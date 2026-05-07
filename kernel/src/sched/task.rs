@@ -443,6 +443,17 @@ pub struct Task {
     /// in [`unthrottle_expired`](super::unthrottle_expired).
     pub throttled: bool,
 
+    /// Resource control group (cgroup) this task belongs to.
+    ///
+    /// Determines the CPU and memory limits applied to this task at the
+    /// group level.  Default: 0 (root cgroup, no limits).
+    ///
+    /// Set via [`crate::cgroup::attach_task`] at task creation or when
+    /// moving a task between groups.  The scheduler charges CPU ticks to
+    /// this group; the memory allocator checks frame limits.
+    #[allow(dead_code)] // Read by scheduler timer_tick cgroup integration (next step).
+    pub cgroup_id: crate::cgroup::CgroupId,
+
     /// If this task's stack was allocated via the kstack allocator
     /// (with hardware guard pages), this holds the slot index for
     /// deallocation.  `None` means the stack uses legacy HHDM-based
@@ -654,6 +665,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            cgroup_id: crate::cgroup::ROOT_CGROUP,
             kstack_slot: None,
             fpu_state: FpuState::new_default(),
         }
@@ -721,6 +733,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            cgroup_id: crate::cgroup::ROOT_CGROUP,
             kstack_slot: None,
             fpu_state: FpuState::new_default(),
         }
@@ -837,6 +850,7 @@ impl Task {
             cpu_quota_pct: 0,
             cpu_period_used: 0,
             throttled: false,
+            cgroup_id: crate::cgroup::ROOT_CGROUP,
             kstack_slot,
             fpu_state: FpuState::new_default(),
         })

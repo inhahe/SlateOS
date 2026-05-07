@@ -61,6 +61,7 @@ mod ahci;
 mod boot;
 mod cap;
 mod cet;
+mod cgroup;
 mod compositor;
 mod console;
 mod cpu;
@@ -1259,6 +1260,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++p4: VMA management self-test.
     // Verifies add/remove/find/overlap/alignment checks for address spaces.
     mm::vma::self_test();
+
+    // Step 22e⅞++++p5: Resource control groups (cgroup) self-test.
+    // Verifies hierarchy, CPU/memory controllers, charge/uncharge, limits.
+    cgroup::self_test();
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.

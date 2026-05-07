@@ -1052,7 +1052,16 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 
 ### 5.5 Container support
 - [ ] Namespace primitives (PID, network, mount, user)
-- [ ] Resource control groups (CPU, memory, I/O limits per group)
+- [-] Resource control groups (CPU, memory, I/O limits per group)
+  - [x] cgroup.rs: hierarchical group tree (max 256 groups, root always exists)
+  - [x] CPU controller: per-group quota/period (quota_ticks per period_ticks), cpu_charge() hot-path check, cpu_period_reset() for BSP timer
+  - [x] Memory controller: per-group frame limit, CAS-based mem_charge() with atomic limit enforcement, mem_uncharge() with underflow saturation
+  - [x] Hierarchical limits: effective_cpu_quota/effective_mem_limit walk parent chain, return tightest constraint
+  - [x] Task integration: cgroup_id field in Task struct (default ROOT_CGROUP), attach_task/detach_task API
+  - [x] 18 self-tests: root exists, create/delete, hierarchy, attach/detach, CPU charge/throttle/reset/unlimited, memory charge/limit/uncharge/underflow, effective hierarchical limits, stats queries
+  - [ ] Scheduler timer_tick integration (charge cgroup CPU on each tick, throttle when over quota)
+  - [ ] Frame allocator integration (check cgroup memory limit on alloc)
+  - [ ] I/O controller (bandwidth limits per group)
 - [ ] Port Docker (or equivalent container runtime)
 
 ### 5.6 Additional software

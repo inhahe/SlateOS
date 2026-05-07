@@ -10,6 +10,7 @@ exclude = [
     "userspace/init",
     "userspace/hello",
     "userspace/ticker",
+    "posix",
 ]
 
 [workspace.lints.clippy]

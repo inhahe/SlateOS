@@ -768,8 +768,25 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer
-- [ ] Enough of POSIX libc for: gcc, coreutils, bash, Python (CPython)
-- [ ] Translate POSIX calls to native syscalls
+- [-] Enough of POSIX libc for: gcc, coreutils, bash, Python (CPython)
+  - [x] Foundation: posix/ crate (no_std staticlib, edition 2024)
+  - [x] Syscall ABI: inline asm wrappers for SYSCALL instruction (0-6 args)
+  - [x] Errno: 50+ POSIX errno constants, thread-local storage, native→POSIX translation
+  - [x] Types: LP64 type aliases (pid_t, off_t, size_t, etc.)
+  - [x] File I/O: open, close, read, write, lseek, dup, dup2, stat, fstat, lstat, unlink, rename, link, symlink, readlink, mkdir, rmdir, truncate, ftruncate, fsync
+  - [x] Process: _exit, getpid, getppid, waitpid, wait, gettid (fork/execve stubs)
+  - [x] Time: sleep, nanosleep, clock_gettime, gettimeofday, time
+  - [x] Memory: mmap, munmap, mprotect
+  - [x] Strings: memcpy, memmove, memset, memcmp, memchr, strlen, strnlen, strcmp, strncmp, strcpy, strncpy, strchr, strrchr
+  - [x] Directory: opendir, readdir, closedir (static Dir pool, 8 concurrent)
+  - [x] Misc: getcwd, chdir, isatty, getuid/geteuid/getgid/getegid, sysconf, abort
+  - [x] Fcntl: O_* flags, SEEK_*, access mode flags, S_IF* file type bits
+  - [ ] pipe, dup3, fcntl, ioctl
+  - [ ] select/poll/epoll equivalents
+  - [ ] signal handling shim (POSIX signals → native IPC)
+  - [ ] posix_spawn (via native SYS_PROCESS_SPAWN)
+  - [ ] socket API shim
+- [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages
 

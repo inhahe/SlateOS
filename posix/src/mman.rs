@@ -1,0 +1,114 @@
+//! POSIX memory mapping functions.
+//!
+//! Implements `mmap`, `munmap`, `mprotect`.
+//!
+//! Our kernel provides `SYS_MMAP`, `SYS_MUNMAP`, `SYS_MPROTECT` which
+//! closely follow POSIX/Linux semantics.
+
+use crate::errno;
+use crate::syscall::*;
+use crate::types::*;
+
+// ---------------------------------------------------------------------------
+// mmap protection flags
+// ---------------------------------------------------------------------------
+
+/// Page may not be accessed.
+pub const PROT_NONE: i32 = 0;
+/// Page may be read.
+pub const PROT_READ: i32 = 1;
+/// Page may be written.
+pub const PROT_WRITE: i32 = 2;
+/// Page may be executed.
+pub const PROT_EXEC: i32 = 4;
+
+// ---------------------------------------------------------------------------
+// mmap flags
+// ---------------------------------------------------------------------------
+
+/// Share mapping with other processes.
+pub const MAP_SHARED: i32 = 0x01;
+/// Create a private copy-on-write mapping.
+pub const MAP_PRIVATE: i32 = 0x02;
+/// Place mapping at exactly the specified address.
+pub const MAP_FIXED: i32 = 0x10;
+/// Mapping is not backed by any file (anonymous).
+pub const MAP_ANONYMOUS: i32 = 0x20;
+
+/// Failure return value for mmap.
+pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_void;
+
+// ---------------------------------------------------------------------------
+// Functions
+// ---------------------------------------------------------------------------
+
+/// Map files or devices into memory.
+///
+/// Our kernel's `SYS_MMAP` takes:
+/// - arg0: addr (hint or fixed address)
+/// - arg1: length
+/// - arg2: prot
+/// - arg3: flags
+/// - arg4: fd (-1 for anonymous)
+/// - arg5: offset
+///
+/// Returns the mapped address, or MAP_FAILED on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn mmap(
+    addr: *mut core::ffi::c_void,
+    length: SizeT,
+    prot: i32,
+    flags: i32,
+    fd: Fd,
+    offset: OffT,
+) -> *mut core::ffi::c_void {
+    if length == 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+
+    let ret = syscall6(
+        SYS_MMAP,
+        addr as u64,
+        length as u64,
+        prot as u64,
+        flags as u64,
+        fd as u64,
+        offset as u64,
+    );
+
+    if ret < 0 {
+        let _ = errno::translate(ret); // Called for side effect: sets errno.
+        return MAP_FAILED;
+    }
+
+    ret as *mut core::ffi::c_void
+}
+
+/// Unmap a region of memory.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn munmap(addr: *mut core::ffi::c_void, length: SizeT) -> i32 {
+    if addr.is_null() || length == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let ret = syscall2(SYS_MUNMAP, addr as u64, length as u64);
+    errno::translate(ret) as i32
+}
+
+/// Set protection on a memory region.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn mprotect(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) -> i32 {
+    if addr.is_null() || len == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let ret = syscall3(SYS_MPROTECT, addr as u64, len as u64, prot as u64);
+    errno::translate(ret) as i32
+}

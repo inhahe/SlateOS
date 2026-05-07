@@ -1,0 +1,25 @@
+[package]
+name = "posix"
+version = "0.1.0"
+edition = "2024"
+description = "POSIX compatibility library — C-compatible function signatures backed by native syscalls"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[profile.release]
+opt-level = 2
+lto = false           # LTO conflicts with code-model in cross-compilation.
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"

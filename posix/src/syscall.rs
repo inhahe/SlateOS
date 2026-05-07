@@ -74,6 +74,14 @@ pub const SYS_FS_LSTAT: u64 = 639;
 // Sync
 pub const SYS_FS_SYNC: u64 = 641;
 
+// Pipes (IPC range 200-399)
+pub const SYS_PIPE_CREATE: u64 = 220;
+pub const SYS_PIPE_WRITE: u64 = 221;
+pub const SYS_PIPE_READ: u64 = 222;
+pub const SYS_PIPE_TRY_WRITE: u64 = 223;
+pub const SYS_PIPE_TRY_READ: u64 = 224;
+pub const SYS_PIPE_CLOSE: u64 = 225;
+
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers
 // ---------------------------------------------------------------------------

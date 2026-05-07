@@ -6,17 +6,16 @@
 //!
 //! ## Translation
 //!
-//! Our kernel uses file handles (integers) similar to POSIX file
-//! descriptors.  The main differences:
+//! Our kernel uses separate handle namespaces for files, pipes, and
+//! channels.  POSIX unifies everything as integer file descriptors.
+//! The fd table (`fdtable`) bridges this gap.
 //!
-//! - Our `SYS_FS_OPEN` takes a path and flags, returns a handle.
-//! - Our `SYS_FS_READ`/`SYS_FS_WRITE` take (handle, buf, len).
-//! - Our `SYS_FS_SEEK` takes (handle, offset, whence).
-//!
-//! These map almost 1:1 to POSIX, making the translation thin.
+//! `read`, `write`, `close` dispatch to the correct kernel syscall
+//! based on the handle type stored in the fd table entry.
 
 use crate::errno;
 use crate::fcntl;
+use crate::fdtable::{self, HandleKind};
 use crate::stat::Stat;
 use crate::syscall::*;
 use crate::types::*;
@@ -55,15 +54,41 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
         native_flags,
     );
 
-    errno::translate(ret) as Fd
+    if ret < 0 {
+        return errno::translate(ret) as Fd;
+    }
+
+    // Register the kernel file handle in the fd table.
+    let kernel_handle = ret as u64;
+    if let Some(fd) = fdtable::alloc_fd(HandleKind::File, kernel_handle) {
+        fd
+    } else {
+        // Fd table full — close the kernel handle.
+        let _ = syscall1(SYS_FS_CLOSE, kernel_handle);
+        errno::set_errno(errno::EMFILE);
+        -1
+    }
 }
 
 /// Close a file descriptor.
 ///
+/// Dispatches to the appropriate kernel close syscall based on
+/// the handle type stored in the fd table.
+///
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: Fd) -> i32 {
-    let ret = syscall1(SYS_FS_CLOSE, fd as u64);
+    let Some(entry) = fdtable::close_fd(fd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+
+    let ret = match entry.kind {
+        HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
+        HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, entry.handle),
+        HandleKind::Console => return 0, // Console fds don't need kernel close.
+    };
+
     errno::translate(ret) as i32
 }
 
@@ -73,6 +98,11 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 
 /// Read from a file descriptor.
 ///
+/// Dispatches to the correct kernel read syscall based on handle type:
+/// - File → `SYS_FS_READ`
+/// - Pipe → `SYS_PIPE_READ`
+/// - Console → `SYS_CONSOLE_READ_CHAR` (one byte at a time)
+///
 /// Returns number of bytes read, 0 at EOF, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
@@ -81,11 +111,39 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         return -1;
     }
 
-    let ret = syscall3(SYS_FS_READ, fd as u64, buf as u64, count as u64);
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    let ret = match entry.kind {
+        HandleKind::File => {
+            syscall3(SYS_FS_READ, entry.handle, buf as u64, count as u64)
+        }
+        HandleKind::Pipe => {
+            syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+        }
+        HandleKind::Console => {
+            // Console read: one character at a time via SYS_CONSOLE_READ_CHAR.
+            if count == 0 {
+                return 0;
+            }
+            let ch = syscall0(SYS_CONSOLE_READ_CHAR);
+            if ch < 0 {
+                return errno::translate(ch) as SsizeT;
+            }
+            // SAFETY: buf is valid for at least `count` bytes (checked above).
+            unsafe { *buf = ch as u8; }
+            1
+        }
+    };
+
     errno::translate(ret) as SsizeT
 }
 
 /// Write to a file descriptor.
+///
+/// Dispatches to the correct kernel write syscall based on handle type:
+/// - File → `SYS_FS_WRITE`
+/// - Pipe → `SYS_PIPE_WRITE`
+/// - Console → `SYS_CONSOLE_WRITE`
 ///
 /// Returns number of bytes written, -1 on error.
 #[unsafe(no_mangle)]
@@ -95,7 +153,20 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         return -1;
     }
 
-    let ret = syscall3(SYS_FS_WRITE, fd as u64, buf as u64, count as u64);
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    let ret = match entry.kind {
+        HandleKind::File => {
+            syscall3(SYS_FS_WRITE, entry.handle, buf as u64, count as u64)
+        }
+        HandleKind::Pipe => {
+            syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+        }
+        HandleKind::Console => {
+            syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64)
+        }
+    };
+
     errno::translate(ret) as SsizeT
 }
 
@@ -105,12 +176,25 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
 
 /// Reposition file offset.
 ///
+/// Only valid for File handles.  Pipes and consoles are not seekable
+/// and return ESPIPE.
+///
 /// Returns the resulting offset from the beginning of the file,
 /// or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
-    let ret = syscall3(SYS_FS_SEEK, fd as u64, offset as u64, whence as u64);
-    errno::translate(ret) as OffT
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    match entry.kind {
+        HandleKind::File => {
+            let ret = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, whence as u64);
+            errno::translate(ret) as OffT
+        }
+        HandleKind::Pipe | HandleKind::Console => {
+            errno::set_errno(errno::ESPIPE);
+            -1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,29 +203,92 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
 
 /// Duplicate a file descriptor.
 ///
-/// Returns the new file descriptor, or -1 on error.
+/// Returns the lowest available fd pointing to the same resource,
+/// or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn dup(oldfd: Fd) -> Fd {
-    let ret = syscall1(SYS_FS_DUP, oldfd as u64);
-    errno::translate(ret) as Fd
+    let Some(entry) = lookup_fd(oldfd) else { return -1; };
+
+    match entry.kind {
+        HandleKind::File => {
+            // Kernel-level dup creates a new independent handle.
+            let ret = syscall1(SYS_FS_DUP, entry.handle);
+            if ret < 0 {
+                return errno::translate(ret) as Fd;
+            }
+            if let Some(fd) = fdtable::alloc_fd(HandleKind::File, ret as u64) {
+                fd
+            } else {
+                let _ = syscall1(SYS_FS_CLOSE, ret as u64);
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
+        HandleKind::Console => {
+            // Console handles are shared — just allocate a new fd entry.
+            if let Some(fd) = fdtable::alloc_fd(HandleKind::Console, entry.handle) {
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
+        HandleKind::Pipe => {
+            // No kernel-level pipe dup available.
+            // TODO: Add SYS_PIPE_DUP to kernel, or add refcounting to fd table.
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+    }
 }
 
 /// Duplicate a file descriptor to a specific number.
 ///
 /// If `newfd` is already open, it is silently closed first.
 /// Returns `newfd` on success, -1 on error.
-///
-/// Note: Our kernel doesn't support targeted dup2 yet — this
-/// currently falls back to a regular dup and logs a warning
-/// if newfd != returned fd.  Full dup2 semantics require kernel
-/// support for handle slot targeting.
 #[unsafe(no_mangle)]
 pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
-    // TODO: Implement proper dup2 with kernel support for
-    // targeting a specific fd number.  For now, just dup.
-    let _ = newfd;
-    let ret = syscall1(SYS_FS_DUP, oldfd as u64);
-    errno::translate(ret) as Fd
+    if oldfd == newfd {
+        // POSIX: if oldfd == newfd and oldfd is valid, return newfd.
+        if fdtable::get_fd(oldfd).is_some() {
+            return newfd;
+        }
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    let Some(entry) = lookup_fd(oldfd) else { return -1; };
+
+    if newfd < 0 || newfd as usize >= fdtable::MAX_FDS {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // For File handles, create a kernel-level duplicate.
+    // For Console, share the handle.
+    // For Pipe, not yet supported.
+    let new_handle = match entry.kind {
+        HandleKind::File => {
+            let ret = syscall1(SYS_FS_DUP, entry.handle);
+            if ret < 0 {
+                return errno::translate(ret) as Fd;
+            }
+            ret as u64
+        }
+        HandleKind::Console => entry.handle,
+        HandleKind::Pipe => {
+            errno::set_errno(errno::ENOSYS);
+            return -1;
+        }
+    };
+
+    // Install at newfd, closing whatever was there.
+    if let Some(old) = fdtable::install_fd(newfd, entry.kind, new_handle) {
+        // Close the previously open handle.
+        let _ = close_kernel_handle(old.kind, old.handle);
+    }
+
+    newfd
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +331,9 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
 }
 
 /// Get file status by file descriptor.
+///
+/// Only meaningful for File handles.  Pipe fds return a
+/// minimal stat with `st_mode = S_IFIFO`.
 #[unsafe(no_mangle)]
 pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
     if buf.is_null() {
@@ -191,13 +341,34 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
         return -1;
     }
 
-    let ret = syscall2(SYS_FS_FSTAT, fd as u64, buf as u64);
+    let Some(entry) = lookup_fd(fd) else { return -1; };
 
-    if ret < 0 {
-        return errno::translate(ret) as i32;
+    match entry.kind {
+        HandleKind::File => {
+            let ret = syscall2(SYS_FS_FSTAT, entry.handle, buf as u64);
+            if ret < 0 {
+                return errno::translate(ret) as i32;
+            }
+            0
+        }
+        HandleKind::Pipe => {
+            // Return minimal stat for a pipe.
+            // SAFETY: buf validity checked above.
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 1);
+                (*buf).st_mode = crate::fcntl::S_IFIFO;
+            }
+            0
+        }
+        HandleKind::Console => {
+            // Return minimal stat for a character device.
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 1);
+                (*buf).st_mode = crate::fcntl::S_IFCHR;
+            }
+            0
+        }
     }
-
-    0
 }
 
 /// Get symbolic link status (don't follow final symlink).
@@ -383,8 +554,18 @@ pub extern "C" fn truncate(path: *const u8, length: OffT) -> i32 {
 /// Truncate a file to a specified length (by fd).
 #[unsafe(no_mangle)]
 pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
-    let ret = syscall2(SYS_FS_FTRUNCATE, fd as u64, length as u64);
-    errno::translate(ret) as i32
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    match entry.kind {
+        HandleKind::File => {
+            let ret = syscall2(SYS_FS_FTRUNCATE, entry.handle, length as u64);
+            errno::translate(ret) as i32
+        }
+        HandleKind::Pipe | HandleKind::Console => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,16 +573,49 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Synchronize file data to storage.
+///
+/// Only meaningful for File handles.  Returns 0 for pipes/console.
 #[unsafe(no_mangle)]
-pub extern "C" fn fsync(_fd: Fd) -> i32 {
-    // Our SYS_FS_SYNC is a global sync, not per-fd.
-    let ret = syscall0(SYS_FS_SYNC);
-    errno::translate(ret) as i32
+pub extern "C" fn fsync(fd: Fd) -> i32 {
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    match entry.kind {
+        HandleKind::File => {
+            // Our SYS_FS_SYNC is a global sync, not per-fd.
+            let ret = syscall0(SYS_FS_SYNC);
+            errno::translate(ret) as i32
+        }
+        HandleKind::Pipe | HandleKind::Console => 0,
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Look up an fd in the table, setting EBADF errno if not found.
+///
+/// Reduces repetitive `match fdtable::get_fd + errno::set_errno(EBADF)` patterns.
+#[must_use]
+fn lookup_fd(fd: Fd) -> Option<fdtable::FdEntry> {
+    let entry = fdtable::get_fd(fd);
+    if entry.is_none() {
+        errno::set_errno(errno::EBADF);
+    }
+    entry
+}
+
+/// Close an underlying kernel handle by type.
+///
+/// Used when tearing down an fd entry (e.g., during dup2 when the
+/// target fd was previously open).
+fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
+    match kind {
+        HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
+        HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, handle),
+        HandleKind::Console => 0, // Console handles are not closeable.
+    }
+}
 
 /// Compute length of a C string (excluding null terminator).
 ///

@@ -66,13 +66,15 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 pub mod errno;
 pub mod fcntl;
+pub mod fdtable;
 pub mod file;
+pub mod mman;
+pub mod pipe;
 pub mod process;
 pub mod stat;
+pub mod string;
 pub mod syscall;
 pub mod time;
 pub mod types;
 pub mod unistd;
-pub mod mman;
-pub mod string;
 pub mod dirent;

@@ -182,6 +182,7 @@ const ROOT_FILES: &[&str] = &[
     "screenshot",
     "a11y",
     "ime",
+    "netindicator",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3545,6 +3546,36 @@ fn gen_ime() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netindicator() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (ic, wc, pc, sc, cc) = super::netindicator::stats();
+    let (cs, desc) = super::netindicator::connection_summary();
+
+    out.push_str("Network Status\n");
+    out.push_str("==============\n\n");
+    out.push_str(&format!("Status:     {} — {}\n", cs.label(), desc));
+    out.push_str(&format!("Interfaces: {}\n", ic));
+    out.push_str(&format!("WiFi nets:  {}\n", wc));
+    out.push_str(&format!("Profiles:   {}\n", pc));
+    out.push_str(&format!("Scans:      {}\n", sc));
+    out.push_str(&format!("Connects:   {}\n", cc));
+    out.push_str(&format!("Airplane:   {}\n\n", super::netindicator::airplane_mode()));
+
+    let ifaces = super::netindicator::list_interfaces();
+    for i in &ifaces {
+        out.push_str(&format!("{}: {} [{}] {}{}\n",
+            i.name, i.iface_type.label(), i.state.label(),
+            if i.ipv4.is_empty() { String::new() } else { format!("ip={} ", i.ipv4) },
+            if i.iface_type == super::netindicator::InterfaceType::Wifi && !i.ssid.is_empty() {
+                format!("ssid={} signal={}%", i.ssid, i.signal)
+            } else { String::new() }));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3892,6 +3923,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "screenshot" => Ok(gen_screenshot()),
         "a11y" => Ok(gen_a11y()),
         "ime" => Ok(gen_ime()),
+        "netindicator" => Ok(gen_netindicator()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

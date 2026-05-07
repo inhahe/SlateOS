@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4786,6 +4786,7 @@ fn dispatch(line: &str) {
         "screenshot" | "scap" => cmd_screenshot(args),
         "a11y" | "accessibility" => cmd_a11y(args),
         "ime" => cmd_ime(args),
+        "netindicator" | "netind" => cmd_netindicator(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -19944,6 +19945,36 @@ fn cmd_ime(args: &str) {
     }
 }
 
+/// `netindicator` / `netind` — network status indicator.
+fn cmd_netindicator(args: &str) {
+    use crate::fs::netindicator;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "addif" => { let name = parts.get(1).copied().unwrap_or(""); let t = parts.get(2).and_then(|s| netindicator::InterfaceType::from_str(s)).unwrap_or(netindicator::InterfaceType::Ethernet); let mac = parts.get(3).copied().unwrap_or("00:00:00:00:00:00"); if name.is_empty() { shell_println!("Usage: netind addif <name> [type] [mac]"); } else { match netindicator::update_interface(name, t, mac) { Ok(()) => shell_println!("Added {} ({})", name, t.label()), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "rmif" => { let name = parts.get(1).copied().unwrap_or(""); match netindicator::remove_interface(name) { Ok(()) => shell_println!("Removed {}", name), Err(e) => shell_println!("Error: {:?}", e), } }
+        "state" => { let name = parts.get(1).copied().unwrap_or(""); let s = parts.get(2).and_then(|s| netindicator::ConnectionState::from_str(s)); if let Some(s) = s { match netindicator::set_state(name, s) { Ok(()) => shell_println!("{}: {}", name, s.label()), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: netind state <name> <connected|disconnected|...>"); } }
+        "ip" => { let name = parts.get(1).copied().unwrap_or(""); let ip = parts.get(2).copied().unwrap_or(""); let gw = parts.get(3).copied().unwrap_or(""); match netindicator::set_ip(name, ip, gw) { Ok(()) => shell_println!("{}: ip={} gw={}", name, ip, gw), Err(e) => shell_println!("Error: {:?}", e), } }
+        "speed" => { let name = parts.get(1).copied().unwrap_or(""); let mbps = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); match netindicator::set_speed(name, mbps) { Ok(()) => shell_println!("{}: {}Mbps", name, mbps), Err(e) => shell_println!("Error: {:?}", e), } }
+        "list" | "ls" => { let ifaces = netindicator::list_interfaces(); if ifaces.is_empty() { shell_println!("No interfaces"); } else { for i in &ifaces { shell_println!("{}: {} [{}]{}{}", i.name, i.iface_type.label(), i.state.label(), if i.ipv4.is_empty() {String::new()} else {alloc::format!(" ip={}", i.ipv4)}, if !i.ssid.is_empty() {alloc::format!(" ssid={} {}%", i.ssid, i.signal)} else {String::new()}); } } }
+        "status" => { let (cs, desc) = netindicator::connection_summary(); shell_println!("{}: {}", cs.label(), desc); }
+        "scan" => { netindicator::scan_wifi(); shell_println!("WiFi scan started"); }
+        "wifi" => { let nets = netindicator::wifi_networks(); if nets.is_empty() { shell_println!("No WiFi networks"); } else { for n in &nets { shell_println!("  {} {}% [{}] ch{}{}", n.ssid, n.signal, n.security.label(), n.channel, if n.saved {" (saved)"} else {""}); } } }
+        "report" => { let ssid = parts.get(1).copied().unwrap_or(""); let sig = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(50); let sec = match parts.get(3).copied().unwrap_or("wpa2") { "open" => netindicator::WifiSecurity::Open, "wep" => netindicator::WifiSecurity::WEP, "wpa" => netindicator::WifiSecurity::WPA, "wpa3" => netindicator::WifiSecurity::WPA3, _ => netindicator::WifiSecurity::WPA2, }; let ch = parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(6); if ssid.is_empty() { shell_println!("Usage: netind report <ssid> [signal] [security] [channel]"); } else { netindicator::report_wifi(ssid, sig, sec, ch, 2437); shell_println!("Reported {} {}% {}", ssid, sig, sec.label()); } }
+        "connect" => { let ssid = parts.get(1).copied().unwrap_or(""); let pw = parts.get(2).copied().unwrap_or(""); if ssid.is_empty() { shell_println!("Usage: netind connect <ssid> [password]"); } else { match netindicator::connect_wifi(ssid, pw) { Ok(()) => shell_println!("Connected to {}", ssid), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "disconnect" => { match netindicator::disconnect_wifi() { Ok(()) => shell_println!("Disconnected"), Err(e) => shell_println!("Error: {:?}", e), } }
+        "save" => { let ssid = parts.get(1).copied().unwrap_or(""); if ssid.is_empty() { shell_println!("Usage: netind save <ssid>"); } else { let _ = netindicator::save_profile(ssid, netindicator::WifiSecurity::WPA2, true); shell_println!("Saved profile for {}", ssid); } }
+        "forget" => { let ssid = parts.get(1).copied().unwrap_or(""); match netindicator::forget_profile(ssid) { Ok(()) => shell_println!("Forgot {}", ssid), Err(e) => shell_println!("Error: {:?}", e), } }
+        "profiles" => { let profs = netindicator::list_profiles(); if profs.is_empty() { shell_println!("No saved profiles"); } else { for p in &profs { shell_println!("  {} [{}]{}{}", p.ssid, p.security.label(), if p.auto_connect {" auto"} else {""}, if p.metered {" metered"} else {""}); } } }
+        "airplane" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { netindicator::set_airplane_mode(true); shell_println!("Airplane mode: on"); } "off"|"false" => { netindicator::set_airplane_mode(false); shell_println!("Airplane mode: off"); } _ => { shell_println!("Airplane mode: {}", netindicator::airplane_mode()); } } }
+        "dns" => { match parts.get(1).copied().unwrap_or("") { "auto" => { netindicator::set_dns_auto(); shell_println!("DNS: auto"); } "manual" => { let servers: Vec<&str> = parts[2..].to_vec(); if servers.is_empty() { shell_println!("Usage: netind dns manual <server1> [server2]"); } else { let _ = netindicator::set_dns_manual(&servers); shell_println!("DNS: manual {:?}", servers); } } _ => { let (mode, servers) = netindicator::dns_config(); shell_println!("DNS: {:?} {:?}", mode, servers); } } }
+        "test" => { match netindicator::self_test() { Ok(()) => shell_println!("All netindicator tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (ic, wc, pc, sc, cc) = netindicator::stats(); shell_println!("Interfaces:{} WiFi:{} Profiles:{} Scans:{} Connects:{}", ic, wc, pc, sc, cc); }
+        "reset" => { netindicator::clear_all(); netindicator::reset_stats(); shell_println!("Network indicator reset"); }
+        _ => { shell_println!("netindicator: addif/rmif/state/ip/speed/list/status/scan/wifi/report/connect/disconnect/save/forget/profiles/airplane/dns/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27473,7 +27504,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

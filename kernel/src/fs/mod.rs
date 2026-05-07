@@ -90,6 +90,7 @@ pub mod lz4;
 pub mod memfs;
 pub mod mime;
 pub mod mount_ns;
+pub mod netindicator;
 pub mod notifcenter;
 pub mod notify;
 pub mod openwith;

@@ -171,6 +171,7 @@ const ROOT_FILES: &[&str] = &[
     "filepicker",
     "theme",
     "hotkeys",
+    "widgets",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3188,6 +3189,35 @@ fn gen_hotkeys() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_widgets() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (widget_count, type_count, adds, refreshes) = super::widgets::stats();
+
+    out.push_str("Desktop Widgets\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Active:   {}/{}\n", widget_count, 64));
+    out.push_str(&format!("Types:    {}/{}\n", type_count, 128));
+    out.push_str(&format!("Adds:     {}\n", adds));
+    out.push_str(&format!("Refresh:  {}\n\n", refreshes));
+
+    let widgets = super::widgets::active_widgets();
+    if !widgets.is_empty() {
+        out.push_str(&format!("{:6} {:16} {:20} {:10} {:10} {}\n",
+            "ID", "KIND", "TITLE", "POS", "SIZE", "VISIBLE"));
+        for w in &widgets {
+            let pos = format!("{},{}", w.x, w.y);
+            let size = format!("{}x{}", w.width, w.height);
+            let vis = if w.visible { "yes" } else { "hidden" };
+            out.push_str(&format!("{:<6} {:16} {:20} {:10} {:10} {}\n",
+                w.id, w.kind.label(), w.title, pos, size, vis));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3524,6 +3554,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "filepicker" => Ok(gen_filepicker()),
         "theme" => Ok(gen_theme()),
         "hotkeys" => Ok(gen_hotkeys()),
+        "widgets" => Ok(gen_widgets()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

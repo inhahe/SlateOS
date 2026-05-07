@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4413,6 +4413,7 @@ fn dispatch(line: &str) {
         "filepicker" | "fpick" => cmd_filepicker(args),
         "theme" => cmd_theme(args),
         "hotkey" => cmd_hotkey(args),
+        "widgets" | "widget" => cmd_widgets(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -18004,6 +18005,276 @@ fn cmd_hotkey(args: &str) {
     }
 }
 
+/// `widgets` / `widget` — desktop widget management.
+fn cmd_widgets(args: &str) {
+    use crate::fs::widgets;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "add" => {
+            // widgets add <kind> [x y]
+            let kind_str = parts.get(1).copied().unwrap_or("");
+            if let Some(kind) = widgets::WidgetKind::from_str(kind_str) {
+                let x: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
+                let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+                match widgets::add(kind, x, y) {
+                    Ok(id) => shell_println!("Widget added: id={} kind={}", id, kind.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else if !kind_str.is_empty() {
+                // Try as custom type
+                let x: i32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
+                let y: i32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+                match widgets::add_custom(kind_str, x, y) {
+                    Ok(id) => shell_println!("Custom widget added: id={}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets add <kind> [x y]");
+                shell_println!("Kinds: clock sysmon notes calendar disk recent weather network");
+            }
+        }
+        "remove" | "rm" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match widgets::remove(id) {
+                    Ok(()) => shell_println!("Widget {} removed", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets remove <id>");
+            }
+        }
+        "get" | "info" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                if let Some(w) = widgets::get(id) {
+                    shell_println!("Widget #{}", w.id);
+                    shell_println!("  Kind:     {}", w.kind.label());
+                    shell_println!("  Type:     {}", w.type_name);
+                    shell_println!("  Title:    {}", w.title);
+                    shell_println!("  Position: ({}, {})", w.x, w.y);
+                    shell_println!("  Size:     {}x{}", w.width, w.height);
+                    shell_println!("  Visible:  {}", w.visible);
+                    shell_println!("  Opacity:  {}%", w.opacity);
+                    shell_println!("  Refresh:  {}ms", w.refresh_ms);
+                    if !w.data.is_empty() {
+                        let trunc = if w.data.len() > 80 {
+                            &w.data[..80]
+                        } else {
+                            &w.data
+                        };
+                        shell_println!("  Data:     {}", trunc);
+                    }
+                } else {
+                    shell_println!("Widget not found");
+                }
+            } else {
+                shell_println!("Usage: widgets get <id>");
+            }
+        }
+        "list" | "ls" => {
+            let all = widgets::active_widgets();
+            if all.is_empty() {
+                shell_println!("No widgets");
+            } else {
+                shell_println!("{:6} {:16} {:20} {:10} {:10} {:4} {}",
+                    "ID", "KIND", "TITLE", "POS", "SIZE", "VIS", "OPACITY");
+                for w in &all {
+                    let pos = alloc::format!("{},{}", w.x, w.y);
+                    let sz = alloc::format!("{}x{}", w.width, w.height);
+                    let vis = if w.visible { "yes" } else { "no" };
+                    shell_println!("{:<6} {:16} {:20} {:10} {:10} {:4} {}%",
+                        w.id, w.kind.label(), w.title, pos, sz, vis, w.opacity);
+                }
+            }
+        }
+        "move" | "mv" => {
+            // widgets move <id> <x> <y>
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok());
+            let x = parts.get(2).and_then(|s| s.parse::<i32>().ok());
+            let y = parts.get(3).and_then(|s| s.parse::<i32>().ok());
+            if let (Some(id), Some(x), Some(y)) = (id, x, y) {
+                match widgets::move_widget(id, x, y) {
+                    Ok(()) => shell_println!("Widget {} moved to ({}, {})", id, x, y),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets move <id> <x> <y>");
+            }
+        }
+        "resize" => {
+            // widgets resize <id> <w> <h>
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok());
+            let w = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            let h = parts.get(3).and_then(|s| s.parse::<u32>().ok());
+            if let (Some(id), Some(w), Some(h)) = (id, w, h) {
+                match widgets::resize(id, w, h) {
+                    Ok(()) => shell_println!("Widget {} resized to {}x{}", id, w, h),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets resize <id> <width> <height>");
+            }
+        }
+        "show" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match widgets::set_visible(id, true) {
+                    Ok(()) => shell_println!("Widget {} shown", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets show <id>");
+            }
+        }
+        "hide" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match widgets::set_visible(id, false) {
+                    Ok(()) => shell_println!("Widget {} hidden", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets hide <id>");
+            }
+        }
+        "opacity" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok());
+            let val = parts.get(2).and_then(|s| s.parse::<u8>().ok());
+            if let (Some(id), Some(val)) = (id, val) {
+                match widgets::set_opacity(id, val) {
+                    Ok(()) => shell_println!("Widget {} opacity set to {}%", id, val.min(100)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets opacity <id> <0-100>");
+            }
+        }
+        "data" => {
+            // widgets data <id> <text...>
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                let text = if parts.len() > 2 {
+                    parts[2..].join(" ")
+                } else {
+                    alloc::string::String::new()
+                };
+                match widgets::set_data(id, &text) {
+                    Ok(()) => shell_println!("Widget {} data set ({} bytes)", id, text.len()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets data <id> [text...]");
+            }
+        }
+        "title" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                let title = if parts.len() > 2 {
+                    parts[2..].join(" ")
+                } else {
+                    alloc::string::String::new()
+                };
+                match widgets::set_title(id, &title) {
+                    Ok(()) => shell_println!("Widget {} title set to '{}'", id, title),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: widgets title <id> <title...>");
+            }
+        }
+        "refresh" => {
+            let stale = widgets::needs_refresh();
+            if stale.is_empty() {
+                shell_println!("All widgets up to date");
+            } else {
+                shell_println!("{} widget(s) need refresh: {:?}", stale.len(), stale);
+                for id in &stale {
+                    let _ = widgets::mark_refreshed(*id);
+                }
+                shell_println!("Marked all as refreshed");
+            }
+        }
+        "regtype" => {
+            // widgets regtype <type_id> <name> [w h app]
+            let type_id = parts.get(1).copied().unwrap_or("");
+            let name = parts.get(2).copied().unwrap_or("");
+            if type_id.is_empty() || name.is_empty() {
+                shell_println!("Usage: widgets regtype <type_id> <name> [width height app]");
+            } else {
+                let w = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(200);
+                let h = parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(200);
+                let app = parts.get(5).copied().unwrap_or("custom");
+                match widgets::register_type(type_id, name, w, h, app) {
+                    Ok(()) => shell_println!("Custom type '{}' registered", type_id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unregtype" => {
+            let type_id = parts.get(1).copied().unwrap_or("");
+            if type_id.is_empty() {
+                shell_println!("Usage: widgets unregtype <type_id>");
+            } else {
+                match widgets::unregister_type(type_id) {
+                    Ok(()) => shell_println!("Custom type '{}' unregistered", type_id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "types" => {
+            let types = widgets::list_types();
+            if types.is_empty() {
+                shell_println!("No custom widget types registered");
+            } else {
+                shell_println!("{:20} {:24} {:8} {:8} {}",
+                    "TYPE_ID", "NAME", "WIDTH", "HEIGHT", "APP");
+                for t in &types {
+                    shell_println!("{:20} {:24} {:8} {:8} {}",
+                        t.type_id, t.display_name, t.default_width, t.default_height, t.provider_app);
+                }
+            }
+        }
+        "test" => {
+            shell_println!("Running widget self-tests...");
+            match widgets::self_test() {
+                Ok(()) => shell_println!("All widget tests passed"),
+                Err(e) => shell_println!("Test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (wcount, tcount, adds, refreshes) = widgets::stats();
+            shell_println!("Widgets: {}/64", wcount);
+            shell_println!("Types:   {}/128", tcount);
+            shell_println!("Adds:    {}", adds);
+            shell_println!("Refresh: {}", refreshes);
+        }
+        "reset" => {
+            widgets::clear_all();
+            widgets::reset_stats();
+            shell_println!("Widget state reset");
+        }
+        _ => {
+            shell_println!("Usage: widgets <subcommand>");
+            shell_println!("  add <kind> [x y]             Add a built-in widget");
+            shell_println!("  remove <id>                  Remove a widget");
+            shell_println!("  get <id>                     Show widget details");
+            shell_println!("  list                         List active widgets");
+            shell_println!("  move <id> <x> <y>            Reposition a widget");
+            shell_println!("  resize <id> <w> <h>          Resize a widget");
+            shell_println!("  show <id>                    Make widget visible");
+            shell_println!("  hide <id>                    Hide a widget");
+            shell_println!("  opacity <id> <0-100>         Set opacity");
+            shell_println!("  data <id> [text...]          Set widget data");
+            shell_println!("  title <id> <title...>        Set widget title");
+            shell_println!("  refresh                      Check/update stale widgets");
+            shell_println!("  regtype <id> <name> [w h app]  Register custom type");
+            shell_println!("  unregtype <id>               Unregister custom type");
+            shell_println!("  types                        List custom types");
+            shell_println!("  test                         Run self-tests");
+            shell_println!("  stats                        Show statistics");
+            shell_println!("  reset                        Clear all");
+            shell_println!("");
+            shell_println!("Kinds: clock sysmon notes calendar disk recent weather network");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -25533,7 +25804,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

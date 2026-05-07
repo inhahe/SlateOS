@@ -74,6 +74,7 @@ pub mod filetype;
 pub mod findex;
 pub mod freeze;
 pub mod fstrim;
+pub mod fstune;
 pub mod fswalk;
 pub mod handle;
 pub mod health;

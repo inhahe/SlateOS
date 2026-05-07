@@ -3446,7 +3446,7 @@ const COMMANDS: &[&str] = &[
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
-    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4743,6 +4743,7 @@ fn dispatch(line: &str) {
         "splice" => cmd_splice(args),
         "directio" => cmd_directio(args),
         "fstrim" => cmd_fstrim(args),
+        "fstune" => cmd_fstune(args),
         "sparse" => cmd_sparse(args),
         "lsplus" => cmd_lsplus(args),
         "fsfreeze" => cmd_fsfreeze(args),
@@ -20497,6 +20498,138 @@ fn cmd_swapcfg(args: &str) {
     }
 }
 
+/// `fstune` — filesystem tuning profiles and parameters.
+fn cmd_fstune(args: &str) {
+    use crate::fs::fstune;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let profiles = fstune::list_profiles();
+            if profiles.is_empty() { shell_println!("No profiles"); return; }
+            shell_println!("{:<6} {:<20} {:<8} {:<12} {:<8} {:<10} {}", "ID", "NAME", "FS", "WORKLOAD", "BLOCK", "JOURNAL", "APPLIED");
+            for p in &profiles {
+                let fs_name = match p.fs_type { fstune::FsType::Ext4 => "ext4", fstune::FsType::Btrfs => "btrfs", fstune::FsType::Xfs => "xfs", fstune::FsType::F2fs => "f2fs", fstune::FsType::Fat32 => "fat32" };
+                let wl = match p.workload { fstune::WorkloadType::Desktop => "desktop", fstune::WorkloadType::Database => "database", fstune::WorkloadType::Server => "server", fstune::WorkloadType::Development => "dev", fstune::WorkloadType::Gaming => "gaming" };
+                let jm = match p.journal_mode { fstune::JournalMode::Ordered => "ordered", fstune::JournalMode::Journal => "journal", fstune::JournalMode::Writeback => "writeback", fstune::JournalMode::Off => "off" };
+                shell_println!("{:<6} {:<20} {:<8} {:<12} {:<8} {:<10} {}", p.id, p.name, fs_name, wl, p.block_size, jm, if p.applied { "yes" } else { "no" });
+            }
+        }
+        "info" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fstune::get_profile(id) {
+                Ok(p) => {
+                    shell_println!("ID:              {}", p.id);
+                    shell_println!("Name:            {}", p.name);
+                    shell_println!("Block size:      {}", p.block_size);
+                    shell_println!("Journal mode:    {:?}", p.journal_mode);
+                    shell_println!("Commit interval: {}s", p.commit_interval_secs);
+                    shell_println!("Reserved:        {}%", p.reserved_pct);
+                    shell_println!("Inode ratio:     {}", p.inode_ratio);
+                    shell_println!("Dir index:       {}", p.dir_index);
+                    shell_println!("Alloc strategy:  {:?}", p.alloc_strategy);
+                    shell_println!("Lazy init:       {}", p.lazy_init);
+                    shell_println!("Discard:         {}", p.discard);
+                    shell_println!("Xattr:           {}", p.xattr);
+                    shell_println!("Stripe width:    {}", p.stripe_width);
+                    shell_println!("Data checksum:   {}", p.data_checksum);
+                    shell_println!("Compression:     {}{}", p.compression, if p.compression { alloc::format!(" ({})", p.compression_algo) } else { alloc::string::String::new() });
+                    shell_println!("Applied:         {}", p.applied);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "create" => {
+            let name = parts.get(1).copied().unwrap_or("unnamed");
+            let fs_type = match parts.get(2).copied().unwrap_or("ext4") {
+                "btrfs" => fstune::FsType::Btrfs, "xfs" => fstune::FsType::Xfs, "f2fs" => fstune::FsType::F2fs, "fat32" => fstune::FsType::Fat32, _ => fstune::FsType::Ext4,
+            };
+            let workload = match parts.get(3).copied().unwrap_or("desktop") {
+                "database" | "db" => fstune::WorkloadType::Database, "server" | "srv" => fstune::WorkloadType::Server, "dev" | "development" => fstune::WorkloadType::Development, "gaming" | "game" => fstune::WorkloadType::Gaming, _ => fstune::WorkloadType::Desktop,
+            };
+            match fstune::create_profile(name, fs_type, workload) { Ok(id) => shell_println!("Created profile {} (ID {})", name, id), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "remove" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fstune::remove_profile(id) { Ok(()) => shell_println!("Removed"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "workload" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let wl = match parts.get(2).copied().unwrap_or("desktop") {
+                "database" | "db" => fstune::WorkloadType::Database, "server" | "srv" => fstune::WorkloadType::Server, "dev" | "development" => fstune::WorkloadType::Development, "gaming" | "game" => fstune::WorkloadType::Gaming, _ => fstune::WorkloadType::Desktop,
+            };
+            match fstune::apply_workload(id, wl) { Ok(()) => shell_println!("Applied workload preset"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "blocksize" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let sz: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fstune::set_block_size(id, sz) { Ok(()) => shell_println!("Block size set to {}", sz), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "journal" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mode = match parts.get(2).copied().unwrap_or("ordered") {
+                "journal" | "full" => fstune::JournalMode::Journal, "writeback" | "wb" => fstune::JournalMode::Writeback, "off" | "none" => fstune::JournalMode::Off, _ => fstune::JournalMode::Ordered,
+            };
+            match fstune::set_journal_mode(id, mode) { Ok(()) => shell_println!("Journal mode set"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "commit" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let secs: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fstune::set_commit_interval(id, secs) { Ok(()) => shell_println!("Commit interval set to {}s", secs), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "reserved" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let pct: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fstune::set_reserved_pct(id, pct) { Ok(()) => shell_println!("Reserved {}%", pct), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "inode" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let ratio: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fstune::set_inode_ratio(id, ratio) { Ok(()) => shell_println!("Inode ratio set to {}", ratio), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "alloc" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let strat = match parts.get(2).copied().unwrap_or("spread") {
+                "pack" => fstune::AllocStrategy::Pack, "sequential" | "seq" => fstune::AllocStrategy::Sequential, _ => fstune::AllocStrategy::Spread,
+            };
+            match fstune::set_alloc_strategy(id, strat) { Ok(()) => shell_println!("Alloc strategy set"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "discard" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let on = parts.get(2).copied().unwrap_or("on") != "off";
+            match fstune::set_discard(id, on) { Ok(()) => shell_println!("Discard {}", if on { "enabled" } else { "disabled" }), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "checksum" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let on = parts.get(2).copied().unwrap_or("on") != "off";
+            match fstune::set_data_checksum(id, on) { Ok(()) => shell_println!("Data checksum {}", if on { "enabled" } else { "disabled" }), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "compress" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let algo = parts.get(2).copied().unwrap_or("off");
+            if algo == "off" { match fstune::set_compression(id, false, "") { Ok(()) => shell_println!("Compression disabled"), Err(e) => shell_println!("Error: {:?}", e) } }
+            else { match fstune::set_compression(id, true, algo) { Ok(()) => shell_println!("Compression: {}", algo), Err(e) => shell_println!("Error: {:?}", e) } }
+        }
+        "apply" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match fstune::mark_applied(id) { Ok(()) => shell_println!("Marked as applied"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "tradeoffs" => {
+            let infos = fstune::tradeoffs();
+            if infos.is_empty() { shell_println!("No tradeoff info (run init first)"); return; }
+            for t in &infos {
+                shell_println!("\n{} = {}", t.param_name, t.value_desc);
+                for a in &t.advantages { shell_println!("  + {}", a); }
+                for d in &t.disadvantages { shell_println!("  - {}", d); }
+            }
+        }
+        "stats" => { let (p, t, a, ops) = fstune::stats(); shell_println!("Profiles: {}  Tradeoffs: {}  Applied: {}  Ops: {}", p, t, a, ops); }
+        "init" => { fstune::init_defaults(); shell_println!("Defaults initialised"); }
+        "test" => { match fstune::self_test() { Ok(()) => shell_println!("All tests passed"), Err(e) => shell_println!("Test failed: {:?}", e) } }
+        _ => shell_println!("Usage: fstune <list|info|create|remove|workload|blocksize|journal|commit|reserved|inode|alloc|discard|checksum|compress|apply|tradeoffs|stats|init|test>"),
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -28026,7 +28159,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

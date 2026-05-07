@@ -136,6 +136,7 @@ const ROOT_FILES: &[&str] = &[
     "splice",
     "directio",
     "fstrim",
+    "fstune",
     "sparse",
     "readdir_plus",
     "freeze",
@@ -2377,6 +2378,54 @@ fn gen_fstrim() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/fstune` — filesystem tuning profiles and parameters.
+fn gen_fstune() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (profile_count, tradeoff_count, applied_count, ops) = super::fstune::stats();
+
+    out.push_str("Filesystem Tuning\n");
+    out.push_str("=================\n\n");
+    out.push_str(&format!("Profiles:      {}\n", profile_count));
+    out.push_str(&format!("Applied:       {}\n", applied_count));
+    out.push_str(&format!("Tradeoffs:     {}\n", tradeoff_count));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    let profiles = super::fstune::list_profiles();
+    if !profiles.is_empty() {
+        out.push_str(&format!("\n{:<20} {:<8} {:<12} {:<10} {:<10} {}\n",
+            "NAME", "FS", "WORKLOAD", "BLOCK", "JOURNAL", "APPLIED"));
+        for p in &profiles {
+            let fs = match p.fs_type {
+                super::fstune::FsType::Ext4 => "ext4",
+                super::fstune::FsType::Btrfs => "btrfs",
+                super::fstune::FsType::Xfs => "xfs",
+                super::fstune::FsType::F2fs => "f2fs",
+                super::fstune::FsType::Fat32 => "fat32",
+            };
+            let wl = match p.workload {
+                super::fstune::WorkloadType::Desktop => "desktop",
+                super::fstune::WorkloadType::Database => "database",
+                super::fstune::WorkloadType::Server => "server",
+                super::fstune::WorkloadType::Development => "dev",
+                super::fstune::WorkloadType::Gaming => "gaming",
+            };
+            let jm = match p.journal_mode {
+                super::fstune::JournalMode::Ordered => "ordered",
+                super::fstune::JournalMode::Journal => "journal",
+                super::fstune::JournalMode::Writeback => "writeback",
+                super::fstune::JournalMode::Off => "off",
+            };
+            let app = if p.applied { "yes" } else { "no" };
+            out.push_str(&format!("{:<20} {:<8} {:<12} {:<10} {:<10} {}\n",
+                p.name, fs, wl, p.block_size, jm, app));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Generate `/proc/sparse` — sparse file management status.
 fn gen_sparse() -> Vec<u8> {
     use alloc::format;
@@ -4347,6 +4396,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "splice" => Ok(gen_splice()),
         "directio" => Ok(gen_directio()),
         "fstrim" => Ok(gen_fstrim()),
+        "fstune" => Ok(gen_fstune()),
         "sparse" => Ok(gen_sparse()),
         "readdir_plus" => Ok(gen_readdir_plus()),
         "freeze" => Ok(gen_freeze()),

@@ -168,8 +168,13 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Kernel trace buffer (ktrace)
   - [x] 512-entry lock-free ring buffer, ~20ns per event recording
   - [x] 12 categories, per-category filter, global enable/disable
-  - [x] Trace points: task spawn, task exit
   - [x] Kshell 'trace' command for inspection
+  - [x] Scheduler tracepoints: TASK_SPAWN, TASK_EXIT, YIELD, TASK_BLOCK, TASK_WAKE, PREEMPT, WORK_STEAL, CONTEXT_SWITCH, DEFERRED_WAKE
+  - [x] Memory tracepoints: FRAME_ALLOC, FRAME_FREE (buddy allocator level, not per-CPU cache), PAGE_FAULT, SWAP_OUT, SWAP_IN, RECLAIM
+  - [x] IPC tracepoints: CHANNEL_SEND, CHANNEL_RECV, PIPE_WRITE, PIPE_READ, SEM_CREATE, SEM_SIGNAL, SEM_WAIT, SEM_CLOSE, CP_REGISTER, CP_WAIT, CP_NOTIFY
+  - [x] IRQ tracepoints: IRQ_ENTER, IRQ_EXIT (device IRQ handler)
+  - [x] Syscall tracepoints: SYSCALL_ENTER, SYSCALL_EXIT (dispatch wrapper)
+  - [x] Timer tracepoints: TIMER_SCHEDULE, TIMER_FIRE, TIMER_CANCEL, TIMER_TICK_SHORT
 - [x] FPU/SSE context save/restore
   - [x] Eager fxsave64/fxrstor64 in switch_context assembly (matches modern Linux since 4.2)
   - [x] Per-task FpuState (512-byte aligned buffer, default FCW=0x037F, MXCSR=0x1F80)
@@ -1024,9 +1029,9 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] 11 self-tests: backend creation, dispatch for all 3 backends, time slices, profiles, deadline-specific ops
 
 ### 5.4 Advanced security
-- [ ] Per-process filesystem namespaces for sandboxing
-- [ ] Interceptor hooks (synchronous, capability-gated, 100ms timeout)
-- [ ] Async notification hooks / tracing subsystem
+- [x] Per-process filesystem namespaces for sandboxing (fs::mount_ns)
+- [x] Interceptor hooks (synchronous, capability-gated) (fs::intercept)
+- [x] Async notification hooks / tracing subsystem (ktrace: 23 tracepoints across 6 categories)
 - [ ] Profiling mode for high-frequency events (alloc/dealloc tracing)
 
 ### 5.5 Container support

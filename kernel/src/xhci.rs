@@ -513,6 +513,10 @@ struct XhciController {
     slot_frames: [Option<PhysFrame>; MAX_SLOTS],
     /// Transfer rings for slot endpoint 0 (one per slot).
     slot_ep0_rings: [Option<TrbRing>; MAX_SLOTS],
+    /// Interrupt IN transfer rings (one per slot, for HID devices).
+    slot_int_rings: [Option<TrbRing>; MAX_SLOTS],
+    /// Interrupt receive buffer frames (one per slot).
+    slot_int_bufs: [Option<PhysFrame>; MAX_SLOTS],
     /// Enumerated devices.
     devices: Vec<UsbDevice>,
     /// Port status cache.
@@ -876,6 +880,8 @@ impl XhciController {
             dcbaa: dcbaa_virt,
             slot_frames: [NONE_FRAME; MAX_SLOTS],
             slot_ep0_rings: [NONE_RING; MAX_SLOTS],
+            slot_int_rings: [NONE_RING; MAX_SLOTS],
+            slot_int_bufs: [NONE_FRAME; MAX_SLOTS],
             devices: Vec::new(),
             ports: Vec::new(),
             hid_interfaces: Vec::new(),
@@ -1745,6 +1751,26 @@ impl XhciController {
                 // Set idle rate to 0 (report only on change).
                 let _ = self.hid_set_idle(slot_id, hid.interface_num);
 
+                // Configure the interrupt endpoint for receiving reports.
+                let dev_speed = self.devices.iter()
+                    .find(|d| d.slot_id == slot_id)
+                    .map(|d| d.speed)
+                    .unwrap_or(USB_SPEED_HIGH);
+                if let Err(e) = self.setup_interrupt_endpoint(
+                    slot_id, hid.interrupt_ep, hid.interrupt_max_packet,
+                    hid.interval, dev_speed,
+                ) {
+                    crate::serial_println!(
+                        "[xhci] Setup interrupt EP failed for slot {} {}: {:?}",
+                        slot_id, protocol_name, e
+                    );
+                } else {
+                    // Post initial receive buffer.
+                    let _ = self.post_interrupt_receive(
+                        slot_id, hid.interrupt_ep, hid.interrupt_max_packet,
+                    );
+                }
+
                 crate::serial_println!(
                     "[xhci] Configured {} on slot {} (EP{} IN, {} bytes, interval={})",
                     protocol_name, slot_id, hid.interrupt_ep,
@@ -1756,6 +1782,224 @@ impl XhciController {
         }
 
         configured
+    }
+
+    /// Set up an interrupt IN endpoint for a HID device.
+    ///
+    /// This issues a Configure Endpoint command to activate the interrupt
+    /// endpoint so it can receive data transfers.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn setup_interrupt_endpoint(
+        &mut self,
+        slot_id: u8,
+        ep_num: u8,
+        max_packet: u16,
+        interval: u8,
+        speed: u8,
+    ) -> KernelResult<()> {
+        let slot_idx = (slot_id as usize).wrapping_sub(1);
+        if slot_idx >= MAX_SLOTS {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let ctx_size = self.context_entry_size();
+
+        // Allocate a Transfer Ring for this interrupt endpoint.
+        let int_ring = TrbRing::new(TRANSFER_RING_SIZE, self.hhdm_offset)?;
+        let int_ring_phys = int_ring.phys_addr();
+
+        // DCI (Device Context Index) for an IN endpoint N = 2*N + 1
+        let dci = (ep_num as usize) * 2 + 1;
+
+        // Build an Input Context for Configure Endpoint.
+        let in_ctx_frame = frame::alloc_frame()?;
+        let in_ctx_phys = in_ctx_frame.addr();
+        let in_ctx_virt = in_ctx_phys.wrapping_add(self.hhdm_offset) as *mut u8;
+        // SAFETY: Just allocated.
+        unsafe { core::ptr::write_bytes(in_ctx_virt, 0, frame::FRAME_SIZE); }
+
+        // Input Control Context: Add Context Flags — set bit for the endpoint DCI
+        // and the Slot Context (bit 0 always set for Configure Endpoint).
+        // SAFETY: in_ctx_virt is valid.
+        unsafe {
+            let add_flags = in_ctx_virt.add(0x04) as *mut u32;
+            let flag = (1u32 << dci) | 1; // Add endpoint DCI + Slot
+            core::ptr::write_volatile(add_flags, flag);
+        }
+
+        // Update Slot Context (at offset ctx_size) — set Context Entries
+        // to include this endpoint.
+        let slot_ctx = unsafe { in_ctx_virt.add(ctx_size) };
+        unsafe {
+            let dword0 = ((dci as u32) << 27) // Context Entries = max DCI
+                | (u32::from(speed) << 20); // Speed
+            core::ptr::write_volatile(slot_ctx as *mut u32, dword0);
+        }
+
+        // Fill the Endpoint Context (at offset (dci + 1) * ctx_size).
+        let ep_ctx = unsafe { in_ctx_virt.add((dci + 1) * ctx_size) };
+
+        // Convert interval to xHCI format (power-of-2 exponent).
+        // For HS/SS: interval = 2^(bInterval-1) microframes.
+        // For FS/LS: interval in frames.
+        let xhci_interval = match speed {
+            USB_SPEED_HIGH | USB_SPEED_SUPER => {
+                // USB 2.0/3.0: bInterval is the exponent directly.
+                interval.max(1)
+            }
+            _ => {
+                // USB 1.x: convert ms interval to closest power of 2.
+                // interval in frames → log2(interval) + 3 for 125us microframes.
+                let val = interval.max(1);
+                let mut exp = 0u8;
+                let mut v = val;
+                while v > 1 { v >>= 1; exp = exp.wrapping_add(1); }
+                exp.wrapping_add(3).min(15)
+            }
+        };
+
+        // SAFETY: ep_ctx within allocated frame.
+        unsafe {
+            // Dword 0: Interval, Mult=0, MaxPStreams=0, LSA=0, MaxESITPayload
+            let dword0 = u32::from(xhci_interval) << 16;
+            core::ptr::write_volatile(ep_ctx as *mut u32, dword0);
+
+            // Dword 1: CErr=3, EP Type=7 (Interrupt IN), Max Packet Size
+            // EP Type encoding: 7 = Interrupt IN
+            let dword1 = (3u32 << 1)  // CErr = 3
+                | (7u32 << 3)          // EP Type = Interrupt IN
+                | (u32::from(max_packet) << 16); // Max Packet Size
+            core::ptr::write_volatile(ep_ctx.add(4) as *mut u32, dword1);
+
+            // Dword 2-3: TR Dequeue Pointer + DCS=1
+            let tr_dequeue = int_ring_phys | 1; // DCS = 1
+            core::ptr::write_volatile(ep_ctx.add(8) as *mut u64, tr_dequeue);
+
+            // Dword 4: Average TRB Length
+            core::ptr::write_volatile(ep_ctx.add(16) as *mut u32, u32::from(max_packet));
+        }
+
+        // Submit Configure Endpoint command.
+        let cfg_trb = Trb {
+            parameter: in_ctx_phys,
+            status: 0,
+            control: (TRB_TYPE_CONFIGURE_EP << 10) | (u32::from(slot_id) << 24),
+        };
+
+        let completion = self.submit_command(cfg_trb)?;
+        let cc = completion.completion_code();
+
+        // Free input context.
+        let _ = unsafe { frame::free_frame(in_ctx_frame) };
+
+        if cc != TRB_CC_SUCCESS {
+            crate::serial_println!(
+                "[xhci] Configure Endpoint failed for slot {} EP{}: cc={}",
+                slot_id, ep_num, cc
+            );
+            return Err(KernelError::IoError);
+        }
+
+        // Store the interrupt ring for this slot.
+        self.slot_int_rings[slot_idx] = Some(int_ring);
+
+        crate::serial_println!(
+            "[xhci] Interrupt EP{} IN configured for slot {} (max_pkt={}, interval={})",
+            ep_num, slot_id, max_packet, xhci_interval
+        );
+
+        Ok(())
+    }
+
+    /// Post a Normal TRB on the interrupt endpoint's transfer ring for
+    /// receiving a HID input report.
+    ///
+    /// Allocates a receive buffer if not already allocated, enqueues a
+    /// Normal TRB pointing to it, and rings the doorbell.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn post_interrupt_receive(
+        &mut self,
+        slot_id: u8,
+        ep_num: u8,
+        max_packet: u16,
+    ) -> KernelResult<()> {
+        let slot_idx = (slot_id as usize).wrapping_sub(1);
+        if slot_idx >= MAX_SLOTS {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        // Ensure we have a receive buffer for this slot.
+        if self.slot_int_bufs[slot_idx].is_none() {
+            let buf_frame = frame::alloc_frame()?;
+            let buf_virt = buf_frame.addr().wrapping_add(self.hhdm_offset) as *mut u8;
+            // SAFETY: Just allocated.
+            unsafe { core::ptr::write_bytes(buf_virt, 0, 64); }
+            self.slot_int_bufs[slot_idx] = Some(buf_frame);
+        }
+
+        let buf_phys = self.slot_int_bufs[slot_idx]
+            .as_ref()
+            .ok_or(KernelError::InternalError)?
+            .addr();
+
+        // Get the interrupt ring.
+        let ring = self.slot_int_rings[slot_idx].as_mut()
+            .ok_or(KernelError::NoSuchDevice)?;
+
+        // Enqueue a Normal TRB (device writes data to our buffer).
+        let normal_trb = Trb {
+            parameter: buf_phys,
+            status: u32::from(max_packet), // Transfer length
+            control: (TRB_TYPE_NORMAL << 10) | TRB_IOC, // IOC = Interrupt On Completion
+        };
+        ring.enqueue(normal_trb);
+
+        fence(Ordering::SeqCst);
+
+        // DCI for IN endpoint = 2*ep_num + 1
+        let dci = (ep_num as u32) * 2 + 1;
+        self.ring_doorbell(slot_id, dci);
+
+        Ok(())
+    }
+
+    /// Poll for a completed HID input report on a device.
+    ///
+    /// Returns the raw report bytes if one is available.  The buffer
+    /// is only valid until the next call.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn poll_hid_report(&mut self, slot_id: u8) -> Option<&[u8]> {
+        let slot_idx = (slot_id as usize).wrapping_sub(1);
+        if slot_idx >= MAX_SLOTS {
+            return None;
+        }
+
+        // Check event ring for a Transfer Event targeting this slot.
+        if let Some(trb) = self.poll_event() {
+            if trb.trb_type() == TRB_TYPE_TRANSFER_EVENT {
+                let cc = trb.completion_code();
+                if cc == TRB_CC_SUCCESS || cc == TRB_CC_SHORT_PACKET {
+                    let transfer_len = trb.status & 0x00FF_FFFF;
+                    let _event_slot = trb.slot_id();
+
+                    // Get the buffer virtual address.
+                    if let Some(buf_frame) = &self.slot_int_bufs[slot_idx] {
+                        let buf_virt = buf_frame.addr().wrapping_add(self.hhdm_offset) as *const u8;
+                        let len = transfer_len.min(64) as usize;
+                        // SAFETY: buf_virt is valid, len is bounded.
+                        let data = unsafe {
+                            core::slice::from_raw_parts(buf_virt, len)
+                        };
+                        return Some(data);
+                    }
+                }
+            } else {
+                // Handle other events.
+                self.handle_event(&trb);
+            }
+        }
+
+        None
     }
 }
 

@@ -448,6 +448,163 @@ pub unsafe extern "C" fn strcspn(s: *const u8, reject: *const u8) -> SizeT {
     }
 }
 
+/// Find the first occurrence in `s` of any byte in `accept`.
+///
+/// Returns a pointer to the byte, or NULL if none found.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::many_single_char_names)]
+pub unsafe extern "C" fn strpbrk(s: *const u8, accept: *const u8) -> *const u8 {
+    let mut i: usize = 0;
+    loop {
+        let c = unsafe { *s.add(i) };
+        if c == 0 {
+            return core::ptr::null();
+        }
+        let mut j: usize = 0;
+        loop {
+            let a = unsafe { *accept.add(j) };
+            if a == 0 {
+                break;
+            }
+            if c == a {
+                return unsafe { s.add(i) };
+            }
+            j = j.wrapping_add(1);
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Tokenize a string.
+///
+/// On the first call, `s` should point to the string to tokenize.
+/// On subsequent calls, `s` should be NULL. The `delim` set may
+/// change between calls.
+///
+/// Returns a pointer to the next token, or NULL when done.
+///
+/// # Safety
+///
+/// `s` (if non-null) and `delim` must be valid null-terminated strings.
+/// Not thread-safe (uses a static saved position).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
+    // Static saved position (POSIX strtok is not reentrant).
+    static mut SAVED: *mut u8 = core::ptr::null_mut();
+
+    // SAFETY: Single-threaded access; POSIX strtok is explicitly not
+    // thread-safe. Using addr_of_mut to comply with Rust 2024 rules.
+    let start = if s.is_null() {
+        let p = unsafe { core::ptr::addr_of_mut!(SAVED).read() };
+        if p.is_null() {
+            return core::ptr::null_mut();
+        }
+        p
+    } else {
+        s
+    };
+
+    // Skip leading delimiters.
+    let mut i: usize = 0;
+    loop {
+        let c = unsafe { *start.add(i) };
+        if c == 0 {
+            // All delimiters, no token.
+            unsafe { core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut()); }
+            return core::ptr::null_mut();
+        }
+        if !unsafe { is_delim(c, delim) } {
+            break;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    let token = unsafe { start.add(i) };
+
+    // Find end of token.
+    let mut k: usize = 0;
+    loop {
+        let c = unsafe { *token.add(k) };
+        if c == 0 {
+            unsafe { core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut()); }
+            return token;
+        }
+        if unsafe { is_delim(c, delim) } {
+            unsafe { *token.add(k) = 0; }
+            unsafe { core::ptr::addr_of_mut!(SAVED).write(token.add(k.wrapping_add(1))); }
+            return token;
+        }
+        k = k.wrapping_add(1);
+    }
+}
+
+/// Check if a byte is in the delimiter set.
+#[inline]
+unsafe fn is_delim(c: u8, delim: *const u8) -> bool {
+    let mut j: usize = 0;
+    loop {
+        let d = unsafe { *delim.add(j) };
+        if d == 0 {
+            return false;
+        }
+        if c == d {
+            return true;
+        }
+        j = j.wrapping_add(1);
+    }
+}
+
+/// Return a string describing an error number.
+///
+/// Returns a pointer to a static string.  The returned string must
+/// not be modified by the caller.
+#[unsafe(no_mangle)]
+pub extern "C" fn strerror(errnum: i32) -> *const u8 {
+    // Return a pointer to a static null-terminated C string.
+    // These match the Linux error descriptions for the codes we support.
+    match errnum {
+        0 => c"Success".as_ptr().cast::<u8>(),
+        1 => c"Operation not permitted".as_ptr().cast::<u8>(),
+        2 => c"No such file or directory".as_ptr().cast::<u8>(),
+        3 => c"No such process".as_ptr().cast::<u8>(),
+        4 => c"Interrupted system call".as_ptr().cast::<u8>(),
+        5 => c"Input/output error".as_ptr().cast::<u8>(),
+        7 => c"Argument list too long".as_ptr().cast::<u8>(),
+        8 => c"Exec format error".as_ptr().cast::<u8>(),
+        9 => c"Bad file descriptor".as_ptr().cast::<u8>(),
+        10 => c"No child processes".as_ptr().cast::<u8>(),
+        11 => c"Resource temporarily unavailable".as_ptr().cast::<u8>(),
+        12 => c"Cannot allocate memory".as_ptr().cast::<u8>(),
+        13 => c"Permission denied".as_ptr().cast::<u8>(),
+        14 => c"Bad address".as_ptr().cast::<u8>(),
+        16 => c"Device or resource busy".as_ptr().cast::<u8>(),
+        17 => c"File exists".as_ptr().cast::<u8>(),
+        18 => c"Invalid cross-device link".as_ptr().cast::<u8>(),
+        20 => c"Not a directory".as_ptr().cast::<u8>(),
+        21 => c"Is a directory".as_ptr().cast::<u8>(),
+        22 => c"Invalid argument".as_ptr().cast::<u8>(),
+        24 => c"Too many open files".as_ptr().cast::<u8>(),
+        25 => c"Inappropriate ioctl for device".as_ptr().cast::<u8>(),
+        27 => c"File too large".as_ptr().cast::<u8>(),
+        28 => c"No space left on device".as_ptr().cast::<u8>(),
+        29 => c"Illegal seek".as_ptr().cast::<u8>(),
+        30 => c"Read-only file system".as_ptr().cast::<u8>(),
+        32 => c"Broken pipe".as_ptr().cast::<u8>(),
+        34 => c"Numerical result out of range".as_ptr().cast::<u8>(),
+        36 => c"File name too long".as_ptr().cast::<u8>(),
+        38 => c"Function not implemented".as_ptr().cast::<u8>(),
+        39 => c"Directory not empty".as_ptr().cast::<u8>(),
+        40 => c"Too many levels of symbolic links".as_ptr().cast::<u8>(),
+        95 => c"Operation not supported".as_ptr().cast::<u8>(),
+        110 => c"Connection timed out".as_ptr().cast::<u8>(),
+        _ => c"Unknown error".as_ptr().cast::<u8>(),
+    }
+}
+
 /// Duplicate a string.
 ///
 /// Allocates memory for a copy of `s` using `mmap`.  The caller must

@@ -64,14 +64,17 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     }
 }
 
+pub mod ctype;
 pub mod errno;
 pub mod fcntl;
 pub mod fcntl_ops;
+pub mod malloc;
 pub mod fdtable;
 pub mod file;
 pub mod mman;
 pub mod pipe;
 pub mod process;
+pub mod setjmp;
 pub mod spawn;
 pub mod stat;
 pub mod stdlib;

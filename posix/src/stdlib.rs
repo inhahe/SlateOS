@@ -202,6 +202,156 @@ pub extern "C" fn labs(j: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// Sorting and searching
+// ---------------------------------------------------------------------------
+
+/// Sort an array using the comparison function.
+///
+/// This is a simple insertion sort — O(n²) but correct and compact.
+/// A real libc would use introsort or merge sort.
+///
+/// # Safety
+///
+/// `base` must point to an array of at least `nmemb` elements, each
+/// of `size` bytes.  `compar` must be a valid comparison function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qsort(
+    base: *mut u8,
+    nmemb: usize,
+    size: usize,
+    compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
+) {
+    if nmemb <= 1 || size == 0 {
+        return;
+    }
+
+    // Insertion sort.  Simple, in-place, stable.
+    // A 256-byte stack buffer avoids mmap for small elements.
+    let mut swap_buf = [0u8; 256];
+    let use_stack = size <= swap_buf.len();
+
+    let temp = if use_stack {
+        swap_buf.as_mut_ptr()
+    } else {
+        // Allocate temp space via mmap for large elements.
+        let ptr = crate::mman::mmap(
+            core::ptr::null_mut(),
+            size,
+            crate::mman::PROT_READ | crate::mman::PROT_WRITE,
+            crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if ptr == crate::mman::MAP_FAILED {
+            return; // Cannot sort without temp space.
+        }
+        ptr.cast::<u8>()
+    };
+
+    let mut i: usize = 1;
+    while i < nmemb {
+        // Save element[i] into temp.
+        let elem_i = unsafe { base.add(i.wrapping_mul(size)) };
+        unsafe { core::ptr::copy_nonoverlapping(elem_i, temp, size); }
+
+        // Shift elements right until we find the insertion point.
+        let mut j = i;
+        while j > 0 {
+            let elem_j_minus_1 = unsafe { base.add(j.wrapping_sub(1).wrapping_mul(size)) };
+            if unsafe { compar(elem_j_minus_1, temp) } <= 0 {
+                break;
+            }
+            let elem_j = unsafe { base.add(j.wrapping_mul(size)) };
+            unsafe { core::ptr::copy_nonoverlapping(elem_j_minus_1, elem_j, size); }
+            j = j.wrapping_sub(1);
+        }
+
+        // Insert the saved element at position j.
+        let dest = unsafe { base.add(j.wrapping_mul(size)) };
+        unsafe { core::ptr::copy_nonoverlapping(temp, dest, size); }
+
+        i = i.wrapping_add(1);
+    }
+
+    if !use_stack {
+        let _ = crate::mman::munmap(temp.cast::<core::ffi::c_void>(), size);
+    }
+}
+
+/// Binary search a sorted array.
+///
+/// Returns a pointer to the matching element, or NULL if not found.
+///
+/// # Safety
+///
+/// `base` must point to a sorted array of at least `nmemb` elements,
+/// each of `size` bytes.  `compar` must be a valid comparison function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bsearch(
+    key: *const u8,
+    base: *const u8,
+    nmemb: usize,
+    size: usize,
+    compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
+) -> *const u8 {
+    if nmemb == 0 || size == 0 {
+        return core::ptr::null();
+    }
+
+    let mut lo: usize = 0;
+    let mut hi: usize = nmemb;
+
+    while lo < hi {
+        let mid = lo.wrapping_add(hi.wrapping_sub(lo) / 2);
+        let elem = unsafe { base.add(mid.wrapping_mul(size)) };
+        let cmp = unsafe { compar(key, elem) };
+        match cmp.cmp(&0) {
+            core::cmp::Ordering::Less => hi = mid,
+            core::cmp::Ordering::Greater => lo = mid.wrapping_add(1),
+            core::cmp::Ordering::Equal => return elem,
+        }
+    }
+
+    core::ptr::null()
+}
+
+// ---------------------------------------------------------------------------
+// Random number generation
+// ---------------------------------------------------------------------------
+
+/// Linear congruential PRNG state.
+///
+/// Not thread-safe. Uses the glibc LCG parameters.
+static mut RAND_STATE: u64 = 1;
+
+/// Seed the random number generator.
+#[unsafe(no_mangle)]
+pub extern "C" fn srand(seed: u32) {
+    // SAFETY: Single-threaded userspace. Using addr_of_mut for Rust 2024.
+    unsafe { core::ptr::addr_of_mut!(RAND_STATE).write(u64::from(seed)); }
+}
+
+/// Generate a pseudo-random integer in [0, RAND_MAX].
+///
+/// Uses the glibc LCG: state = state * 6364136223846793005 + 1.
+/// Returns the upper 31 bits.
+#[unsafe(no_mangle)]
+pub extern "C" fn rand() -> i32 {
+    // SAFETY: Single-threaded access.
+    let state = unsafe { core::ptr::addr_of_mut!(RAND_STATE).read() };
+    let new_state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1);
+    unsafe { core::ptr::addr_of_mut!(RAND_STATE).write(new_state); }
+    // Return upper 31 bits as a non-negative i32.
+    ((new_state >> 33) & 0x7FFF_FFFF) as i32
+}
+
+/// Maximum value returned by rand().
+#[unsafe(no_mangle)]
+pub static RAND_MAX: i32 = 0x7FFF_FFFF;
+
+// ---------------------------------------------------------------------------
 // Character classification (internal helpers)
 // ---------------------------------------------------------------------------
 

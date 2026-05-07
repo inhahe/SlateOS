@@ -109,6 +109,7 @@ mod net;
 mod numa;
 mod nvme;
 mod pci;
+mod pcspk;
 mod pacct;
 mod pmc;
 mod port;
@@ -1295,6 +1296,9 @@ extern "C" fn kmain() -> ! {
         serial_println!("[hda] Self-test failed: {:?} (non-fatal)", e);
     }
 
+    // PC speaker self-test.
+    pcspk::self_test();
+
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {
         serial_println!("[fb] Self-test failed: {} (non-fatal)", e);
@@ -1554,6 +1558,10 @@ extern "C" fn kmain() -> ! {
     // Show boot-complete on the framebuffer console too.
     console_println!();
     console_println!("=== Kernel boot complete ===");
+
+    // Play the startup chime via the PC speaker (audible in QEMU with
+    // pcspk-audiodev configured, always present on real hardware).
+    pcspk::startup_chime();
 
     // Spawn the background mouse cursor task.
     // Continuously drains mouse events and updates the framebuffer cursor,

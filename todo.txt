@@ -109,6 +109,16 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   for cow.rs (CoW copy), swap.rs (swap-out/swap-in), and compact.rs
   (migration), but try_resolve_fault is in proc/ which is process zone.
 
+- kernel-process: Wire cgroup memory controller into demand paging.
+  In proc/pcb.rs try_resolve_fault(), before allocating a frame, call:
+    if crate::cgroup::try_charge_current_mem(1).is_err() {
+        return Err(KernelError::OutOfMemory);
+    }
+  And on process exit / munmap frame free, call:
+    crate::cgroup::uncharge_current_mem(1);
+  This enforces per-group memory limits on user-space page allocation.
+  The cgroup infrastructure and API are fully ready in cgroup.rs.
+
 ## Cross-Zone Bug Reports
 
 - (FIXED) rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics

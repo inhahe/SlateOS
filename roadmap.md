@@ -1015,7 +1015,8 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] New/waking task placement at min_vruntime (anti-starvation)
   - [x] Work stealing (least-urgent tasks from back of BTreeMap)
   - [x] Scheduler trait implementation, WorkloadProfile integration, has_real_work
-  - [x] 9 self-tests: pick_next ordering, tick vruntime advance, dequeue, equal-priority fairness, weighted fairness, steal, has_ready/has_real_work, workload profiles, anti-starvation
+  - [x] Preemption-on-wake: should_preempt() checks front-of-queue deadline vs current task; tick() triggers early reschedule when woken task has significantly earlier deadline (MIN_GRANULARITY threshold prevents oscillation)
+  - [x] 12 self-tests: pick_next ordering, tick vruntime advance, dequeue, equal-priority fairness, weighted fairness, steal, has_ready/has_real_work, workload profiles, anti-starvation, preemption-on-wake (high-prio preempts, equal-prio doesn't, empty queue safe)
 - [x] Deadline scheduler (for real-time/audio workloads)
   - [x] DeadlineScheduler struct: BTreeMap run queue keyed by (abs_deadline, task_id), reverse index for O(log n) dequeue
   - [x] DeadlineParams: budget_ticks, deadline_ticks, period_ticks per task

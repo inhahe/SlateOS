@@ -122,13 +122,15 @@ const VRUNTIME_UNIT: u64 = 1_000_000;
 /// Minimum granularity for preemption decisions (in vruntime units).
 ///
 /// Even if a newly-woken task has an earlier deadline, we don't preempt
-/// the current task unless the vruntime difference exceeds this threshold.
+/// the current task unless the deadline difference exceeds this threshold.
 /// This prevents excessive context switches from micro-differences.
 ///
 /// Set to approximately 1 tick's worth of vruntime at the reference
 /// weight (priority 20, weight 1024): 1_000_000 / 1024 ≈ 976.
 /// We round to 1000 for simplicity.
-#[allow(dead_code)] // Will be used when preemption-on-wake is added.
+///
+/// Based on Linux's `sysctl_sched_min_granularity` (kernel/sched/fair.c),
+/// which prevents preemption unless the vruntime gap is meaningful.
 const MIN_GRANULARITY: u64 = 1000;
 
 // ---------------------------------------------------------------------------
@@ -431,11 +433,64 @@ impl EevdfScheduler {
         false
     }
 
+    /// Check if the currently-running task should be preempted by a
+    /// ready task with an earlier virtual deadline.
+    ///
+    /// Returns `true` if the first eligible task in the run queue has a
+    /// deadline earlier than the current task's projected deadline by
+    /// more than [`MIN_GRANULARITY`].  This enables preemption-on-wake:
+    /// when a high-priority task wakes and receives a tight deadline,
+    /// the running task is preempted on the next timer tick instead of
+    /// waiting for its full time slice to expire.
+    ///
+    /// The MIN_GRANULARITY threshold prevents oscillation — two tasks
+    /// with nearly identical deadlines would otherwise ping-pong the
+    /// CPU on every tick, wasting time on context switches.
+    ///
+    /// Based on Linux's `check_preempt_wakeup()` in kernel/sched/fair.c,
+    /// which compares vruntime/deadline gaps before requesting preemption.
+    #[must_use]
+    fn should_preempt(&self) -> bool {
+        if self.current_weight == 0 {
+            return false; // No task running.
+        }
+
+        // Find the earliest-deadline task in the queue.
+        let Some((_, front)) = self.tree.iter().next() else {
+            return false; // Queue empty — nothing to preempt for.
+        };
+
+        // Only consider eligible tasks (vruntime <= min_vruntime).
+        // A task that isn't eligible yet hasn't "earned" its turn.
+        if front.vruntime > self.min_vruntime {
+            return false;
+        }
+
+        // Compute the current task's projected deadline based on its
+        // accumulated vruntime (updated each tick).
+        let current_deadline = self.compute_deadline(
+            self.current_vruntime, self.current_priority, self.current_weight,
+        );
+
+        // Preempt if the front task's deadline is earlier by more than
+        // MIN_GRANULARITY.  The saturating_add prevents overflow from
+        // producing a false negative.
+        front.deadline.saturating_add(MIN_GRANULARITY) < current_deadline
+    }
+
     /// Handle a timer tick for the currently-running task.
     ///
     /// Advances the current task's vruntime by `VRUNTIME_UNIT / weight`
     /// and decrements the remaining time slice.  Returns `true` when
-    /// the time slice expires and a reschedule is needed.
+    /// a reschedule is needed — either because the time slice expired
+    /// or because a woken task has a significantly earlier deadline
+    /// (preemption-on-wake).
+    ///
+    /// The preemption-on-wake check (via [`should_preempt`]) runs on
+    /// every tick.  This adds O(1) overhead (reading the BTreeMap front
+    /// entry) but ensures woken tasks with tight deadlines get the CPU
+    /// within one timer period (~10ms) rather than waiting for the
+    /// running task's full time slice.
     pub fn tick(&mut self) -> bool {
         if self.current_weight == 0 {
             return false;
@@ -455,7 +510,14 @@ impl EevdfScheduler {
         if self.current_remaining > 0 {
             self.current_remaining = self.current_remaining.saturating_sub(1);
         }
-        self.current_remaining == 0
+
+        // Reschedule if: (a) time slice expired, or (b) a woken task
+        // has a significantly earlier deadline (preemption-on-wake).
+        //
+        // OPT: should_preempt() is O(1) — it reads the BTreeMap's
+        // front entry and compares two u64s.  The added cost per tick
+        // is negligible compared to the timer ISR overhead.
+        self.current_remaining == 0 || self.should_preempt()
     }
 
     /// Check if any task is ready in the run queue.
@@ -762,6 +824,70 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             first == Some(500) || first == Some(501),
             "either task could be first"
         );
+    }
+
+    serial_println!("  eevdf: preemption-on-wake — high-priority waker preempts...");
+    {
+        let mut sched = EevdfScheduler::new();
+
+        // Task A: low priority (25, weight 335).  Enqueue and pick.
+        sched.enqueue(600, 25);
+        let picked = sched.pick_next();
+        assert_eq!(picked, Some(600));
+
+        // Simulate a few ticks so A has been running (builds vruntime).
+        sched.tick();
+        sched.tick();
+
+        // Now a high-priority task B (priority 0, weight 88761) wakes up.
+        // Its deadline will be very tight (small weight divisor → small
+        // deadline offset), while A's projected deadline is very loose.
+        sched.enqueue(601, 0);
+
+        // The next tick should trigger preemption because B's deadline
+        // is significantly earlier than A's.
+        let preempted = sched.tick();
+        assert!(
+            preempted,
+            "high-priority waker should preempt low-priority runner"
+        );
+    }
+
+    serial_println!("  eevdf: preemption-on-wake — equal priority does NOT preempt...");
+    {
+        let mut sched = EevdfScheduler::new();
+
+        // Task A: priority 15 (weight 3121).
+        sched.enqueue(700, 15);
+        let _ = sched.pick_next();
+
+        // One tick so A is running.
+        sched.tick();
+
+        // Task B also at priority 15 — same weight, similar deadline.
+        // Should NOT trigger preemption (deadline difference < MIN_GRANULARITY).
+        sched.enqueue(701, 15);
+
+        // Tick: should not preempt yet (time slice still has ticks left,
+        // and same-priority waker doesn't have a meaningfully earlier
+        // deadline).
+        let preempted = sched.tick();
+        // At priority 15, base time slice = 2 + 15*1 = 17 ticks.
+        // We've used 2 ticks, so time slice hasn't expired.
+        // Same-weight tasks get similar deadlines, so should_preempt is false.
+        assert!(
+            !preempted,
+            "equal-priority waker should not preempt (deadline gap < MIN_GRANULARITY)"
+        );
+    }
+
+    serial_println!("  eevdf: should_preempt returns false with empty queue...");
+    {
+        let mut sched = EevdfScheduler::new();
+        sched.enqueue(800, 10);
+        let _ = sched.pick_next();
+        // Queue is empty — should_preempt must be false.
+        assert!(!sched.should_preempt(), "empty queue → no preemption");
     }
 
     serial_println!("  eevdf: all tests passed.");

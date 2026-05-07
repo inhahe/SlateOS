@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4809,6 +4809,7 @@ fn dispatch(line: &str) {
         "schedtune" | "stune" => cmd_schedtune(args),
         "mmtune" | "mtune" => cmd_mmtune(args),
         "capsettings" | "caps" => cmd_capsettings(args),
+        "vpn" => cmd_vpn(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -22528,6 +22529,278 @@ fn parse_capability(s: &str) -> Option<crate::fs::capsettings::Capability> {
     }
 }
 
+/// `vpn` — VPN connection management.
+fn cmd_vpn(args: &str) {
+    use crate::fs::vpn;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "init" => {
+            vpn::init_defaults();
+            shell_println!("Initialised default VPN profiles.");
+        }
+        "list" | "ls" => {
+            let profiles = vpn::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No VPN profiles configured.");
+                return;
+            }
+            shell_println!("{:<4} {:<20} {:<12} {:<20} {:<6} {:<6} {}",
+                "ID", "NAME", "PROTOCOL", "SERVER", "PORT", "AUTO", "KILL");
+            for p in &profiles {
+                shell_println!("{:<4} {:<20} {:<12} {:<20} {:<6} {:<6} {}",
+                    p.id, p.name,
+                    format!("{:?}", p.protocol),
+                    p.server, p.port, p.auto_connect, p.kill_switch);
+            }
+        }
+        "status" | "show" => {
+            let s = vpn::status();
+            shell_println!("State:       {:?}", s.state);
+            if let Some(pid) = s.active_profile {
+                shell_println!("Profile:     {}", pid);
+            }
+            shell_println!("Server:      {}", if s.connected_server.is_empty() { "-" } else { &s.connected_server });
+            shell_println!("VPN IP:      {}", if s.vpn_ip.is_empty() { "-" } else { &s.vpn_ip });
+            shell_println!("Uptime:      {} s", s.uptime_s);
+            shell_println!("Sent:        {} bytes", s.bytes_sent);
+            shell_println!("Received:    {} bytes", s.bytes_received);
+            shell_println!("Active:      {}", vpn::is_active());
+
+            let tp = vpn::list_third_party();
+            if !tp.is_empty() {
+                shell_println!("\nThird-party VPNs:");
+                for t in &tp {
+                    shell_println!("  {} ({}) — {} [{}]",
+                        t.app_name,
+                        t.app_path,
+                        if t.connected { "connected" } else { "disconnected" },
+                        t.interface);
+                }
+            }
+        }
+        "get" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: vpn get <id>"); return; }
+            };
+            match vpn::get_profile(id) {
+                Ok(p) => {
+                    shell_println!("ID:            {}", p.id);
+                    shell_println!("Name:          {}", p.name);
+                    shell_println!("Protocol:      {:?}", p.protocol);
+                    shell_println!("Server:        {}:{}", p.server, p.port);
+                    shell_println!("Transport:     {:?}", p.transport);
+                    shell_println!("Auth:          {:?}", p.auth);
+                    shell_println!("Username:      {}", p.username);
+                    shell_println!("Cert:          {}", p.cert_path);
+                    shell_println!("Key:           {}", p.key_path);
+                    shell_println!("CA:            {}", p.ca_path);
+                    shell_println!("DNS:           {:?}", p.dns_servers);
+                    shell_println!("Route all:     {}", p.route_all);
+                    shell_println!("Kill switch:   {}", p.kill_switch);
+                    shell_println!("Auto connect:  {}", p.auto_connect);
+                    shell_println!("Auto reconnect:{}", p.auto_reconnect);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "create" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: vpn create <name> <protocol> <server> <port>");
+                shell_println!("Protocols: openvpn, wireguard, ipsec, l2tp, pptp, ssh");
+                return;
+            }
+            let name = parts[1];
+            let proto = match parts[2] {
+                "openvpn" | "ovpn" => vpn::VpnProtocol::OpenVpn,
+                "wireguard" | "wg" => vpn::VpnProtocol::WireGuard,
+                "ipsec" | "ikev2" => vpn::VpnProtocol::IpSec,
+                "l2tp" => vpn::VpnProtocol::L2tp,
+                "pptp" => vpn::VpnProtocol::Pptp,
+                "ssh" => vpn::VpnProtocol::SshTunnel,
+                _ => { shell_println!("Unknown protocol."); return; }
+            };
+            let port: u16 = match parts.get(4).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid port."); return; }
+            };
+            match vpn::create_profile(name, proto, parts[3], port) {
+                Ok(id) => shell_println!("Created VPN profile {} (id={}).", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: vpn remove <id>"); return; }
+            };
+            match vpn::remove_profile(id) {
+                Ok(()) => shell_println!("Removed VPN profile {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "connect" | "up" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: vpn connect <id>"); return; }
+            };
+            match vpn::connect(id) {
+                Ok(()) => shell_println!("Connected to VPN."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disconnect" | "down" => {
+            match vpn::disconnect() {
+                Ok(()) => shell_println!("Disconnected from VPN."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "auth" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vpn auth <id> <userpass|cert|psk|token>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let auth = match parts[2] {
+                "userpass" | "up" => vpn::AuthMethod::UserPass,
+                "cert" | "certificate" => vpn::AuthMethod::Certificate,
+                "psk" => vpn::AuthMethod::PreSharedKey,
+                "token" | "otp" => vpn::AuthMethod::Token,
+                _ => { shell_println!("Unknown auth method."); return; }
+            };
+            match vpn::set_auth(id, auth) {
+                Ok(()) => shell_println!("Set authentication method."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "transport" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vpn transport <id> <udp|tcp>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let t = match parts[2] {
+                "udp" => vpn::Transport::Udp,
+                "tcp" => vpn::Transport::Tcp,
+                _ => { shell_println!("Use udp or tcp."); return; }
+            };
+            match vpn::set_transport(id, t) {
+                Ok(()) => shell_println!("Set transport."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "killswitch" | "ks" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vpn killswitch <id> <on|off>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let on = parts[2] == "on" || parts[2] == "true";
+            match vpn::set_kill_switch(id, on) {
+                Ok(()) => shell_println!("Kill switch {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "routeall" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vpn routeall <id> <on|off>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let on = parts[2] == "on" || parts[2] == "true";
+            match vpn::set_route_all(id, on) {
+                Ok(()) => shell_println!("Route all traffic {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "autoconnect" | "ac" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vpn autoconnect <id> <on|off>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let on = parts[2] == "on" || parts[2] == "true";
+            match vpn::set_auto_connect(id, on) {
+                Ok(()) => shell_println!("Auto-connect {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "dns" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vpn dns <id> <server>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            match vpn::add_dns(id, parts[2]) {
+                Ok(()) => shell_println!("Added DNS server {}.", parts[2]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, connected, tp, ops) = vpn::conn_stats();
+            shell_println!("Profiles:    {}", total);
+            shell_println!("Connected:   {}", connected);
+            shell_println!("Third-party: {}", tp);
+            shell_println!("Operations:  {}", ops);
+        }
+        "clear" => {
+            vpn::clear_all();
+            shell_println!("Cleared all VPN configuration.");
+        }
+        "test" => {
+            match vpn::self_test() {
+                Ok(()) => shell_println!("vpn: all tests passed."),
+                Err(e) => shell_println!("vpn: test failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("vpn — VPN connection management");
+            shell_println!();
+            shell_println!("Subcommands:");
+            shell_println!("  init                          Load default profiles");
+            shell_println!("  list / ls                     List all profiles");
+            shell_println!("  status / show                 Show current status");
+            shell_println!("  get <id>                      Show profile details");
+            shell_println!("  create <name> <proto> <srv> <port>  Create profile");
+            shell_println!("  remove / rm <id>              Remove profile");
+            shell_println!("  connect / up <id>             Connect to VPN");
+            shell_println!("  disconnect / down             Disconnect");
+            shell_println!("  auth <id> <method>            Set auth method");
+            shell_println!("  transport <id> <udp|tcp>      Set transport");
+            shell_println!("  killswitch <id> <on|off>      Toggle kill switch");
+            shell_println!("  routeall <id> <on|off>        Route all traffic");
+            shell_println!("  autoconnect <id> <on|off>     Auto-connect on startup");
+            shell_println!("  dns <id> <server>             Add DNS server");
+            shell_println!("  stats / clear / test");
+            shell_println!();
+            shell_println!("Protocols: openvpn, wireguard, ipsec, l2tp, pptp, ssh");
+            shell_println!("Auth: userpass, cert, psk, token");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -30306,7 +30579,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

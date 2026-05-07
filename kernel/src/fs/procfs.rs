@@ -205,6 +205,7 @@ const ROOT_FILES: &[&str] = &[
     "schedtune",
     "mmtune",
     "capsettings",
+    "vpn",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4428,6 +4429,44 @@ fn gen_capsettings() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_vpn() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, connected, tp_count, ops) = super::vpn::conn_stats();
+    let s = super::vpn::status();
+
+    out.push_str("VPN Management\n");
+    out.push_str("==============\n\n");
+    out.push_str(&format!("Profiles:      {}\n", total));
+    out.push_str(&format!("Connected:     {}\n", connected));
+    out.push_str(&format!("State:         {:?}\n", s.state));
+    out.push_str(&format!("Third-party:   {}\n", tp_count));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    if connected {
+        out.push_str(&format!("\nServer:  {}\n", s.connected_server));
+        out.push_str(&format!("VPN IP:  {}\n", s.vpn_ip));
+        out.push_str(&format!("Uptime:  {} s\n", s.uptime_s));
+        out.push_str(&format!("Sent:    {} bytes\n", s.bytes_sent));
+        out.push_str(&format!("Recv:    {} bytes\n", s.bytes_received));
+    }
+
+    let profiles = super::vpn::list_profiles();
+    if !profiles.is_empty() {
+        out.push_str(&format!("\n{:<4} {:<20} {:<12} {:<20} {:<6} {}\n",
+            "ID", "NAME", "PROTOCOL", "SERVER", "PORT", "AUTO"));
+        for p in &profiles {
+            out.push_str(&format!("{:<4} {:<20} {:<12} {:<20} {:<6} {}\n",
+                p.id, p.name,
+                format!("{:?}", p.protocol),
+                p.server, p.port, p.auto_connect));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4798,6 +4837,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "schedtune" => Ok(gen_schedtune()),
         "mmtune" => Ok(gen_mmtune()),
         "capsettings" => Ok(gen_capsettings()),
+        "vpn" => Ok(gen_vpn()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

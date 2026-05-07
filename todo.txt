@@ -102,9 +102,10 @@ make sure latest WINE plan and automatic code change plan are in roadmap
 
 ## Cross-Zone Bug Reports
 
-- rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics during
-  rip_sample self-test, blocks BENCH_OK.  Not in fs zone; likely from
-  kernel-core changes.  Observed 2026-05-06 during QEMU boot.
+- (FIXED) rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics
+  during rip_sample self-test on SMP.  APs contribute timer samples between
+  baseline and final check.  Fixed: changed exact assert_eq to >= checks.
+  Commit 0d6e5f8.  Verified BOOT_OK reached in QEMU SMP boot.
 
 ## Judgment Calls
 

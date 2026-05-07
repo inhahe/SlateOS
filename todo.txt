@@ -100,6 +100,12 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   write_journal_superblock) now use to_be_bytes.  Journal is now
   compatible with Linux-formatted ext4 images.
 
+## Cross-Zone Bug Reports
+
+- rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics during
+  rip_sample self-test, blocks BENCH_OK.  Not in fs zone; likely from
+  kernel-core changes.  Observed 2026-05-06 during QEMU boot.
+
 ## Judgment Calls
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from

@@ -1543,6 +1543,11 @@ extern "C" fn kmain() -> ! {
     console_println!();
     console_println!("=== Kernel boot complete ===");
 
+    // Spawn the background mouse cursor task.
+    // Continuously drains mouse events and updates the framebuffer cursor,
+    // keeping cursor movement smooth even under load.
+    mouse::spawn_cursor_task();
+
     // Spawn a low-priority kernel task to run micro-benchmarks in the
     // background.  This lets init start immediately while benchmarks
     // run interleaved with normal scheduling.

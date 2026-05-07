@@ -589,3 +589,68 @@ pub fn self_test() -> Result<(), &'static str> {
         HAS_SCROLL_WHEEL.load(Ordering::Acquire));
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Background cursor task
+// ---------------------------------------------------------------------------
+
+/// Whether the cursor task is running.
+static CURSOR_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Spawn a background kernel task that continuously processes mouse events
+/// and updates the framebuffer cursor.
+///
+/// This makes the cursor move smoothly even during heavy workloads.
+/// Call after both `mouse::init()` and `fb::init()` have completed,
+/// and after the scheduler is running.
+pub fn spawn_cursor_task() {
+    if !INITIALIZED.load(Ordering::Acquire) || !crate::fb::is_initialized() {
+        crate::serial_println!("[mouse] Cannot spawn cursor task: mouse or fb not ready");
+        return;
+    }
+
+    if CURSOR_TASK_RUNNING.load(Ordering::Acquire) {
+        return; // Already running.
+    }
+
+    let pml4 = crate::mm::page_table::read_cr3();
+    match crate::sched::spawn(
+        b"mouse_cursor",
+        16, // Mid-priority (responsive but not highest)
+        cursor_task_entry,
+        0,
+        pml4,
+    ) {
+        Ok(tid) => {
+            CURSOR_TASK_RUNNING.store(true, Ordering::Release);
+            crate::serial_println!("[mouse] Cursor task spawned (tid={})", tid);
+        }
+        Err(e) => {
+            crate::serial_println!("[mouse] Failed to spawn cursor task: {:?}", e);
+        }
+    }
+}
+
+/// Entry point for the background cursor task.
+///
+/// Continuously drains mouse events and updates the framebuffer cursor.
+/// Yields when no events are available to avoid busy-waiting.
+extern "C" fn cursor_task_entry(_arg: u64) {
+    // Show the cursor initially.
+    crate::fb::show_cursor();
+
+    loop {
+        let mut processed = false;
+
+        // Drain all pending events in a batch.
+        while let Some(ev) = try_read_event() {
+            crate::fb::move_cursor(ev.dx, ev.dy);
+            processed = true;
+        }
+
+        if !processed {
+            // No events — yield to avoid spinning.
+            crate::sched::yield_now();
+        }
+    }
+}

@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
-    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fstrim", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4365,6 +4365,7 @@ fn dispatch(line: &str) {
         "prefetch" => cmd_prefetch(args),
         "splice" => cmd_splice(args),
         "directio" => cmd_directio(args),
+        "fstrim" => cmd_fstrim(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13839,6 +13840,98 @@ fn cmd_directio(args: &str) {
     }
 }
 
+fn cmd_fstrim(args: &str) {
+    use crate::fs::fstrim;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "run" | "flush" | "" => {
+            let device = parts.get(1).copied().unwrap_or("");
+            let result = fstrim::flush(device);
+            if result.ranges_trimmed == 0 {
+                shell_println!("No pending discard ranges to trim.");
+            } else {
+                shell_println!("Trimmed {} ranges ({} bytes, {} coalesced)",
+                    result.ranges_trimmed, result.bytes_trimmed, result.ranges_coalesced);
+            }
+        }
+        "mode" => {
+            if let Some(mode_str) = parts.get(1) {
+                match fstrim::TrimMode::from_name(mode_str) {
+                    Some(mode) => {
+                        fstrim::set_mode(mode);
+                        shell_println!("TRIM mode set to: {}", mode.label());
+                    }
+                    None => shell_println!("Unknown mode: {} (manual, periodic, continuous)", mode_str),
+                }
+            } else {
+                shell_println!("Current mode: {}", fstrim::get_mode().label());
+                shell_println!("  Available: manual, periodic, continuous");
+            }
+        }
+        "pending" => {
+            let summary = fstrim::pending_summary();
+            if summary.is_empty() {
+                shell_println!("No pending discard ranges.");
+            } else {
+                shell_println!("{:20} {:>8} {:>12}", "DEVICE", "RANGES", "BYTES");
+                shell_println!("{}", "-".repeat(44));
+                for (dev, count, bytes) in &summary {
+                    shell_println!("{:20} {:>8} {:>12}", dev, count, bytes);
+                }
+                shell_println!("\nTotal: {} ranges", fstrim::pending_count());
+            }
+        }
+        "drop" => {
+            let count = fstrim::drop_pending();
+            shell_println!("Dropped {} pending discard ranges.", count);
+        }
+        "notify" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: fstrim notify <device> <offset> <length>");
+                return;
+            }
+            let device = parts[1];
+            let offset: u64 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid offset"); return; }
+            };
+            let length: u64 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid length"); return; }
+            };
+            fstrim::notify_free(device, offset, length);
+            shell_println!("Queued discard: {} offset={} len={}", device, offset, length);
+        }
+        "stats" => {
+            let (trims, bytes, queued, coalesced, overflows, pending, last_flush) = fstrim::stats();
+            shell_println!("TRIM Statistics");
+            shell_println!("  Mode:          {}", fstrim::get_mode().label());
+            shell_println!("  Pending:       {}", pending);
+            shell_println!("  Total TRIMs:   {}", trims);
+            shell_println!("  Bytes trimmed: {}", bytes);
+            shell_println!("  Queued:        {}", queued);
+            shell_println!("  Coalesced:     {}", coalesced);
+            shell_println!("  Overflows:     {}", overflows);
+            shell_println!("  Last flush:    {} ns", last_flush);
+        }
+        "reset" => {
+            fstrim::reset_stats();
+            shell_println!("TRIM statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: fstrim [command]");
+            shell_println!("  run|flush [device]         Flush pending TRIMs (default)");
+            shell_println!("  mode [manual|periodic|continuous]  Get/set TRIM mode");
+            shell_println!("  pending                    Show pending discard ranges");
+            shell_println!("  notify <dev> <off> <len>   Queue a discard notification");
+            shell_println!("  drop                       Drop all pending (no TRIM)");
+            shell_println!("  stats                      Show TRIM statistics");
+            shell_println!("  reset                      Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -15858,58 +15951,96 @@ fn cmd_mouse() {
 }
 
 fn cmd_audio(args: &str) {
-    if !crate::hda::is_initialized() {
-        crate::console_println!("Intel HD Audio: not detected");
-        crate::console_println!("  QEMU: add -device intel-hda -device hda-duplex");
-        return;
-    }
-
     let sub = args.split_whitespace().next().unwrap_or("status");
     match sub {
         "status" => {
-            let codecs = crate::hda::codec_count();
-            let vid = crate::hda::vendor_id().unwrap_or(0);
-            let streams = crate::hda::stream_counts();
-            crate::console_println!("Intel HD Audio:");
-            crate::console_println!("  Codecs:  {}", codecs);
-            if vid != 0 {
-                crate::console_println!("  Vendor:  {:04x}:{:04x}",
-                    (vid >> 16) & 0xFFFF, vid & 0xFFFF);
+            // Intel HDA status.
+            if crate::hda::is_initialized() {
+                let codecs = crate::hda::codec_count();
+                let vid = crate::hda::vendor_id().unwrap_or(0);
+                let streams = crate::hda::stream_counts();
+                crate::console_println!("Intel HD Audio:");
+                crate::console_println!("  Codecs:  {}", codecs);
+                if vid != 0 {
+                    crate::console_println!("  Vendor:  {:04x}:{:04x}",
+                        (vid >> 16) & 0xFFFF, vid & 0xFFFF);
+                }
+                if let Some((iss, oss, bss)) = streams {
+                    crate::console_println!("  Streams: {} input, {} output, {} bidirectional",
+                        iss, oss, bss);
+                }
+            } else {
+                crate::console_println!("Intel HD Audio: not detected");
             }
-            if let Some((iss, oss, bss)) = streams {
-                crate::console_println!("  Streams: {} input, {} output, {} bidirectional",
-                    iss, oss, bss);
+
+            // Virtio-sound status.
+            let (avail, outputs, inputs, playing) = crate::virtio::sound::status_info();
+            if avail {
+                crate::console_println!("Virtio Sound:");
+                crate::console_println!("  Output streams: {}", outputs);
+                crate::console_println!("  Input streams:  {}", inputs);
+                crate::console_println!("  Playing: {}", if playing { "yes" } else { "no" });
+            } else {
+                crate::console_println!("Virtio Sound: not detected");
             }
+
+            // PC speaker is always available.
+            crate::console_println!("PC Speaker: available");
         }
         "play" => {
-            match crate::hda::configure_output() {
-                Ok(()) => {
-                    if let Err(e) = crate::hda::fill_test_tone() {
-                        crate::console_println!("Failed to generate tone: {:?}", e);
-                        return;
-                    }
-                    if let Err(e) = crate::hda::start_playback() {
-                        crate::console_println!("Failed to start playback: {:?}", e);
-                        return;
-                    }
-                    crate::console_println!("Playing 440 Hz test tone...");
-                    crate::console_println!("Use 'audio stop' to stop.");
+            // Try virtio-sound first (better quality), fall back to HDA, then pcspk.
+            if crate::virtio::sound::is_available() {
+                crate::console_println!("Playing via virtio-sound (440 Hz, 1 sec)...");
+                match crate::virtio::sound::play_test_tone(1000) {
+                    Ok(()) => crate::console_println!("Done."),
+                    Err(e) => crate::console_println!("Virtio-sound error: {:?}", e),
                 }
-                Err(e) => crate::console_println!("Failed to configure output: {:?}", e),
+            } else if crate::hda::is_initialized() {
+                match crate::hda::configure_output() {
+                    Ok(()) => {
+                        if let Err(e) = crate::hda::fill_test_tone() {
+                            crate::console_println!("Failed to generate tone: {:?}", e);
+                            return;
+                        }
+                        if let Err(e) = crate::hda::start_playback() {
+                            crate::console_println!("Failed to start playback: {:?}", e);
+                            return;
+                        }
+                        crate::console_println!("Playing 440 Hz test tone via HDA...");
+                        crate::console_println!("Use 'audio stop' to stop.");
+                    }
+                    Err(e) => crate::console_println!("Failed to configure output: {:?}", e),
+                }
+            } else {
+                // Fall back to PC speaker.
+                crate::console_println!("Playing via PC speaker (440 Hz, 1 sec)...");
+                crate::pcspk::beep(440, 1000);
+                crate::console_println!("Done.");
             }
         }
         "stop" => {
-            if let Err(e) = crate::hda::stop_playback() {
-                crate::console_println!("Failed to stop: {:?}", e);
-            } else {
-                crate::console_println!("Playback stopped.");
+            // Stop all audio sources.
+            let _ = crate::virtio::sound::stop();
+            if crate::hda::is_initialized() {
+                let _ = crate::hda::stop_playback();
             }
+            crate::pcspk::off();
+            crate::console_println!("Playback stopped.");
+        }
+        "beep" => {
+            // PC speaker beep (always available).
+            let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+            let freq: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(440);
+            let dur: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+            crate::console_println!("Beep: {} Hz, {} ms", freq, dur);
+            crate::pcspk::beep(freq, dur);
         }
         _ => {
-            crate::console_println!("Usage: audio [status|play|stop]");
-            crate::console_println!("  status — show HDA controller info");
-            crate::console_println!("  play   — play 440 Hz test tone");
-            crate::console_println!("  stop   — stop playback");
+            crate::console_println!("Usage: audio [status|play|stop|beep]");
+            crate::console_println!("  status       — show audio device info");
+            crate::console_println!("  play         — play 440 Hz test tone (best available output)");
+            crate::console_println!("  stop         — stop all playback");
+            crate::console_println!("  beep [f] [d] — PC speaker beep (freq Hz, duration ms)");
         }
     }
 }
@@ -19177,7 +19308,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -135,6 +135,7 @@ const ROOT_FILES: &[&str] = &[
     "prefetch",
     "splice",
     "directio",
+    "fstrim",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2281,6 +2282,37 @@ fn gen_directio() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/fstrim` — SSD TRIM/discard status.
+fn gen_fstrim() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (trims, bytes, queued, coalesced, overflows, pending, last_flush) =
+        super::fstrim::stats();
+    let mode = super::fstrim::get_mode();
+
+    out.push_str("Filesystem TRIM/DISCARD\n");
+    out.push_str("======================\n\n");
+    out.push_str(&format!("Mode:             {}\n", mode.label()));
+    out.push_str(&format!("Pending ranges:   {}\n", pending));
+    out.push_str(&format!("Total TRIMs:      {}\n", trims));
+    out.push_str(&format!("Bytes trimmed:    {}\n", bytes));
+    out.push_str(&format!("Ranges queued:    {}\n", queued));
+    out.push_str(&format!("Coalesced:        {}\n", coalesced));
+    out.push_str(&format!("Queue overflows:  {}\n", overflows));
+    out.push_str(&format!("Last flush (ns):  {}\n", last_flush));
+
+    let summary = super::fstrim::pending_summary();
+    if !summary.is_empty() {
+        out.push_str(&format!("\n{:20} {:>8} {:>12}\n", "DEVICE", "RANGES", "BYTES"));
+        for (dev, count, bytes) in &summary {
+            out.push_str(&format!("{:20} {:>8} {:>12}\n", dev, count, bytes));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2357,6 +2389,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "prefetch" => Ok(gen_prefetch()),
         "splice" => Ok(gen_splice()),
         "directio" => Ok(gen_directio()),
+        "fstrim" => Ok(gen_fstrim()),
         _ => Err(KernelError::NotFound),
     }
 }

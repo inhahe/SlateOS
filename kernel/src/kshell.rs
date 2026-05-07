@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4360,6 +4360,7 @@ fn dispatch(line: &str) {
         "fsprofile" => cmd_fsprofile(args),
         "fspolicy" => cmd_fspolicy(args),
         "fsbench" => cmd_fsbench(args),
+        "ionice" => cmd_ionice(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13373,6 +13374,92 @@ fn cmd_fsbench(args: &str) {
     }
 }
 
+/// I/O priority management — view and set per-task I/O scheduling class.
+fn cmd_ionice(args: &str) {
+    use crate::fs::ioprio::{self, IoClass, IoPriority};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let all = ioprio::list_all();
+            let current = ioprio::current_ioprio();
+            shell_println!("Current task I/O priority: {}", current.display());
+            shell_println!();
+            if all.is_empty() {
+                shell_println!("No explicit I/O priorities set.");
+                shell_println!("All tasks use default: best-effort:4");
+            } else {
+                shell_println!("{:>6} {:>12} {:>6}", "TASK", "CLASS", "LEVEL");
+                shell_println!("{}", "-".repeat(28));
+                for (tid, prio) in &all {
+                    shell_println!("{:>6} {:>12} {:>6}", tid, prio.class.label(), prio.level);
+                }
+            }
+        }
+        "set" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: ionice set <task_id> <class> [level]");
+                shell_println!("  Classes: realtime|rt, best-effort|be, idle|bg");
+                shell_println!("  Level: 0-7 (only for best-effort, default 4)");
+                return;
+            }
+            let task_id: u64 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid task ID: {}", parts[1]); return; }
+            };
+            let class = match IoClass::from_name(parts[2]) {
+                Some(c) => c,
+                None => { shell_println!("Unknown class: {} (use: rt, be, idle)", parts[2]); return; }
+            };
+            let level: u8 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+            let prio = IoPriority::new(class, level);
+            match ioprio::set_ioprio(task_id, prio) {
+                Ok(()) => shell_println!("Set task {} I/O priority: {}", task_id, prio.display()),
+                Err(e) => shell_println!("Error: {}", e),
+            }
+        }
+        "clear" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ionice clear <task_id>");
+                return;
+            }
+            let task_id: u64 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid task ID: {}", parts[1]); return; }
+            };
+            ioprio::clear_ioprio(task_id);
+            shell_println!("Cleared I/O priority for task {} (reset to default)", task_id);
+        }
+        "get" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ionice get <task_id>");
+                return;
+            }
+            let task_id: u64 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid task ID: {}", parts[1]); return; }
+            };
+            let prio = ioprio::get_ioprio(task_id);
+            shell_println!("Task {} I/O priority: {}", task_id, prio.display());
+        }
+        "stats" => {
+            let (sets, gets, active) = ioprio::stats();
+            shell_println!("Active entries: {}/256 | Set calls: {} | Get calls: {}", active, sets, gets);
+        }
+        _ => {
+            shell_println!("Usage: ionice <command>");
+            shell_println!("  show               List all I/O priorities (default)");
+            shell_println!("  set <tid> <class> [level]  Set task I/O priority");
+            shell_println!("  get <tid>          Get task I/O priority");
+            shell_println!("  clear <tid>        Reset task to default priority");
+            shell_println!("  stats              Show counters");
+            shell_println!();
+            shell_println!("Classes: realtime (rt), best-effort (be), idle (bg)");
+            shell_println!("Levels: 0-7 (0=highest, only for best-effort)");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18711,7 +18798,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

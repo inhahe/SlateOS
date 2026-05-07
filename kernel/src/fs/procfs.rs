@@ -130,6 +130,7 @@ const ROOT_FILES: &[&str] = &[
     "profile",
     "fspolicy",
     "fsbench",
+    "ioprio",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2139,6 +2140,33 @@ fn gen_fsbench() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/ioprio` — I/O priority assignments.
+fn gen_ioprio() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (sets, gets, active) = super::ioprio::stats();
+
+    out.push_str("I/O Priority Management\n");
+    out.push_str("=======================\n\n");
+    out.push_str(&format!("Active entries: {}/{}\n", active, 256));
+    out.push_str(&format!("Set calls:      {}\n", sets));
+    out.push_str(&format!("Get calls:      {}\n\n", gets));
+
+    let all = super::ioprio::list_all();
+    if all.is_empty() {
+        out.push_str("No explicit I/O priorities set (all tasks use default: best-effort:4)\n");
+    } else {
+        out.push_str(&format!("{:>6} {:>12} {:>6}\n", "TASK", "CLASS", "LEVEL"));
+        for (tid, prio) in &all {
+            out.push_str(&format!("{:>6} {:>12} {:>6}\n",
+                tid, prio.class.label(), prio.level));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2210,6 +2238,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "profile" => Ok(gen_profile()),
         "fspolicy" => Ok(gen_fspolicy()),
         "fsbench" => Ok(gen_fsbench()),
+        "ioprio" => Ok(gen_ioprio()),
         _ => Err(KernelError::NotFound),
     }
 }

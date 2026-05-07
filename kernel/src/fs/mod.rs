@@ -54,6 +54,7 @@ pub mod health;
 pub mod history;
 pub mod index;
 pub mod intercept;
+pub mod ioprio;
 pub mod integrity;
 pub mod iso9660;
 pub mod journal;

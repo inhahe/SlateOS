@@ -147,6 +147,7 @@ const ROOT_FILES: &[&str] = &[
     "thumbcache",
     "bookmarks",
     "clipboard",
+    "dragdrop",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2615,6 +2616,32 @@ fn gen_clipboard() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_dragdrop() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (drags, drops, cancels, total_bytes, zone_count) = super::dragdrop::stats();
+
+    out.push_str("Drag and Drop\n");
+    out.push_str("=============\n\n");
+    out.push_str(&format!("Drags:        {}\n", drags));
+    out.push_str(&format!("Drops:        {}\n", drops));
+    out.push_str(&format!("Cancels:      {}\n", cancels));
+    out.push_str(&format!("Total bytes:  {}\n", total_bytes));
+    out.push_str(&format!("Drop zones:   {}/{}\n\n", zone_count, 256));
+
+    let active = super::dragdrop::is_dragging();
+    out.push_str(&format!("Active drag:  {}\n", if active { "yes" } else { "no" }));
+
+    if let Some(session) = super::dragdrop::current_session() {
+        out.push_str(&format!("  Source:     {}\n", session.source));
+        out.push_str(&format!("  Formats:    {}\n", session.offered_formats.len()));
+        out.push_str(&format!("  Cursor:     ({}, {})\n", session.cursor.0, session.cursor.1));
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2703,6 +2730,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "thumbcache" => Ok(gen_thumbcache()),
         "bookmarks" => Ok(gen_bookmarks()),
         "clipboard" => Ok(gen_clipboard()),
+        "dragdrop" => Ok(gen_dragdrop()),
         _ => Err(KernelError::NotFound),
     }
 }

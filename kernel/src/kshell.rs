@@ -3085,7 +3085,7 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
-    "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
+    "cut", "date", "dd", "dedup", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "findex", "finfo", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
@@ -4377,6 +4377,7 @@ fn dispatch(line: &str) {
         "thumbcache" | "tcache" => cmd_thumbcache(args),
         "bookmark" | "bm" => cmd_bookmark(args),
         "clipboard" | "clip" => cmd_clipboard(args),
+        "dragdrop" => cmd_dragdrop(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -15213,6 +15214,100 @@ fn cmd_clipboard(args: &str) {
     }
 }
 
+/// `dragdrop` — drag-and-drop subsystem management.
+fn cmd_dragdrop(args: &str) {
+    use crate::fs::dragdrop;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "status" | "" => {
+            let (drags, drops, cancels, total_bytes, zone_count) = dragdrop::stats();
+            shell_println!("Drag-and-drop status:");
+            shell_println!("  Total drags:    {}", drags);
+            shell_println!("  Total drops:    {}", drops);
+            shell_println!("  Total cancels:  {}", cancels);
+            shell_println!("  Total bytes:    {}", total_bytes);
+            shell_println!("  Drop zones:     {}/{}", zone_count, 256);
+            shell_println!("  Active drag:    {}", if dragdrop::is_dragging() { "yes" } else { "no" });
+            if let Some(session) = dragdrop::current_session() {
+                shell_println!("  Source:         {}", session.source);
+                shell_println!("  Formats:        {}", session.offered_formats.len());
+                shell_println!("  Cursor:         ({}, {})", session.cursor.0, session.cursor.1);
+            }
+        }
+        "zones" => {
+            let zones = dragdrop::list_zones();
+            if zones.is_empty() {
+                shell_println!("No drop zones registered.");
+            } else {
+                shell_println!("{:6} {:8} {:12} {:20} {:20} {}", "ID", "ACTIVE", "KIND", "OWNER", "LABEL", "BOUNDS");
+                for z in &zones {
+                    let kind = match z.kind {
+                        dragdrop::DropZoneKind::FileListEmpty => "file-list",
+                        dragdrop::DropZoneKind::FolderEntry => "folder",
+                        dragdrop::DropZoneKind::FileEntry => "file",
+                        dragdrop::DropZoneKind::TextInput => "text",
+                        dragdrop::DropZoneKind::ImageArea => "image",
+                        dragdrop::DropZoneKind::Custom => "custom",
+                    };
+                    let (x, y, w, h) = z.bounds;
+                    shell_println!("{:6} {:8} {:12} {:20} {:20} {}x{}+{}+{}",
+                        z.id, if z.active { "yes" } else { "no" }, kind,
+                        z.owner, z.label, w, h, x, y);
+                }
+            }
+        }
+        "test" => {
+            // Quick text drag test for shell.
+            match dragdrop::begin_text_drag("kshell", "test drag data") {
+                Ok(id) => {
+                    shell_println!("Started test drag session {}.", id);
+                    match dragdrop::accept(dragdrop::DragFormat::PlainText) {
+                        Ok(data) => {
+                            let text = core::str::from_utf8(&data).unwrap_or("<binary>");
+                            shell_println!("Accepted: {}", text);
+                        }
+                        Err(e) => shell_println!("Accept error: {:?}", e),
+                    }
+                    dragdrop::finish();
+                    shell_println!("Test drag completed.");
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cancel" => {
+            if dragdrop::cancel() {
+                dragdrop::finish();
+                shell_println!("Active drag cancelled.");
+            } else {
+                shell_println!("No active drag to cancel.");
+            }
+        }
+        "stats" => {
+            let (drags, drops, cancels, total_bytes, zone_count) = dragdrop::stats();
+            shell_println!("Drag-and-drop statistics:");
+            shell_println!("  Drags:       {}", drags);
+            shell_println!("  Drops:       {}", drops);
+            shell_println!("  Cancels:     {}", cancels);
+            shell_println!("  Bytes:       {}", total_bytes);
+            shell_println!("  Zones:       {}", zone_count);
+        }
+        "reset" => {
+            dragdrop::reset_stats();
+            shell_println!("Drag-and-drop statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: dragdrop <command>");
+            shell_println!("  status       Show current state (default)");
+            shell_println!("  zones        List registered drop zones");
+            shell_println!("  test         Run a test drag-and-drop");
+            shell_println!("  cancel       Cancel active drag session");
+            shell_println!("  stats        Show statistics");
+            shell_println!("  reset        Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -20781,7 +20876,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

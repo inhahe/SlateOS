@@ -49,6 +49,7 @@ pub mod dedup;
 pub mod devfs;
 pub mod directio;
 pub mod dirsync;
+pub mod dragdrop;
 pub mod encrypt;
 pub mod ext4;
 pub mod fat;

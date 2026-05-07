@@ -180,6 +180,7 @@ const ROOT_FILES: &[&str] = &[
     "vdesktop",
     "keylayout",
     "screenshot",
+    "a11y",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3478,6 +3479,38 @@ fn gen_screenshot() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_a11y() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (tc, ec, ic, ac) = super::a11y::stats();
+    let cfg = super::a11y::config();
+
+    out.push_str("Accessibility\n");
+    out.push_str("=============\n\n");
+    out.push_str(&format!("Tools:        {}\n", tc));
+    out.push_str(&format!("Elements:     {}\n", ec));
+    out.push_str(&format!("Injections:   {}\n", ic));
+    out.push_str(&format!("Announcements:{}\n\n", ac));
+    out.push_str(&format!("High contrast: {}\n", cfg.high_contrast));
+    out.push_str(&format!("Reduce motion: {}\n", cfg.reduce_motion));
+    out.push_str(&format!("Screen reader: {}\n", cfg.screen_reader_active));
+    out.push_str(&format!("Font scale:    {}%\n", cfg.font_scale));
+    out.push_str(&format!("Sticky keys:   {}\n", cfg.sticky_keys));
+    out.push_str(&format!("Mouse keys:    {}\n", cfg.mouse_keys));
+    out.push_str(&format!("Cursor scale:  {}%\n", cfg.cursor_scale));
+    out.push_str(&format!("Captions:      {}\n\n", cfg.captions));
+
+    let tools = super::a11y::list_tools();
+    for t in &tools {
+        out.push_str(&format!("  #{}: {} [{}]{}\n",
+            t.id, t.name, t.kind.label(),
+            if t.active { "" } else { " (inactive)" }));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3823,6 +3856,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "vdesktop" => Ok(gen_vdesktop()),
         "keylayout" => Ok(gen_keylayout()),
         "screenshot" => Ok(gen_screenshot()),
+        "a11y" => Ok(gen_a11y()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

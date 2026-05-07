@@ -2933,6 +2933,90 @@ fn redraw_from_cursor(buf: &str, cursor: usize) {
 /// recent matching history entry is shown.  Pressing Ctrl+R again jumps
 /// to the next (older) match.  Enter accepts the match into the line
 /// buffer.  Ctrl+C or ESC cancels and restores the original line.
+/// Enter find-in-scrollback mode (Ctrl+F).
+///
+/// Displays a `(find)` prompt.  As the user types, matches in the
+/// scrollback buffer are shown.  Ctrl+N cycles through matches.
+/// Enter or ESC exits find mode.
+fn find_in_scrollback() {
+    use crate::keyboard;
+
+    let mut query = String::with_capacity(64);
+    let mut match_idx: usize = 0; // Which match to display.
+    let mut results: Vec<alloc::string::String> = Vec::new();
+
+    let redraw_find = |q: &str, results: &[alloc::string::String], idx: usize| {
+        crate::console::write_str("\r\x1b[2K");
+        crate::console::write_str("(find)`");
+        crate::console::write_str(q);
+        crate::console::write_str("': ");
+        if let Some(line) = results.get(idx) {
+            // Show match number and total.
+            let info = alloc::format!("[{}/{}] ", idx + 1, results.len());
+            crate::console::write_str(&info);
+            // Truncate long lines.
+            let max = 120;
+            if line.len() > max {
+                if let Some(prefix) = line.get(..max) {
+                    crate::console::write_str(prefix);
+                    crate::console::write_str("...");
+                }
+            } else {
+                crate::console::write_str(line);
+            }
+        } else if !q.is_empty() {
+            crate::console::write_str("(no match)");
+        }
+    };
+
+    redraw_find("", &results, 0);
+
+    loop {
+        let ch = keyboard::read_char();
+
+        match ch {
+            b'\n' | 0x1B | 0x03 => {
+                // Enter, ESC, or Ctrl+C — exit find mode.
+                return;
+            }
+            0x0E | 0x06 => {
+                // Ctrl+N or Ctrl+F again — next match.
+                if !results.is_empty() {
+                    match_idx = (match_idx + 1) % results.len();
+                    redraw_find(&query, &results, match_idx);
+                }
+            }
+            0x10 => {
+                // Ctrl+P — previous match.
+                if !results.is_empty() {
+                    match_idx = if match_idx == 0 {
+                        results.len().saturating_sub(1)
+                    } else {
+                        match_idx.saturating_sub(1)
+                    };
+                    redraw_find(&query, &results, match_idx);
+                }
+            }
+            0x08 | 0x7F => {
+                // Backspace.
+                if query.pop().is_some() {
+                    results = crate::console::scrollback_search(&query);
+                    match_idx = 0;
+                    redraw_find(&query, &results, match_idx);
+                }
+            }
+            ch if ch >= 0x20 && ch < 0x7F => {
+                // Printable character — extend query.
+                query.push(ch as char);
+                results = crate::console::scrollback_search(&query);
+                match_idx = 0;
+                redraw_find(&query, &results, match_idx);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn reverse_search_mode(buf: &mut String, cursor: &mut usize, history: &mut History) {
     use crate::keyboard;
 
@@ -3147,6 +3231,21 @@ fn read_line(buf: &mut String, history: &mut History) {
                     crate::console::putchar(b'\x08');
                 }
             }
+            0x06 => {
+                // Ctrl+F — find in scrollback buffer.
+                find_in_scrollback();
+                // Reprint prompt + line after returning from find mode.
+                crate::console::write_str("\r\x1b[2K");
+                let prompt = alloc::format!("{}> ", get_cwd());
+                crate::console::write_str(&prompt);
+                for &b in buf.as_bytes() {
+                    crate::console::putchar(b);
+                }
+                let tail_len = buf.len().saturating_sub(cursor);
+                for _ in 0..tail_len {
+                    crate::console::putchar(b'\x08');
+                }
+            }
             0x12 => {
                 // Ctrl+R — reverse incremental search through history.
                 reverse_search_mode(buf, &mut cursor, history);
@@ -3342,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4685,6 +4784,7 @@ fn dispatch(line: &str) {
         "vdesktop" | "vd" => cmd_vdesktop(args),
         "keylayout" | "kbl" => cmd_keylayout(args),
         "screenshot" | "scap" => cmd_screenshot(args),
+        "a11y" | "accessibility" => cmd_a11y(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -19782,6 +19882,40 @@ fn cmd_screenshot(args: &str) {
     }
 }
 
+/// `a11y` / `accessibility` — accessibility subsystem.
+fn cmd_a11y(args: &str) {
+    use crate::fs::a11y;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "regtool" => { let kind_s = parts.get(1).copied().unwrap_or(""); let name = if parts.len() > 2 { parts[2..].join(" ") } else { String::from("Tool") }; if let Some(kind) = a11y::ToolKind::from_str(kind_s) { match a11y::register_tool(kind, &name, true, true) { Ok(id) => shell_println!("Registered tool #{}: {} [{}]", id, name, kind.label()), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: a11y regtool <kind> [name] (kinds: reader/mag/osk/voice/switch/eye/auto/custom)"); } }
+        "unregtool" => { let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); match a11y::unregister_tool(id) { Ok(()) => shell_println!("Unregistered tool #{}", id), Err(e) => shell_println!("Error: {:?}", e), } }
+        "tools" => { let tools = a11y::list_tools(); if tools.is_empty() { shell_println!("No tools registered"); } else { for t in &tools { shell_println!("#{}: {} [{}]{}", t.id, t.name, t.kind.label(), if t.active {""} else {" (inactive)"}); } } }
+        "regelem" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); let role_s = parts.get(2).copied().unwrap_or("generic"); let name = if parts.len() > 3 { parts[3..].join(" ") } else { String::from("Element") }; let role = match role_s { "button" | "btn" => a11y::ElementRole::Button, "text" | "input" => a11y::ElementRole::TextInput, "label" => a11y::ElementRole::Label, "menu" => a11y::ElementRole::Menu, "checkbox" | "check" => a11y::ElementRole::Checkbox, "slider" => a11y::ElementRole::Slider, "list" => a11y::ElementRole::List, "link" => a11y::ElementRole::Link, _ => a11y::ElementRole::Generic, }; match a11y::register_element(wid, role, &name, (0, 0, 100, 30)) { Ok(id) => shell_println!("Registered element #{}: {} [{}] in window {}", id, name, role.label(), wid), Err(e) => shell_println!("Error: {:?}", e), } }
+        "rmelem" => { let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); match a11y::remove_element(id) { Ok(()) => shell_println!("Removed element #{}", id), Err(e) => shell_println!("Error: {:?}", e), } }
+        "focus" => { let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); match a11y::set_focus(id) { Ok(()) => shell_println!("Focused element #{}", id), Err(e) => shell_println!("Error: {:?}", e), } }
+        "focused" => { match a11y::focused_element() { Some(e) => shell_println!("Focused: #{} [{}] '{}'", e.id, e.role.label(), e.name), None => shell_println!("No focused element"), } }
+        "elems" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); let elems = a11y::elements_in_window(wid); if elems.is_empty() { shell_println!("No elements in window {}", wid); } else { for e in &elems { shell_println!("  #{}: [{}] '{}'{}", e.id, e.role.label(), e.name, if e.focused {" *"} else {""}); } } }
+        "hit" => { let x = parts.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0); let y = parts.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0); match a11y::element_at(x, y) { Some(e) => shell_println!("Hit: #{} [{}] '{}'", e.id, e.role.label(), e.name), None => shell_println!("No element at ({},{})", x, y), } }
+        "inject" => { let what = parts.get(1).copied().unwrap_or(""); match what { "key" => { let code = parts.get(2).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0); let _ = a11y::inject_key(code, true); let _ = a11y::inject_key(code, false); shell_println!("Injected key 0x{:02X}", code); } "click" => { let x = parts.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0); let y = parts.get(3).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0); let _ = a11y::inject_click(x, y, 1); shell_println!("Injected click at ({},{})", x, y); } "text" => { let text = if parts.len() > 2 { parts[2..].join(" ") } else { String::new() }; let _ = a11y::inject_text(&text); shell_println!("Injected text: {}", text); } _ => { shell_println!("Usage: a11y inject key|click|text ..."); } } }
+        "announce" => { let prio_s = parts.get(1).copied().unwrap_or("normal"); let text = if parts.len() > 2 { parts[2..].join(" ") } else { String::new() }; let prio = a11y::AnnouncePriority::from_str(prio_s).unwrap_or(a11y::AnnouncePriority::Normal); match a11y::announce(&text, prio) { Ok(id) => shell_println!("Announcement #{}: [{}] {}", id, prio.label(), text), Err(e) => shell_println!("Error: {:?}", e), } }
+        "pending" => { let msgs = a11y::pending_announcements(); if msgs.is_empty() { shell_println!("No pending announcements"); } else { for m in &msgs { shell_println!("#{}: [{}] {}", m.id, m.priority.label(), m.text); } } }
+        "contrast" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { a11y::set_high_contrast(true); shell_println!("High contrast: on"); } "off"|"false" => { a11y::set_high_contrast(false); shell_println!("High contrast: off"); } _ => { shell_println!("High contrast: {}", a11y::config().high_contrast); } } }
+        "motion" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { a11y::set_reduce_motion(true); shell_println!("Reduce motion: on"); } "off"|"false" => { a11y::set_reduce_motion(false); shell_println!("Reduce motion: off"); } _ => { shell_println!("Reduce motion: {}", a11y::config().reduce_motion); } } }
+        "reader" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { a11y::set_screen_reader(true); shell_println!("Screen reader: on"); } "off"|"false" => { a11y::set_screen_reader(false); shell_println!("Screen reader: off"); } _ => { shell_println!("Screen reader: {}", a11y::config().screen_reader_active); } } }
+        "fontscale" => { if let Some(v) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) { a11y::set_font_scale(v); shell_println!("Font scale: {}%", v.clamp(50, 500)); } else { shell_println!("Font scale: {}%", a11y::config().font_scale); } }
+        "sticky" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { a11y::set_sticky_keys(true); shell_println!("Sticky keys: on"); } "off"|"false" => { a11y::set_sticky_keys(false); shell_println!("Sticky keys: off"); } _ => { shell_println!("Sticky keys: {}", a11y::config().sticky_keys); } } }
+        "mousekeys" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { a11y::set_mouse_keys(true); shell_println!("Mouse keys: on"); } "off"|"false" => { a11y::set_mouse_keys(false); shell_println!("Mouse keys: off"); } _ => { shell_println!("Mouse keys: {}", a11y::config().mouse_keys); } } }
+        "cursor" => { if let Some(v) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) { a11y::set_cursor_scale(v); shell_println!("Cursor scale: {}%", v.clamp(50, 500)); } else { shell_println!("Cursor scale: {}%", a11y::config().cursor_scale); } }
+        "captions" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { a11y::set_captions(true); shell_println!("Captions: on"); } "off"|"false" => { a11y::set_captions(false); shell_println!("Captions: off"); } _ => { shell_println!("Captions: {}", a11y::config().captions); } } }
+        "show" | "config" => { let cfg = a11y::config(); shell_println!("Contrast:{} Motion:{} Reader:{} Font:{}% Sticky:{} Mouse:{} Cursor:{}% Captions:{}", cfg.high_contrast, cfg.reduce_motion, cfg.screen_reader_active, cfg.font_scale, cfg.sticky_keys, cfg.mouse_keys, cfg.cursor_scale, cfg.captions); }
+        "test" => { match a11y::self_test() { Ok(()) => shell_println!("All a11y tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (tc, ec, ic, ac) = a11y::stats(); shell_println!("Tools:{} Elements:{} Injections:{} Announcements:{}", tc, ec, ic, ac); }
+        "reset" => { a11y::clear_all(); a11y::reset_stats(); shell_println!("Accessibility reset"); }
+        _ => { shell_println!("a11y: regtool/unregtool/tools/regelem/rmelem/focus/focused/elems/hit/inject/announce/pending/contrast/motion/reader/fontscale/sticky/mousekeys/cursor/captions/show/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27311,7 +27445,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

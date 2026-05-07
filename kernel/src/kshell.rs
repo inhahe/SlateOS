@@ -3085,7 +3085,7 @@ const COMMANDS: &[&str] = &[
     "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
-    "cut", "date", "dd", "dedup", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
+    "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "find", "findex", "finfo", "fops", "fsel", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
@@ -4390,6 +4390,7 @@ fn dispatch(line: &str) {
         "bookmark" | "bm" => cmd_bookmark(args),
         "clipboard" | "clip" => cmd_clipboard(args),
         "contextmenu" | "ctxmenu" => cmd_contextmenu(args),
+        "deskicons" => cmd_deskicons(args),
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
         "fileselect" | "fsel" => cmd_fileselect(args),
@@ -15350,6 +15351,138 @@ fn cmd_contextmenu(args: &str) {
     }
 }
 
+/// `deskicons` — desktop icon layout management.
+fn cmd_deskicons(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "load" => {
+            let dir = parts.get(1).map(|p| resolve_path(p)).unwrap_or_else(|| String::from("/home/user/Desktop"));
+            let w: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1920);
+            let h: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1080);
+            match crate::fs::deskicons::load(&dir, w, h) {
+                Ok(()) => {
+                    let count = crate::fs::deskicons::icon_count();
+                    shell_println!("Loaded {} desktop icons from {}", count, dir);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" => {
+            if let Some(layout) = crate::fs::deskicons::get_layout() {
+                shell_println!("Desktop: {} ({}x{}) [{:?}]",
+                               layout.desktop_path, layout.screen_w, layout.screen_h, layout.mode);
+                shell_println!("{:<20} {:<8} {:<8} {}", "Name", "X", "Y", "Type");
+                shell_println!("{}", "-".repeat(50));
+                for icon in &layout.icons {
+                    let kind = if icon.special.is_some() {
+                        "special"
+                    } else if icon.is_dir {
+                        "dir"
+                    } else {
+                        "file"
+                    };
+                    let sel = if icon.selected { " *" } else { "" };
+                    shell_println!("{:<20} {:<8} {:<8} {}{}", icon.name, icon.x, icon.y, kind, sel);
+                }
+            } else {
+                shell_println!("(no desktop layout loaded - use 'deskicons load' first)");
+            }
+        }
+        "arrange" => {
+            let sort_str = parts.get(1).copied().unwrap_or("name");
+            let sort = match sort_str {
+                "name" => crate::fs::deskicons::SortBy::Name,
+                "size" => crate::fs::deskicons::SortBy::Size,
+                "type" => crate::fs::deskicons::SortBy::Type,
+                "date" => crate::fs::deskicons::SortBy::DateModified,
+                _ => {
+                    shell_println!("Sort options: name, size, type, date");
+                    return;
+                }
+            };
+            match crate::fs::deskicons::auto_arrange(sort) {
+                Ok(()) => shell_println!("Icons arranged by {:?}", sort),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mode" => {
+            let mode_str = parts.get(1).copied().unwrap_or("");
+            let mode = match mode_str {
+                "grid" | "snap" => crate::fs::deskicons::LayoutMode::SnapToGrid,
+                "free" => crate::fs::deskicons::LayoutMode::FreePlacement,
+                _ => {
+                    shell_println!("Usage: deskicons mode <grid|free>");
+                    return;
+                }
+            };
+            match crate::fs::deskicons::set_mode(mode) {
+                Ok(()) => shell_println!("Layout mode: {:?}", mode),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "select" => {
+            if let Some(name) = parts.get(1) {
+                let exclusive = !parts.contains(&"--add");
+                match crate::fs::deskicons::select(name, exclusive) {
+                    Ok(()) => shell_println!("Selected: {}", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: deskicons select <name> [--add]");
+            }
+        }
+        "deselect" => {
+            match crate::fs::deskicons::deselect_all() {
+                Ok(()) => shell_println!("All icons deselected"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "refresh" => {
+            match crate::fs::deskicons::refresh() {
+                Ok(()) => shell_println!("Desktop refreshed ({} icons)", crate::fs::deskicons::icon_count()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "hit" => {
+            if let (Some(x), Some(y)) = (
+                parts.get(1).and_then(|s| s.parse::<u32>().ok()),
+                parts.get(2).and_then(|s| s.parse::<u32>().ok()),
+            ) {
+                match crate::fs::deskicons::icon_at(x, y) {
+                    Some(name) => shell_println!("Hit: {}", name),
+                    None => shell_println!("(no icon at {}, {})", x, y),
+                }
+            } else {
+                shell_println!("Usage: deskicons hit <x> <y>");
+            }
+        }
+        "stats" => {
+            let (loads, arranges, count) = crate::fs::deskicons::stats();
+            shell_println!("Icons:    {}", count);
+            shell_println!("Loads:    {}", loads);
+            shell_println!("Arranges: {}", arranges);
+        }
+        "reset" => {
+            crate::fs::deskicons::reset_stats();
+            shell_println!("Desktop icon stats reset");
+        }
+        _ => {
+            shell_println!("Usage: deskicons <subcommand>");
+            shell_println!("  load [dir] [w] [h]  Load desktop icons");
+            shell_println!("  list                List all icons");
+            shell_println!("  arrange <sort>      Auto-arrange (name/size/type/date)");
+            shell_println!("  mode <grid|free>    Set layout mode");
+            shell_println!("  select <name>       Select an icon");
+            shell_println!("  deselect            Deselect all");
+            shell_println!("  refresh             Refresh from filesystem");
+            shell_println!("  hit <x> <y>         Hit test at coordinates");
+            shell_println!("  stats               Show statistics");
+            shell_println!("  reset               Reset statistics");
+        }
+    }
+}
+
 /// `dragdrop` — drag-and-drop subsystem management.
 fn cmd_dragdrop(args: &str) {
     use crate::fs::dragdrop;
@@ -22063,7 +22196,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "fileops" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

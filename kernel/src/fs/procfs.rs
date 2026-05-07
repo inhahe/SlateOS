@@ -149,6 +149,7 @@ const ROOT_FILES: &[&str] = &[
     "clipboard",
     "dragdrop",
     "contextmenu",
+    "deskicons",
     "fileops",
     "fileselect",
     "preview",
@@ -2831,6 +2832,27 @@ fn gen_contextmenu() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_deskicons() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (loads, arranges, count) = super::deskicons::stats();
+
+    out.push_str("Desktop Icons\n");
+    out.push_str("=============\n\n");
+    out.push_str(&format!("Icons:    {}\n", count));
+    out.push_str(&format!("Loads:    {}\n", loads));
+    out.push_str(&format!("Arranges: {}\n", arranges));
+
+    if let Some(layout) = super::deskicons::get_layout() {
+        out.push_str(&format!("Mode:     {:?}\n", layout.mode));
+        out.push_str(&format!("Sort:     {:?}\n", layout.sort_by));
+        out.push_str(&format!("Screen:   {}x{}\n", layout.screen_w, layout.screen_h));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_fileselect() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -2958,6 +2980,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "clipboard" => Ok(gen_clipboard()),
         "dragdrop" => Ok(gen_dragdrop()),
         "contextmenu" => Ok(gen_contextmenu()),
+        "deskicons" => Ok(gen_deskicons()),
         "fileops" => Ok(gen_fileops()),
         "fileselect" => Ok(gen_fileselect()),
         "preview" => Ok(gen_preview()),

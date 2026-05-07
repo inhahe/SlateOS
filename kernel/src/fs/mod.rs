@@ -48,6 +48,7 @@ pub mod contextmenu;
 #[allow(dead_code)]
 pub mod cpio;
 pub mod dedup;
+pub mod deskicons;
 pub mod devfs;
 pub mod directio;
 pub mod dirsync;

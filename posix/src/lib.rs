@@ -24,11 +24,15 @@
 //! syscalls return negative error codes.  The translation layer converts
 //! native error codes to POSIX errno values.
 //!
+//! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
+//!   `setjmp`/`longjmp`, `qsort`, `bsearch`, `atoi`/`strtol`,
+//!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
+//!
 //! ## What This Is NOT
 //!
-//! This is not a complete C runtime (no `printf`, `malloc`, `stdio`).
-//! Those higher-level facilities will be built on top of these primitives
-//! or provided by porting musl/newlib.
+//! This is not a complete C runtime (no `printf` — needs C variadic
+//! support, deferred to musl port).  Higher-level facilities like
+//! buffered FILE* I/O and locale support will come from porting musl.
 //!
 //! ## References
 //!
@@ -64,6 +68,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     }
 }
 
+pub mod assert;
 pub mod ctype;
 pub mod errno;
 pub mod fcntl;
@@ -75,6 +80,7 @@ pub mod mman;
 pub mod pipe;
 pub mod process;
 pub mod setjmp;
+pub mod signal;
 pub mod spawn;
 pub mod stat;
 pub mod stdio;

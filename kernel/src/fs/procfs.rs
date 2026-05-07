@@ -168,6 +168,7 @@ const ROOT_FILES: &[&str] = &[
     "systray",
     "taskbar",
     "startmenu",
+    "filepicker",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3087,6 +3088,41 @@ fn gen_startmenu() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_filepicker() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (active, total, bm_n, recent_n, open_ops, nav_ops) = super::filepicker::stats();
+
+    out.push_str("File Picker\n");
+    out.push_str("===========\n\n");
+    out.push_str(&format!("Active dialogs: {}\n", active));
+    out.push_str(&format!("Total dialogs:  {}\n", total));
+    out.push_str(&format!("Bookmarks:      {}\n", bm_n));
+    out.push_str(&format!("Recent dirs:    {}\n", recent_n));
+    out.push_str(&format!("Open ops:       {}\n", open_ops));
+    out.push_str(&format!("Navigate ops:   {}\n\n", nav_ops));
+
+    let bookmarks = super::filepicker::bookmarks();
+    if !bookmarks.is_empty() {
+        out.push_str("Bookmarks:\n");
+        for bm in &bookmarks {
+            out.push_str(&format!("  {} → {}\n", bm.label, bm.path));
+        }
+        out.push_str("\n");
+    }
+
+    let recent = super::filepicker::recent_dirs();
+    if !recent.is_empty() {
+        out.push_str("Recent directories:\n");
+        for d in recent.iter().take(10) {
+            out.push_str(&format!("  {}\n", d));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3420,6 +3456,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "systray" => Ok(gen_systray()),
         "taskbar" => Ok(gen_taskbar()),
         "startmenu" => Ok(gen_startmenu()),
+        "filepicker" => Ok(gen_filepicker()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

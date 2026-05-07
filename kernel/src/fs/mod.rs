@@ -61,6 +61,7 @@ pub mod fcomment;
 pub mod fcompress;
 pub mod fileinfo;
 pub mod fileops;
+pub mod filepicker;
 pub mod fileselect;
 pub mod filetype;
 pub mod findex;

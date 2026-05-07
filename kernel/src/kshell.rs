@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4410,6 +4410,7 @@ fn dispatch(line: &str) {
         "systray" | "tray" => cmd_systray(args),
         "taskbar" => cmd_taskbar(args),
         "startmenu" | "smenu" => cmd_startmenu(args),
+        "filepicker" | "fpick" => cmd_filepicker(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -17630,6 +17631,292 @@ fn cmd_appregistry(args: &str) {
     }
 }
 
+/// `filepicker` / `fpick` — file open/save dialog backend.
+fn cmd_filepicker(args: &str) {
+    use crate::fs::filepicker;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "open" => {
+            let dir = parts.get(1).copied().unwrap_or("/");
+            match filepicker::create_dialog(filepicker::DialogMode::OpenFile, dir, Vec::new()) {
+                Ok(id) => {
+                    shell_println!("Dialog #{}: OpenFile at {}", id, dir);
+                    // Auto-navigate to build listing.
+                    let _ = filepicker::navigate(id, dir);
+                    if let Some(d) = filepicker::get_dialog(id) {
+                        shell_println!("{} items in listing", d.listing.len());
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "openm" => {
+            let dir = parts.get(1).copied().unwrap_or("/");
+            match filepicker::create_dialog(filepicker::DialogMode::OpenFiles, dir, Vec::new()) {
+                Ok(id) => shell_println!("Dialog #{}: OpenFiles at {}", id, dir),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "save" => {
+            let dir = parts.get(1).copied().unwrap_or("/");
+            match filepicker::create_dialog(filepicker::DialogMode::SaveFile, dir, Vec::new()) {
+                Ok(id) => shell_println!("Dialog #{}: SaveFile at {}", id, dir),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "folder" => {
+            let dir = parts.get(1).copied().unwrap_or("/");
+            match filepicker::create_dialog(filepicker::DialogMode::SelectFolder, dir, Vec::new()) {
+                Ok(id) => shell_println!("Dialog #{}: SelectFolder at {}", id, dir),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "nav" | "cd" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let path = parts.get(2).copied().unwrap_or("");
+            if id == 0 || path.is_empty() {
+                shell_println!("Usage: fpick nav <dialog-id> <path>");
+                return;
+            }
+            match filepicker::navigate(id, path) {
+                Ok(()) => {
+                    if let Some(d) = filepicker::get_dialog(id) {
+                        shell_println!("Navigated to: {} ({} items)", d.current_dir, d.listing.len());
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "up" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: fpick up <dialog-id>");
+                return;
+            }
+            match filepicker::go_up(id) {
+                Ok(()) => {
+                    if let Some(d) = filepicker::get_dialog(id) {
+                        shell_println!("Now at: {}", d.current_dir);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "back" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: fpick back <dialog-id>");
+                return;
+            }
+            match filepicker::go_back(id) {
+                Ok(()) => {
+                    if let Some(d) = filepicker::get_dialog(id) {
+                        shell_println!("Back to: {}", d.current_dir);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "select" | "sel" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let path = parts.get(2).copied().unwrap_or("");
+            if id == 0 || path.is_empty() {
+                shell_println!("Usage: fpick select <dialog-id> <path>");
+                return;
+            }
+            match filepicker::select(id, path) {
+                Ok(()) => shell_println!("Selected: {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "filename" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let name = parts.get(2).copied().unwrap_or("");
+            if id == 0 || name.is_empty() {
+                shell_println!("Usage: fpick filename <dialog-id> <name>");
+                return;
+            }
+            match filepicker::set_filename(id, name) {
+                Ok(()) => shell_println!("Filename: {}", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "confirm" | "ok" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: fpick confirm <dialog-id>");
+                return;
+            }
+            match filepicker::confirm(id) {
+                Ok(filepicker::DialogResult::Confirmed(paths)) => {
+                    shell_println!("Confirmed ({} paths):", paths.len());
+                    for p in &paths {
+                        shell_println!("  {}", p);
+                    }
+                }
+                Ok(filepicker::DialogResult::Cancelled) => shell_println!("Cancelled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cancel" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: fpick cancel <dialog-id>");
+                return;
+            }
+            match filepicker::cancel(id) {
+                Ok(()) => shell_println!("Dialog #{} cancelled", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "close" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: fpick close <dialog-id>");
+                return;
+            }
+            match filepicker::close(id) {
+                Ok(()) => shell_println!("Dialog #{} closed", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: fpick info <dialog-id>");
+                return;
+            }
+            match filepicker::get_dialog(id) {
+                Some(d) => {
+                    shell_println!("Dialog #{}", d.id);
+                    shell_println!("  Mode:      {}", d.mode.title());
+                    shell_println!("  Directory: {}", d.current_dir);
+                    shell_println!("  Items:     {}", d.listing.len());
+                    shell_println!("  Selected:  {}", d.selection.len());
+                    shell_println!("  Filters:   {}", d.filters.len());
+                    shell_println!("  Open:      {}", if d.open { "yes" } else { "no" });
+                    if !d.filename.is_empty() {
+                        shell_println!("  Filename:  {}", d.filename);
+                    }
+                }
+                None => shell_println!("Dialog not found: {}", id),
+            }
+        }
+        "ls" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: fpick ls <dialog-id>");
+                return;
+            }
+            match filepicker::get_dialog(id) {
+                Some(d) => {
+                    if d.listing.is_empty() {
+                        shell_println!("Empty listing");
+                    } else {
+                        shell_println!("{} items in {}:", d.listing.len(), d.current_dir);
+                        for item in d.listing.iter().take(30) {
+                            let kind = if item.is_dir { "DIR " } else { "FILE" };
+                            let sel = if d.selection.iter().any(|s| s == &item.path) { " *" } else { "" };
+                            shell_println!("  {} {:8} {}{}", kind, item.size, item.name, sel);
+                        }
+                        if d.listing.len() > 30 {
+                            shell_println!("  ... and {} more", d.listing.len() - 30);
+                        }
+                    }
+                }
+                None => shell_println!("Dialog not found: {}", id),
+            }
+        }
+        "bookmark" | "bm" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            match action {
+                "add" => {
+                    let label = parts.get(2).copied().unwrap_or("");
+                    let path = parts.get(3).copied().unwrap_or("");
+                    if label.is_empty() || path.is_empty() {
+                        shell_println!("Usage: fpick bm add <label> <path> [icon]");
+                        return;
+                    }
+                    let icon = parts.get(4).copied().unwrap_or("icon-folder");
+                    match filepicker::add_bookmark(label, path, icon) {
+                        Ok(()) => shell_println!("Bookmark added: {} → {}", label, path),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" | "remove" => {
+                    let path = parts.get(2).copied().unwrap_or("");
+                    if path.is_empty() {
+                        shell_println!("Usage: fpick bm rm <path>");
+                        return;
+                    }
+                    match filepicker::remove_bookmark(path) {
+                        Ok(()) => shell_println!("Bookmark removed: {}", path),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                _ => {
+                    let bms = filepicker::bookmarks();
+                    if bms.is_empty() {
+                        shell_println!("No bookmarks");
+                    } else {
+                        shell_println!("{} bookmarks:", bms.len());
+                        for bm in &bms {
+                            shell_println!("  {} → {}", bm.label, bm.path);
+                        }
+                    }
+                }
+            }
+        }
+        "init" => {
+            filepicker::init_defaults();
+            shell_println!("Default bookmarks set");
+        }
+        "test" => {
+            match filepicker::self_test() {
+                Ok(()) => shell_println!("All file picker self-tests passed"),
+                Err(e) => shell_println!("File picker self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (active, total, bms, recent, opens, navs) = filepicker::stats();
+            shell_println!("Active dialogs: {}", active);
+            shell_println!("Total dialogs:  {}", total);
+            shell_println!("Bookmarks:      {}", bms);
+            shell_println!("Recent dirs:    {}", recent);
+            shell_println!("Open ops:       {}", opens);
+            shell_println!("Navigate ops:   {}", navs);
+        }
+        "reset" => {
+            filepicker::clear_all();
+            filepicker::reset_stats();
+            shell_println!("File picker cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: fpick <subcommand>");
+            shell_println!("  open [dir]              Open file dialog");
+            shell_println!("  openm [dir]             Open multiple files dialog");
+            shell_println!("  save [dir]              Save file dialog");
+            shell_println!("  folder [dir]            Select folder dialog");
+            shell_println!("  nav <id> <path>         Navigate to directory");
+            shell_println!("  up <id>                 Navigate up");
+            shell_println!("  back <id>               Navigate back");
+            shell_println!("  select <id> <path>      Select a file");
+            shell_println!("  filename <id> <name>    Set save filename");
+            shell_println!("  confirm <id>            Confirm dialog");
+            shell_println!("  cancel <id>             Cancel dialog");
+            shell_println!("  close <id>              Close completed dialog");
+            shell_println!("  info <id>               Show dialog state");
+            shell_println!("  ls <id>                 List dialog directory");
+            shell_println!("  bm [add|rm] [args]      Manage bookmarks");
+            shell_println!("  init                    Set default bookmarks");
+            shell_println!("  test                    Run self-tests");
+            shell_println!("  stats                   Show statistics");
+            shell_println!("  reset                   Clear all");
+        }
+    }
+}
+
 /// `taskbar` — taskbar management: pinned apps, running windows, configuration.
 fn cmd_taskbar(args: &str) {
     use crate::fs::taskbar;
@@ -24873,7 +25160,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

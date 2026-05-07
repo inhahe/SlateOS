@@ -142,6 +142,7 @@ const ROOT_FILES: &[&str] = &[
     "sealing",
     "recent",
     "fileinfo",
+    "fswalk",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2489,6 +2490,28 @@ fn gen_fileinfo() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fswalk() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (walks, entries, errors) = super::fswalk::stats();
+
+    out.push_str("Filesystem Walk Engine\n");
+    out.push_str("======================\n\n");
+    out.push_str(&format!("Total walks:    {}\n", walks));
+    out.push_str(&format!("Entries walked: {}\n", entries));
+    out.push_str(&format!("Errors:         {}\n\n", errors));
+
+    out.push_str("Traversal modes: DepthFirst, BreadthFirst\n");
+    out.push_str("Filters:         All, FilesOnly, DirsOnly, SymlinksOnly\n");
+    out.push_str(&format!("Max queue:       {} pending dirs\n", 8192));
+    out.push_str(&format!("Max results:     {}\n", 65536));
+    out.push_str(&format!("Default depth:   {}\n", 64));
+    out.push_str("Default excl:    /proc, /sys, /dev\n");
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2572,6 +2595,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sealing" => Ok(gen_sealing()),
         "recent" => Ok(gen_recent()),
         "fileinfo" => Ok(gen_fileinfo()),
+        "fswalk" => Ok(gen_fswalk()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -54,6 +54,7 @@ pub mod fcompress;
 pub mod fileinfo;
 pub mod freeze;
 pub mod fstrim;
+pub mod fswalk;
 pub mod handle;
 pub mod health;
 pub mod history;

@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "finfo", "fold", "free",
-    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -3118,7 +3118,7 @@ const COMMANDS: &[&str] = &[
     "fswatch",
     "undelete",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
-    "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
+    "walk", "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
@@ -4372,6 +4372,7 @@ fn dispatch(line: &str) {
         "seal" => cmd_seal(args),
         "recent" => cmd_recent(args),
         "fileinfo" | "finfo" => cmd_fileinfo(args),
+        "fswalk" | "walk" => cmd_fswalk(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14589,6 +14590,164 @@ fn cmd_fileinfo(args: &str) {
     }
 }
 
+fn cmd_fswalk(args: &str) {
+    use crate::fs::fswalk::{self, WalkOptions, WalkFilter, WalkOrder};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "stats" => {
+            let (walks, entries, errors) = fswalk::stats();
+            shell_println!("Walk Statistics");
+            shell_println!("  Walks:   {}", walks);
+            shell_println!("  Entries: {}", entries);
+            shell_println!("  Errors:  {}", errors);
+        }
+        "reset" => {
+            fswalk::reset_stats();
+            shell_println!("Walk statistics reset.");
+        }
+        "count" => {
+            let path = if parts.len() > 1 { resolve_path(parts[1]) } else { get_cwd() };
+            let depth = parts.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(64);
+            match fswalk::count(&path, depth) {
+                Ok((files, dirs)) => {
+                    shell_println!("{}: {} files, {} dirs", path, files, dirs);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "size" => {
+            let path = if parts.len() > 1 { resolve_path(parts[1]) } else { get_cwd() };
+            let depth = parts.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(64);
+            match fswalk::total_size(&path, depth) {
+                Ok(size) => {
+                    shell_println!("{}: {} bytes", path, size);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "find" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fswalk find <pattern> [path] [max-depth]");
+                return;
+            }
+            let pattern = parts[1];
+            let path = if parts.len() > 2 { resolve_path(parts[2]) } else { get_cwd() };
+            let depth = parts.get(3).and_then(|s| s.parse::<usize>().ok()).unwrap_or(64);
+            match fswalk::find(&path, pattern, depth) {
+                Ok(files) => {
+                    if files.is_empty() {
+                        shell_println!("No files found matching '{}'.", pattern);
+                    } else {
+                        for f in &files {
+                            shell_println!("{}", f);
+                        }
+                        shell_println!("\n{} matches.", files.len());
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "" => {
+            // Default: walk current directory with default options.
+            let path = get_cwd();
+            let opts = WalkOptions {
+                max_depth: 3,
+                limit: 50,
+                ..Default::default()
+            };
+            match fswalk::walk(&path, &opts) {
+                Ok(result) => {
+                    for entry in &result.entries {
+                        let prefix = "  ".repeat(entry.depth);
+                        let type_char = match entry.entry_type {
+                            crate::fs::EntryType::Directory => "d",
+                            crate::fs::EntryType::File => "f",
+                            crate::fs::EntryType::Symlink => "l",
+                            _ => "?",
+                        };
+                        let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                        if entry.size > 0 {
+                            shell_println!("{}[{}] {} ({} B)", prefix, type_char, name, entry.size);
+                        } else {
+                            shell_println!("{}[{}] {}", prefix, type_char, name);
+                        }
+                    }
+                    shell_println!("\n{} files, {} dirs, {} total bytes",
+                        result.stats.files, result.stats.dirs, result.stats.total_size);
+                    if result.truncated {
+                        shell_println!("(truncated)");
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        _ => {
+            // Treat as path.
+            let path = resolve_path(sub);
+            let mut opts = WalkOptions {
+                max_depth: 3,
+                limit: 100,
+                ..Default::default()
+            };
+            // Parse extra options.
+            let mut i = 1;
+            while i < parts.len() {
+                match parts[i] {
+                    "-d" | "--depth" => {
+                        if let Some(d) = parts.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                            opts.max_depth = d;
+                        }
+                        i += 2;
+                    }
+                    "-n" | "--limit" => {
+                        if let Some(n) = parts.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                            opts.limit = n;
+                        }
+                        i += 2;
+                    }
+                    "-f" | "--files" => { opts.filter = WalkFilter::FilesOnly; i += 1; }
+                    "-D" | "--dirs" => { opts.filter = WalkFilter::DirsOnly; i += 1; }
+                    "-a" | "--all" => { opts.show_hidden = true; i += 1; }
+                    "-b" | "--bfs" => { opts.order = WalkOrder::BreadthFirst; i += 1; }
+                    "-p" | "--pattern" => {
+                        if let Some(p) = parts.get(i + 1) {
+                            opts.pattern = alloc::string::String::from(*p);
+                        }
+                        i += 2;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+            match fswalk::walk(&path, &opts) {
+                Ok(result) => {
+                    for entry in &result.entries {
+                        let prefix = "  ".repeat(entry.depth);
+                        let type_char = match entry.entry_type {
+                            crate::fs::EntryType::Directory => "d",
+                            crate::fs::EntryType::File => "f",
+                            crate::fs::EntryType::Symlink => "l",
+                            _ => "?",
+                        };
+                        let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                        if entry.size > 0 {
+                            shell_println!("{}[{}] {} ({} B)", prefix, type_char, name, entry.size);
+                        } else {
+                            shell_println!("{}[{}] {}", prefix, type_char, name);
+                        }
+                    }
+                    shell_println!("\n{} files, {} dirs, {} total bytes",
+                        result.stats.files, result.stats.dirs, result.stats.total_size);
+                    if result.truncated {
+                        shell_println!("(truncated)");
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -20035,7 +20194,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

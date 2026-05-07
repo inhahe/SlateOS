@@ -3118,7 +3118,7 @@ const COMMANDS: &[&str] = &[
     "fswatch",
     "undelete",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
-    "walk", "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
+    "viewstate", "walk", "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
@@ -4383,6 +4383,7 @@ fn dispatch(line: &str) {
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
         "pathbar" => cmd_pathbar(args),
+        "viewstate" => cmd_viewstate(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -15970,6 +15971,115 @@ fn cmd_pathbar(args: &str) {
     }
 }
 
+/// `viewstate` — per-directory view settings.
+fn cmd_viewstate(args: &str) {
+    use crate::fs::viewstate;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "get" => {
+            let path_arg = parts.get(1).copied().unwrap_or(".");
+            let path = resolve_path(path_arg);
+            let settings = viewstate::get(&path);
+            shell_println!("View settings for {}:", path);
+            shell_println!("  Mode:          {}", settings.mode.label());
+            shell_println!("  Icon size:     {}", if settings.icon_size == 0 { settings.mode.default_icon_size() } else { settings.icon_size });
+            shell_println!("  Sort:          {} {}", settings.sort.column, if settings.sort.ascending { "asc" } else { "desc" });
+            shell_println!("  Show hidden:   {}", settings.show_hidden);
+            shell_println!("  Show ext:      {}", settings.show_extensions);
+        }
+        "set" => {
+            // viewstate set <path> <mode> [sort_col] [asc|desc]
+            if parts.len() < 3 {
+                shell_println!("Usage: viewstate set <path> <mode> [sort_col] [asc|desc]");
+                return;
+            }
+            let path = resolve_path(parts.get(1).copied().unwrap_or(""));
+            let mode_str = parts.get(2).copied().unwrap_or("details");
+            let mode = viewstate::ViewMode::from_str(mode_str);
+            match mode {
+                Some(m) => {
+                    let mut settings = viewstate::get(&path);
+                    settings.mode = m;
+                    if let Some(col) = parts.get(3) {
+                        settings.sort.column = String::from(*col);
+                    }
+                    if let Some(dir) = parts.get(4) {
+                        settings.sort.ascending = *dir != "desc";
+                    }
+                    match viewstate::set(&path, settings) {
+                        Ok(()) => shell_println!("View state saved for {}.", path),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                None => shell_println!("Unknown mode '{}'. Use: details, list, large, medium, small, tiles, content", mode_str),
+            }
+        }
+        "remove" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: viewstate remove <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            if viewstate::remove(&path) {
+                shell_println!("Removed view state for {}.", path);
+            } else {
+                shell_println!("No saved state for {}.", path);
+            }
+        }
+        "list" | "ls" => {
+            let saved = viewstate::list_saved();
+            if saved.is_empty() {
+                shell_println!("No saved view states.");
+            } else {
+                shell_println!("{:40} {:12} {:10} {:6}", "PATH", "MODE", "SORT", "ASC");
+                for (path, settings) in &saved {
+                    shell_println!("{:40} {:12} {:10} {:6}",
+                        path, settings.mode.label(),
+                        settings.sort.column,
+                        if settings.sort.ascending { "yes" } else { "no" });
+                }
+            }
+        }
+        "templates" => {
+            viewstate::init_defaults();
+            let templates = viewstate::list_templates();
+            if templates.is_empty() {
+                shell_println!("No view templates.");
+            } else {
+                shell_println!("{:6} {:30} {:12} {}", "ID", "PATTERN", "MODE", "LABEL");
+                for t in &templates {
+                    shell_println!("{:6} {:30} {:12} {}", t.id, t.pattern, t.settings.mode.label(), t.label);
+                }
+            }
+        }
+        "stats" | "" => {
+            let (saved, templates, gets, sets) = viewstate::stats();
+            shell_println!("View state statistics:");
+            shell_println!("  Saved states: {}/{}", saved, 4096);
+            shell_println!("  Templates:    {}/{}", templates, 64);
+            shell_println!("  Lookups:      {}", gets);
+            shell_println!("  Saves:        {}", sets);
+        }
+        "reset" => {
+            viewstate::clear();
+            viewstate::reset_stats();
+            shell_println!("View state reset.");
+        }
+        _ => {
+            shell_println!("Usage: viewstate <command>");
+            shell_println!("  get <path>                Get view settings");
+            shell_println!("  set <path> <mode> [opts]  Set view settings");
+            shell_println!("  remove <path>             Remove saved state");
+            shell_println!("  list|ls                   List all saved states");
+            shell_println!("  templates                 Show view templates");
+            shell_println!("  stats                     Show statistics (default)");
+            shell_println!("  reset                     Clear all states");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -21538,7 +21648,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

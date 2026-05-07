@@ -153,6 +153,7 @@ const ROOT_FILES: &[&str] = &[
     "templates",
     "columnview",
     "pathbar",
+    "viewstate",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2787,6 +2788,22 @@ fn gen_pathbar() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_viewstate() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (saved, templates, gets, sets) = super::viewstate::stats();
+
+    out.push_str("View State\n");
+    out.push_str("==========\n\n");
+    out.push_str(&format!("Saved states: {}/{}\n", saved, 4096));
+    out.push_str(&format!("Templates:    {}/{}\n", templates, 64));
+    out.push_str(&format!("Lookups:      {}\n", gets));
+    out.push_str(&format!("Saves:        {}\n", sets));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2881,6 +2898,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "templates" => Ok(gen_templates()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
+        "viewstate" => Ok(gen_viewstate()),
         _ => Err(KernelError::NotFound),
     }
 }

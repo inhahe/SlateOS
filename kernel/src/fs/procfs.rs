@@ -122,6 +122,7 @@ const ROOT_FILES: &[&str] = &[
     "usage",
     "health",
     "dirsync",
+    "backup",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1942,6 +1943,22 @@ fn gen_dirsync() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/backup` — backup engine statistics.
+fn gen_backup() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (backups, restores, bytes) = super::backup::stats();
+
+    out.push_str("Backup Statistics\n");
+    out.push_str("=================\n\n");
+    out.push_str(&format!("Backups created:  {}\n", backups));
+    out.push_str(&format!("Restores done:    {}\n", restores));
+    out.push_str(&format!("Bytes backed up:  {}\n", bytes));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2005,6 +2022,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "usage" => Ok(gen_usage()),
         "health" => Ok(gen_health()),
         "dirsync" => Ok(gen_dirsync()),
+        "backup" => Ok(gen_backup()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -30,6 +30,7 @@ pub mod acl;
 pub mod ar;
 pub mod audit;
 pub mod associations;
+pub mod backup;
 #[allow(dead_code)]
 pub mod bzip2;
 pub mod cache;

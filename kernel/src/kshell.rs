@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "append", "assoc", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "ar", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
+    "ar", "backup", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
@@ -4351,6 +4351,7 @@ fn dispatch(line: &str) {
         "fshealth" => cmd_fshealth(args),
         "fswatch" => cmd_fswatch(args),
         "dirsync" => cmd_dirsync(args),
+        "backup" => cmd_backup(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -12364,6 +12365,202 @@ fn cmd_dirsync(args: &str) {
     }
 }
 
+/// `backup` — incremental backup engine.
+fn cmd_backup(args: &str) {
+    use crate::fs::backup;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "create" | "full" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: backup create <src> <dst> [--incremental] [--no-verify] [--dry-run] [--exclude <prefix>]");
+                return;
+            }
+            let src = parts[1];
+            let dst = parts[2];
+            let flags = &parts[3..];
+            let mut exclude = Vec::new();
+            let mut i = 0;
+            while i < flags.len() {
+                if flags[i] == "--exclude" || flags[i] == "-x" {
+                    if i + 1 < flags.len() {
+                        exclude.push(String::from(flags[i + 1]));
+                        i += 1;
+                    }
+                }
+                i += 1;
+            }
+            let opts = backup::BackupOptions {
+                mode: if flags.iter().any(|f| *f == "--incremental" || *f == "-i") {
+                    backup::BackupMode::Incremental
+                } else {
+                    backup::BackupMode::Full
+                },
+                verify: !flags.iter().any(|f| *f == "--no-verify"),
+                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                exclude,
+                ..backup::BackupOptions::default()
+            };
+            if opts.dry_run {
+                shell_println!("(dry run — no changes will be made)");
+            }
+            shell_println!("Backing up {} -> {} ({:?})...", src, dst, opts.mode);
+            match backup::create(src, dst, &opts) {
+                Ok(result) => {
+                    shell_println!("Backup complete: {}", result.manifest_id);
+                    shell_println!("  Files copied:  {}", result.files_copied);
+                    shell_println!("  Files skipped: {}", result.files_skipped);
+                    shell_println!("  Dirs created:  {}", result.dirs_created);
+                    shell_println!("  Bytes copied:  {}", result.bytes_copied);
+                    if !result.errors.is_empty() {
+                        shell_println!("  Errors ({}):", result.errors.len());
+                        for e in &result.errors {
+                            shell_println!("    ! {}", e);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "incr" | "incremental" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: backup incr <src> <dst> [--no-verify] [--dry-run]");
+                return;
+            }
+            let src = parts[1];
+            let dst = parts[2];
+            let flags = &parts[3..];
+            let opts = backup::BackupOptions {
+                mode: backup::BackupMode::Incremental,
+                verify: !flags.iter().any(|f| *f == "--no-verify"),
+                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                ..backup::BackupOptions::default()
+            };
+            if opts.dry_run {
+                shell_println!("(dry run — no changes will be made)");
+            }
+            shell_println!("Incremental backup {} -> {}...", src, dst);
+            match backup::create(src, dst, &opts) {
+                Ok(result) => {
+                    shell_println!("Backup complete: {}", result.manifest_id);
+                    shell_println!("  Files copied:  {}", result.files_copied);
+                    shell_println!("  Files skipped: {}", result.files_skipped);
+                    shell_println!("  Bytes copied:  {}", result.bytes_copied);
+                    if !result.errors.is_empty() {
+                        shell_println!("  Errors: {}", result.errors.len());
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "restore" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: backup restore <backup_root> <dst> [manifest_id] [--no-verify] [--dry-run]");
+                return;
+            }
+            let backup_root = parts[1];
+            let dst = parts[2];
+            let manifest_id = parts.get(3).and_then(|s| {
+                if s.starts_with('-') { None } else { Some(*s) }
+            });
+            let flags = &parts[3..];
+            let opts = backup::RestoreOptions {
+                verify: !flags.iter().any(|f| *f == "--no-verify"),
+                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                ..backup::RestoreOptions::default()
+            };
+            if opts.dry_run {
+                shell_println!("(dry run)");
+            }
+            match backup::restore(backup_root, dst, manifest_id, &opts) {
+                Ok(result) => {
+                    shell_println!("Restore complete:");
+                    shell_println!("  Files restored: {}", result.files_restored);
+                    shell_println!("  Dirs created:   {}", result.dirs_created);
+                    shell_println!("  Bytes restored: {}", result.bytes_restored);
+                    if result.verify_failures > 0 {
+                        shell_println!("  VERIFY FAILURES: {}", result.verify_failures);
+                    }
+                    if !result.errors.is_empty() {
+                        shell_println!("  Errors ({}):", result.errors.len());
+                        for e in &result.errors {
+                            shell_println!("    ! {}", e);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "ls" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: backup list <backup_root>");
+                return;
+            }
+            match backup::list(parts[1]) {
+                Ok(backups) => {
+                    if backups.is_empty() {
+                        shell_println!("No backups found in {}", parts[1]);
+                    } else {
+                        shell_println!("Backups in {}:", parts[1]);
+                        for b in &backups {
+                            let mode = match b.mode {
+                                backup::BackupMode::Full => "full",
+                                backup::BackupMode::Incremental => "incr",
+                            };
+                            shell_println!(
+                                "  {} [{}] {} files, {} bytes, from {}",
+                                b.id, mode, b.file_count, b.total_bytes, b.source,
+                            );
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "verify" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: backup verify <backup_root> [manifest_id]");
+                return;
+            }
+            let manifest_id = parts.get(2).copied();
+            match backup::verify(parts[1], manifest_id) {
+                Ok((ok, fail, failures)) => {
+                    shell_println!("Verification: {} ok, {} failed", ok, fail);
+                    for f in &failures {
+                        shell_println!("  FAIL: {}", f);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (backups, restores, bytes) = backup::stats();
+            shell_println!("Backups created: {}", backups);
+            shell_println!("Restores done:   {}", restores);
+            shell_println!("Bytes backed up: {}", bytes);
+        }
+        _ => {
+            shell_println!("Usage: backup <command> [args]");
+            shell_println!();
+            shell_println!("Commands:");
+            shell_println!("  create <src> <dst> [flags]         Create a full backup");
+            shell_println!("  incr <src> <dst> [flags]           Create an incremental backup");
+            shell_println!("  restore <root> <dst> [id] [flags]  Restore from backup");
+            shell_println!("  list <backup_root>                 List available backups");
+            shell_println!("  verify <backup_root> [id]          Verify backup integrity");
+            shell_println!("  stats                              Show backup statistics");
+            shell_println!();
+            shell_println!("Create flags:");
+            shell_println!("  --incremental, -i    Incremental mode");
+            shell_println!("  --no-verify          Skip hash verification");
+            shell_println!("  --dry-run, -n        Show what would be done");
+            shell_println!("  --exclude, -x <pfx>  Exclude paths with prefix");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -17645,7 +17842,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

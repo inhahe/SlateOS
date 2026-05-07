@@ -314,12 +314,19 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
             let written = pipe.write_bytes(data);
             if written > 0 {
                 // Wake the reader if it was blocked waiting for data.
+                let pipe_id = handle.pipe_id();
                 let reader_id = pipe.reader_waiter.take();
                 drop(table);
 
                 if let Some(task_id) = reader_id {
                     sched::wake(task_id);
                 }
+                crate::ktrace::record(
+                    crate::ktrace::Category::Ipc,
+                    crate::ktrace::event::PIPE_WRITE,
+                    pipe_id,
+                    written as u64,
+                );
                 super::stats::pipe_write(written as u64);
                 return Ok(written);
             }
@@ -414,12 +421,19 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
             let n = pipe.read_bytes(buf);
             if n > 0 {
                 // Wake the writer if it was blocked waiting for space.
+                let pipe_id = handle.pipe_id();
                 let writer_id = pipe.writer_waiter.take();
                 drop(table);
 
                 if let Some(task_id) = writer_id {
                     sched::wake(task_id);
                 }
+                crate::ktrace::record(
+                    crate::ktrace::Category::Ipc,
+                    crate::ktrace::event::PIPE_READ,
+                    pipe_id,
+                    n as u64,
+                );
                 super::stats::pipe_read(n as u64);
                 return Ok(n);
             }

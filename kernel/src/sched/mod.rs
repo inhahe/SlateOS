@@ -3353,6 +3353,13 @@ fn schedule_inner(requeue: bool) {
                             ctr.fetch_add(1, Ordering::Relaxed);
                         }
 
+                        crate::ktrace::record(
+                            crate::ktrace::Category::Sched,
+                            crate::ktrace::event::CONTEXT_SWITCH,
+                            current_id,
+                            ready_id,
+                        );
+
                         // Profile the actual context switch (save/restore/CR3).
                         let _prof_t = crate::kprofile::begin(crate::kprofile::Slot::ContextSwitch);
 
@@ -3510,6 +3517,13 @@ fn schedule_inner(requeue: bool) {
     if let Some(ctr) = CTX_SWITCHES.get(cpu) {
         ctr.fetch_add(1, Ordering::Relaxed);
     }
+
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::CONTEXT_SWITCH,
+        current_id,
+        next_id,
+    );
 
     unsafe {
         switch_context(&mut *old_ctx_ptr, &*new_ctx_ptr, old_fpu_ptr, new_fpu_ptr);

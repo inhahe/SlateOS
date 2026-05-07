@@ -477,6 +477,12 @@ pub fn send(handle: ChannelHandle, msg: Message) -> KernelResult<()> {
         sched::wake(task_id);
     }
 
+    crate::ktrace::record(
+        crate::ktrace::Category::Ipc,
+        crate::ktrace::event::CHANNEL_SEND,
+        handle.channel_id(),
+        msg_len,
+    );
     super::stats::channel_send(msg_len);
     Ok(())
 }
@@ -1003,22 +1009,36 @@ pub fn recv(handle: ChannelHandle) -> KernelResult<Message> {
             if ch.sync {
                 // Sync channel: check for a parked message from peer.
                 if let Some(msg) = ch.rendezvous_slots[peer].take() {
+                    let ch_id = handle.channel_id();
                     let wake_sender = ch.sender_waiters[peer].take();
                     drop(channels);
                     if let Some(task_id) = wake_sender {
                         sched::wake(task_id);
                     }
+                    crate::ktrace::record(
+                        crate::ktrace::Category::Ipc,
+                        crate::ktrace::event::CHANNEL_RECV,
+                        ch_id,
+                        msg.len() as u64,
+                    );
                     super::stats::channel_recv();
                     return Ok(msg);
                 }
             } else {
                 // Async channel: dequeue from our queue.
                 if let Some(msg) = ch.queues[our_side].pop_front() {
+                    let ch_id = handle.channel_id();
                     let wake_sender = ch.sender_waiters[peer].take();
                     drop(channels);
                     if let Some(task_id) = wake_sender {
                         sched::wake(task_id);
                     }
+                    crate::ktrace::record(
+                        crate::ktrace::Category::Ipc,
+                        crate::ktrace::event::CHANNEL_RECV,
+                        ch_id,
+                        msg.len() as u64,
+                    );
                     super::stats::channel_recv();
                     return Ok(msg);
                 }

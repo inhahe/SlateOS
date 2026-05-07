@@ -3105,6 +3105,7 @@ const COMMANDS: &[&str] = &[
     "tmpwatch",
     "audit",
     "namespace", "ns",
+    "fssnapshot", "fssnap",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4328,6 +4329,7 @@ fn dispatch(line: &str) {
         "tmpwatch" => cmd_tmpwatch(args),
         "audit" => cmd_audit(args),
         "namespace" | "ns" => cmd_namespace(args),
+        "fssnapshot" | "fssnap" => cmd_fssnapshot(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4414,6 +4416,7 @@ fn dispatch(line: &str) {
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
+        "mouse" => cmd_mouse(),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
         "dns" | "nslookup" => cmd_dns(args),
@@ -4664,6 +4667,7 @@ fn cmd_help() {
     crate::console_println!("  run FILE  Load and execute an ELF binary");
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
+    crate::console_println!("  mouse     Show PS/2 mouse status and recent events");
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
     crate::console_println!("  ping IP   Send ICMP echo requests (ping)");
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
@@ -10454,6 +10458,272 @@ fn cmd_namespace(args: &str) {
     }
 }
 
+/// `fssnapshot` / `fssnap` — filesystem snapshot management.
+///
+/// Subcommands:
+///   create PATH NAME [--parent ID]   Create a snapshot of PATH
+///   restore ID [TARGET]              Restore snapshot to TARGET (or original path)
+///   list                             List all snapshots
+///   info ID                          Show snapshot details
+///   diff ID1 ID2                     Compare two snapshots
+///   delete ID                        Delete a snapshot
+///   entries ID                       List all entries in a snapshot
+fn cmd_fssnapshot(args: &str) {
+    use crate::fs::snapshot;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        shell_println!("Usage: fssnapshot <create|restore|list|info|diff|delete|entries> ...");
+        shell_println!("");
+        shell_println!("  create PATH NAME [--parent ID]  — create snapshot of directory tree");
+        shell_println!("  restore ID [TARGET]             — restore snapshot to target path");
+        shell_println!("  list                            — list all snapshots");
+        shell_println!("  info ID                         — show snapshot details");
+        shell_println!("  diff ID1 ID2                    — compare two snapshots");
+        shell_println!("  delete ID                       — delete a snapshot");
+        shell_println!("  entries ID                      — list entries in snapshot");
+        return;
+    }
+
+    match parts[0] {
+        "create" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: fssnapshot create PATH NAME [--parent ID]");
+                return;
+            }
+            let path = parts[1];
+            let name = parts[2];
+
+            // Parse optional --parent ID.
+            let mut parent = None;
+            if parts.len() >= 5 && parts[3] == "--parent" {
+                if let Ok(id) = parts[4].parse::<u64>() {
+                    parent = Some(snapshot::SnapshotId(id));
+                } else {
+                    shell_println!("Error: invalid parent ID");
+                    return;
+                }
+            }
+
+            let opts = snapshot::SnapshotOptions::default();
+            match snapshot::create(path, name, parent, &opts) {
+                Ok(id) => {
+                    let info = snapshot::info(id).ok();
+                    if let Some(i) = info {
+                        shell_println!(
+                            "Snapshot '{}' created (id={}, {} files, {} bytes)",
+                            i.name, i.id.0, i.file_count, i.total_bytes,
+                        );
+                    } else {
+                        shell_println!("Snapshot created: id={}", id.0);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "restore" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fssnapshot restore ID [TARGET]");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(v) => snapshot::SnapshotId(v),
+                Err(_) => {
+                    shell_println!("Error: invalid snapshot ID");
+                    return;
+                }
+            };
+            // Target: either specified or use original root_path.
+            let target = if parts.len() >= 3 {
+                parts[2]
+            } else {
+                match snapshot::info(id) {
+                    Ok(i) => {
+                        // We need to use the root_path, but we can't borrow from KernelResult
+                        // because the String is temporary. Use a fallback approach.
+                        shell_println!("Restoring to original path: {}", i.root_path);
+                        // Re-fetch info for the path.
+                        let info = snapshot::info(id).expect("just checked");
+                        let target = info.root_path.clone();
+                        match snapshot::restore(id, &target) {
+                            Ok(r) => {
+                                shell_println!(
+                                    "Restored: {} files, {} dirs, {} symlinks, {} errors",
+                                    r.files_restored, r.dirs_created, r.symlinks_created, r.errors,
+                                );
+                            }
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        return;
+                    }
+                }
+            };
+            match snapshot::restore(id, target) {
+                Ok(r) => {
+                    shell_println!(
+                        "Restored: {} files, {} dirs, {} symlinks, {} errors",
+                        r.files_restored, r.dirs_created, r.symlinks_created, r.errors,
+                    );
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" => {
+            let snaps = snapshot::list();
+            if snaps.is_empty() {
+                shell_println!("No snapshots.");
+                return;
+            }
+            shell_println!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}",
+                "ID", "NAME", "PATH", "FILES", "BYTES", "PARENT");
+            for s in &snaps {
+                let parent_str = s.parent
+                    .map(|p| alloc::format!("{}", p.0))
+                    .unwrap_or_else(|| alloc::format!("-"));
+                shell_println!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}",
+                    s.id.0, s.name, s.root_path, s.file_count, s.total_bytes, parent_str);
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fssnapshot info ID");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(v) => snapshot::SnapshotId(v),
+                Err(_) => {
+                    shell_println!("Error: invalid ID");
+                    return;
+                }
+            };
+            match snapshot::info(id) {
+                Ok(i) => {
+                    shell_println!("Snapshot ID: {}", i.id.0);
+                    shell_println!("  Name:   {}", i.name);
+                    shell_println!("  Path:   {}", i.root_path);
+                    shell_println!("  Files:  {}", i.file_count);
+                    shell_println!("  Bytes:  {}", i.total_bytes);
+                    shell_println!("  Parent: {}", i.parent
+                        .map(|p| alloc::format!("{}", p.0))
+                        .unwrap_or_else(|| alloc::format!("none")));
+                    let kids = snapshot::children(i.id);
+                    if !kids.is_empty() {
+                        let ids: Vec<_> = kids.iter()
+                            .map(|k| alloc::format!("{}", k.0))
+                            .collect();
+                        shell_println!("  Children: {}", ids.join(", "));
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "diff" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: fssnapshot diff ID1 ID2");
+                return;
+            }
+            let id1 = match parts[1].parse::<u64>() {
+                Ok(v) => snapshot::SnapshotId(v),
+                Err(_) => {
+                    shell_println!("Error: invalid ID1");
+                    return;
+                }
+            };
+            let id2 = match parts[2].parse::<u64>() {
+                Ok(v) => snapshot::SnapshotId(v),
+                Err(_) => {
+                    shell_println!("Error: invalid ID2");
+                    return;
+                }
+            };
+            match snapshot::diff(id1, id2) {
+                Ok((added, removed, modified)) => {
+                    if added.is_empty() && removed.is_empty() && modified.is_empty() {
+                        shell_println!("Snapshots are identical.");
+                    } else {
+                        for p in &added {
+                            shell_println!("  + {}", p);
+                        }
+                        for p in &removed {
+                            shell_println!("  - {}", p);
+                        }
+                        for p in &modified {
+                            shell_println!("  ~ {}", p);
+                        }
+                        shell_println!("");
+                        shell_println!("{} added, {} removed, {} modified",
+                            added.len(), removed.len(), modified.len());
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fssnapshot delete ID");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(v) => snapshot::SnapshotId(v),
+                Err(_) => {
+                    shell_println!("Error: invalid ID");
+                    return;
+                }
+            };
+            match snapshot::delete(id) {
+                Ok(()) => shell_println!("Snapshot {} deleted.", id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "entries" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fssnapshot entries ID");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(v) => snapshot::SnapshotId(v),
+                Err(_) => {
+                    shell_println!("Error: invalid ID");
+                    return;
+                }
+            };
+            match snapshot::entries(id) {
+                Ok(ents) => {
+                    for e in &ents {
+                        let t = match e.entry_type {
+                            crate::fs::EntryType::File => "F",
+                            crate::fs::EntryType::Directory => "D",
+                            crate::fs::EntryType::Symlink => "L",
+                            _ => "?",
+                        };
+                        let hash_str = e.content_hash
+                            .as_ref()
+                            .map(|h| snapshot::hash_to_hex(h))
+                            .map(|s| {
+                                // Show first 16 hex chars.
+                                let short: String = s.chars().take(16).collect();
+                                short
+                            })
+                            .unwrap_or_else(|| alloc::format!("-"));
+                        shell_println!("  {} {:>8}  {}  {}",
+                            t, e.size, hash_str, e.path);
+                    }
+                    shell_println!("{} entries", ents.len());
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", parts[0]);
+            shell_println!("Use: create, restore, list, info, diff, delete, entries");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -12402,6 +12672,48 @@ fn cmd_net() {
     let rx_info = crate::virtio::net::with_device(|dev| dev.rx_pending());
     if let Some(pending) = rx_info {
         crate::console_println!("  RX buffers:   {} pending", pending);
+    }
+}
+
+fn cmd_mouse() {
+    if !crate::mouse::is_initialized() {
+        crate::console_println!("PS/2 mouse: not initialized");
+        return;
+    }
+    let scroll = if crate::mouse::has_scroll_wheel() { "yes" } else { "no" };
+    let events = crate::mouse::event_count();
+    let x = crate::mouse::accum_x();
+    let y = crate::mouse::accum_y();
+    crate::console_println!("PS/2 mouse:");
+    crate::console_println!("  Scroll wheel: {}", scroll);
+    crate::console_println!("  Events:       {}", events);
+    crate::console_println!("  Cumulative:   ({}, {})", x, y);
+
+    // Drain and show the last few pending events (up to 5).
+    let mut shown = 0u32;
+    while let Some(ev) = crate::mouse::try_read_event() {
+        if shown < 5 {
+            let btn = match ev.buttons {
+                0 => "",
+                1 => " [L]",
+                2 => " [R]",
+                3 => " [L+R]",
+                4 => " [M]",
+                5 => " [L+M]",
+                6 => " [R+M]",
+                7 => " [L+R+M]",
+                _ => " [?]",
+            };
+            crate::console_println!("  Event: dx={:+4} dy={:+4} dz={:+2}{}",
+                ev.dx, ev.dy, ev.dz, btn);
+        }
+        shown += 1;
+    }
+    if shown > 5 {
+        crate::console_println!("  ... and {} more events", shown - 5);
+    }
+    if shown == 0 {
+        crate::console_println!("  (no pending events)");
     }
 }
 
@@ -15603,14 +15915,14 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "dhcp" | "ping" | "dns" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mouse" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

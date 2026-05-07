@@ -52,6 +52,7 @@ mod ac97;
 mod acpi;
 mod apic;
 mod audio_mixer;
+mod audio_notify;
 mod backtrace;
 mod bench;
 mod blkdev;
@@ -1322,6 +1323,9 @@ extern "C" fn kmain() -> ! {
     // Audio mixer self-test.
     audio_mixer::self_test();
 
+    // System notification sounds self-test.
+    audio_notify::self_test();
+
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {
         serial_println!("[fb] Self-test failed: {} (non-fatal)", e);
@@ -1582,9 +1586,9 @@ extern "C" fn kmain() -> ! {
     console_println!();
     console_println!("=== Kernel boot complete ===");
 
-    // Play the startup chime via the PC speaker (audible in QEMU with
-    // pcspk-audiodev configured, always present on real hardware).
-    pcspk::startup_chime();
+    // Play the boot-complete notification sound (uses mixer if available,
+    // falls back to PC speaker chime).
+    audio_notify::play(audio_notify::NotifySound::BootComplete);
 
     // Spawn the background mouse cursor task.
     // Continuously drains mouse events and updates the framebuffer cursor,

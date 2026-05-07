@@ -1417,6 +1417,17 @@ pub fn timer_tick() -> bool {
                     bandwidth_exceeded = true;
                 }
             }
+
+            // Cgroup CPU enforcement: charge the tick to the task's
+            // resource control group.  If the group's quota is exceeded,
+            // throttle the task (same effect as per-task throttling).
+            if !bandwidth_exceeded {
+                let cg = task.cgroup_id;
+                if crate::cgroup::cpu_charge(cg) {
+                    task.throttled = true;
+                    bandwidth_exceeded = true;
+                }
+            }
         }
     }
     // Even if we couldn't acquire SCHED for burst tracking, the
@@ -1430,6 +1441,8 @@ pub fn timer_tick() -> bool {
         if tick > 0 && tick % BANDWIDTH_PERIOD_TICKS == 0 {
             unthrottle_expired();
             update_load_average();
+            // Reset cgroup CPU period counters alongside per-task resets.
+            crate::cgroup::cpu_period_reset();
         }
         // Anti-starvation check: every STARVATION_CHECK_INTERVAL ticks.
         #[allow(clippy::arithmetic_side_effects)]

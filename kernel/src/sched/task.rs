@@ -451,7 +451,6 @@ pub struct Task {
     /// Set via [`crate::cgroup::attach_task`] at task creation or when
     /// moving a task between groups.  The scheduler charges CPU ticks to
     /// this group; the memory allocator checks frame limits.
-    #[allow(dead_code)] // Read by scheduler timer_tick cgroup integration (next step).
     pub cgroup_id: crate::cgroup::CgroupId,
 
     /// If this task's stack was allocated via the kstack allocator

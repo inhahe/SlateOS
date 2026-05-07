@@ -1059,7 +1059,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] Hierarchical limits: effective_cpu_quota/effective_mem_limit walk parent chain, return tightest constraint
   - [x] Task integration: cgroup_id field in Task struct (default ROOT_CGROUP), attach_task/detach_task API
   - [x] 18 self-tests: root exists, create/delete, hierarchy, attach/detach, CPU charge/throttle/reset/unlimited, memory charge/limit/uncharge/underflow, effective hierarchical limits, stats queries
-  - [ ] Scheduler timer_tick integration (charge cgroup CPU on each tick, throttle when over quota)
+  - [x] Scheduler timer_tick integration: charges task's cgroup on each tick, throttles when group quota exceeded, BSP period reset drives cgroup::cpu_period_reset()
   - [ ] Frame allocator integration (check cgroup memory limit on alloc)
   - [ ] I/O controller (bandwidth limits per group)
 - [ ] Port Docker (or equivalent container runtime)

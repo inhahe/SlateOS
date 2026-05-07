@@ -116,6 +116,7 @@ mod nvme;
 mod pci;
 mod pcspk;
 mod pacct;
+mod pidns;
 mod pmc;
 mod port;
 mod power;
@@ -1264,6 +1265,10 @@ extern "C" fn kmain() -> ! {
     // Step 22e⅞++++p5: Resource control groups (cgroup) self-test.
     // Verifies hierarchy, CPU/memory controllers, charge/uncharge, limits.
     cgroup::self_test();
+
+    // Step 22e⅞++++p6: PID namespace subsystem init + self-test.
+    pidns::init();
+    pidns::self_test();
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.

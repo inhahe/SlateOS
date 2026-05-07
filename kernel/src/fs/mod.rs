@@ -48,6 +48,7 @@ pub mod compress;
 pub mod contextmenu;
 #[allow(dead_code)]
 pub mod cpio;
+pub mod credentials;
 pub mod dedup;
 pub mod deskicons;
 pub mod devfs;

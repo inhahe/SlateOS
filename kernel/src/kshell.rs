@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4303,6 +4303,7 @@ fn dispatch(line: &str) {
         "ps" | "tasks" => cmd_ps(),
         "clear" | "cls" => cmd_clear(),
         "ansi" | "termtest" => cmd_ansi_test(),
+        "unicode" | "unicodetest" => cmd_unicode_test(),
         "uptime" => cmd_uptime(),
         "dmesg" => cmd_dmesg(args),
         "echo" => cmd_echo(args),
@@ -4416,6 +4417,7 @@ fn dispatch(line: &str) {
         "widgets" | "widget" => cmd_widgets(args),
         "soundmixer" | "smixer" => cmd_soundmixer(args),
         "wallpaper" | "wp" => cmd_wallpaper(args),
+        "credentials" | "cred" => cmd_credentials(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -18847,6 +18849,231 @@ fn cmd_wallpaper(args: &str) {
     }
 }
 
+/// `credentials` / `cred` — OS credential store.
+fn cmd_credentials(args: &str) {
+    use crate::fs::credentials;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "unlock" => {
+            credentials::unlock();
+            shell_println!("Credential store unlocked");
+        }
+        "lock" => {
+            credentials::lock();
+            shell_println!("Credential store locked");
+        }
+        "status" => {
+            shell_println!("Store: {}", if credentials::is_unlocked() { "UNLOCKED" } else { "LOCKED" });
+        }
+        "store" => {
+            // cred store <app> <service> <user> <secret> [kind]
+            let app = parts.get(1).copied().unwrap_or("");
+            let svc = parts.get(2).copied().unwrap_or("");
+            let user = parts.get(3).copied().unwrap_or("");
+            let secret = parts.get(4).copied().unwrap_or("");
+            let kind = parts.get(5).and_then(|s| credentials::CredentialKind::from_str(s))
+                .unwrap_or(credentials::CredentialKind::Password);
+            if app.is_empty() || svc.is_empty() || secret.is_empty() {
+                shell_println!("Usage: cred store <app> <service> <user> <secret> [kind]");
+                shell_println!("Kinds: password apikey token ssh cert generic");
+            } else {
+                match credentials::store(app, svc, user, secret, kind) {
+                    Ok(()) => shell_println!("Credential stored: {}@{}", app, svc),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "get" | "retrieve" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let svc = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || svc.is_empty() {
+                shell_println!("Usage: cred get <app> <service>");
+            } else {
+                match credentials::retrieve(app, svc) {
+                    Ok(c) => {
+                        shell_println!("App:      {}", c.app_id);
+                        shell_println!("Service:  {}", c.service);
+                        shell_println!("User:     {}", c.username);
+                        shell_println!("Kind:     {}", c.kind.label());
+                        shell_println!("Secret:   {}****", &c.secret[..c.secret.len().min(2)]);
+                        if !c.label.is_empty() {
+                            shell_println!("Label:    {}", c.label);
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "delete" | "rm" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let svc = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || svc.is_empty() {
+                shell_println!("Usage: cred delete <app> <service>");
+            } else {
+                match credentials::delete(app, svc) {
+                    Ok(()) => shell_println!("Deleted: {}@{}", app, svc),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "deleteapp" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: cred deleteapp <app_id>");
+            } else {
+                let n = credentials::delete_app(app);
+                shell_println!("Deleted {} credential(s) for '{}'", n, app);
+            }
+        }
+        "list" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let creds = if app.is_empty() {
+                credentials::list_all()
+            } else {
+                credentials::list_for_app(app)
+            };
+            if creds.is_empty() {
+                shell_println!("No credentials{}", if app.is_empty() { "" } else { " for this app" });
+            } else {
+                shell_println!("{:16} {:24} {:20} {:10} {}",
+                    "APP", "SERVICE", "USER", "KIND", "EXPIRED");
+                for c in &creds {
+                    shell_println!("{:16} {:24} {:20} {:10} {}",
+                        c.app_id, c.service, c.username, c.kind.label(),
+                        if c.expired { "YES" } else { "-" });
+                }
+            }
+        }
+        "search" => {
+            let query = if parts.len() > 1 { parts[1..].join(" ") } else { alloc::string::String::new() };
+            if query.is_empty() {
+                shell_println!("Usage: cred search <query>");
+            } else {
+                let results = credentials::search(&query);
+                if results.is_empty() {
+                    shell_println!("No matches");
+                } else {
+                    shell_println!("{:16} {:24} {:20} {}",
+                        "APP", "SERVICE", "USER", "KIND");
+                    for c in &results {
+                        shell_println!("{:16} {:24} {:20} {}",
+                            c.app_id, c.service, c.username, c.kind.label());
+                    }
+                }
+            }
+        }
+        "autofill" => {
+            // cred autofill <app> <field> <service> [auto]
+            let app = parts.get(1).copied().unwrap_or("");
+            let field = parts.get(2).copied().unwrap_or("");
+            let svc = parts.get(3).copied().unwrap_or("");
+            if app.is_empty() {
+                // List all autofill rules.
+                let all = credentials::list_all();
+                shell_println!("Use: cred autofill <app> to list rules for an app");
+                shell_println!("     cred autofill <app> <field> <service> [auto]  to add a rule");
+                let _ = all;
+            } else if field.is_empty() {
+                let rules = credentials::list_autofill(app);
+                if rules.is_empty() {
+                    shell_println!("No autofill rules for '{}'", app);
+                } else {
+                    shell_println!("{:16} {:16} {:24} {}",
+                        "APP", "FIELD", "SERVICE", "AUTO");
+                    for r in &rules {
+                        shell_println!("{:16} {:16} {:24} {}",
+                            r.app_id, r.field_type, r.service,
+                            if r.auto { "yes" } else { "prompt" });
+                    }
+                }
+            } else if svc.is_empty() {
+                shell_println!("Usage: cred autofill <app> <field> <service> [auto]");
+            } else {
+                let auto = parts.get(4).copied().unwrap_or("true") != "false";
+                match credentials::add_autofill(app, field, svc, auto) {
+                    Ok(()) => shell_println!("Autofill rule added: {}:{} → {}", app, field, svc),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rmautofill" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let field = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || field.is_empty() {
+                shell_println!("Usage: cred rmautofill <app> <field>");
+            } else {
+                match credentials::remove_autofill(app, field) {
+                    Ok(()) => shell_println!("Autofill rule removed"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "verify" => {
+            let user = parts.get(1).copied().unwrap_or("default");
+            if credentials::check_debounce(user) {
+                shell_println!("Identity verified (debounce active)");
+            } else {
+                shell_println!("Re-verification needed");
+                credentials::confirm_identity(user);
+                shell_println!("Identity confirmed for '{}'", user);
+            }
+        }
+        "label" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let svc = parts.get(2).copied().unwrap_or("");
+            let label = if parts.len() > 3 { parts[3..].join(" ") } else { alloc::string::String::new() };
+            if app.is_empty() || svc.is_empty() {
+                shell_println!("Usage: cred label <app> <service> <label...>");
+            } else {
+                match credentials::set_label(app, svc, &label) {
+                    Ok(()) => shell_println!("Label set"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "test" => {
+            shell_println!("Running credential store self-tests...");
+            match credentials::self_test() {
+                Ok(()) => shell_println!("All credential tests passed"),
+                Err(e) => shell_println!("Test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (creds, af, stores, retrieves) = credentials::stats();
+            shell_println!("Status:    {}", if credentials::is_unlocked() { "UNLOCKED" } else { "LOCKED" });
+            shell_println!("Stored:    {}/4096", creds);
+            shell_println!("Autofill:  {}/1024", af);
+            shell_println!("Stores:    {}", stores);
+            shell_println!("Retrieves: {}", retrieves);
+        }
+        "reset" => {
+            credentials::clear_all();
+            credentials::reset_stats();
+            shell_println!("Credential store reset");
+        }
+        _ => {
+            shell_println!("Usage: credentials <subcommand>");
+            shell_println!("  unlock                        Unlock store");
+            shell_println!("  lock                          Lock store");
+            shell_println!("  status                        Show lock status");
+            shell_println!("  store <app> <svc> <user> <secret> [kind]  Store credential");
+            shell_println!("  get <app> <service>           Retrieve credential");
+            shell_println!("  delete <app> <service>        Delete credential");
+            shell_println!("  deleteapp <app>               Delete all for app");
+            shell_println!("  list [app]                    List credentials");
+            shell_println!("  search <query>                Search credentials");
+            shell_println!("  autofill <app> [field svc]    Add/list autofill rules");
+            shell_println!("  rmautofill <app> <field>      Remove autofill rule");
+            shell_println!("  verify [user]                 Check/confirm identity");
+            shell_println!("  label <app> <svc> <label>     Set label");
+            shell_println!("  test                          Run self-tests");
+            shell_println!("  stats                         Show statistics");
+            shell_println!("  reset                         Clear all");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -26376,7 +26603,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

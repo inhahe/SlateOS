@@ -174,6 +174,7 @@ const ROOT_FILES: &[&str] = &[
     "widgets",
     "soundmixer",
     "wallpaper",
+    "credentials",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3280,6 +3281,36 @@ fn gen_wallpaper() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_credentials() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (cred_count, autofill_count, stores, retrieves) = super::credentials::stats();
+    let unlocked = super::credentials::is_unlocked();
+
+    out.push_str("Credential Store\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Status:    {}\n", if unlocked { "UNLOCKED" } else { "LOCKED" }));
+    out.push_str(&format!("Stored:    {}/{}\n", cred_count, 4096));
+    out.push_str(&format!("Autofill:  {}/{}\n", autofill_count, 1024));
+    out.push_str(&format!("Stores:    {}\n", stores));
+    out.push_str(&format!("Retrieves: {}\n\n", retrieves));
+
+    // Only show summaries (no secrets).
+    let creds = super::credentials::list_all();
+    if !creds.is_empty() {
+        out.push_str(&format!("{:16} {:24} {:20} {:10} {}\n",
+            "APP", "SERVICE", "USER", "KIND", "EXPIRED"));
+        for c in creds.iter().take(30) {
+            out.push_str(&format!("{:16} {:24} {:20} {:10} {}\n",
+                c.app_id, c.service, c.username, c.kind.label(),
+                if c.expired { "YES" } else { "-" }));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3619,6 +3650,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "widgets" => Ok(gen_widgets()),
         "soundmixer" => Ok(gen_soundmixer()),
         "wallpaper" => Ok(gen_wallpaper()),
+        "credentials" => Ok(gen_credentials()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

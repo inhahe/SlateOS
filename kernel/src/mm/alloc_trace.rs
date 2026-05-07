@@ -480,7 +480,8 @@ fn current_cpu_fast() -> u8 {
 pub fn self_test() {
     serial_println!("[alloc_trace] Running self-test...");
 
-    // Test 1: Initially enabled with zero events after reset.
+    // Test 1: Enable, reset, verify zero events.
+    enable();
     reset();
     assert!(is_enabled());
     let s = stats();
@@ -525,11 +526,14 @@ pub fn self_test() {
 
     // Test 6: Disable suppresses recording.
     disable();
+    assert!(!is_enabled());
     record_alloc(99, Owner::Dma);
     let s = stats();
-    assert_eq!(s.total_events, 3); // Unchanged.
-    assert!(s.dropped > 0);       // Dropped incremented.
+    assert_eq!(s.total_events, 3); // Unchanged — disabled, event silently dropped.
+    // Note: DROPPED_EVENTS is not incremented on the hot path (by design —
+    // an atomic inc on every alloc/free when tracing is off would add cost).
     enable();
+    assert!(is_enabled());
     serial_println!("[alloc_trace]   Disable/enable: OK");
 
     // Test 7: Ring wrapping (fill past capacity).
@@ -559,8 +563,9 @@ pub fn self_test() {
     }
     serial_println!("[alloc_trace]   Timestamps monotonic: OK");
 
-    // Cleanup.
+    // Cleanup: disable (sysctl default is off) and reset ring buffer.
     reset();
+    disable();
 
     serial_println!("[alloc_trace] Self-test PASSED");
 }

@@ -986,9 +986,16 @@ pub fn spawn_with_affinity(
 /// priority ready task is scheduled.  If no other task is ready, the
 /// current task continues running.
 pub fn yield_now() {
+    let current_id = load_current_task();
     if let Some(ctr) = VOLUNTARY_SWITCHES.get(current_cpu_id()) {
         ctr.fetch_add(1, Ordering::Relaxed);
     }
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::YIELD,
+        current_id,
+        current_cpu_id() as u64,
+    );
     // Report RCU quiescent state — this CPU is voluntarily yielding,
     // so it's not in an RCU read-side critical section.
     crate::rcu::quiescent_state();
@@ -1056,6 +1063,12 @@ pub fn block_current() {
         ctr.fetch_add(1, Ordering::Relaxed);
     }
     let current_id = load_current_task();
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::TASK_BLOCK,
+        current_id,
+        current_cpu_id() as u64,
+    );
     {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&current_id) {
@@ -1095,6 +1108,12 @@ pub fn wake(task_id: TaskId) -> bool {
             return false;
         }
     }
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::TASK_WAKE,
+        task_id,
+        target_cpu as u64,
+    );
     // Signal the target CPU after releasing the lock.
     signal_cpu(target_cpu);
     true
@@ -1464,9 +1483,16 @@ pub fn timer_tick() -> bool {
 /// context.  The current task is re-enqueued and the highest-priority
 /// ready task is scheduled.
 pub fn preempt() {
+    let current_id = load_current_task();
     if let Some(ctr) = PREEMPTIONS.get(current_cpu_id()) {
         ctr.fetch_add(1, Ordering::Relaxed);
     }
+    crate::ktrace::record(
+        crate::ktrace::Category::Sched,
+        crate::ktrace::event::PREEMPT,
+        current_id,
+        current_cpu_id() as u64,
+    );
     schedule_inner(true);
 }
 
@@ -3160,8 +3186,14 @@ fn schedule_inner(requeue: bool) {
             Some(id) => Some(id),
             None => {
                 let stolen = PER_CPU_SCHED.try_steal(cpu, &mut migrated);
-                if stolen.is_some() {
+                if let Some(stolen_id) = stolen {
                     WORK_STEALS.fetch_add(1, Ordering::Relaxed);
+                    crate::ktrace::record(
+                        crate::ktrace::Category::Sched,
+                        crate::ktrace::event::WORK_STEAL,
+                        stolen_id,
+                        cpu as u64,
+                    );
                 }
                 stolen
             }

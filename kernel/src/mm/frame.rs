@@ -1723,7 +1723,15 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
     {
         let mut guard = allocator.lock();
         match guard.alloc_inner(order) {
-            Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
+            Ok(addr) => {
+                crate::ktrace::record(
+                    crate::ktrace::Category::Mm,
+                    crate::ktrace::event::FRAME_ALLOC,
+                    addr,
+                    order as u64,
+                );
+                return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
+            }
             Err(KernelError::OutOfMemory) => {
                 // Fall through to reclamation.
             }
@@ -1975,6 +1983,13 @@ pub unsafe fn free_order(frame: PhysFrame, order: usize) -> KernelResult<()> {
             }
         }
     }
+
+    crate::ktrace::record(
+        crate::ktrace::Category::Mm,
+        crate::ktrace::event::FRAME_FREE,
+        frame.addr(),
+        order as u64,
+    );
 
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
     let mut guard = allocator.lock();

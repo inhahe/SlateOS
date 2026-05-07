@@ -126,6 +126,7 @@ const ROOT_FILES: &[&str] = &[
     "undelete",
     "archives",
     "batch",
+    "linkcheck",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2012,6 +2013,21 @@ fn gen_batch() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/linkcheck` — link analysis statistics.
+fn gen_linkcheck() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (checks, broken) = super::linkcheck::stats();
+
+    out.push_str("Link Check Statistics\n");
+    out.push_str("=====================\n\n");
+    out.push_str(&format!("Checks performed:  {}\n", checks));
+    out.push_str(&format!("Broken links found: {}\n", broken));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2079,6 +2095,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "undelete" => Ok(gen_undelete()),
         "archives" => Ok(gen_archives()),
         "batch" => Ok(gen_batch()),
+        "linkcheck" => Ok(gen_linkcheck()),
         _ => Err(KernelError::NotFound),
     }
 }

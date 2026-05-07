@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4356,6 +4356,7 @@ fn dispatch(line: &str) {
         "undelete" => cmd_undelete(args),
         "archive" => cmd_archive(args),
         "batch" => cmd_batch(args),
+        "linkcheck" => cmd_linkcheck(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -12984,6 +12985,88 @@ fn cmd_batch(args: &str) {
     }
 }
 
+/// `linkcheck` — find broken symlinks and hardlink analysis.
+fn cmd_linkcheck(args: &str) {
+    use crate::fs::linkcheck;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "check" | "scan" => {
+            let dir = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/") };
+            let opts = linkcheck::CheckOptions::default();
+            match linkcheck::check(&dir, &opts) {
+                Ok(report) => {
+                    shell_println!("Link check: {}", dir);
+                    shell_println!("  Files scanned:    {}", report.files_scanned);
+                    shell_println!("  Dirs scanned:     {}", report.dirs_scanned);
+                    shell_println!("  Symlinks:         {} ({} valid, {} broken)",
+                        report.symlinks_scanned, report.valid_symlinks, report.broken_symlinks.len());
+                    shell_println!("  Hardlink groups:  {}", report.hardlink_groups.len());
+                    if !report.broken_symlinks.is_empty() {
+                        shell_println!();
+                        shell_println!("  Broken symlinks:");
+                        for b in &report.broken_symlinks {
+                            shell_println!("    {} -> {}", b.link_path, b.target);
+                        }
+                    }
+                    if !report.hardlink_groups.is_empty() {
+                        shell_println!();
+                        shell_println!("  Hardlink groups:");
+                        for g in &report.hardlink_groups {
+                            shell_println!("    [{} bytes, {} links]:", g.size, g.nlinks);
+                            for p in &g.paths {
+                                shell_println!("      {}", p);
+                            }
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "broken" => {
+            let dir = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/") };
+            match linkcheck::find_broken(&dir) {
+                Ok(broken) => {
+                    if broken.is_empty() {
+                        shell_println!("No broken symlinks in {}", dir);
+                    } else {
+                        shell_println!("{} broken symlinks:", broken.len());
+                        for b in &broken {
+                            shell_println!("  {} -> {}", b.link_path, b.target);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "fix" => {
+            let dir = if parts.len() >= 2 { resolve_path(parts[1]) } else { String::from("/") };
+            let dry_run = parts.iter().any(|f| *f == "--dry-run" || *f == "-n");
+            if dry_run { shell_println!("(dry run)"); }
+            match linkcheck::fix_broken(&dir, dry_run) {
+                Ok((removed, errors)) => {
+                    shell_println!("Removed {} broken symlinks", removed);
+                    for e in &errors {
+                        shell_println!("  ! {}", e);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (checks, broken) = linkcheck::stats();
+            shell_println!("Checks: {} | Broken found: {}", checks, broken);
+        }
+        _ => {
+            shell_println!("Usage: linkcheck <command> [dir]");
+            shell_println!("  check [dir]    Full link analysis (default: /)");
+            shell_println!("  broken [dir]   Find broken symlinks only");
+            shell_println!("  fix [dir]      Remove broken symlinks [--dry-run]");
+            shell_println!("  stats          Show counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18322,7 +18405,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

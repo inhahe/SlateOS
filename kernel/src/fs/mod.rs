@@ -56,6 +56,7 @@ pub mod intercept;
 pub mod integrity;
 pub mod iso9660;
 pub mod journal;
+pub mod linkcheck;
 #[allow(dead_code)]
 pub mod lz4;
 pub mod memfs;

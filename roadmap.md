@@ -607,6 +607,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ISO 9660 enhancements: Joliet UCS-2 filename parsing (was detected but ignored), Rock Ridge SUSP/RRIP extensions (PX/TF/NM/SL/CL/RE for POSIX metadata, timestamps, symlinks, deep dirs), multi-extent files (>4 GiB), directory record timestamps → FileMeta; readlink() for RR symlinks; 6 self-tests
   - [x] VFS enforcement hooks: intercept pre-checks and quota enforcement wired into write_file, write_at, remove, mkdir, rmdir, rename, link, symlink; quota charge/release on success/delete; audit logging for all mutating operations
   - [x] Filesystem snapshots (fs::snapshot): CAS-backed point-in-time directory tree snapshots with create/restore/delete/diff/list; branching (parent→child tree), selective include/exclude filters, metadata preservation; `fssnapshot`/`fssnap` kshell command; /proc/snapshots; 8 self-tests
+  - [x] Disk space reclamation daemon (fs::reclaim): multi-phase coordinated cleanup (cache flush → CAS GC → tmpwatch → trash purge → journal flush) with configurable watermarks (90%/80% default), per-phase enable/disable, periodic check() entry point; `reclaim` kshell command; /proc/reclaim; 6 self-tests
+  - [x] Atomic filesystem transactions (fs::transaction): write-ahead grouped operations (write/remove/mkdir/rename/symlink) with undo-stack rollback on failure, max 64 ops per transaction, dirty state detection for failed rollbacks; `fstx` kshell command with 11 subcommands; /proc/transactions; 6 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

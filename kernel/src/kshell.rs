@@ -3107,6 +3107,7 @@ const COMMANDS: &[&str] = &[
     "namespace", "ns",
     "fssnapshot", "fssnap",
     "reclaim",
+    "fstx",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4332,6 +4333,7 @@ fn dispatch(line: &str) {
         "namespace" | "ns" => cmd_namespace(args),
         "fssnapshot" | "fssnap" => cmd_fssnapshot(args),
         "reclaim" => cmd_reclaim(args),
+        "fstx" => cmd_fstx(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -10799,6 +10801,198 @@ fn cmd_reclaim(args: &str) {
     }
 }
 
+/// `fstx` — filesystem atomic transactions.
+///
+/// Subcommands:
+///   fstx begin [LABEL]              - start a new transaction
+///   fstx write TXID PATH DATA       - queue a file write
+///   fstx remove TXID PATH           - queue a file removal
+///   fstx mkdir TXID PATH            - queue a directory creation
+///   fstx rename TXID FROM TO        - queue a rename
+///   fstx symlink TXID PATH TARGET   - queue a symlink creation
+///   fstx commit TXID                - commit (execute) the transaction
+///   fstx rollback TXID              - discard the transaction
+///   fstx info TXID                  - show transaction details
+///   fstx list                       - list all transactions
+///   fstx delete TXID                - remove a completed transaction
+fn cmd_fstx(args: &str) {
+    use crate::fs::transaction;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.first().copied().unwrap_or("list") {
+        "begin" | "start" => {
+            let label = if parts.len() > 1 {
+                parts[1..].join(" ")
+            } else {
+                alloc::string::String::new()
+            };
+            match transaction::begin_with_label(&label) {
+                Ok(id) => shell_println!("Transaction {} started.", id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "write" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: fstx write TXID PATH DATA");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            let path = resolve_path(parts[2]);
+            let data = parts[3..].join(" ");
+            match transaction::tx_write(id, &path, data.as_bytes()) {
+                Ok(()) => shell_println!("Queued write to {} in tx {}", path, id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: fstx remove TXID PATH");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            let path = resolve_path(parts[2]);
+            match transaction::tx_remove(id, &path) {
+                Ok(()) => shell_println!("Queued removal of {} in tx {}", path, id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mkdir" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: fstx mkdir TXID PATH");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            let path = resolve_path(parts[2]);
+            match transaction::tx_mkdir(id, &path) {
+                Ok(()) => shell_println!("Queued mkdir {} in tx {}", path, id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rename" | "mv" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: fstx rename TXID FROM TO");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            let from = resolve_path(parts[2]);
+            let to = resolve_path(parts[3]);
+            match transaction::tx_rename(id, &from, &to) {
+                Ok(()) => shell_println!("Queued rename {} -> {} in tx {}", from, to, id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "symlink" | "link" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: fstx symlink TXID PATH TARGET");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            let path = resolve_path(parts[2]);
+            let target = parts[3];
+            match transaction::tx_symlink(id, &path, target) {
+                Ok(()) => shell_println!("Queued symlink {} -> {} in tx {}", path, target, id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "commit" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fstx commit TXID");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            match transaction::commit(id) {
+                Ok(()) => shell_println!("Transaction {} committed successfully.", id.0),
+                Err(e) => shell_println!("Transaction {} failed: {:?}", id.0, e),
+            }
+        }
+        "rollback" | "abort" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fstx rollback TXID");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            match transaction::rollback(id) {
+                Ok(()) => shell_println!("Transaction {} rolled back.", id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" | "show" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fstx info TXID");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            match transaction::info(id) {
+                Ok(i) => {
+                    shell_println!("Transaction {}:", i.id.0);
+                    shell_println!("  State: {:?}", i.state);
+                    shell_println!("  Ops:   {}", i.ops_count);
+                    shell_println!("  Label: {}", if i.label.is_empty() { "(none)" } else { &i.label });
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "ls" => {
+            let txns = transaction::list();
+            if txns.is_empty() {
+                shell_println!("No transactions.");
+            } else {
+                shell_println!("{:<6} {:<12} {:<6} {}", "ID", "STATE", "OPS", "LABEL");
+                for t in &txns {
+                    let state = match t.state {
+                        transaction::TxState::Active => "active",
+                        transaction::TxState::Committed => "committed",
+                        transaction::TxState::RolledBack => "rolled-back",
+                        transaction::TxState::Dirty => "DIRTY",
+                    };
+                    shell_println!("{:<6} {:<12} {:<6} {}", t.id.0, state, t.ops_count, t.label);
+                }
+            }
+        }
+        "delete" | "del" | "clean" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fstx delete TXID");
+                return;
+            }
+            let id = match parts[1].parse::<u64>() {
+                Ok(n) => transaction::TxId(n),
+                Err(_) => { shell_println!("Invalid TXID"); return; }
+            };
+            match transaction::remove(id) {
+                Ok(()) => shell_println!("Transaction {} removed.", id.0),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Usage: fstx <begin|write|remove|mkdir|rename|symlink|commit|rollback|info|list|delete> [args...]");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -15990,7 +16184,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

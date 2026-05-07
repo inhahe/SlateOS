@@ -112,6 +112,7 @@ const ROOT_FILES: &[&str] = &[
     "audit",
     "snapshots",
     "reclaim",
+    "transactions",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1680,6 +1681,32 @@ fn gen_reclaim() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_transactions() -> Vec<u8> {
+    use crate::fs::transaction;
+    let txns = transaction::list();
+    let active = transaction::active_count();
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!("Filesystem transactions: {} total, {} active\n\n", txns.len(), active));
+
+    if txns.is_empty() {
+        out.push_str("(no transactions)\n");
+    } else {
+        out.push_str(&format!("{:<6} {:<12} {:<6} {}\n", "ID", "STATE", "OPS", "LABEL"));
+        for t in &txns {
+            let state = match t.state {
+                transaction::TxState::Active => "active",
+                transaction::TxState::Committed => "committed",
+                transaction::TxState::RolledBack => "rolled-back",
+                transaction::TxState::Dirty => "DIRTY",
+            };
+            out.push_str(&format!("{:<6} {:<12} {:<6} {}\n", t.id.0, state, t.ops_count, t.label));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1733,6 +1760,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "audit" => Ok(gen_audit()),
         "snapshots" => Ok(gen_snapshots()),
         "reclaim" => Ok(gen_reclaim()),
+        "transactions" => Ok(gen_transactions()),
         _ => Err(KernelError::NotFound),
     }
 }

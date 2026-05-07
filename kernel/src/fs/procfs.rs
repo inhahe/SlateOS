@@ -114,6 +114,7 @@ const ROOT_FILES: &[&str] = &[
     "reclaim",
     "transactions",
     "certmgr",
+    "installer",
     "changetrack",
     "fcompress",
     "encryption",
@@ -1843,6 +1844,49 @@ fn gen_certmgr() -> Vec<u8> {
             let auto = if c.auto_renew { "yes" } else { "no" };
             out.push_str(&format!("{:<6} {:<28} {:<12} {:<10} {:<10} {}\n",
                 c.id, c.common_name, ct, src, st, auto));
+        }
+    }
+
+    out.into_bytes()
+}
+
+/// Generate `/proc/installer` — installation wizard status.
+fn gen_installer() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, complete, failed, ops) = super::installer::stats();
+
+    out.push_str("Installation Wizard\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Sessions:   {}\n", total));
+    out.push_str(&format!("Complete:   {}\n", complete));
+    out.push_str(&format!("Failed:     {}\n", failed));
+    out.push_str(&format!("Operations: {}\n", ops));
+
+    let sessions = super::installer::list_sessions();
+    if !sessions.is_empty() {
+        out.push_str(&format!("\n{:<6} {:<12} {:<14} {:<4}% {}\n",
+            "ID", "MODE", "PHASE", "PCT", "STATUS"));
+        for s in &sessions {
+            let mode = match s.mode {
+                super::installer::InstallMode::Easy => "easy",
+                super::installer::InstallMode::Manual => "manual",
+                super::installer::InstallMode::Unattended => "unattended",
+            };
+            let phase = match s.phase {
+                super::installer::InstallPhase::NotStarted => "not-started",
+                super::installer::InstallPhase::PreInstall => "pre-install",
+                super::installer::InstallPhase::Partitioning => "partitioning",
+                super::installer::InstallPhase::Copying => "copying",
+                super::installer::InstallPhase::Bootloader => "bootloader",
+                super::installer::InstallPhase::PendingReboot => "reboot",
+                super::installer::InstallPhase::FirstBoot => "first-boot",
+                super::installer::InstallPhase::Complete => "complete",
+                super::installer::InstallPhase::Failed => "FAILED",
+            };
+            out.push_str(&format!("{:<6} {:<12} {:<14} {:<4} {}\n",
+                s.id, mode, phase, s.progress_pct, s.status_message));
         }
     }
 
@@ -4428,6 +4472,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "reclaim" => Ok(gen_reclaim()),
         "transactions" => Ok(gen_transactions()),
         "certmgr" => Ok(gen_certmgr()),
+        "installer" => Ok(gen_installer()),
         "changetrack" => Ok(gen_changetrack()),
         "fcompress" => Ok(gen_fcompress()),
         "encryption" => Ok(gen_encryption()),

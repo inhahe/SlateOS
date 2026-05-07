@@ -84,6 +84,7 @@ pub mod history;
 pub mod ime;
 pub mod immutable;
 pub mod index;
+pub mod installer;
 pub mod intercept;
 pub mod ioprio;
 pub mod integrity;

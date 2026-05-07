@@ -3447,7 +3447,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
+    "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
@@ -4802,6 +4802,7 @@ fn dispatch(line: &str) {
         "bootcfg" | "boot" => cmd_bootcfg(args),
         "swapcfg" | "swap" => cmd_swapcfg(args),
         "certmgr" | "cert" => cmd_certmgr(args),
+        "installer" => cmd_installer(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20752,6 +20753,151 @@ fn cmd_certmgr(args: &str) {
     }
 }
 
+/// `installer` — OS installation wizard management.
+fn cmd_installer(args: &str) {
+    use crate::fs::installer;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let sessions = installer::list_sessions();
+            if sessions.is_empty() { shell_println!("No sessions"); return; }
+            shell_println!("{:<6} {:<12} {:<14} {:<5} {}", "ID", "MODE", "PHASE", "PCT", "STATUS");
+            for s in &sessions {
+                let mode = match s.mode { installer::InstallMode::Easy => "easy", installer::InstallMode::Manual => "manual", installer::InstallMode::Unattended => "unattended" };
+                let phase = match s.phase { installer::InstallPhase::NotStarted => "not-started", installer::InstallPhase::PreInstall => "pre-install", installer::InstallPhase::Partitioning => "partitioning", installer::InstallPhase::Copying => "copying", installer::InstallPhase::Bootloader => "bootloader", installer::InstallPhase::PendingReboot => "reboot", installer::InstallPhase::FirstBoot => "first-boot", installer::InstallPhase::Complete => "complete", installer::InstallPhase::Failed => "FAILED" };
+                shell_println!("{:<6} {:<12} {:<14} {:<5} {}", s.id, mode, phase, s.progress_pct, s.status_message);
+            }
+        }
+        "info" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match installer::get_session(id) {
+                Ok(s) => {
+                    shell_println!("ID:        {}", s.id);
+                    shell_println!("Mode:      {:?}", s.mode);
+                    shell_println!("Phase:     {:?}", s.phase);
+                    shell_println!("Progress:  {}%", s.progress_pct);
+                    shell_println!("Keyboard:  {} {}", s.keyboard_layout, s.keyboard_variant);
+                    shell_println!("Scale:     {:?} ({}dpi)", s.scale_preset, s.detected_dpi);
+                    shell_println!("Workload:  {:?}", s.workload);
+                    if let Some(ref plan) = s.partition_plan {
+                        shell_println!("Disk:      {} (erase={})", plan.disk, plan.erase_disk);
+                        shell_println!("Boot:      {} MiB", plan.boot_mib);
+                        shell_println!("Swap:      {}", if let Some(m) = plan.swap_mib { alloc::format!("{} MiB partition", m) } else { alloc::string::String::from("swap file") });
+                    }
+                    shell_println!("Timezone:  {}", s.timezone);
+                    shell_println!("User:      {} (pass={} auto={})", s.username, s.password_set, s.auto_login);
+                    shell_println!("Browser:   {:?}", s.browser);
+                    shell_println!("Theme:     {}", s.theme_mode);
+                    if !s.wifi_ssid.is_empty() { shell_println!("Wifi:      {}", s.wifi_ssid); }
+                    if !s.error_message.is_empty() { shell_println!("Error:     {}", s.error_message); }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "create" => {
+            let mode = match parts.get(1).copied().unwrap_or("easy") {
+                "manual" => installer::InstallMode::Manual, "unattended" | "auto" => installer::InstallMode::Unattended, _ => installer::InstallMode::Easy,
+            };
+            match installer::create_session(mode) { Ok(id) => shell_println!("Created session {}", id), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "remove" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match installer::remove_session(id) { Ok(()) => shell_println!("Removed"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "keyboard" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let layout = parts.get(2).copied().unwrap_or("us");
+            let variant = parts.get(3).copied().unwrap_or("");
+            match installer::set_keyboard(id, layout, variant) { Ok(()) => shell_println!("Keyboard: {} {}", layout, variant), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "scaling" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let dpi: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(96);
+            match installer::detect_and_set_scaling(id, dpi) { Ok(p) => shell_println!("DPI {} → {:?}", dpi, p), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "workload" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let wl = match parts.get(2).copied().unwrap_or("desktop") {
+                "server" | "srv" => installer::WorkloadType::Server, "dev" | "development" => installer::WorkloadType::Development, "gaming" | "game" => installer::WorkloadType::Gaming, _ => installer::WorkloadType::Desktop,
+            };
+            match installer::set_workload(id, wl) { Ok(()) => shell_println!("Workload set"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "partition" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let disk = parts.get(2).copied().unwrap_or("/dev/sda");
+            let boot: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1024);
+            let swap_str = parts.get(4).copied().unwrap_or("file");
+            let swap = if swap_str == "file" { None } else { swap_str.parse().ok() };
+            match installer::set_partition_plan(id, installer::PartitionPlan { disk: alloc::string::String::from(disk), boot_mib: boot, swap_mib: swap, root_label: alloc::string::String::from("MintOS"), erase_disk: true }) {
+                Ok(()) => shell_println!("Partition plan set"), Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match installer::sanity_check(id) {
+                Ok(r) => {
+                    shell_println!("Sanity check: {}", if r.passed { "PASSED" } else { "FAILED" });
+                    for w in &r.warnings { shell_println!("  WARN: {}", w); }
+                    for e in &r.errors { shell_println!("  ERR:  {}", e); }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "install" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match installer::execute_install(id) { Ok(()) => shell_println!("Installation complete — reboot required"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "firstboot" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match installer::start_first_boot(id) { Ok(()) => shell_println!("First-boot setup started"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "timezone" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let tz = parts.get(2).copied().unwrap_or("UTC");
+            match installer::set_timezone(id, tz) { Ok(()) => shell_println!("Timezone: {}", tz), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "user" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let name = parts.get(2).copied().unwrap_or("user");
+            let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
+            let auto = parts.get(4).copied().unwrap_or("no") == "yes";
+            match installer::set_user(id, name, pass, auto) { Ok(()) => shell_println!("User: {}", name), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "browser" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let br = match parts.get(2).copied().unwrap_or("firefox") {
+                "chromium" | "chrome" => installer::BrowserChoice::Chromium, "epiphany" | "gnome" => installer::BrowserChoice::Epiphany, "custom" => installer::BrowserChoice::Custom, _ => installer::BrowserChoice::Firefox,
+            };
+            match installer::set_browser(id, br) { Ok(()) => shell_println!("Browser set"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "theme" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mode = parts.get(2).copied().unwrap_or("dark");
+            match installer::set_theme(id, mode) { Ok(()) => shell_println!("Theme: {}", mode), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "wifi" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let ssid = parts.get(2).copied().unwrap_or("");
+            let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
+            match installer::set_wifi(id, ssid, pass) { Ok(()) => shell_println!("Wifi: {}", ssid), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "audio" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let dev = parts.get(2).copied().unwrap_or("default");
+            match installer::set_audio_device(id, dev) { Ok(()) => shell_println!("Audio: {}", dev), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "complete" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match installer::complete_first_boot(id) { Ok(()) => shell_println!("First-boot complete"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "stats" => { let (t, c, f, ops) = installer::stats(); shell_println!("Sessions: {}  Complete: {}  Failed: {}  Ops: {}", t, c, f, ops); }
+        "init" => { installer::init_defaults(); shell_println!("Defaults initialised"); }
+        "test" => { match installer::self_test() { Ok(()) => shell_println!("All tests passed"), Err(e) => shell_println!("Test failed: {:?}", e) } }
+        _ => shell_println!("Usage: installer <list|info|create|remove|keyboard|scaling|workload|partition|check|install|firstboot|timezone|user|browser|theme|wifi|audio|complete|stats|init|test>"),
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -28281,7 +28427,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

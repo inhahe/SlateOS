@@ -473,6 +473,12 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
         SyscallResult::err(KernelError::NotSupported)
     };
 
+    crate::ktrace::record(
+        crate::ktrace::Category::Syscall,
+        crate::ktrace::event::SYSCALL_EXIT,
+        nr,
+        result.value as u64,
+    );
     crate::sclatency::exit(sc_start, nr);
     result
 }

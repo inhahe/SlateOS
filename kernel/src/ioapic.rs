@@ -732,6 +732,13 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     // --- CPU time accounting: entering IRQ context ---
     crate::cputime::enter_irq();
 
+    crate::ktrace::record(
+        crate::ktrace::Category::Irq,
+        crate::ktrace::event::IRQ_ENTER,
+        irq as u64,
+        crate::sched::current_cpu_id() as u64,
+    );
+
     // 0. Device-specific handlers that must run in ISR context.
     //    The keyboard must read its scan code from port 0x60
     //    immediately — the data is lost after EOI.
@@ -787,6 +794,13 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     unsafe {
         crate::softirq::process_pending();
     }
+
+    crate::ktrace::record(
+        crate::ktrace::Category::Irq,
+        crate::ktrace::event::IRQ_EXIT,
+        irq as u64,
+        crate::sched::current_cpu_id() as u64,
+    );
 
     // --- CPU time accounting: leaving IRQ context ---
     crate::cputime::exit_irq();

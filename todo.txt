@@ -119,6 +119,15 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   This enforces per-group memory limits on user-space page allocation.
   The cgroup infrastructure and API are fully ready in cgroup.rs.
 
+- net zone: Integrate netns module with net/ globals.  Currently the net/
+  module uses a single global IFACE static in interface.rs, a global ARP_CACHE
+  in arp.rs, and global firewall state in firewall.rs.  These need to become
+  per-namespace lookups keyed by the current process's NetNsId.  The netns.rs
+  module already provides per-namespace interface config, routing tables, and
+  process tracking — the net zone just needs to query netns::interface_config()
+  and netns::route_lookup() instead of accessing its own globals directly.
+  Files to change: net/interface.rs, net/arp.rs, net/firewall.rs, net/ipv4.rs.
+
 ## Cross-Zone Bug Reports
 
 - (FIXED) rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics

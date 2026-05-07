@@ -2113,6 +2113,164 @@ pub fn rescan() {
     }
 }
 
+/// Poll for USB keyboard input.
+///
+/// Returns `Some(HidKeyboardReport)` if a key event is available.
+/// This is non-blocking — returns None immediately if no data.
+pub fn poll_keyboard() -> Option<HidKeyboardReport> {
+    let mut ctrl = XHCI.lock();
+    let ctrl = ctrl.as_mut()?;
+
+    // Find the keyboard slot.
+    let kb_iface = ctrl.hid_interfaces.iter()
+        .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)?;
+    let slot_id = kb_iface.slot_id;
+    let slot_idx = (slot_id as usize).wrapping_sub(1);
+
+    // Poll for a report.
+    if let Some(data) = ctrl.poll_hid_report(slot_id) {
+        if data.len() >= 8 {
+            let report = HidKeyboardReport {
+                modifiers: data[0],
+                reserved: data[1],
+                keycodes: [data[2], data[3], data[4], data[5], data[6], data[7]],
+            };
+            // Re-post receive buffer for next report.
+            let max_pkt = ctrl.hid_interfaces.iter()
+                .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
+                .map(|h| h.interrupt_max_packet)
+                .unwrap_or(8);
+            let ep_num = ctrl.hid_interfaces.iter()
+                .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
+                .map(|h| h.interrupt_ep)
+                .unwrap_or(1);
+            let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
+            return Some(report);
+        }
+    }
+
+    // Re-post if the buffer was consumed but no valid report.
+    if ctrl.slot_int_rings[slot_idx].is_some() {
+        let max_pkt = ctrl.hid_interfaces.iter()
+            .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
+            .map(|h| h.interrupt_max_packet)
+            .unwrap_or(8);
+        let ep_num = ctrl.hid_interfaces.iter()
+            .find(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD)
+            .map(|h| h.interrupt_ep)
+            .unwrap_or(1);
+        // Only post if the ring has space.
+        let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
+    }
+
+    None
+}
+
+/// Poll for USB mouse input.
+///
+/// Returns `Some(HidMouseReport)` if a mouse event is available.
+/// This is non-blocking — returns None immediately if no data.
+pub fn poll_mouse() -> Option<HidMouseReport> {
+    let mut ctrl = XHCI.lock();
+    let ctrl = ctrl.as_mut()?;
+
+    // Find the mouse slot.
+    let mouse_iface = ctrl.hid_interfaces.iter()
+        .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)?;
+    let slot_id = mouse_iface.slot_id;
+    let slot_idx = (slot_id as usize).wrapping_sub(1);
+
+    // Poll for a report.
+    if let Some(data) = ctrl.poll_hid_report(slot_id) {
+        if data.len() >= 3 {
+            let report = HidMouseReport {
+                buttons: data[0],
+                x: data[1] as i8,
+                y: data[2] as i8,
+                wheel: if data.len() >= 4 { data[3] as i8 } else { 0 },
+            };
+            // Re-post receive buffer.
+            let max_pkt = ctrl.hid_interfaces.iter()
+                .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
+                .map(|h| h.interrupt_max_packet)
+                .unwrap_or(4);
+            let ep_num = ctrl.hid_interfaces.iter()
+                .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
+                .map(|h| h.interrupt_ep)
+                .unwrap_or(1);
+            let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
+            return Some(report);
+        }
+    }
+
+    // Re-post if needed.
+    if ctrl.slot_int_rings[slot_idx].is_some() {
+        let max_pkt = ctrl.hid_interfaces.iter()
+            .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
+            .map(|h| h.interrupt_max_packet)
+            .unwrap_or(4);
+        let ep_num = ctrl.hid_interfaces.iter()
+            .find(|h| h.protocol == USB_HID_PROTOCOL_MOUSE)
+            .map(|h| h.interrupt_ep)
+            .unwrap_or(1);
+        let _ = ctrl.post_interrupt_receive(slot_id, ep_num, max_pkt);
+    }
+
+    None
+}
+
+/// USB HID keycode to PS/2 scan code conversion table.
+///
+/// Maps USB HID keyboard usage codes (0x04-0x65) to AT/PS2 make scan
+/// codes.  This allows USB keyboard reports to feed into the existing
+/// PS/2 keyboard infrastructure.
+///
+/// Index = HID usage code.  Value = PS/2 scan code (0 = no mapping).
+static HID_TO_SCANCODE: [u8; 104] = [
+    0x00, 0x00, 0x00, 0x00, // 0x00-0x03: reserved
+    0x1E, 0x30, 0x2E, 0x20, // 0x04-0x07: A, B, C, D
+    0x12, 0x21, 0x22, 0x23, // 0x08-0x0B: E, F, G, H
+    0x17, 0x24, 0x25, 0x26, // 0x0C-0x0F: I, J, K, L
+    0x32, 0x31, 0x18, 0x19, // 0x10-0x13: M, N, O, P
+    0x10, 0x13, 0x1F, 0x14, // 0x14-0x17: Q, R, S, T
+    0x16, 0x2F, 0x11, 0x2D, // 0x18-0x1B: U, V, W, X
+    0x15, 0x2C, 0x02, 0x03, // 0x1C-0x1F: Y, Z, 1, 2
+    0x04, 0x05, 0x06, 0x07, // 0x20-0x23: 3, 4, 5, 6
+    0x08, 0x09, 0x0A, 0x0B, // 0x24-0x27: 7, 8, 9, 0
+    0x1C, 0x01, 0x0E, 0x0F, // 0x28-0x2B: Enter, Escape, Backspace, Tab
+    0x39, 0x0C, 0x0D, 0x1A, // 0x2C-0x2F: Space, -, =, [
+    0x1B, 0x2B, 0x2B, 0x27, // 0x30-0x33: ], \, #, ;
+    0x28, 0x29, 0x33, 0x34, // 0x34-0x37: ', `, ,, .
+    0x35, 0x3A, 0x3B, 0x3C, // 0x38-0x3B: /, CapsLock, F1, F2
+    0x3D, 0x3E, 0x3F, 0x40, // 0x3C-0x3F: F3, F4, F5, F6
+    0x41, 0x42, 0x43, 0x44, // 0x40-0x43: F7, F8, F9, F10
+    0x57, 0x58, 0x00, 0x46, // 0x44-0x47: F11, F12, PrintScreen, ScrollLock
+    0x00, 0x52, 0x47, 0x49, // 0x48-0x4B: Pause, Insert, Home, PageUp
+    0x53, 0x4F, 0x51, 0x4D, // 0x4C-0x4F: Delete, End, PageDown, Right
+    0x4B, 0x50, 0x48, 0x45, // 0x50-0x53: Left, Down, Up, NumLock
+    0x00, 0x37, 0x4A, 0x4E, // 0x54-0x57: KP/, KP*, KP-, KP+
+    0x00, 0x4F, 0x50, 0x51, // 0x58-0x5B: KPEnter, KP1, KP2, KP3
+    0x4B, 0x4C, 0x4D, 0x47, // 0x5C-0x5F: KP4, KP5, KP6, KP7
+    0x48, 0x49, 0x52, 0x53, // 0x60-0x63: KP8, KP9, KP0, KP.
+    0x56, 0x00, 0x00, 0x00, // 0x64-0x67: NonUS\, Application, Power, KP=
+];
+
+/// Convert a USB HID keyboard report to the first valid scan code.
+///
+/// Returns the PS/2-equivalent scan code for the first non-zero
+/// keycode in the report, or None if no key is pressed.
+pub fn hid_report_to_scancode(report: &HidKeyboardReport) -> Option<u8> {
+    for &keycode in &report.keycodes {
+        if keycode != 0 && (keycode as usize) < HID_TO_SCANCODE.len() {
+            let scancode = HID_TO_SCANCODE[keycode as usize];
+            if scancode != 0 {
+                return Some(scancode);
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -2159,6 +2317,28 @@ pub fn self_test() {
     assert_eq!(test_trb.trb_type(), TRB_TYPE_CMD_COMPLETION);
     assert_eq!(test_trb.completion_code(), TRB_CC_SUCCESS);
     assert_eq!(test_trb.slot_id(), 5);
+
+    // Test 5: HID keycode mapping.
+    let kb_report = HidKeyboardReport {
+        modifiers: 0,
+        reserved: 0,
+        keycodes: [0x04, 0, 0, 0, 0, 0], // 'A' key
+    };
+    assert_eq!(hid_report_to_scancode(&kb_report), Some(0x1E)); // PS/2 'A' = 0x1E
+
+    let kb_report2 = HidKeyboardReport {
+        modifiers: 0,
+        reserved: 0,
+        keycodes: [0x28, 0, 0, 0, 0, 0], // Enter key
+    };
+    assert_eq!(hid_report_to_scancode(&kb_report2), Some(0x1C)); // PS/2 Enter = 0x1C
+
+    let kb_empty = HidKeyboardReport::default();
+    assert_eq!(hid_report_to_scancode(&kb_empty), None); // No key pressed
+
+    // Test 6: HID report structures.
+    assert_eq!(core::mem::size_of::<HidKeyboardReport>(), 8);
+    assert_eq!(core::mem::size_of::<HidMouseReport>(), 4);
 
     crate::serial_println!("[xhci] Self-test PASSED");
 }

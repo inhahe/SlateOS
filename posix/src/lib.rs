@@ -69,7 +69,9 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 pub mod assert;
+pub mod crt;
 pub mod ctype;
+pub mod environ;
 pub mod errno;
 pub mod fcntl;
 pub mod fcntl_ops;

@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4797,6 +4797,7 @@ fn dispatch(line: &str) {
         "useracct" | "uacct" => cmd_useracct(args),
         "progmgr" | "prog" => cmd_progmgr(args),
         "scriptlang" | "slang" => cmd_scriptlang(args),
+        "osreset" | "reset" => cmd_osreset(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20363,6 +20364,48 @@ fn cmd_scriptlang(args: &str) {
     }
 }
 
+/// `osreset` / `reset` — OS reset, repair, and rollback.
+fn cmd_osreset(args: &str) {
+    use crate::fs::osreset;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "status" => { let s = match osreset::status() { osreset::ResetStatus::Idle => "Idle", osreset::ResetStatus::Scanning => "Scanning", osreset::ResetStatus::Checkpointing => "Checkpointing", osreset::ResetStatus::Planning => "Planning", osreset::ResetStatus::Executing => "Executing", osreset::ResetStatus::Repairing => "Repairing" }; shell_println!("Reset status: {}", s); }
+        "checkpoint" | "cp" => { if parts.len() < 2 { shell_println!("Usage: osreset checkpoint <name> [full|keepfiles|keepapps|repair]"); } else { let scope = match parts.get(2).copied().unwrap_or("keepfiles") { "full" => osreset::ResetScope::Full, "keepapps" => osreset::ResetScope::KeepFilesAndApps, "repair" => osreset::ResetScope::RepairOnly, _ => osreset::ResetScope::KeepFiles }; match osreset::create_checkpoint(parts[1], scope) { Ok(id) => shell_println!("Created checkpoint {} '{}'", id, parts[1]), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "checkpoints" | "cps" => { let cps = osreset::list_checkpoints(); if cps.is_empty() { shell_println!("No checkpoints"); } else { for c in &cps { let scope = match c.scope { osreset::ResetScope::Full => "full", osreset::ResetScope::KeepFiles => "keep-files", osreset::ResetScope::KeepFilesAndApps => "keep-files+apps", osreset::ResetScope::RepairOnly => "repair" }; let valid = if c.valid { "valid" } else { "invalid" }; shell_println!("  id={} '{}' scope={} [{}]", c.id, c.name, scope, valid); } } }
+        "rmcp" => { if parts.len() < 2 { shell_println!("Usage: osreset rmcp <checkpoint_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::delete_checkpoint(id) { Ok(()) => shell_println!("Deleted checkpoint {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "plan" => { if parts.len() < 2 { shell_println!("Usage: osreset plan <full|keepfiles|keepapps|repair>"); } else { let scope = match parts[1] { "full" => osreset::ResetScope::Full, "keepapps" => osreset::ResetScope::KeepFilesAndApps, "repair" => osreset::ResetScope::RepairOnly, _ => osreset::ResetScope::KeepFiles }; match osreset::plan_reset(scope) { Ok(id) => { shell_println!("Created plan {}", id); match osreset::get_plan(id) { Ok(p) => { shell_println!("  Apps to import: {}", p.apps.iter().filter(|a| a.include).count()); shell_println!("  Settings cats:  {}", p.settings.iter().filter(|s| s.include).count()); shell_println!("  Preserve:       {} bytes", p.preserve_bytes); shell_println!("  Delete:         {} bytes", p.delete_bytes); }, Err(_) => {} } }, Err(e) => shell_println!("Error: {:?}", e) } } }
+        "plans" => { let plans = osreset::list_plans(); if plans.is_empty() { shell_println!("No plans"); } else { for p in &plans { let scope = match p.scope { osreset::ResetScope::Full => "full", osreset::ResetScope::KeepFiles => "keep-files", osreset::ResetScope::KeepFilesAndApps => "keep-files+apps", osreset::ResetScope::RepairOnly => "repair" }; let ex = if p.executed { "executed" } else { "pending" }; shell_println!("  id={} scope={} [{}] apps={} settings={}", p.id, scope, ex, p.apps.len(), p.settings.len()); } } }
+        "showplan" => { if parts.len() < 2 { shell_println!("Usage: osreset showplan <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::get_plan(id) { Ok(p) => { shell_println!("Plan {} ({:?}):", p.id, p.scope); if !p.apps.is_empty() { shell_println!("  Apps:"); for a in &p.apps { let risk = match a.risk { osreset::AppRiskLevel::Safe => "safe", osreset::AppRiskLevel::Moderate => "moderate", osreset::AppRiskLevel::Dangerous => "DANGEROUS", osreset::AppRiskLevel::Unknown => "unknown" }; let inc = if a.include { "YES" } else { "no" }; shell_println!("    {} [{}] risk={} settings={} data={}", a.name, inc, risk, a.import_settings, a.import_data); } } if !p.settings.is_empty() { shell_println!("  Settings:"); for s in &p.settings { let inc = if s.include { "YES" } else { "no" }; shell_println!("    {:?} [{}] — {}", s.category, inc, s.description); } } }, Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "appinc" => { if parts.len() < 4 { shell_println!("Usage: osreset appinc <plan_id> <app_id> <on|off>"); } else { match parts[1].parse::<u64>() { Ok(pid) => { let inc = matches!(parts[3], "on" | "yes" | "true" | "1"); match osreset::set_app_include(pid, parts[2], inc) { Ok(()) => shell_println!("Set app '{}' include={} in plan {}", parts[2], inc, pid), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid plan id") } } }
+        "execute" | "exec" => { if parts.len() < 2 { shell_println!("Usage: osreset execute <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::execute_reset(id) { Ok(()) => shell_println!("Reset plan {} executed", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "cancel" => { if parts.len() < 2 { shell_println!("Usage: osreset cancel <plan_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::cancel_plan(id) { Ok(()) => shell_println!("Cancelled plan {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "rollback" | "rb" => { if parts.len() < 2 { shell_println!("Usage: osreset rollback <checkpoint_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match osreset::rollback(id) { Ok(cp) => shell_println!("Rolling back to '{}' (checkpoint {})", cp.name, cp.id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "scan" => { match osreset::scan_integrity() { Ok(r) => { shell_println!("Integrity scan: {}/{} files OK", r.good_files, r.total_files); if r.corrupted_files > 0 { shell_println!("  Corrupted: {}", r.corrupted_files); } if r.missing_files > 0 { shell_println!("  Missing:   {}", r.missing_files); } for path in &r.problem_paths { shell_println!("  ! {}", path); } }, Err(e) => shell_println!("Error: {:?}", e) } }
+        "repair" => { match osreset::repair_files() { Ok(n) => { if n > 0 { shell_println!("Repaired {} files", n); } else { shell_println!("No problems to repair (run 'osreset scan' first)"); } }, Err(e) => shell_println!("Error: {:?}", e) } }
+        "stats" => { let (cps, plans, problems, ops) = osreset::stats(); shell_println!("Checkpoints: {}  Plans: {}  Problems: {}  Ops: {}", cps, plans, problems, ops); }
+        "test" => { match osreset::self_test() { Ok(()) => shell_println!("osreset: all tests passed"), Err(e) => shell_println!("osreset: test FAILED: {:?}", e) } }
+        _ => {
+            shell_println!("osreset — OS reset, repair, and rollback");
+            shell_println!("  status           Current status");
+            shell_println!("  checkpoint <n>   Create checkpoint");
+            shell_println!("  checkpoints      List checkpoints");
+            shell_println!("  rmcp <id>        Delete checkpoint");
+            shell_println!("  plan <scope>     Create reset plan");
+            shell_println!("  plans            List plans");
+            shell_println!("  showplan <id>    Show plan details");
+            shell_println!("  appinc <p> <a> <on|off>  Toggle app");
+            shell_println!("  execute <id>     Execute plan");
+            shell_println!("  cancel <id>      Cancel plan");
+            shell_println!("  rollback <id>    Rollback to checkpoint");
+            shell_println!("  scan             Integrity scan");
+            shell_println!("  repair           Repair corrupted files");
+            shell_println!("  stats            Show statistics");
+            shell_println!("  test             Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27892,7 +27935,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

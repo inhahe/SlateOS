@@ -99,6 +99,7 @@ pub mod netindicator;
 pub mod notifcenter;
 pub mod notify;
 pub mod openwith;
+pub mod osreset;
 pub mod overlay;
 pub mod partmgr;
 pub mod pathbar;

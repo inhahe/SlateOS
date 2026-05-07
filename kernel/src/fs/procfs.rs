@@ -193,6 +193,7 @@ const ROOT_FILES: &[&str] = &[
     "useracct",
     "progmgr",
     "scriptlang",
+    "osreset",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3928,6 +3929,40 @@ fn gen_scriptlang() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_osreset() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (cps, plans, problems, ops) = super::osreset::stats();
+    let status = match super::osreset::status() {
+        super::osreset::ResetStatus::Idle => "idle",
+        super::osreset::ResetStatus::Scanning => "scanning",
+        super::osreset::ResetStatus::Checkpointing => "checkpointing",
+        super::osreset::ResetStatus::Planning => "planning",
+        super::osreset::ResetStatus::Executing => "executing",
+        super::osreset::ResetStatus::Repairing => "repairing",
+    };
+
+    out.push_str("OS Reset / Repair\n");
+    out.push_str("=================\n\n");
+    out.push_str(&format!("Status:       {}\n", status));
+    out.push_str(&format!("Checkpoints:  {}\n", cps));
+    out.push_str(&format!("Plans:        {}\n", plans));
+    out.push_str(&format!("Problems:     {}\n", problems));
+    out.push_str(&format!("Operations:   {}\n", ops));
+
+    let checkpoints = super::osreset::list_checkpoints();
+    if !checkpoints.is_empty() {
+        out.push_str("\nCheckpoints:\n");
+        for c in &checkpoints {
+            let valid = if c.valid { "valid" } else { "invalid" };
+            out.push_str(&format!("  id={} '{}' [{}]\n", c.id, c.name, valid));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4286,6 +4321,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "useracct" => Ok(gen_useracct()),
         "progmgr" => Ok(gen_progmgr()),
         "scriptlang" => Ok(gen_scriptlang()),
+        "osreset" => Ok(gen_osreset()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

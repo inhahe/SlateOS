@@ -204,6 +204,7 @@ const ROOT_FILES: &[&str] = &[
     "autostart",
     "schedtune",
     "mmtune",
+    "capsettings",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4401,6 +4402,32 @@ fn gen_mmtune() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_capsettings() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (groups, users, programs, paths, ops) = super::capsettings::stats();
+
+    out.push_str("Capability Settings\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Groups:        {}\n", groups));
+    out.push_str(&format!("Users:         {}\n", users));
+    out.push_str(&format!("Programs:      {}\n", programs));
+    out.push_str(&format!("Path reqs:     {}\n", paths));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    let group_list = super::capsettings::list_groups();
+    if !group_list.is_empty() {
+        out.push_str(&format!("\n{:<4} {:<20} {:<8} {}\n", "ID", "NAME", "CAPS", "BUILTIN"));
+        for g in &group_list {
+            out.push_str(&format!("{:<4} {:<20} {:<8} {}\n",
+                g.id, g.name, g.caps.len(), g.builtin));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4770,6 +4797,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "autostart" => Ok(gen_autostart()),
         "schedtune" => Ok(gen_schedtune()),
         "mmtune" => Ok(gen_mmtune()),
+        "capsettings" => Ok(gen_capsettings()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

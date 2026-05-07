@@ -43,6 +43,7 @@ pub mod bench;
 #[allow(dead_code)]
 pub mod bzip2;
 pub mod cache;
+pub mod capsettings;
 pub mod cas;
 pub mod certmgr;
 pub mod clipboard;

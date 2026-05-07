@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4808,6 +4808,7 @@ fn dispatch(line: &str) {
         "autostart" | "astart" => cmd_autostart(args),
         "schedtune" | "stune" => cmd_schedtune(args),
         "mmtune" | "mtune" => cmd_mmtune(args),
+        "capsettings" | "caps" => cmd_capsettings(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -22162,6 +22163,371 @@ fn cmd_mmtune(args: &str) {
     }
 }
 
+/// `capsettings` / `caps` — capability settings management.
+fn cmd_capsettings(args: &str) {
+    use crate::fs::capsettings;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "init" => {
+            capsettings::init_defaults();
+            shell_println!("Initialised default capability settings.");
+        }
+        "groups" | "lg" => {
+            let groups = capsettings::list_groups();
+            if groups.is_empty() {
+                shell_println!("No capability groups.");
+                return;
+            }
+            shell_println!("{:<4} {:<20} {:<8} {:<8} {}",
+                "ID", "NAME", "CAPS", "BUILTIN", "DESCRIPTION");
+            for g in &groups {
+                shell_println!("{:<4} {:<20} {:<8} {:<8} {}",
+                    g.id, g.name, g.caps.len(), g.builtin, g.description);
+            }
+        }
+        "group" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: capsettings group <id>"); return; }
+            };
+            match capsettings::get_group(id) {
+                Ok(g) => {
+                    shell_println!("ID:          {}", g.id);
+                    shell_println!("Name:        {}", g.name);
+                    shell_println!("Description: {}", g.description);
+                    shell_println!("Built-in:    {}", g.builtin);
+                    shell_println!("Capabilities:");
+                    for cap in &g.caps {
+                        shell_println!("  {:?}", cap);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mkgroup" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings mkgroup <name> <desc>");
+                return;
+            }
+            let name = parts[1];
+            let desc = parts[2..].join(" ");
+            match capsettings::create_group(name, &desc, &[]) {
+                Ok(id) => shell_println!("Created group {} (id={}).", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmgroup" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: capsettings rmgroup <id>"); return; }
+            };
+            match capsettings::remove_group(id) {
+                Ok(()) => shell_println!("Removed group {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "gadd" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings gadd <group_id> <capability>");
+                return;
+            }
+            let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid group id."); return; }
+            };
+            let cap = match parse_capability(parts[2]) {
+                Some(c) => c,
+                None => { shell_println!("Unknown capability: {}", parts[2]); return; }
+            };
+            match capsettings::group_add_cap(gid, cap) {
+                Ok(()) => shell_println!("Added {:?} to group {}.", cap, gid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "grm" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings grm <group_id> <capability>");
+                return;
+            }
+            let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid group id."); return; }
+            };
+            let cap = match parse_capability(parts[2]) {
+                Some(c) => c,
+                None => { shell_println!("Unknown capability: {}", parts[2]); return; }
+            };
+            match capsettings::group_remove_cap(gid, cap) {
+                Ok(()) => shell_println!("Removed {:?} from group {}.", cap, gid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "users" | "lu" => {
+            let users = capsettings::list_user_assignments();
+            if users.is_empty() {
+                shell_println!("No user capability assignments.");
+                return;
+            }
+            shell_println!("{:<6} {:<15} {:<8} {:<8} {}",
+                "UID", "USERNAME", "GROUPS", "EXTRA", "DENIED");
+            for u in &users {
+                shell_println!("{:<6} {:<15} {:<8} {:<8} {}",
+                    u.uid, u.username, u.groups.len(),
+                    u.extra_caps.len(), u.denied_caps.len());
+            }
+        }
+        "user" => {
+            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: capsettings user <uid>"); return; }
+            };
+            match capsettings::get_user_assignment(uid) {
+                Ok(a) => {
+                    shell_println!("UID:     {}", a.uid);
+                    shell_println!("Name:    {}", a.username);
+                    shell_println!("Groups:  {:?}", a.groups);
+                    shell_println!("Extra:   {:?}", a.extra_caps);
+                    shell_println!("Denied:  {:?}", a.denied_caps);
+                    match capsettings::user_effective_caps(uid) {
+                        Ok(caps) => {
+                            shell_println!("Effective capabilities:");
+                            for cap in &caps {
+                                shell_println!("  {:?}", cap);
+                            }
+                        }
+                        Err(e) => shell_println!("Error resolving caps: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "adduser" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings adduser <uid> <username>");
+                return;
+            }
+            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid uid."); return; }
+            };
+            match capsettings::assign_user(uid, parts[2]) {
+                Ok(id) => shell_println!("Created user assignment (id={}).", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "ugroup" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings ugroup <uid> <group_id>");
+                return;
+            }
+            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid uid."); return; }
+            };
+            let gid: u64 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid group id."); return; }
+            };
+            match capsettings::user_add_group(uid, gid) {
+                Ok(()) => shell_println!("Added user {} to group {}.", uid, gid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "ucap" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings ucap <uid> <capability>");
+                return;
+            }
+            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid uid."); return; }
+            };
+            let cap = match parse_capability(parts[2]) {
+                Some(c) => c,
+                None => { shell_println!("Unknown capability."); return; }
+            };
+            match capsettings::user_add_cap(uid, cap) {
+                Ok(()) => shell_println!("Added {:?} to user {}.", cap, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "udeny" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings udeny <uid> <capability>");
+                return;
+            }
+            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid uid."); return; }
+            };
+            let cap = match parse_capability(parts[2]) {
+                Some(c) => c,
+                None => { shell_println!("Unknown capability."); return; }
+            };
+            match capsettings::user_deny_cap(uid, cap) {
+                Ok(()) => shell_println!("Denied {:?} for user {}.", cap, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings check <uid> <path>");
+                return;
+            }
+            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid uid."); return; }
+            };
+            match capsettings::check_access(uid, parts[2]) {
+                Ok(true) => shell_println!("Access GRANTED for user {} to {}", uid, parts[2]),
+                Ok(false) => shell_println!("Access DENIED for user {} to {}", uid, parts[2]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "programs" | "lp" => {
+            let progs = capsettings::list_programs();
+            if progs.is_empty() {
+                shell_println!("No program capability assignments.");
+                return;
+            }
+            shell_println!("{:<30} {:<8} {:<8} {}",
+                "PROGRAM", "REQ", "MAX", "SANDBOX");
+            for p in &progs {
+                shell_println!("{:<30} {:<8} {:<8} {}",
+                    p.program, p.required_caps.len(), p.max_caps.len(), p.sandboxed);
+            }
+        }
+        "paths" => {
+            let reqs = capsettings::list_path_requirements();
+            if reqs.is_empty() {
+                shell_println!("No path capability requirements.");
+                return;
+            }
+            shell_println!("{:<4} {:<30} {:<8} {}",
+                "ID", "PATH", "CAPS", "RECURSIVE");
+            for r in &reqs {
+                shell_println!("{:<4} {:<30} {:<8} {}",
+                    r.id, r.path, r.required_caps.len(), r.recursive);
+            }
+        }
+        "addpath" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: capsettings addpath <path> <capability> [recursive]");
+                return;
+            }
+            let cap = match parse_capability(parts[2]) {
+                Some(c) => c,
+                None => { shell_println!("Unknown capability."); return; }
+            };
+            let recursive = parts.get(3).copied() == Some("recursive") ||
+                           parts.get(3).copied() == Some("r");
+            match capsettings::set_path_requirement(parts[1], &[cap], recursive) {
+                Ok(id) => shell_println!("Created path requirement (id={}).", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmpath" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: capsettings rmpath <id>"); return; }
+            };
+            match capsettings::remove_path_requirement(id) {
+                Ok(()) => shell_println!("Removed path requirement {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "caplist" => {
+            shell_println!("Available capabilities:");
+            shell_println!("  fileread, filewrite, execute, network, bindlowport,");
+            shell_println!("  rawsocket, mount, useradmin, packageinstall, systemconfig,");
+            shell_println!("  hardwareaccess, debugprocess, chown, dacoverride,");
+            shell_println!("  setclock, reboot, moduleload, auditread, auditwrite,");
+            shell_println!("  capadmin");
+        }
+        "stats" => {
+            let (groups, users, programs, paths, ops) = capsettings::stats();
+            shell_println!("Groups:      {}", groups);
+            shell_println!("Users:       {}", users);
+            shell_println!("Programs:    {}", programs);
+            shell_println!("Path reqs:   {}", paths);
+            shell_println!("Operations:  {}", ops);
+        }
+        "clear" => {
+            capsettings::clear_all();
+            shell_println!("Cleared all capability settings.");
+        }
+        "test" => {
+            match capsettings::self_test() {
+                Ok(()) => shell_println!("capsettings: all tests passed."),
+                Err(e) => shell_println!("capsettings: test failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("capsettings — capability groups and assignments");
+            shell_println!();
+            shell_println!("Groups:");
+            shell_println!("  groups / lg                   List all groups");
+            shell_println!("  group <id>                    Show group details");
+            shell_println!("  mkgroup <name> <desc>         Create group");
+            shell_println!("  rmgroup <id>                  Remove group");
+            shell_println!("  gadd <gid> <cap>              Add cap to group");
+            shell_println!("  grm <gid> <cap>               Remove cap from group");
+            shell_println!();
+            shell_println!("Users:");
+            shell_println!("  users / lu                    List user assignments");
+            shell_println!("  user <uid>                    Show user caps");
+            shell_println!("  adduser <uid> <name>          Create user assignment");
+            shell_println!("  ugroup <uid> <gid>            Add user to group");
+            shell_println!("  ucap <uid> <cap>              Add extra cap to user");
+            shell_println!("  udeny <uid> <cap>             Deny cap for user");
+            shell_println!("  check <uid> <path>            Check access");
+            shell_println!();
+            shell_println!("Programs & Paths:");
+            shell_println!("  programs / lp                 List program caps");
+            shell_println!("  paths                         List path requirements");
+            shell_println!("  addpath <path> <cap> [r]      Add path requirement");
+            shell_println!("  rmpath <id>                   Remove path requirement");
+            shell_println!();
+            shell_println!("Other:");
+            shell_println!("  caplist                       List all capabilities");
+            shell_println!("  init                          Load defaults");
+            shell_println!("  stats / clear / test");
+            shell_println!("Alias: caps");
+        }
+    }
+}
+
+fn parse_capability(s: &str) -> Option<crate::fs::capsettings::Capability> {
+    use crate::fs::capsettings::Capability;
+    match s {
+        "fileread" | "fread" => Some(Capability::FileRead),
+        "filewrite" | "fwrite" => Some(Capability::FileWrite),
+        "execute" | "exec" => Some(Capability::Execute),
+        "network" | "net" => Some(Capability::Network),
+        "bindlowport" | "blp" => Some(Capability::BindLowPort),
+        "rawsocket" | "raw" => Some(Capability::RawSocket),
+        "mount" => Some(Capability::Mount),
+        "useradmin" | "uadmin" => Some(Capability::UserAdmin),
+        "packageinstall" | "pkg" => Some(Capability::PackageInstall),
+        "systemconfig" | "sysconfig" => Some(Capability::SystemConfig),
+        "hardwareaccess" | "hw" => Some(Capability::HardwareAccess),
+        "debugprocess" | "debug" => Some(Capability::DebugProcess),
+        "chown" => Some(Capability::Chown),
+        "dacoverride" | "dac" => Some(Capability::DacOverride),
+        "setclock" | "clock" => Some(Capability::SetClock),
+        "reboot" => Some(Capability::Reboot),
+        "moduleload" | "modload" => Some(Capability::ModuleLoad),
+        "auditread" | "aread" => Some(Capability::AuditRead),
+        "auditwrite" | "awrite" => Some(Capability::AuditWrite),
+        "capadmin" | "cadmin" => Some(Capability::CapAdmin),
+        _ => None,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -29940,7 +30306,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

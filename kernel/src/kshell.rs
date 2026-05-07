@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4412,6 +4412,7 @@ fn dispatch(line: &str) {
         "startmenu" | "smenu" => cmd_startmenu(args),
         "filepicker" | "fpick" => cmd_filepicker(args),
         "theme" => cmd_theme(args),
+        "hotkey" => cmd_hotkey(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -17826,6 +17827,183 @@ fn cmd_theme(args: &str) {
     }
 }
 
+/// `hotkey` — global keyboard shortcut management.
+fn cmd_hotkey(args: &str) {
+    use crate::fs::hotkeys;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "bind" => {
+            let combo_str = parts.get(1).copied().unwrap_or("");
+            let action_str = parts.get(2).copied().unwrap_or("");
+            if combo_str.is_empty() || action_str.is_empty() {
+                shell_println!("Usage: hotkey bind <combo> <action> [description]");
+                shell_println!("  combo: Ctrl+S, Alt+F4, Super+L, etc.");
+                shell_println!("  actions: close, switch, minimize-all, run, start,");
+                shell_println!("    screenshot, lock, logout, copy, cut, paste, undo,");
+                shell_println!("    redo, select-all, launch:<app>, cmd:<command>");
+                return;
+            }
+            let combo = match hotkeys::KeyCombo::parse(combo_str) {
+                Some(c) => c,
+                None => { shell_println!("Invalid combo: {}", combo_str); return; }
+            };
+            let action = match hotkeys::HotkeyAction::from_str(action_str) {
+                Some(a) => a,
+                None => { shell_println!("Unknown action: {}", action_str); return; }
+            };
+            let desc = if parts.len() > 3 {
+                parts[3..].join(" ")
+            } else {
+                action.label()
+            };
+            match hotkeys::bind(combo, action, &desc, false) {
+                Ok(()) => shell_println!("Bound: {} → {}", combo_str, desc),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unbind" => {
+            let combo_str = parts.get(1).copied().unwrap_or("");
+            if combo_str.is_empty() {
+                shell_println!("Usage: hotkey unbind <combo>");
+                return;
+            }
+            let combo = match hotkeys::KeyCombo::parse(combo_str) {
+                Some(c) => c,
+                None => { shell_println!("Invalid combo: {}", combo_str); return; }
+            };
+            match hotkeys::unbind(&combo) {
+                Ok(()) => shell_println!("Unbound: {}", combo_str),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            let combo_str = parts.get(1).copied().unwrap_or("");
+            if combo_str.is_empty() {
+                shell_println!("Usage: hotkey {} <combo>", sub);
+                return;
+            }
+            let combo = match hotkeys::KeyCombo::parse(combo_str) {
+                Some(c) => c,
+                None => { shell_println!("Invalid combo: {}", combo_str); return; }
+            };
+            let enabled = sub == "enable";
+            match hotkeys::set_enabled(&combo, enabled) {
+                Ok(()) => shell_println!("{}: {}", if enabled { "Enabled" } else { "Disabled" }, combo_str),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "dispatch" | "trigger" => {
+            let combo_str = parts.get(1).copied().unwrap_or("");
+            if combo_str.is_empty() {
+                shell_println!("Usage: hotkey dispatch <combo>");
+                return;
+            }
+            let combo = match hotkeys::KeyCombo::parse(combo_str) {
+                Some(c) => c,
+                None => { shell_println!("Invalid combo: {}", combo_str); return; }
+            };
+            let actions = hotkeys::dispatch(&combo);
+            if actions.is_empty() {
+                shell_println!("No binding for: {}", combo_str);
+            } else {
+                for a in &actions {
+                    shell_println!("Action: {}", a.label());
+                }
+            }
+        }
+        "find" => {
+            let action_str = parts.get(1).copied().unwrap_or("");
+            if action_str.is_empty() {
+                shell_println!("Usage: hotkey find <action>");
+                return;
+            }
+            match hotkeys::HotkeyAction::from_str(action_str) {
+                Some(action) => {
+                    match hotkeys::find_binding(&action) {
+                        Some(combo) => shell_println!("{} → {}", combo.display(), action.label()),
+                        None => shell_println!("No binding for: {}", action_str),
+                    }
+                }
+                None => shell_println!("Unknown action: {}", action_str),
+            }
+        }
+        "search" => {
+            let query = parts.get(1).copied().unwrap_or("");
+            if query.is_empty() {
+                shell_println!("Usage: hotkey search <query>");
+                return;
+            }
+            let results = hotkeys::search(query);
+            if results.is_empty() {
+                shell_println!("No matches for: {}", query);
+            } else {
+                for h in &results {
+                    let actions: Vec<String> = h.actions.iter().map(|a| a.label()).collect();
+                    let en = if h.enabled { "" } else { " (disabled)" };
+                    shell_println!("  {:20} → {}{}", h.combo.display(), actions.join(", "), en);
+                }
+            }
+        }
+        "list" | "" => {
+            let all = hotkeys::list_all();
+            if all.is_empty() {
+                shell_println!("No hotkeys configured");
+            } else {
+                shell_println!("{} hotkeys:", all.len());
+                for h in &all {
+                    let actions: Vec<String> = h.actions.iter().map(|a| a.label()).collect();
+                    let en = if h.enabled { "" } else { " [off]" };
+                    let def = if h.is_default { " [default]" } else { "" };
+                    shell_println!("  {:20} → {}{}{}", h.combo.display(), actions.join(", "), en, def);
+                }
+            }
+        }
+        "init" | "defaults" => {
+            match hotkeys::register_defaults() {
+                Ok(()) => {
+                    let (total, _, _, _) = hotkeys::stats();
+                    shell_println!("Registered default hotkeys ({} total)", total);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "test" => {
+            match hotkeys::self_test() {
+                Ok(()) => shell_println!("All hotkey self-tests passed"),
+                Err(e) => shell_println!("Hotkey self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, enabled, dispatches, hits) = hotkeys::stats();
+            shell_println!("Bindings:   {}", total);
+            shell_println!("Enabled:    {}", enabled);
+            shell_println!("Dispatches: {}", dispatches);
+            shell_println!("Hits:       {}", hits);
+        }
+        "reset" => {
+            hotkeys::clear_all();
+            hotkeys::reset_stats();
+            shell_println!("Hotkeys cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: hotkey <subcommand>");
+            shell_println!("  bind <combo> <action> [desc]  Register hotkey");
+            shell_println!("  unbind <combo>                Remove hotkey");
+            shell_println!("  enable <combo>                Enable hotkey");
+            shell_println!("  disable <combo>               Disable hotkey");
+            shell_println!("  dispatch <combo>              Simulate keypress");
+            shell_println!("  find <action>                 Find combo for action");
+            shell_println!("  search <query>                Search bindings");
+            shell_println!("  list                          List all hotkeys");
+            shell_println!("  init                          Register defaults");
+            shell_println!("  test                          Run self-tests");
+            shell_println!("  stats                         Show statistics");
+            shell_println!("  reset                         Clear all");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -25355,7 +25533,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

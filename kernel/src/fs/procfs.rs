@@ -170,6 +170,7 @@ const ROOT_FILES: &[&str] = &[
     "startmenu",
     "filepicker",
     "theme",
+    "hotkeys",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3159,6 +3160,34 @@ fn gen_theme() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_hotkeys() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, enabled, dispatches, hits) = super::hotkeys::stats();
+
+    out.push_str("Hotkeys\n");
+    out.push_str("=======\n\n");
+    out.push_str(&format!("Bindings: {}/{}\n", total, 512));
+    out.push_str(&format!("Enabled:  {}\n", enabled));
+    out.push_str(&format!("Dispatch: {}\n", dispatches));
+    out.push_str(&format!("Hits:     {}\n\n", hits));
+
+    let bindings = super::hotkeys::list_enabled();
+    if !bindings.is_empty() {
+        out.push_str(&format!("{:24} {:30} {}\n", "COMBO", "ACTION", "DESC"));
+        for h in &bindings {
+            let action_str = h.actions.first()
+                .map_or(String::from("-"), |a| a.label());
+            let def = if h.is_default { " [default]" } else { "" };
+            out.push_str(&format!("{:24} {:30} {}{}\n",
+                h.combo.display(), action_str, h.description, def));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3494,6 +3523,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "startmenu" => Ok(gen_startmenu()),
         "filepicker" => Ok(gen_filepicker()),
         "theme" => Ok(gen_theme()),
+        "hotkeys" => Ok(gen_hotkeys()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

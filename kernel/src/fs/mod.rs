@@ -70,6 +70,7 @@ pub mod fstrim;
 pub mod fswalk;
 pub mod handle;
 pub mod health;
+pub mod hotkeys;
 pub mod history;
 pub mod immutable;
 pub mod index;

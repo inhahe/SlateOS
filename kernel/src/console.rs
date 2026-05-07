@@ -147,6 +147,21 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
 }
 
 // ---------------------------------------------------------------------------
+// Framebuffer info accessor
+// ---------------------------------------------------------------------------
+
+/// Framebuffer parameters for use by other modules (e.g., the graphics layer).
+///
+/// Returns `None` if the console is not initialized.
+pub fn framebuffer_info() -> Option<(u64, u32, u32, u32)> {
+    let con = CONSOLE.lock();
+    if !con.initialized {
+        return None;
+    }
+    Some((con.fb_addr, con.fb_width, con.fb_height, con.fb_pitch))
+}
+
+// ---------------------------------------------------------------------------
 // Screen operations
 // ---------------------------------------------------------------------------
 

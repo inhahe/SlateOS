@@ -4421,6 +4421,7 @@ fn dispatch(line: &str) {
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
         "mouse" => cmd_mouse(),
+        "gfx" => cmd_gfx(args),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
         "dns" | "nslookup" => cmd_dns(args),
@@ -4672,6 +4673,7 @@ fn cmd_help() {
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
     crate::console_println!("  mouse     Show PS/2 mouse status and recent events");
+    crate::console_println!("  gfx [sub] Framebuffer graphics (demo/cursor/clear)");
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
     crate::console_println!("  ping IP   Send ICMP echo requests (ping)");
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
@@ -12986,6 +12988,67 @@ fn cmd_mouse() {
     }
 }
 
+fn cmd_gfx(args: &str) {
+    if !crate::fb::is_initialized() {
+        crate::console_println!("Framebuffer graphics: not initialized");
+        return;
+    }
+    let (w, h) = crate::fb::dimensions();
+    let sub = args.split_whitespace().next().unwrap_or("status");
+    match sub {
+        "status" | "info" => {
+            crate::console_println!("Framebuffer graphics:");
+            crate::console_println!("  Resolution:  {}x{}", w, h);
+            let (cx, cy) = crate::fb::cursor_pos();
+            crate::console_println!("  Cursor pos:  ({}, {})", cx, cy);
+        }
+        "demo" => {
+            crate::console_println!("Drawing graphics demo...");
+            // Draw some shapes without covering the console text area.
+            // Use the bottom-right quadrant of the screen.
+            let base_x = (w / 2) as i32;
+            let base_y = (h / 2) as i32;
+
+            // Filled red rectangle.
+            crate::fb::fill_rect(base_x + 20, base_y + 20, 100, 60, crate::fb::rgb(220, 50, 50));
+            // Outlined green rectangle.
+            crate::fb::draw_rect(base_x + 140, base_y + 20, 80, 60, crate::fb::rgb(50, 220, 50));
+            // Blue filled circle.
+            crate::fb::fill_circle(base_x + 80, base_y + 140, 40, crate::fb::rgb(50, 80, 220));
+            // Yellow circle outline.
+            crate::fb::draw_circle(base_x + 200, base_y + 140, 35, crate::fb::rgb(220, 220, 50));
+            // White diagonal line.
+            crate::fb::draw_line(base_x + 20, base_y + 200, base_x + 250, base_y + 200, crate::fb::rgb(255, 255, 255));
+            // Cyan diagonal.
+            crate::fb::draw_line(base_x + 20, base_y + 210, base_x + 250, base_y + 250, crate::fb::rgb(0, 255, 255));
+
+            crate::console_println!("  Drew shapes in bottom-right quadrant.");
+        }
+        "cursor" => {
+            crate::console_println!("Showing mouse cursor. Move the mouse!");
+            crate::fb::show_cursor();
+            // Process mouse events for a short period to demonstrate cursor movement.
+            for _ in 0..500u32 {
+                while let Some(ev) = crate::mouse::try_read_event() {
+                    crate::fb::move_cursor(ev.dx, ev.dy);
+                }
+                crate::sched::yield_now();
+            }
+            crate::fb::hide_cursor();
+            crate::console_println!("  Cursor hidden.");
+        }
+        "clear" => {
+            crate::fb::clear_screen(crate::fb::rgb(0, 0, 0));
+            // Re-draw the console text.
+            crate::console::clear();
+            crate::console_println!("Screen cleared.");
+        }
+        _ => {
+            crate::console_println!("Usage: gfx [status|demo|cursor|clear]");
+        }
+    }
+}
+
 fn cmd_dhcp() {
     crate::console_println!("Running DHCP discovery...");
     match crate::net::dhcp::discover() {
@@ -16191,7 +16254,7 @@ fn is_builtin(name: &str) -> bool {
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mouse" | "dhcp" | "ping" | "dns" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mouse" | "gfx" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

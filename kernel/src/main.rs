@@ -63,6 +63,7 @@ mod cpu_hotplug;
 mod cpu_topology;
 mod cpufreq;
 mod e1000;
+mod fb;
 mod cputime;
 mod crypto;
 mod error;
@@ -189,6 +190,10 @@ extern "C" fn kmain() -> ! {
         console_println!("=== Framebuffer console active ===");
         console_println!(); // blank line before boot steps
     }
+
+    // Initialize framebuffer 2D graphics primitives (after console::init
+    // makes the framebuffer parameters available).
+    fb::init();
 
     // Step 3: Set up our own GDT (replacing the one Limine set up).
     //
@@ -1268,6 +1273,11 @@ extern "C" fn kmain() -> ! {
 
     // Intel e1000 NIC self-test.
     e1000::self_test();
+
+    // Framebuffer graphics self-test.
+    if let Err(e) = fb::self_test() {
+        serial_println!("[fb] Self-test failed: {} (non-fatal)", e);
+    }
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

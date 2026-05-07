@@ -3084,7 +3084,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 const COMMANDS: &[&str] = &[
     "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
-    "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
+    "clip", "clipboard", "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "findex", "finfo", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
@@ -4376,6 +4376,7 @@ fn dispatch(line: &str) {
         "findex" => cmd_findex(args),
         "thumbcache" | "tcache" => cmd_thumbcache(args),
         "bookmark" | "bm" => cmd_bookmark(args),
+        "clipboard" | "clip" => cmd_clipboard(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4467,6 +4468,7 @@ fn dispatch(line: &str) {
         "mixer" => cmd_mixer(args),
         "soundhist" => cmd_soundhist(),
         "gfx" => cmd_gfx(args),
+        "gpu" => cmd_gpu(args),
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
@@ -15055,6 +15057,162 @@ fn cmd_bookmark(args: &str) {
     }
 }
 
+/// `clipboard` — system clipboard operations.
+fn cmd_clipboard(args: &str) {
+    use crate::fs::clipboard;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "copy" | "text" => {
+            let text = args.trim_start_matches("copy").trim_start_matches("text").trim();
+            if text.is_empty() {
+                shell_println!("Usage: clipboard copy <text>");
+                return;
+            }
+            match clipboard::set_text(text, "kshell") {
+                Ok(()) => shell_println!("Copied to clipboard."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "paste" | "get" => {
+            match clipboard::get_text() {
+                Some(text) => shell_println!("{}", text),
+                None => shell_println!("Clipboard is empty or not text."),
+            }
+        }
+        "files" => {
+            match clipboard::get_files() {
+                Some((paths, op)) => {
+                    let op_label = match op {
+                        clipboard::FileOp::Copy => "copy",
+                        clipboard::FileOp::Cut => "cut",
+                    };
+                    shell_println!("File operation: {}", op_label);
+                    for p in &paths {
+                        shell_println!("  {}", p);
+                    }
+                }
+                None => shell_println!("No files on clipboard."),
+            }
+        }
+        "formats" => {
+            let fmts = clipboard::available_formats();
+            if fmts.is_empty() {
+                shell_println!("Clipboard is empty.");
+            } else {
+                shell_println!("Available formats:");
+                for f in &fmts {
+                    shell_println!("  {}", f.mime());
+                }
+            }
+        }
+        "history" | "hist" => {
+            let hist = clipboard::history();
+            if hist.is_empty() {
+                shell_println!("No clipboard history.");
+            } else {
+                shell_println!("{:4} {:10} {:20} {}", "IDX", "SEQ", "SOURCE", "FORMATS");
+                for (i, entry) in hist.iter().enumerate() {
+                    let fmts: Vec<&str> = entry.formats.iter()
+                        .map(|f| f.format.mime())
+                        .collect();
+                    shell_println!("{:4} {:10} {:20} {}", i, entry.sequence, entry.source,
+                        fmts.join(", "));
+                }
+            }
+        }
+        "restore" => {
+            if let Some(idx_str) = parts.get(1) {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    match clipboard::restore_from_history(idx) {
+                        Ok(()) => shell_println!("Restored entry {}.", idx),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid index.");
+                }
+            } else {
+                shell_println!("Usage: clipboard restore <index>");
+            }
+        }
+        "watch" => {
+            let label = parts.get(1).copied().unwrap_or("kshell");
+            match clipboard::watch(label) {
+                Ok(id) => shell_println!("Watching clipboard (id={}).", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unwatch" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    if clipboard::unwatch(id) {
+                        shell_println!("Unwatched id {}.", id);
+                    } else {
+                        shell_println!("No watcher with id {}.", id);
+                    }
+                } else {
+                    shell_println!("Invalid watcher id.");
+                }
+            } else {
+                shell_println!("Usage: clipboard unwatch <id>");
+            }
+        }
+        "watchers" => {
+            let ws = clipboard::list_watchers();
+            if ws.is_empty() {
+                shell_println!("No watchers.");
+            } else {
+                shell_println!("{:6} {}", "ID", "LABEL");
+                for (id, label) in &ws {
+                    shell_println!("{:6} {}", id, label);
+                }
+            }
+        }
+        "clear" => {
+            clipboard::clear();
+            shell_println!("Clipboard cleared.");
+        }
+        "clearall" => {
+            clipboard::clear_all();
+            shell_println!("Clipboard and history cleared.");
+        }
+        "stats" | "" => {
+            let (copies, pastes, total_bytes, seq, hist_count, watchers) = clipboard::stats();
+            shell_println!("Clipboard statistics:");
+            shell_println!("  Sequence:     {}", seq);
+            shell_println!("  Copies:       {}", copies);
+            shell_println!("  Pastes:       {}", pastes);
+            shell_println!("  Total bytes:  {}", total_bytes);
+            shell_println!("  History:      {}/{}", hist_count, 32);
+            shell_println!("  Watchers:     {}/{}", watchers, 16);
+            let fmts = clipboard::available_formats();
+            if !fmts.is_empty() {
+                shell_println!("  Formats:      {}", fmts.len());
+            }
+        }
+        "reset" => {
+            clipboard::reset_stats();
+            shell_println!("Clipboard statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: clipboard <command>");
+            shell_println!("  copy <text>      Copy text to clipboard");
+            shell_println!("  paste|get        Paste text from clipboard");
+            shell_println!("  files            Show file operations on clipboard");
+            shell_println!("  formats          Show available formats");
+            shell_println!("  history|hist     Show clipboard history");
+            shell_println!("  restore <idx>    Restore entry from history");
+            shell_println!("  watch [label]    Register change watcher");
+            shell_println!("  unwatch <id>     Remove watcher");
+            shell_println!("  watchers         List watchers");
+            shell_println!("  clear            Clear current clipboard");
+            shell_println!("  clearall         Clear clipboard and history");
+            shell_println!("  stats            Show statistics (default)");
+            shell_println!("  reset            Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -17326,6 +17484,101 @@ fn cmd_gfx(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: gfx [status|demo|cursor|clear]");
+        }
+    }
+}
+
+fn cmd_gpu(args: &str) {
+    let sub = args.split_whitespace().next().unwrap_or("status");
+    match sub {
+        "status" | "info" => {
+            if crate::virtio::gpu::is_available() {
+                let (w, h) = crate::virtio::gpu::dimensions();
+                crate::console_println!("Virtio-GPU:");
+                crate::console_println!("  Status:     active");
+                crate::console_println!("  Resolution: {}x{}", w, h);
+                crate::console_println!("  Format:     B8G8R8A8 (32-bit)");
+                if let Some(addr) = crate::virtio::gpu::framebuffer_addr() {
+                    crate::console_println!("  FB addr:    {:#x}", addr);
+                }
+            } else {
+                crate::console_println!("Virtio-GPU: not present");
+                crate::console_println!("  Add `-device virtio-gpu-pci` to QEMU to enable");
+            }
+        }
+        "fill" => {
+            if !crate::virtio::gpu::is_available() {
+                crate::console_println!("virtio-gpu not available");
+                return;
+            }
+            // Parse optional color argument (default: blue).
+            let color_str = args.split_whitespace().nth(1).unwrap_or("0xFF0044AA");
+            let color = if let Some(hex) = color_str.strip_prefix("0x") {
+                u32::from_str_radix(hex, 16).unwrap_or(0xFF_0044AA)
+            } else {
+                match color_str {
+                    "red" => 0xFF_FF0000,
+                    "green" => 0xFF_00FF00,
+                    "blue" => 0xFF_0000FF,
+                    "white" => 0xFF_FFFFFF,
+                    "black" => 0xFF_000000,
+                    _ => 0xFF_0044AA,
+                }
+            };
+            match crate::virtio::gpu::fill(color) {
+                Ok(()) => crate::console_println!("Filled display with color {:#010x}", color),
+                Err(e) => crate::console_println!("Fill failed: {:?}", e),
+            }
+        }
+        "flush" => {
+            if !crate::virtio::gpu::is_available() {
+                crate::console_println!("virtio-gpu not available");
+                return;
+            }
+            match crate::virtio::gpu::flush_full() {
+                Ok(()) => crate::console_println!("Display flushed"),
+                Err(e) => crate::console_println!("Flush failed: {:?}", e),
+            }
+        }
+        "test" => {
+            if !crate::virtio::gpu::is_available() {
+                crate::console_println!("virtio-gpu not available");
+                return;
+            }
+            crate::console_println!("Drawing test pattern...");
+            // Draw colored bars across the display.
+            let (w, h) = crate::virtio::gpu::dimensions();
+            let bar_height = h / 8;
+            let colors: [u32; 8] = [
+                0xFF_FF0000, // Red
+                0xFF_FF8000, // Orange
+                0xFF_FFFF00, // Yellow
+                0xFF_00FF00, // Green
+                0xFF_00FFFF, // Cyan
+                0xFF_0000FF, // Blue
+                0xFF_8000FF, // Purple
+                0xFF_FFFFFF, // White
+            ];
+            for bar in 0..8u32 {
+                let y_start = bar * bar_height;
+                let y_end = if bar == 7 { h } else { y_start + bar_height };
+                for y in y_start..y_end {
+                    for x in 0..w {
+                        crate::virtio::gpu::set_pixel(x, y, colors[bar as usize]);
+                    }
+                }
+            }
+            match crate::virtio::gpu::flush_full() {
+                Ok(()) => crate::console_println!("Test pattern displayed (8 color bars)"),
+                Err(e) => crate::console_println!("Flush failed: {:?}", e),
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: gpu [status|fill [color]|flush|test]");
+            crate::console_println!("  status  - Show virtio-gpu device info");
+            crate::console_println!("  fill    - Fill display with color (red/green/blue/0xAARRGGBB)");
+            crate::console_println!("  flush   - Force display refresh");
+            crate::console_println!("  test    - Draw color bar test pattern");
         }
     }
 }
@@ -20528,7 +20781,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

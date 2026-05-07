@@ -146,6 +146,7 @@ const ROOT_FILES: &[&str] = &[
     "findex",
     "thumbcache",
     "bookmarks",
+    "clipboard",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2586,6 +2587,34 @@ fn gen_bookmarks() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_clipboard() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (copies, pastes, total_bytes, seq, hist_count, watchers) = super::clipboard::stats();
+
+    out.push_str("Clipboard\n");
+    out.push_str("=========\n\n");
+    out.push_str(&format!("Sequence:     {}\n", seq));
+    out.push_str(&format!("Copies:       {}\n", copies));
+    out.push_str(&format!("Pastes:       {}\n", pastes));
+    out.push_str(&format!("Total bytes:  {}\n", total_bytes));
+    out.push_str(&format!("History:      {}/{}\n", hist_count, 32));
+    out.push_str(&format!("Watchers:     {}/{}\n\n", watchers, 16));
+
+    let formats = super::clipboard::available_formats();
+    if formats.is_empty() {
+        out.push_str("Clipboard is empty.\n");
+    } else {
+        out.push_str("Current formats:\n");
+        for f in &formats {
+            out.push_str(&format!("  {}\n", f.mime()));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2673,6 +2702,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "findex" => Ok(gen_findex()),
         "thumbcache" => Ok(gen_thumbcache()),
         "bookmarks" => Ok(gen_bookmarks()),
+        "clipboard" => Ok(gen_clipboard()),
         _ => Err(KernelError::NotFound),
     }
 }

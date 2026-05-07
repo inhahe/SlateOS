@@ -40,6 +40,7 @@ pub mod bench;
 pub mod bzip2;
 pub mod cache;
 pub mod cas;
+pub mod clipboard;
 pub mod changetrack;
 pub mod compress;
 #[allow(dead_code)]

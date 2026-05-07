@@ -71,6 +71,7 @@ mod error;
 mod font;
 mod fs;
 mod gdt;
+mod hda;
 mod hpet;
 mod hrtimer;
 mod hypervisor;
@@ -666,6 +667,12 @@ extern "C" fn kmain() -> ! {
     // Step 20d-2c: Initialize Realtek RTL8139 NIC (if present).
     // Common on older hardware and available as a QEMU option.
     rtl8139::init(boot_info.hhdm_offset);
+
+    // Step 20d-2d: Initialize Intel HD Audio controller (if present).
+    // Discovers codecs, sets up CORB/RIRB command buffers, probes audio
+    // topology for output path (DAC → Pin).  QEMU: `-device intel-hda
+    // -device hda-duplex`.
+    hda::init(boot_info.hhdm_offset);
 
     console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
 
@@ -1282,6 +1289,11 @@ extern "C" fn kmain() -> ! {
 
     // Realtek RTL8139 NIC self-test.
     rtl8139::self_test();
+
+    // Intel HD Audio self-test.
+    if let Err(e) = hda::self_test() {
+        serial_println!("[hda] Self-test failed: {:?} (non-fatal)", e);
+    }
 
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {

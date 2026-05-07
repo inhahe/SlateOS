@@ -117,6 +117,7 @@ mod rcu;
 mod rip_sample;
 mod rng;
 mod rtc;
+mod rtl8139;
 mod sched;
 mod sched_fairness;
 mod sched_migrate;
@@ -660,6 +661,10 @@ extern "C" fn kmain() -> ! {
     // Provides native NIC support for QEMU/VirtualBox without virtio.
     // Falls back gracefully if no Intel NIC is found.
     e1000::init(boot_info.hhdm_offset);
+
+    // Step 20d-2c: Initialize Realtek RTL8139 NIC (if present).
+    // Common on older hardware and available as a QEMU option.
+    rtl8139::init(boot_info.hhdm_offset);
 
     console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
 
@@ -1273,6 +1278,9 @@ extern "C" fn kmain() -> ! {
 
     // Intel e1000 NIC self-test.
     e1000::self_test();
+
+    // Realtek RTL8139 NIC self-test.
+    rtl8139::self_test();
 
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {

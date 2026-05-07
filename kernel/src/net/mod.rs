@@ -59,7 +59,7 @@ pub fn poll() {
 
 /// Receive a single frame from the active NIC.
 ///
-/// Tries virtio-net first (if present), then falls back to e1000.
+/// Tries virtio-net first, then e1000, then rtl8139.
 fn recv_frame() -> Option<Vec<u8>> {
     // Try virtio-net first.
     if let Some(Some(data)) = crate::virtio::net::with_device(|dev| dev.recv()) {
@@ -69,13 +69,17 @@ fn recv_frame() -> Option<Vec<u8>> {
     if let Some(Some(data)) = crate::e1000::with_device(|dev| dev.recv()) {
         return Some(data);
     }
+    // Fall back to rtl8139.
+    if let Some(data) = crate::rtl8139::recv() {
+        return Some(data);
+    }
     None
 }
 
 /// Send an Ethernet frame via the active NIC.
 ///
 /// Used by the IPv4 layer and ARP to transmit packets.
-/// Tries virtio-net first, falls back to e1000.
+/// Tries virtio-net first, falls back to e1000, then rtl8139.
 pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
     // Try virtio-net first.
     if let Some(result) = crate::virtio::net::with_device(|dev| dev.send(frame)) {
@@ -84,6 +88,10 @@ pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
     // Fall back to e1000.
     if let Some(result) = crate::e1000::with_device(|dev| dev.send(frame)) {
         return result;
+    }
+    // Fall back to rtl8139.
+    if crate::rtl8139::with_device(|_| ()).is_some() {
+        return crate::rtl8139::send(frame);
     }
     Err(KernelError::NoSuchDevice)
 }

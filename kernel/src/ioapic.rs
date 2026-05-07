@@ -749,6 +749,7 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     // read if this IRQ matches the device.
     crate::virtio::blk::handle_irq(irq);
     crate::virtio::net::handle_irq(irq);
+    crate::rtl8139::handle_irq(irq);
 
     // 1. Record the interrupt (for IRQ storm detection and notification).
     irq_notify(irq);

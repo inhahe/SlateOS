@@ -13077,6 +13077,8 @@ fn cmd_net() {
         "virtio-net"
     } else if crate::e1000::with_device(|_| ()).is_some() {
         "e1000"
+    } else if crate::rtl8139::with_device(|_| ()).is_some() {
+        "rtl8139"
     } else {
         "unknown"
     };

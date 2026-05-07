@@ -132,6 +132,16 @@ pub fn init() {
         return;
     }
 
+    // Fall back to RTL8139.
+    let mac = crate::rtl8139::with_device(|dev| dev.mac());
+    if let Some(mac) = mac {
+        let mut iface = IFACE.lock();
+        iface.mac = MacAddress(mac);
+        iface.up = true;
+        crate::serial_println!("[net] Interface up (rtl8139): MAC {}", MacAddress(mac));
+        return;
+    }
+
     crate::serial_println!("[net] No NIC — interface not configured");
 }
 

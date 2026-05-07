@@ -494,8 +494,21 @@ fn push_char(ch: u8) {
 /// Try to read one character from the ring buffer without blocking.
 ///
 /// Returns `Some(ch)` if a character is available, `None` if the buffer
-/// is empty.
+/// is empty.  Also polls the USB keyboard for pending reports before
+/// checking the buffer.
 pub fn try_read_char() -> Option<u8> {
+    // Poll USB HID keyboard for any pending input reports.  This is a
+    // no-op if no USB keyboard is present or no data is waiting.
+    poll_usb_keyboard();
+
+    try_read_char_raw()
+}
+
+/// Read from the ring buffer without polling USB.
+///
+/// Used internally to avoid recursion when the USB poll itself
+/// pushes characters via `push_char`.
+fn try_read_char_raw() -> Option<u8> {
     let head = INPUT_HEAD.load(Ordering::Acquire);
     let tail = INPUT_TAIL.load(Ordering::Acquire);
 
@@ -514,11 +527,15 @@ pub fn try_read_char() -> Option<u8> {
 /// Read one character, blocking if the buffer is empty.
 ///
 /// This spins in a loop yielding the CPU (via HLT) until a character
-/// becomes available.  In the future this will use proper scheduler
-/// blocking with an eventfd or similar mechanism.
+/// becomes available.  Polls both PS/2 (interrupt-driven) and USB HID
+/// (polled) keyboard inputs.  In the future this will use proper
+/// scheduler blocking with an eventfd or similar mechanism.
 pub fn read_char() -> u8 {
     loop {
-        if let Some(ch) = try_read_char() {
+        // Poll USB keyboard for any pending reports.
+        poll_usb_keyboard();
+
+        if let Some(ch) = try_read_char_raw() {
             return ch;
         }
         // Yield CPU until next interrupt (the keyboard IRQ or timer
@@ -611,6 +628,146 @@ fn flush_output_buffer() {
             break;
         }
         let _ = unsafe { port::inb(DATA_PORT) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// USB HID keyboard integration
+// ---------------------------------------------------------------------------
+
+/// USB HID modifier bitmask constants (boot protocol report byte 0).
+const USB_MOD_LEFT_CTRL: u8 = 1 << 0;
+const USB_MOD_LEFT_SHIFT: u8 = 1 << 1;
+const USB_MOD_LEFT_ALT: u8 = 1 << 2;
+#[allow(dead_code)]
+const USB_MOD_LEFT_GUI: u8 = 1 << 3;
+const USB_MOD_RIGHT_CTRL: u8 = 1 << 4;
+const USB_MOD_RIGHT_SHIFT: u8 = 1 << 5;
+const USB_MOD_RIGHT_ALT: u8 = 1 << 6;
+#[allow(dead_code)]
+const USB_MOD_RIGHT_GUI: u8 = 1 << 7;
+
+/// Previous USB HID keyboard report state for detecting press/release.
+///
+/// USB HID boot protocol sends a full snapshot of pressed keys each
+/// report.  To detect individual key presses and releases, we compare
+/// each report against the previous one.
+#[allow(clippy::declare_interior_mutable_const)]
+static USB_PREV_KEYCODES: [AtomicU8; 6] = {
+    const ZERO: AtomicU8 = AtomicU8::new(0);
+    [ZERO; 6]
+};
+static USB_PREV_MODIFIERS: AtomicU8 = AtomicU8::new(0);
+
+/// Process a USB HID boot protocol keyboard report.
+///
+/// Detects newly-pressed keys by comparing against the previous report,
+/// converts them to PS/2 scan codes via the xHCI HID-to-scancode table,
+/// and feeds the resulting characters into the shared ring buffer.
+///
+/// This allows USB keyboards to work identically to PS/2 keyboards
+/// from the kshell's perspective.
+///
+/// # Arguments
+///
+/// * `modifiers` — HID modifier bitmask (byte 0 of boot report)
+/// * `keycodes` — six keycode slots (bytes 2-7 of boot report)
+pub fn handle_usb_hid_report(modifiers: u8, keycodes: [u8; 6]) {
+    // Update modifier state from HID modifier byte.
+    let prev_mods = USB_PREV_MODIFIERS.swap(modifiers, Ordering::AcqRel);
+    update_usb_modifiers(modifiers, prev_mods);
+
+    // Load previous keycodes.
+    let mut prev = [0u8; 6];
+    for (slot, prev_slot) in USB_PREV_KEYCODES.iter().zip(prev.iter_mut()) {
+        *prev_slot = slot.load(Ordering::Acquire);
+    }
+
+    // Detect released keys (in prev but not in new) — used to clear
+    // modifier/state if needed; no character output for releases.
+    // (Modifier releases are already handled above via the modifier byte.)
+
+    // Detect newly pressed keys (in new but not in prev).
+    for &keycode in &keycodes {
+        if keycode == 0 || keycode == 1 {
+            // 0 = no key, 1 = error rollover (phantom keys).
+            continue;
+        }
+        // Check if this key was already pressed in the previous report.
+        let was_pressed = prev.contains(&keycode);
+        if !was_pressed {
+            // New key press — convert to PS/2 scan code and process.
+            if let Some(scancode) = usb_hid_to_scancode(keycode) {
+                // Feed through the existing PS/2 scan code → ASCII pipeline.
+                handle_usb_scancode(scancode, modifiers);
+            }
+        }
+    }
+
+    // Store current keycodes as previous for next comparison.
+    for (slot, &kc) in USB_PREV_KEYCODES.iter().zip(keycodes.iter()) {
+        slot.store(kc, Ordering::Release);
+    }
+}
+
+/// Update atomic modifier state from USB HID modifier bitmask changes.
+fn update_usb_modifiers(current: u8, _prev: u8) {
+    // USB HID modifier byte gives us the complete modifier state each
+    // report.  We update the global atomic modifier booleans directly
+    // (shared with PS/2 path).
+    LEFT_SHIFT.store(current & USB_MOD_LEFT_SHIFT != 0, Ordering::Release);
+    RIGHT_SHIFT.store(current & USB_MOD_RIGHT_SHIFT != 0, Ordering::Release);
+    LEFT_CTRL.store(current & USB_MOD_LEFT_CTRL != 0, Ordering::Release);
+    RIGHT_CTRL.store(current & USB_MOD_RIGHT_CTRL != 0, Ordering::Release);
+    LEFT_ALT.store(current & USB_MOD_LEFT_ALT != 0, Ordering::Release);
+    RIGHT_ALT.store(current & USB_MOD_RIGHT_ALT != 0, Ordering::Release);
+}
+
+/// Convert a USB HID usage code to a PS/2 scan code set 1 value.
+///
+/// Returns None for unmapped or reserved HID usage codes.
+fn usb_hid_to_scancode(hid_usage: u8) -> Option<u8> {
+    // Use the xhci module's HID_TO_SCANCODE table via the public API.
+    // Since we're in the same kernel, we can call it directly.
+    let report = crate::xhci::HidKeyboardReport {
+        modifiers: 0,
+        reserved: 0,
+        keycodes: [hid_usage, 0, 0, 0, 0, 0],
+    };
+    crate::xhci::hid_report_to_scancode(&report)
+}
+
+/// Process a PS/2 scan code generated from a USB HID keycode.
+///
+/// Uses the current modifier state (already updated from the HID
+/// modifier byte) to translate the scan code to an ASCII character
+/// and push it into the ring buffer.
+fn handle_usb_scancode(scancode: u8, _hid_modifiers: u8) {
+    // Handle Caps Lock toggle (HID usage 0x39 → PS/2 0x3A).
+    if scancode == 0x3A {
+        let old = CAPS_LOCK.load(Ordering::Acquire);
+        CAPS_LOCK.store(!old, Ordering::Release);
+        return;
+    }
+
+    // Convert to ASCII using the existing PS/2 scan code table.
+    // Modifier state has already been updated from the HID modifier byte.
+    if let Some(ch) = scancode_to_ascii(scancode) {
+        push_char(ch);
+    } else if let Some(ch) = extended_to_ascii(scancode) {
+        // Some HID keys (arrows, home, end, delete) map to "extended"
+        // PS/2 scan codes that produce special key constants.
+        push_char(ch);
+    }
+}
+
+/// Poll the USB keyboard for input (called from the main keyboard poll path).
+///
+/// This non-blocking check reads any pending USB HID keyboard reports
+/// and processes them into the ring buffer.
+pub fn poll_usb_keyboard() {
+    if let Some(report) = crate::xhci::poll_keyboard() {
+        handle_usb_hid_report(report.modifiers, report.keycodes);
     }
 }
 

@@ -214,6 +214,7 @@ const ROOT_FILES: &[&str] = &[
     "netsettings",
     "sysinfo",
     "perfmon",
+    "focusassist",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4683,6 +4684,51 @@ fn gen_perfmon() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_focusassist() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::from("=== Focus Assist ===\n");
+
+    let (profile_count, schedule_count, active, missed, sessions, ops) =
+        super::focusassist::stats();
+
+    out.push_str(&format!("status: {}\n", if active { "active" } else { "off" }));
+    out.push_str(&format!("profiles: {}\n", profile_count));
+    out.push_str(&format!("schedules: {}\n", schedule_count));
+    out.push_str(&format!("missed_this_session: {}\n", missed));
+    out.push_str(&format!("total_sessions: {}\n", sessions));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Some(profile) = super::focusassist::active_profile() {
+        out.push_str(&format!("\nactive_profile: {} (id={})\n", profile.name, profile.id));
+        out.push_str(&format!("mode: {:?}\n", profile.mode));
+        out.push_str(&format!("priority_apps: {}\n", profile.priority_apps.len()));
+        if let Some(ref reply) = profile.auto_reply {
+            out.push_str(&format!("auto_reply: {}\n", reply));
+        }
+    }
+
+    let profiles = super::focusassist::list_profiles();
+    if !profiles.is_empty() {
+        out.push_str("\nprofiles:\n");
+        for p in &profiles {
+            out.push_str(&format!("  id={} name={:?} mode={:?} enabled={} builtin={}\n",
+                p.id, p.name, p.mode, p.enabled, p.builtin));
+        }
+    }
+
+    let schedules = super::focusassist::list_schedules();
+    if !schedules.is_empty() {
+        out.push_str("\nschedules:\n");
+        for s in &schedules {
+            out.push_str(&format!("  id={} name={:?} {:02}:{:02}-{:02}:{:02} enabled={} profile={}\n",
+                s.id, s.name, s.start_hour, s.start_minute,
+                s.end_hour, s.end_minute, s.enabled, s.profile_id));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5062,6 +5108,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "netsettings" => Ok(gen_netsettings()),
         "sysinfo" => Ok(gen_sysinfo()),
         "perfmon" => Ok(gen_perfmon()),
+        "focusassist" => Ok(gen_focusassist()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

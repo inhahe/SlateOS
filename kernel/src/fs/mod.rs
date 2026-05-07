@@ -69,6 +69,7 @@ pub mod dyndns;
 pub mod encrypt;
 pub mod ext4;
 pub mod fat;
+pub mod focusassist;
 pub mod fcomment;
 pub mod fcompress;
 pub mod fontmgr;

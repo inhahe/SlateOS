@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4818,6 +4818,7 @@ fn dispatch(line: &str) {
         "netsettings" | "netcfg" => cmd_netsettings(args),
         "sysinfo" | "hwinfo" => cmd_sysinfo(args),
         "perfmon" | "resmon" => cmd_perfmon(args),
+        "focusassist" | "dnd" => cmd_focusassist(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -24682,6 +24683,344 @@ fn cmd_perfmon(args: &str) {
     }
 }
 
+/// `focusassist` / `dnd` — Focus Assist / Do Not Disturb mode.
+fn cmd_focusassist(args: &str) {
+    use crate::fs::focusassist;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            focusassist::init_defaults();
+            shell_println!("Focus assist initialized with default profiles.");
+        }
+        "show" | "" => {
+            let (profiles, schedules, active, missed, sessions, ops) = focusassist::stats();
+            shell_println!("=== Focus Assist ===");
+            shell_println!("Status:    {}", if active { "ACTIVE" } else { "off" });
+            shell_println!("Profiles:  {}", profiles);
+            shell_println!("Schedules: {}", schedules);
+            shell_println!("Missed:    {}", missed);
+            shell_println!("Sessions:  {}", sessions);
+            shell_println!("Ops:       {}", ops);
+            if let Some(profile) = focusassist::active_profile() {
+                shell_println!("\nActive profile: {} (mode={:?})", profile.name, profile.mode);
+                if !profile.priority_apps.is_empty() {
+                    shell_println!("Priority apps: {}", profile.priority_apps.join(", "));
+                }
+                if let Some(ref reply) = profile.auto_reply {
+                    shell_println!("Auto-reply: {}", reply);
+                }
+            }
+        }
+        "on" => {
+            let profile_id = parts.get(1)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(1);
+            match focusassist::activate(profile_id) {
+                Ok(()) => {
+                    if let Some(p) = focusassist::active_profile() {
+                        shell_println!("Focus assist ON: {} ({:?})", p.name, p.mode);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "off" => {
+            match focusassist::deactivate() {
+                Ok(missed) => {
+                    shell_println!("Focus assist OFF.");
+                    if !missed.is_empty() {
+                        shell_println!("Missed {} notification(s):", missed.len());
+                        for m in &missed {
+                            shell_println!("  [{}] {}: {}", match m.priority {
+                                focusassist::NotifPriority::Low => "low",
+                                focusassist::NotifPriority::Normal => "normal",
+                                focusassist::NotifPriority::High => "high",
+                                focusassist::NotifPriority::Critical => "critical",
+                                focusassist::NotifPriority::Alarm => "alarm",
+                            }, m.app_id, m.title);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "profiles" => {
+            let profiles = focusassist::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No profiles. Run 'focusassist init'.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<15} {:<8} {}", "ID", "Name", "Mode", "Enabled", "Builtin");
+                for p in &profiles {
+                    shell_println!("{:<4} {:<20} {:<15} {:<8} {}", p.id, p.name,
+                        format!("{:?}", p.mode), p.enabled, p.builtin);
+                }
+            }
+        }
+        "create" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let mode_str = parts.get(2).copied().unwrap_or("priority");
+            if name.is_empty() {
+                shell_println!("Usage: focusassist create <name> [priority|alarms|total]");
+                return;
+            }
+            let mode = match mode_str {
+                "priority" => focusassist::FocusMode::PriorityOnly,
+                "alarms" => focusassist::FocusMode::AlarmsOnly,
+                "total" => focusassist::FocusMode::Total,
+                _ => {
+                    shell_println!("Unknown mode '{}'. Use: priority, alarms, total", mode_str);
+                    return;
+                }
+            };
+            match focusassist::create_profile(name, mode) {
+                Ok(id) => shell_println!("Created profile '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: focusassist remove <profile_id>");
+                return;
+            }
+            match focusassist::remove_profile(id) {
+                Ok(()) => shell_println!("Removed profile {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mode" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let mode_str = parts.get(2).copied().unwrap_or("");
+            if id == 0 || mode_str.is_empty() {
+                shell_println!("Usage: focusassist mode <profile_id> <priority|alarms|total>");
+                return;
+            }
+            let mode = match mode_str {
+                "priority" => focusassist::FocusMode::PriorityOnly,
+                "alarms" => focusassist::FocusMode::AlarmsOnly,
+                "total" => focusassist::FocusMode::Total,
+                _ => {
+                    shell_println!("Unknown mode '{}'", mode_str);
+                    return;
+                }
+            };
+            match focusassist::set_mode(id, mode) {
+                Ok(()) => shell_println!("Set profile {} mode to {:?}", id, mode),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "addapp" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let app_id = parts.get(2).copied().unwrap_or("");
+            if id == 0 || app_id.is_empty() {
+                shell_println!("Usage: focusassist addapp <profile_id> <app_id>");
+                return;
+            }
+            match focusassist::add_priority_app(id, app_id) {
+                Ok(()) => shell_println!("Added '{}' to profile {} priority apps", app_id, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmapp" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let app_id = parts.get(2).copied().unwrap_or("");
+            if id == 0 || app_id.is_empty() {
+                shell_println!("Usage: focusassist rmapp <profile_id> <app_id>");
+                return;
+            }
+            match focusassist::remove_priority_app(id, app_id) {
+                Ok(()) => shell_println!("Removed '{}' from profile {} priority apps", app_id, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "apps" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: focusassist apps <profile_id>");
+                return;
+            }
+            match focusassist::priority_apps(id) {
+                Ok(apps) => {
+                    if apps.is_empty() {
+                        shell_println!("No priority apps for profile {}", id);
+                    } else {
+                        shell_println!("Priority apps for profile {}:", id);
+                        for a in &apps {
+                            shell_println!("  {}", a);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reply" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: focusassist reply <profile_id> [message]");
+                return;
+            }
+            let msg = if parts.len() > 2 {
+                Some(parts[2..].join(" "))
+            } else {
+                None
+            };
+            match focusassist::set_auto_reply(id, msg.as_deref()) {
+                Ok(()) => {
+                    if let Some(ref m) = msg {
+                        shell_println!("Set auto-reply for profile {}: {}", id, m);
+                    } else {
+                        shell_println!("Cleared auto-reply for profile {}", id);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "missed" => {
+            let missed = focusassist::missed_notifications();
+            if missed.is_empty() {
+                shell_println!("No missed notifications.");
+            } else {
+                shell_println!("Missed {} notification(s):", missed.len());
+                for m in &missed {
+                    shell_println!("  [{}] {}: {}", match m.priority {
+                        focusassist::NotifPriority::Low => "low",
+                        focusassist::NotifPriority::Normal => "normal",
+                        focusassist::NotifPriority::High => "high",
+                        focusassist::NotifPriority::Critical => "critical",
+                        focusassist::NotifPriority::Alarm => "alarm",
+                    }, m.app_id, m.title);
+                }
+            }
+        }
+        "schedules" => {
+            let scheds = focusassist::list_schedules();
+            if scheds.is_empty() {
+                shell_println!("No schedules.");
+            } else {
+                let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                for s in &scheds {
+                    let days: Vec<&str> = s.days.iter().enumerate()
+                        .filter(|(_, d)| **d)
+                        .map(|(i, _)| day_names[i])
+                        .collect();
+                    shell_println!("  id={} {:?} {:02}:{:02}-{:02}:{:02} days=[{}] profile={} enabled={}",
+                        s.id, s.name, s.start_hour, s.start_minute,
+                        s.end_hour, s.end_minute, days.join(","), s.profile_id, s.enabled);
+                }
+            }
+        }
+        "addsched" => {
+            // focusassist addsched <name> <start_hh:mm> <end_hh:mm> <profile_id> [days]
+            let name = parts.get(1).copied().unwrap_or("");
+            let start = parts.get(2).copied().unwrap_or("");
+            let end = parts.get(3).copied().unwrap_or("");
+            let pid = parts.get(4).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if name.is_empty() || start.is_empty() || end.is_empty() || pid == 0 {
+                shell_println!("Usage: focusassist addsched <name> <HH:MM> <HH:MM> <profile_id> [days]");
+                shell_println!("  days: comma-separated 0-6 (0=Sun). Default: all days.");
+                return;
+            }
+            let parse_time = |t: &str| -> Option<(u8, u8)> {
+                let p: Vec<&str> = t.split(':').collect();
+                if p.len() != 2 { return None; }
+                Some((p[0].parse().ok()?, p[1].parse().ok()?))
+            };
+            let (sh, sm) = match parse_time(start) {
+                Some(t) => t,
+                None => { shell_println!("Invalid start time"); return; }
+            };
+            let (eh, em) = match parse_time(end) {
+                Some(t) => t,
+                None => { shell_println!("Invalid end time"); return; }
+            };
+            let mut days = [true; 7];
+            if let Some(d) = parts.get(5) {
+                days = [false; 7];
+                for part in d.split(',') {
+                    if let Ok(n) = part.parse::<usize>() {
+                        if n < 7 { days[n] = true; }
+                    }
+                }
+            }
+            match focusassist::add_schedule(name, days, sh, sm, eh, em, pid) {
+                Ok(id) => shell_println!("Created schedule '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmsched" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: focusassist rmsched <schedule_id>");
+                return;
+            }
+            match focusassist::remove_schedule(id) {
+                Ok(()) => shell_println!("Removed schedule {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "autofs" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            match val {
+                "on" => { let _ = focusassist::set_auto_fullscreen(true); shell_println!("Auto fullscreen: ON"); }
+                "off" => { let _ = focusassist::set_auto_fullscreen(false); shell_println!("Auto fullscreen: OFF"); }
+                _ => shell_println!("Usage: focusassist autofs <on|off>"),
+            }
+        }
+        "autogame" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            match val {
+                "on" => { let _ = focusassist::set_auto_gaming(true); shell_println!("Auto gaming: ON"); }
+                "off" => { let _ = focusassist::set_auto_gaming(false); shell_println!("Auto gaming: OFF"); }
+                _ => shell_println!("Usage: focusassist autogame <on|off>"),
+            }
+        }
+        "autopres" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            match val {
+                "on" => { let _ = focusassist::set_auto_presentation(true); shell_println!("Auto presentation: ON"); }
+                "off" => { let _ = focusassist::set_auto_presentation(false); shell_println!("Auto presentation: OFF"); }
+                _ => shell_println!("Usage: focusassist autopres <on|off>"),
+            }
+        }
+        "stats" => {
+            let (profiles, schedules, active, missed, sessions, ops) = focusassist::stats();
+            shell_println!("profiles={} schedules={} active={} missed={} sessions={} ops={}",
+                profiles, schedules, active, missed, sessions, ops);
+        }
+        "test" => {
+            focusassist::self_test();
+            shell_println!("Self-tests passed.");
+        }
+        _ => {
+            shell_println!("focusassist / dnd — Focus Assist / Do Not Disturb");
+            shell_println!("Subcommands:");
+            shell_println!("  show          Show current focus status");
+            shell_println!("  on [id]       Activate focus profile (default: 1=Priority Only)");
+            shell_println!("  off           Deactivate focus, show missed summary");
+            shell_println!("  profiles      List all focus profiles");
+            shell_println!("  create <name> [priority|alarms|total]  Create custom profile");
+            shell_println!("  remove <id>   Remove custom profile");
+            shell_println!("  mode <id> <mode>  Set profile mode");
+            shell_println!("  addapp <id> <app>  Add priority app to profile");
+            shell_println!("  rmapp <id> <app>   Remove priority app from profile");
+            shell_println!("  apps <id>     List priority apps for profile");
+            shell_println!("  reply <id> [msg]  Set/clear auto-reply");
+            shell_println!("  missed        Show missed notifications");
+            shell_println!("  schedules     List focus schedules");
+            shell_println!("  addsched <name> <HH:MM> <HH:MM> <profile_id> [days]  Add schedule");
+            shell_println!("  rmsched <id>  Remove schedule");
+            shell_println!("  autofs <on|off>    Auto-activate on fullscreen");
+            shell_println!("  autogame <on|off>  Auto-activate on gaming");
+            shell_println!("  autopres <on|off>  Auto-activate on presentation");
+            shell_println!("  init          Initialize defaults");
+            shell_println!("  stats         Show counters");
+            shell_println!("  test          Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -32460,7 +32799,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

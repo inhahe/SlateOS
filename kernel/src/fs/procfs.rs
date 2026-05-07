@@ -148,6 +148,7 @@ const ROOT_FILES: &[&str] = &[
     "bookmarks",
     "clipboard",
     "dragdrop",
+    "fileops",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2642,6 +2643,38 @@ fn gen_dragdrop() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fileops() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, completed, cancelled, bytes_moved) = super::fileops::stats();
+
+    out.push_str("File Operations\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Total ops:    {}\n", total));
+    out.push_str(&format!("Completed:    {}\n", completed));
+    out.push_str(&format!("Cancelled:    {}\n", cancelled));
+    out.push_str(&format!("Bytes moved:  {}\n\n", bytes_moved));
+
+    let ops = super::fileops::list_ops();
+    if !ops.is_empty() {
+        out.push_str(&format!("{:6} {:6} {:10} {}\n", "ID", "KIND", "STATE", "LABEL"));
+        for (id, kind, state, label) in &ops {
+            let state_str = match state {
+                super::fileops::OpState::Queued => "queued",
+                super::fileops::OpState::Running => "running",
+                super::fileops::OpState::Paused => "paused",
+                super::fileops::OpState::Completed => "done",
+                super::fileops::OpState::Cancelled => "cancelled",
+                super::fileops::OpState::Undoing => "undoing",
+            };
+            out.push_str(&format!("{:6} {:6} {:10} {}\n", id, kind.label(), state_str, label));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2731,6 +2764,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "bookmarks" => Ok(gen_bookmarks()),
         "clipboard" => Ok(gen_clipboard()),
         "dragdrop" => Ok(gen_dragdrop()),
+        "fileops" => Ok(gen_fileops()),
         _ => Err(KernelError::NotFound),
     }
 }

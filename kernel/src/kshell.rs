@@ -3086,7 +3086,7 @@ const COMMANDS: &[&str] = &[
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "findex", "finfo", "fold", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "find", "findex", "finfo", "fops", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
@@ -4378,6 +4378,7 @@ fn dispatch(line: &str) {
         "bookmark" | "bm" => cmd_bookmark(args),
         "clipboard" | "clip" => cmd_clipboard(args),
         "dragdrop" => cmd_dragdrop(args),
+        "fileops" | "fops" => cmd_fileops(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -15308,6 +15309,217 @@ fn cmd_dragdrop(args: &str) {
     }
 }
 
+/// `fileops` — bulk file operations engine.
+fn cmd_fileops(args: &str) {
+    use crate::fs::fileops;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "copy" | "cp" => {
+            // fileops copy <src> [<src2> ...] <dest> [--overwrite|--skip|--rename]
+            if parts.len() < 3 {
+                shell_println!("Usage: fileops copy <source...> <dest> [--overwrite|--skip|--rename]");
+                return;
+            }
+            let mut sources = Vec::new();
+            let mut dest = "";
+            let mut policy = fileops::ConflictPolicy::AutoRename;
+
+            // Parse: everything except last non-flag arg is a source, last non-flag is dest.
+            let mut non_flags: Vec<&str> = Vec::new();
+            for &p in parts.iter().skip(1) {
+                match p {
+                    "--overwrite" | "-o" => policy = fileops::ConflictPolicy::Overwrite,
+                    "--skip" | "-s" => policy = fileops::ConflictPolicy::Skip,
+                    "--rename" | "-r" => policy = fileops::ConflictPolicy::AutoRename,
+                    "--merge" | "-m" => policy = fileops::ConflictPolicy::MergeDir,
+                    _ => non_flags.push(p),
+                }
+            }
+
+            if non_flags.len() < 2 {
+                shell_println!("Need at least one source and one destination.");
+                return;
+            }
+
+            dest = non_flags.last().copied().unwrap_or("");
+            for &nf in non_flags.iter().take(non_flags.len().saturating_sub(1)) {
+                sources.push(resolve_path(nf));
+            }
+
+            let dest_resolved = resolve_path(dest);
+            let src_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+
+            match fileops::create(fileops::OpKind::Copy, &src_refs, &dest_resolved, policy) {
+                Ok(op_id) => {
+                    shell_println!("Created copy operation {}.", op_id);
+                    match fileops::execute(op_id) {
+                        Ok(prog) => {
+                            shell_println!("Completed: {}/{} items, {} bytes, {} skipped, {} failed.",
+                                prog.processed_items, prog.total_items,
+                                prog.transferred_bytes, prog.skipped, prog.failed);
+                        }
+                        Err(e) => shell_println!("Execution error: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "move" | "mv" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: fileops move <source...> <dest> [--overwrite|--skip|--rename]");
+                return;
+            }
+            let mut policy = fileops::ConflictPolicy::AutoRename;
+            let mut non_flags: Vec<&str> = Vec::new();
+
+            for &p in parts.iter().skip(1) {
+                match p {
+                    "--overwrite" | "-o" => policy = fileops::ConflictPolicy::Overwrite,
+                    "--skip" | "-s" => policy = fileops::ConflictPolicy::Skip,
+                    "--rename" | "-r" => policy = fileops::ConflictPolicy::AutoRename,
+                    _ => non_flags.push(p),
+                }
+            }
+
+            if non_flags.len() < 2 {
+                shell_println!("Need at least one source and one destination.");
+                return;
+            }
+
+            let dest_str = non_flags.last().copied().unwrap_or("");
+            let mut sources = Vec::new();
+            for &nf in non_flags.iter().take(non_flags.len().saturating_sub(1)) {
+                sources.push(resolve_path(nf));
+            }
+
+            let dest_resolved = resolve_path(dest_str);
+            let src_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+
+            match fileops::create(fileops::OpKind::Move, &src_refs, &dest_resolved, policy) {
+                Ok(op_id) => {
+                    shell_println!("Created move operation {}.", op_id);
+                    match fileops::execute(op_id) {
+                        Ok(prog) => {
+                            shell_println!("Completed: {}/{} items, {} bytes, {} skipped, {} failed.",
+                                prog.processed_items, prog.total_items,
+                                prog.transferred_bytes, prog.skipped, prog.failed);
+                        }
+                        Err(e) => shell_println!("Execution error: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fileops delete <path...>");
+                return;
+            }
+            let mut sources = Vec::new();
+            for &p in parts.iter().skip(1) {
+                sources.push(resolve_path(p));
+            }
+            let src_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+
+            match fileops::create(fileops::OpKind::Delete, &src_refs, "", fileops::ConflictPolicy::Skip) {
+                Ok(op_id) => {
+                    shell_println!("Created delete operation {}.", op_id);
+                    match fileops::execute(op_id) {
+                        Ok(prog) => {
+                            shell_println!("Completed: {}/{} items, {} skipped, {} failed.",
+                                prog.processed_items, prog.total_items,
+                                prog.skipped, prog.failed);
+                        }
+                        Err(e) => shell_println!("Execution error: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "ls" => {
+            let ops = fileops::list_ops();
+            if ops.is_empty() {
+                shell_println!("No file operations.");
+            } else {
+                shell_println!("{:6} {:6} {:10} {}", "ID", "KIND", "STATE", "LABEL");
+                for (id, kind, state, label) in &ops {
+                    let state_str = match state {
+                        fileops::OpState::Queued => "queued",
+                        fileops::OpState::Running => "running",
+                        fileops::OpState::Paused => "paused",
+                        fileops::OpState::Completed => "done",
+                        fileops::OpState::Cancelled => "cancelled",
+                        fileops::OpState::Undoing => "undoing",
+                    };
+                    shell_println!("{:6} {:6} {:10} {}", id, kind.label(), state_str, label);
+                }
+            }
+        }
+        "cancel" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match fileops::cancel(id) {
+                        Ok(()) => shell_println!("Operation {} cancelled.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid operation ID.");
+                }
+            } else {
+                shell_println!("Usage: fileops cancel <op_id>");
+            }
+        }
+        "undo" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match fileops::undo(id) {
+                        Ok((undone, failed)) => {
+                            shell_println!("Undo: {} undone, {} could not be undone.", undone, failed);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid operation ID.");
+                }
+            } else {
+                shell_println!("Usage: fileops undo <op_id>");
+            }
+        }
+        "cleanup" => {
+            let removed = fileops::cleanup();
+            shell_println!("Removed {} completed/cancelled operations.", removed);
+        }
+        "stats" | "" => {
+            let (total, completed, cancelled, bytes_moved) = fileops::stats();
+            shell_println!("File operations statistics:");
+            shell_println!("  Total ops:   {}", total);
+            shell_println!("  Completed:   {}", completed);
+            shell_println!("  Cancelled:   {}", cancelled);
+            shell_println!("  Bytes moved: {}", bytes_moved);
+        }
+        "reset" => {
+            fileops::reset_stats();
+            fileops::clear();
+            shell_println!("File operations reset.");
+        }
+        _ => {
+            shell_println!("Usage: fileops <command>");
+            shell_println!("  copy <src...> <dest> [flags]  Copy files");
+            shell_println!("  move <src...> <dest> [flags]  Move files");
+            shell_println!("  delete <path...>              Delete files");
+            shell_println!("  list|ls                       List operations");
+            shell_println!("  cancel <id>                   Cancel operation");
+            shell_println!("  undo <id>                     Undo operation");
+            shell_println!("  cleanup                       Remove finished ops");
+            shell_println!("  stats                         Show statistics (default)");
+            shell_println!("  reset                         Reset all");
+            shell_println!("");
+            shell_println!("Flags: --overwrite|-o  --skip|-s  --rename|-r  --merge|-m");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -20876,7 +21088,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

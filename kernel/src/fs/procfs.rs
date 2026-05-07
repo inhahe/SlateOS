@@ -120,6 +120,7 @@ const ROOT_FILES: &[&str] = &[
     "search",
     "tags",
     "usage",
+    "health",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1894,6 +1895,37 @@ fn gen_usage() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/health` — filesystem health status.
+fn gen_health() -> Vec<u8> {
+    use crate::fs::health;
+    let mut out = String::with_capacity(1024);
+
+    out.push_str(&format!("Filesystem Health ({} checks run)\n\n", health::checks_run()));
+
+    if let Some(report) = health::last_report() {
+        out.push_str(&format!("Overall: {}\n", report.status.name()));
+        out.push_str(&format!("  healthy:  {}\n", report.healthy));
+        out.push_str(&format!("  warnings: {}\n", report.warnings));
+        out.push_str(&format!("  critical: {}\n", report.critical));
+        out.push_str("\nChecks:\n");
+        for c in &report.checks {
+            let icon = match c.status {
+                health::HealthStatus::Healthy => "+",
+                health::HealthStatus::Warning => "!",
+                health::HealthStatus::Critical => "X",
+            };
+            out.push_str(&format!("  [{}] {:14} {}\n", icon, c.name, c.message));
+            if let Some(ref rec) = c.recommendation {
+                out.push_str(&format!("      -> {}\n", rec));
+            }
+        }
+    } else {
+        out.push_str("(no health check cached; run `fshealth` to check)\n");
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1955,6 +1987,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "search" => Ok(gen_search()),
         "tags" => Ok(gen_tags()),
         "usage" => Ok(gen_usage()),
+        "health" => Ok(gen_health()),
         _ => Err(KernelError::NotFound),
     }
 }

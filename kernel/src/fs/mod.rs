@@ -45,6 +45,7 @@ pub mod ext4;
 pub mod fat;
 pub mod fcompress;
 pub mod handle;
+pub mod health;
 pub mod history;
 pub mod index;
 pub mod intercept;

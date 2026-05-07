@@ -3114,6 +3114,7 @@ const COMMANDS: &[&str] = &[
     "fsearch",
     "tag",
     "diskuse",
+    "fshealth",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4346,6 +4347,7 @@ fn dispatch(line: &str) {
         "fsearch" => cmd_fsearch(args),
         "tag" => cmd_tag(args),
         "diskuse" => cmd_diskuse(args),
+        "fshealth" => cmd_fshealth(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -12084,6 +12086,43 @@ fn cmd_diskuse(args: &str) {
     }
 }
 
+/// `fshealth` — filesystem health check.
+///
+/// Runs all health checks and reports status with recommendations.
+fn cmd_fshealth(_args: &str) {
+    use crate::fs::health;
+
+    shell_println!("Running filesystem health check...");
+    shell_println!();
+
+    match health::check() {
+        Ok(report) => {
+            let status_str = match report.status {
+                health::HealthStatus::Healthy => "HEALTHY",
+                health::HealthStatus::Warning => "WARNING",
+                health::HealthStatus::Critical => "CRITICAL",
+            };
+            shell_println!("=== Filesystem Health: {} ===", status_str);
+            shell_println!("  {} check(s): {} healthy, {} warning(s), {} critical",
+                report.total_checks, report.healthy, report.warnings, report.critical);
+            shell_println!();
+
+            for c in &report.checks {
+                let icon = match c.status {
+                    health::HealthStatus::Healthy => "[+]",
+                    health::HealthStatus::Warning => "[!]",
+                    health::HealthStatus::Critical => "[X]",
+                };
+                shell_println!("{} {:14} {}", icon, c.name, c.message);
+                if let Some(ref rec) = c.recommendation {
+                    shell_println!("    -> {}", rec);
+                }
+            }
+        }
+        Err(e) => shell_println!("fshealth: {:?}", e),
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -17342,7 +17381,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

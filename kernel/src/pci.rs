@@ -295,6 +295,99 @@ pub fn enable_bus_master(addr: PciAddress) {
 }
 
 // ---------------------------------------------------------------------------
+// PCI Capabilities
+// ---------------------------------------------------------------------------
+
+/// Offset of the Capabilities Pointer in PCI config space.
+const CFG_CAP_PTR: u8 = 0x34;
+
+/// Offset of the Status register in PCI config space.
+const CFG_STATUS: u8 = 0x06;
+
+/// Status register bit: device has capabilities list.
+const STATUS_CAP_LIST: u16 = 1 << 4;
+
+/// A PCI capability entry found during capability list traversal.
+#[derive(Debug, Clone, Copy)]
+pub struct PciCapability {
+    /// Capability ID (e.g., 0x09 = Vendor Specific).
+    pub id: u8,
+    /// Offset in config space where this capability starts.
+    pub offset: u8,
+}
+
+/// Walk the PCI capabilities linked list for a device.
+///
+/// Returns all capabilities found.  The list terminates when the next
+/// pointer is 0x00 or when we've traversed 48 entries (safety limit).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn walk_capabilities(addr: PciAddress) -> Vec<PciCapability> {
+    let mut caps = Vec::new();
+
+    // Check that the device has capabilities (Status bit 4).
+    let status = config_read16(addr.bus, addr.device, addr.function, CFG_STATUS);
+    if status & STATUS_CAP_LIST == 0 {
+        return caps;
+    }
+
+    // Read the capabilities pointer (low byte of dword at 0x34).
+    let mut ptr = config_read8(addr.bus, addr.device, addr.function, CFG_CAP_PTR);
+    ptr &= 0xFC; // Dword-aligned.
+
+    let mut count = 0u8;
+    while ptr != 0 && count < 48 {
+        let cap_id = config_read8(addr.bus, addr.device, addr.function, ptr);
+        let cap_next = config_read8(addr.bus, addr.device, addr.function, ptr.wrapping_add(1));
+
+        caps.push(PciCapability { id: cap_id, offset: ptr });
+
+        ptr = cap_next & 0xFC;
+        count = count.wrapping_add(1);
+    }
+
+    caps
+}
+
+/// Find the first capability with a given ID for a device.
+pub fn find_capability(addr: PciAddress, cap_id: u8) -> Option<PciCapability> {
+    walk_capabilities(addr).into_iter().find(|c| c.id == cap_id)
+}
+
+/// Find all capabilities with a given ID for a device.
+pub fn find_capabilities(addr: PciAddress, cap_id: u8) -> Vec<PciCapability> {
+    walk_capabilities(addr).into_iter().filter(|c| c.id == cap_id).collect()
+}
+
+/// Decode a 64-bit BAR (for memory-mapped BARs that are 64-bit).
+///
+/// If `bar_index` is a 64-bit BAR, reads BARs[index] and BARs[index+1]
+/// to form the full 64-bit base address.  Returns None if the BAR is
+/// I/O space or if the index is out of range.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn bar_mmio_addr64(dev: &PciDevice, bar_index: usize) -> Option<u64> {
+    if bar_index >= 6 {
+        return None;
+    }
+    let bar_lo = dev.bars[bar_index];
+    // Bit 0 = 0 means memory space.
+    if bar_lo & 1 != 0 {
+        return None; // I/O space.
+    }
+    // Bits 2:1 indicate type: 00 = 32-bit, 10 = 64-bit.
+    let bar_type = (bar_lo >> 1) & 0x3;
+    let base_lo = u64::from(bar_lo & 0xFFFF_FFF0);
+
+    if bar_type == 0x2 && bar_index + 1 < 6 {
+        // 64-bit BAR.
+        let bar_hi = dev.bars[bar_index + 1];
+        Some(base_lo | (u64::from(bar_hi) << 32))
+    } else {
+        // 32-bit BAR.
+        Some(base_lo)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

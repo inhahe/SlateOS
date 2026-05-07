@@ -110,6 +110,14 @@ impl Virtqueue {
         self.queue_size
     }
 
+    /// Return the physical base address of this queue's backing memory.
+    ///
+    /// Needed by the modern virtio transport to set descriptor/avail/used
+    /// ring addresses separately.
+    pub fn phys_addr(&self) -> u64 {
+        self.phys_frame.addr()
+    }
+
     /// Allocate and initialize a virtqueue.
     ///
     /// Allocates physically contiguous memory from the frame allocator,

@@ -17,6 +17,7 @@
 //! - Virtio 1.0+ spec: <https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html>
 
 pub mod blk;
+pub mod gpu;
 pub mod net;
 pub mod queue;
 pub mod sound;

@@ -318,12 +318,12 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] IOMMU page table setup (DMA remapping)
   - [x] Per-device DMA sandboxing for driver isolation
 - [ ] Ada/SPARK FFI bridge for kernel-space drivers
-- [-] virtio drivers (disk, network, GPU, sound) for VM development/testing
+- [x] virtio drivers (disk, network, GPU, sound) for VM development/testing
   - [x] virtio-blk driver (legacy PCI transport, synchronous sector I/O, interrupt-driven completion with polling fallback)
   - [x] virtio-net driver (legacy PCI transport, RX/TX queues, MAC read, interrupt acknowledgment)
   - [x] virtio-sound driver (legacy PCI transport, 4 virtqueues, PCM stream lifecycle, 48kHz/S16/stereo playback)
   - [x] Shared PCI IRQ handling (level-triggered, ISR reads device status to deassert)
-  - [ ] virtio-gpu driver (2D framebuffer, cursor, multi-head)
+  - [x] virtio-gpu driver (modern PCI transport, MMIO BARs, PCI capability parsing, 2D framebuffer, resource management, scanout config)
 
 ### 2.2 Essential drivers
 - [-] Keyboard (PS/2 and USB HID)

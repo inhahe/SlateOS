@@ -691,6 +691,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("[ac97] Init: {:?} (non-fatal)", e);
     }
 
+    // Virtio-GPU driver: 2D framebuffer for VMs.
+    // QEMU: `-device virtio-gpu-pci`
+    if let Err(e) = virtio::gpu::init(boot_info.hhdm_offset) {
+        serial_println!("[virtio-gpu] Init: {:?} (non-fatal)", e);
+    }
+
     console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
 
     // Step 20d-3: Initialize networking stack.
@@ -1320,6 +1326,9 @@ extern "C" fn kmain() -> ! {
 
     // AC97 audio self-test.
     ac97::self_test();
+
+    // Virtio-GPU self-test.
+    virtio::gpu::self_test();
 
     // Audio mixer self-test.
     audio_mixer::self_test();

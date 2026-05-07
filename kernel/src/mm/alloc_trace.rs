@@ -173,7 +173,9 @@ static RING: TraceRing = TraceRing(core::cell::UnsafeCell::new(
 static WRITE_POS: AtomicU32 = AtomicU32::new(0);
 
 /// Whether tracing is enabled.
-static ENABLED: AtomicBool = AtomicBool::new(true);
+/// Default: disabled — enable via `alloc_trace::enable()` or sysctl.
+/// The disabled path is a single atomic load (~1ns), safe for hot paths.
+static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Total events recorded since boot.
 static TOTAL_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -191,8 +193,10 @@ static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
 /// Extremely cheap when enabled (~10ns).  No-op when disabled.
 #[inline]
 pub fn record(op: AllocOp, frame_idx: u32, owner: Owner, order: u8) {
+    // Fast-path: single atomic load when disabled (~1ns).
+    // No dropped-event counting on the hot path — that would add
+    // an atomic increment to every heap alloc/free when tracing is off.
     if !ENABLED.load(Ordering::Relaxed) {
-        DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
         return;
     }
 

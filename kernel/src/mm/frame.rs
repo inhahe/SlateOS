@@ -1730,6 +1730,13 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
                     addr,
                     order as u64,
                 );
+                // Profiling: detailed alloc event in dedicated ring buffer
+                // (zero-cost when alloc_trace is disabled).
+                super::alloc_trace::record_alloc_block(
+                    (addr / FRAME_SIZE as u64) as u32,
+                    super::frame_owner::Owner::Unknown,
+                    order as u8,
+                );
                 return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
             }
             Err(KernelError::OutOfMemory) => {
@@ -2011,6 +2018,14 @@ pub unsafe fn free_order(frame: PhysFrame, order: usize) -> KernelResult<()> {
         crate::ktrace::event::FRAME_FREE,
         frame.addr(),
         order as u64,
+    );
+    // Profiling: detailed free event in dedicated ring buffer
+    // (zero-cost when alloc_trace is disabled).
+    super::alloc_trace::record(
+        super::alloc_trace::AllocOp::Free,
+        (frame.addr() / FRAME_SIZE as u64) as u32,
+        super::frame_owner::Owner::Free,
+        order as u8,
     );
 
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;

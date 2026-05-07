@@ -180,6 +180,16 @@ pub const PARAM_FS_READAHEAD_INITIAL: u16 = 21;
 /// Default: 5.
 pub const PARAM_FS_DIRTY_EXPIRE_SECS: u16 = 22;
 
+/// Enable/disable allocation tracing (mm.alloc_trace).
+///
+/// 0 = disabled (default, zero-cost — single atomic load per alloc).
+/// 1 = enabled (records alloc/free events in 256-entry ring buffer).
+///
+/// This is the "profiling mode for high-frequency events" — enables
+/// detailed tracking of frame allocation/free events at the buddy
+/// allocator level.  Use `alloctrace` kshell command to inspect.
+pub const PARAM_MM_ALLOC_TRACE: u16 = 7;
+
 // ---------------------------------------------------------------------------
 // Parameter definition
 // ---------------------------------------------------------------------------
@@ -396,6 +406,14 @@ pub fn init() {
         64, // Maximum: swap 64 pages before yielding
     );
 
+    reg.register(
+        PARAM_MM_ALLOC_TRACE,
+        "mm.alloc_trace",
+        0,  // Disabled (zero-cost single atomic load per alloc/free)
+        0,
+        1,  // 1 = enabled
+    );
+
     // Scheduler parameters (informational — actual values are in the
     // task module, but exposing them here allows the sysctl interface
     // to read them).
@@ -518,6 +536,14 @@ fn notify_subsystem(id: u16, value: u64) {
         PARAM_MM_ZERO_ON_ALLOC => {
             // value 0 = zero-on-alloc (default), 1 = zero-on-free.
             crate::mm::frame::set_zero_on_free_mode(value == 1);
+        }
+        PARAM_MM_ALLOC_TRACE => {
+            // Toggle frame allocation profiling.
+            if value != 0 {
+                crate::mm::alloc_trace::enable();
+            } else {
+                crate::mm::alloc_trace::disable();
+            }
         }
         PARAM_SCHED_BACKEND => {
             // Update the desired scheduler backend.  Takes effect on

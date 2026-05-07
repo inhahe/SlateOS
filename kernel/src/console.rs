@@ -44,6 +44,41 @@ const TAB_STOP: u32 = 8;
 // Console state
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ANSI color table (standard 8 + bright 8 = 16 colors)
+// ---------------------------------------------------------------------------
+
+/// Standard ANSI 16-color palette (BGRA format).
+const ANSI_COLORS: [u32; 16] = [
+    0x0000_0000, // 0  Black
+    0x00AA_0000, // 1  Red
+    0x0000_AA00, // 2  Green
+    0x00AA_5500, // 3  Brown/Yellow
+    0x0000_00AA, // 4  Blue
+    0x00AA_00AA, // 5  Magenta
+    0x0000_AAAA, // 6  Cyan
+    0x00AA_AAAA, // 7  White (light gray)
+    0x0055_5555, // 8  Bright black (dark gray)
+    0x00FF_5555, // 9  Bright red
+    0x0055_FF55, // 10 Bright green
+    0x00FF_FF55, // 11 Bright yellow
+    0x0055_55FF, // 12 Bright blue
+    0x00FF_55FF, // 13 Bright magenta
+    0x0055_FFFF, // 14 Bright cyan
+    0x00FF_FFFF, // 15 Bright white
+];
+
+/// ANSI escape sequence parser state.
+#[derive(Clone, Copy, PartialEq)]
+enum AnsiState {
+    /// Normal character output.
+    Normal,
+    /// Saw ESC (0x1B), waiting for '[' or other control character.
+    Escape,
+    /// In a CSI sequence (ESC [), accumulating parameter bytes.
+    Csi,
+}
+
 /// Internal console state, protected by a mutex.
 struct ConsoleInner {
     /// Virtual address of the framebuffer start.
@@ -64,6 +99,22 @@ struct ConsoleInner {
     cursor_row: u32,
     /// Whether init() has been called.
     initialized: bool,
+    /// Current foreground color.
+    fg_color: u32,
+    /// Current background color.
+    bg_color: u32,
+    /// Whether bold/bright mode is active.
+    bold: bool,
+    /// ANSI escape sequence parser state.
+    ansi_state: AnsiState,
+    /// CSI parameter accumulator (up to 8 parameters).
+    ansi_params: [u16; 8],
+    /// Number of accumulated parameters.
+    ansi_param_count: usize,
+    /// Current parameter being accumulated.
+    ansi_cur_param: u16,
+    /// Whether we've seen a digit for the current parameter.
+    ansi_has_digit: bool,
 }
 
 impl ConsoleInner {
@@ -79,6 +130,43 @@ impl ConsoleInner {
             cursor_col: 0,
             cursor_row: 0,
             initialized: false,
+            fg_color: FG_COLOR,
+            bg_color: BG_COLOR,
+            bold: false,
+            ansi_state: AnsiState::Normal,
+            ansi_params: [0; 8],
+            ansi_param_count: 0,
+            ansi_cur_param: 0,
+            ansi_has_digit: false,
+        }
+    }
+
+    /// Reset ANSI parser state.
+    fn ansi_reset(&mut self) {
+        self.ansi_state = AnsiState::Normal;
+        self.ansi_params = [0; 8];
+        self.ansi_param_count = 0;
+        self.ansi_cur_param = 0;
+        self.ansi_has_digit = false;
+    }
+
+    /// Finalize the current CSI parameter and start a new one.
+    fn ansi_next_param(&mut self) {
+        if self.ansi_param_count < 8 {
+            self.ansi_params[self.ansi_param_count] = self.ansi_cur_param;
+            self.ansi_param_count += 1;
+        }
+        self.ansi_cur_param = 0;
+        self.ansi_has_digit = false;
+    }
+
+    /// Get a CSI parameter by index, defaulting to `default` if not present.
+    fn ansi_param(&self, idx: usize, default: u16) -> u16 {
+        if idx < self.ansi_param_count {
+            let v = self.ansi_params[idx];
+            if v == 0 && !self.ansi_has_digit { default } else { v }
+        } else {
+            default
         }
     }
 }
@@ -195,56 +283,64 @@ pub fn clear() {
 /// Render a single character at the current cursor position and advance
 /// the cursor.
 ///
-/// Handles `\n` (newline), `\r` (carriage return), and `\t` (tab).
-/// Non-printable characters outside those three are ignored.
+/// Handles `\n` (newline), `\r` (carriage return), `\t` (tab), and
+/// ANSI/VT100 escape sequences (colors, cursor movement, screen clearing).
 pub fn putchar(c: u8) {
     let mut con = CONSOLE.lock();
     if !con.initialized {
         return;
     }
 
+    match con.ansi_state {
+        AnsiState::Normal => putchar_normal(&mut con, c),
+        AnsiState::Escape => putchar_escape(&mut con, c),
+        AnsiState::Csi => putchar_csi(&mut con, c),
+    }
+}
+
+/// Handle a character in normal (non-escape) mode.
+fn putchar_normal(con: &mut ConsoleInner, c: u8) {
     match c {
+        0x1B => {
+            // ESC — start of an escape sequence.
+            con.ansi_state = AnsiState::Escape;
+        }
         b'\n' => {
             con.cursor_col = 0;
             con.cursor_row = con.cursor_row.saturating_add(1);
             if con.cursor_row >= con.rows {
-                scroll_up_locked(&mut con);
+                scroll_up_locked(con);
             }
         }
         b'\r' => {
             con.cursor_col = 0;
         }
         b'\x08' => {
-            // Backspace: move cursor back one column (if not at start
-            // of line).  Does NOT erase the character — the caller is
-            // responsible for overwriting with a space if desired.
             if con.cursor_col > 0 {
                 con.cursor_col = con.cursor_col.saturating_sub(1);
             }
         }
         b'\t' => {
-            // Advance to the next tab stop (multiple of TAB_STOP).
-            // If already at or past the last tab stop on the line,
-            // wrap to the next line.
             let next = (con.cursor_col / TAB_STOP).saturating_add(1).saturating_mul(TAB_STOP);
             if next >= con.cols {
                 con.cursor_col = 0;
                 con.cursor_row = con.cursor_row.saturating_add(1);
                 if con.cursor_row >= con.rows {
-                    scroll_up_locked(&mut con);
+                    scroll_up_locked(con);
                 }
             } else {
                 con.cursor_col = next;
             }
         }
         _ => {
-            // Render the glyph at the current cursor position.
+            // Render the glyph at the current cursor position with current colors.
             let col = con.cursor_col;
             let row = con.cursor_row;
             let fb = con.fb_addr;
             let pitch = con.fb_pitch;
+            let fg = con.fg_color;
 
-            draw_glyph(fb, pitch, col, row, c);
+            draw_glyph_colored(fb, pitch, col, row, c, fg);
 
             // Advance cursor.
             con.cursor_col = col.saturating_add(1);
@@ -252,9 +348,282 @@ pub fn putchar(c: u8) {
                 con.cursor_col = 0;
                 con.cursor_row = con.cursor_row.saturating_add(1);
                 if con.cursor_row >= con.rows {
-                    scroll_up_locked(&mut con);
+                    scroll_up_locked(con);
                 }
             }
+        }
+    }
+}
+
+/// Handle a character after ESC was received.
+fn putchar_escape(con: &mut ConsoleInner, c: u8) {
+    match c {
+        b'[' => {
+            // CSI (Control Sequence Introducer) — ESC [
+            con.ansi_state = AnsiState::Csi;
+            con.ansi_params = [0; 8];
+            con.ansi_param_count = 0;
+            con.ansi_cur_param = 0;
+            con.ansi_has_digit = false;
+        }
+        b'c' => {
+            // RIS (Reset to Initial State) — ESC c
+            con.fg_color = FG_COLOR;
+            con.bg_color = BG_COLOR;
+            con.bold = false;
+            con.ansi_reset();
+        }
+        _ => {
+            // Unknown escape — discard and return to normal.
+            con.ansi_reset();
+        }
+    }
+}
+
+/// Handle a character within a CSI sequence (ESC [ ...).
+fn putchar_csi(con: &mut ConsoleInner, c: u8) {
+    match c {
+        b'0'..=b'9' => {
+            // Accumulate digit into current parameter.
+            con.ansi_cur_param = con.ansi_cur_param.saturating_mul(10)
+                .saturating_add((c - b'0') as u16);
+            con.ansi_has_digit = true;
+        }
+        b';' => {
+            // Parameter separator.
+            con.ansi_next_param();
+        }
+        // --- Final bytes (command characters) ---
+        b'm' => {
+            // SGR (Select Graphic Rendition) — colors and attributes.
+            con.ansi_next_param(); // Finalize last param.
+            handle_sgr(con);
+            con.ansi_reset();
+        }
+        b'H' | b'f' => {
+            // CUP (Cursor Position) — ESC [ row ; col H
+            con.ansi_next_param();
+            let row = con.ansi_param(0, 1).saturating_sub(1) as u32;
+            let col = con.ansi_param(1, 1).saturating_sub(1) as u32;
+            con.cursor_row = row.min(con.rows.saturating_sub(1));
+            con.cursor_col = col.min(con.cols.saturating_sub(1));
+            con.ansi_reset();
+        }
+        b'A' => {
+            // CUU (Cursor Up).
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            con.cursor_row = con.cursor_row.saturating_sub(n);
+            con.ansi_reset();
+        }
+        b'B' => {
+            // CUD (Cursor Down).
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            con.cursor_row = (con.cursor_row + n).min(con.rows.saturating_sub(1));
+            con.ansi_reset();
+        }
+        b'C' => {
+            // CUF (Cursor Forward/Right).
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            con.cursor_col = (con.cursor_col + n).min(con.cols.saturating_sub(1));
+            con.ansi_reset();
+        }
+        b'D' => {
+            // CUB (Cursor Back/Left).
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            con.cursor_col = con.cursor_col.saturating_sub(n);
+            con.ansi_reset();
+        }
+        b'J' => {
+            // ED (Erase in Display).
+            con.ansi_next_param();
+            let mode = con.ansi_param(0, 0);
+            handle_erase_display(con, mode);
+            con.ansi_reset();
+        }
+        b'K' => {
+            // EL (Erase in Line).
+            con.ansi_next_param();
+            let mode = con.ansi_param(0, 0);
+            handle_erase_line(con, mode);
+            con.ansi_reset();
+        }
+        b'h' | b'l' => {
+            // Set/reset mode — ignore (used for cursor visibility etc.)
+            con.ansi_reset();
+        }
+        _ => {
+            // Unknown command or intermediate byte — abort sequence.
+            if c >= 0x40 && c <= 0x7E {
+                // Final byte we don't handle.
+                con.ansi_reset();
+            }
+            // If it's an intermediate byte (0x20-0x3F), keep accumulating.
+            // But for safety, abort after too many characters.
+            if con.ansi_param_count >= 8 {
+                con.ansi_reset();
+            }
+        }
+    }
+}
+
+/// Handle SGR (Select Graphic Rendition) parameters.
+fn handle_sgr(con: &mut ConsoleInner) {
+    // If no parameters, treat as reset (SGR 0).
+    if con.ansi_param_count == 0 {
+        con.fg_color = FG_COLOR;
+        con.bg_color = BG_COLOR;
+        con.bold = false;
+        return;
+    }
+
+    for i in 0..con.ansi_param_count {
+        let param = con.ansi_params[i];
+        match param {
+            0 => {
+                // Reset all attributes.
+                con.fg_color = FG_COLOR;
+                con.bg_color = BG_COLOR;
+                con.bold = false;
+            }
+            1 => {
+                // Bold / bright.
+                con.bold = true;
+                // If current fg is a standard color (0-7), switch to bright.
+                // Simple approach: just set the bold flag and use it when
+                // selecting colors.
+            }
+            22 => {
+                // Normal intensity (not bold).
+                con.bold = false;
+            }
+            // Standard foreground colors (30-37).
+            30..=37 => {
+                let idx = (param - 30) as usize;
+                let color_idx = if con.bold { idx + 8 } else { idx };
+                con.fg_color = ANSI_COLORS[color_idx];
+            }
+            39 => {
+                // Default foreground color.
+                con.fg_color = FG_COLOR;
+            }
+            // Standard background colors (40-47).
+            40..=47 => {
+                let idx = (param - 40) as usize;
+                con.bg_color = ANSI_COLORS[idx];
+            }
+            49 => {
+                // Default background color.
+                con.bg_color = BG_COLOR;
+            }
+            // Bright foreground colors (90-97).
+            90..=97 => {
+                let idx = (param - 90) as usize + 8;
+                con.fg_color = ANSI_COLORS[idx];
+            }
+            // Bright background colors (100-107).
+            100..=107 => {
+                let idx = (param - 100) as usize + 8;
+                con.bg_color = ANSI_COLORS[idx];
+            }
+            _ => {
+                // Unsupported SGR parameter — ignore.
+            }
+        }
+    }
+}
+
+/// Handle ED (Erase in Display) command.
+fn handle_erase_display(con: &mut ConsoleInner, mode: u16) {
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let cols = con.cols;
+    let rows = con.rows;
+    let bg = con.bg_color;
+
+    match mode {
+        0 => {
+            // Erase from cursor to end of display.
+            // Clear rest of current line.
+            for col in con.cursor_col..cols {
+                erase_cell(fb, pitch, col, con.cursor_row, bg);
+            }
+            // Clear all lines below.
+            for row in (con.cursor_row + 1)..rows {
+                for col in 0..cols {
+                    erase_cell(fb, pitch, col, row, bg);
+                }
+            }
+        }
+        1 => {
+            // Erase from start to cursor.
+            for row in 0..con.cursor_row {
+                for col in 0..cols {
+                    erase_cell(fb, pitch, col, row, bg);
+                }
+            }
+            for col in 0..=con.cursor_col.min(cols.saturating_sub(1)) {
+                erase_cell(fb, pitch, col, con.cursor_row, bg);
+            }
+        }
+        2 | 3 => {
+            // Erase entire display.
+            for row in 0..rows {
+                for col in 0..cols {
+                    erase_cell(fb, pitch, col, row, bg);
+                }
+            }
+            // Also reset cursor for mode 2.
+            if mode == 2 {
+                con.cursor_col = 0;
+                con.cursor_row = 0;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Handle EL (Erase in Line) command.
+fn handle_erase_line(con: &mut ConsoleInner, mode: u16) {
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let cols = con.cols;
+    let row = con.cursor_row;
+    let bg = con.bg_color;
+
+    match mode {
+        0 => {
+            // Erase from cursor to end of line.
+            for col in con.cursor_col..cols {
+                erase_cell(fb, pitch, col, row, bg);
+            }
+        }
+        1 => {
+            // Erase from start of line to cursor.
+            for col in 0..=con.cursor_col.min(cols.saturating_sub(1)) {
+                erase_cell(fb, pitch, col, row, bg);
+            }
+        }
+        2 => {
+            // Erase entire line.
+            for col in 0..cols {
+                erase_cell(fb, pitch, col, row, bg);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Erase a single character cell (fill with background color).
+fn erase_cell(fb: u64, pitch: u32, col: u32, row: u32, bg: u32) {
+    let px_x = col.wrapping_mul(GLYPH_WIDTH);
+    let px_y = row.wrapping_mul(GLYPH_HEIGHT);
+    for gy in 0..GLYPH_HEIGHT {
+        for gx in 0..GLYPH_WIDTH {
+            put_pixel(fb, pitch, px_x + gx, px_y + gy, bg);
         }
     }
 }

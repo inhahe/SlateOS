@@ -1484,6 +1484,11 @@ extern "C" fn kmain() -> ! {
         serial_println!("EEVDF self-test FAILED: {:?}", e);
     }
 
+    // Step 22k8: Deadline scheduler self-test.
+    if let Err(e) = sched::deadline::self_test() {
+        serial_println!("Deadline scheduler self-test FAILED: {:?}", e);
+    }
+
     // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();
 

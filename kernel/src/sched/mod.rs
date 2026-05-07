@@ -49,6 +49,7 @@
 pub mod barrier;
 pub mod condvar;
 pub mod context;
+pub mod deadline;
 pub mod eevdf;
 pub mod fpu;
 pub mod io_sched;
@@ -107,6 +108,29 @@ pub trait Scheduler {
 
 // Implement Scheduler trait for PriorityRoundRobin.
 impl Scheduler for PriorityRoundRobin {
+    fn pick_next(&mut self) -> Option<TaskId> {
+        self.pick_next()
+    }
+
+    fn enqueue(&mut self, id: TaskId, priority: u8) {
+        self.enqueue(id, priority);
+    }
+
+    fn dequeue(&mut self, id: TaskId, priority: u8) -> bool {
+        self.dequeue(id, priority)
+    }
+
+    fn tick(&mut self) -> bool {
+        self.tick()
+    }
+
+    fn has_ready(&self) -> bool {
+        self.has_ready()
+    }
+}
+
+// Implement Scheduler trait for DeadlineScheduler.
+impl Scheduler for deadline::DeadlineScheduler {
     fn pick_next(&mut self) -> Option<TaskId> {
         self.pick_next()
     }

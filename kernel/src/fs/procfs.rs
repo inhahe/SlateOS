@@ -188,6 +188,7 @@ const ROOT_FILES: &[&str] = &[
     "cursorsettings",
     "kbsettings",
     "detailcols",
+    "partmgr",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3735,6 +3736,40 @@ fn gen_detailcols() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_partmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (disk_count, part_count, ops) = super::partmgr::stats();
+
+    out.push_str("Partition Manager\n");
+    out.push_str("=================\n\n");
+    out.push_str(&format!("Disks:      {}\n", disk_count));
+    out.push_str(&format!("Partitions: {}\n", part_count));
+    out.push_str(&format!("Operations: {}\n", ops));
+    out.push_str(&format!("Confirm:    {}\n\n", super::partmgr::confirmation_required()));
+
+    let disks = super::partmgr::list_disks();
+    for d in &disks {
+        let gb = d.size_bytes / (1024 * 1024 * 1024);
+        out.push_str(&format!("{}: {} {} {}GB [{}]{}{}\n",
+            d.name, d.model, d.serial, gb, d.table_type.label(),
+            if d.removable { " removable" } else { "" },
+            if d.read_only { " ro" } else { "" }));
+        let parts = super::partmgr::list_partitions(d.id);
+        for p in &parts {
+            let mb = p.size_bytes / (1024 * 1024);
+            out.push_str(&format!("  #{}: {} {}MB {} [{}]{}\n",
+                p.number, p.label, mb, p.fs_type.label(),
+                p.flags.iter().map(|f| f.label()).collect::<Vec<_>>().join(","),
+                if p.mount_point.is_empty() { String::new() }
+                else { alloc::format!(" → {}", p.mount_point) }));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4088,6 +4123,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cursorsettings" => Ok(gen_cursorsettings()),
         "kbsettings" => Ok(gen_kbsettings()),
         "detailcols" => Ok(gen_detailcols()),
+        "partmgr" => Ok(gen_partmgr()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

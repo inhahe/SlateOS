@@ -99,6 +99,7 @@ pub mod notifcenter;
 pub mod notify;
 pub mod openwith;
 pub mod overlay;
+pub mod partmgr;
 pub mod pathbar;
 pub mod pipe;
 pub mod procfs;

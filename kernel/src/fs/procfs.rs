@@ -178,6 +178,7 @@ const ROOT_FILES: &[&str] = &[
     "power",
     "display",
     "vdesktop",
+    "keylayout",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3422,6 +3423,34 @@ fn gen_vdesktop() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_keylayout() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (lc, rc, tc, sc) = super::keylayout::stats();
+
+    out.push_str("Keyboard Layouts\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Layouts:     {}\n", lc));
+    out.push_str(&format!("Remaps:      {}\n", rc));
+    out.push_str(&format!("Translates:  {}\n", tc));
+    out.push_str(&format!("Switches:    {}\n", sc));
+    out.push_str(&format!("Active:      {}\n\n", {
+        let a = super::keylayout::active();
+        if a.is_empty() { String::from("(none)") } else { a }
+    }));
+
+    let layouts = super::keylayout::list_layouts();
+    for (name, desc, builtin) in &layouts {
+        out.push_str(&format!("{}{}: {}{}\n",
+            if *name == super::keylayout::active() { "*" } else { " " },
+            name, desc,
+            if *builtin { " [built-in]" } else { "" }));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3765,6 +3794,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "power" => Ok(gen_power()),
         "display" => Ok(gen_display()),
         "vdesktop" => Ok(gen_vdesktop()),
+        "keylayout" => Ok(gen_keylayout()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

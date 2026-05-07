@@ -3342,7 +3342,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -3355,7 +3355,7 @@ const COMMANDS: &[&str] = &[
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "fcomment", "fflags",
-    "rmdir", "run", "rundialog", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
+    "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "template", "test",
@@ -4565,6 +4565,7 @@ fn dispatch(line: &str) {
         "ansi" | "termtest" => cmd_ansi_test(),
         "unicode" | "unicodetest" => cmd_unicode_test(),
         "color" | "colorscheme" => cmd_colorscheme(args),
+        "scrollback" | "sb" => cmd_scrollback(args),
         "uptime" => cmd_uptime(),
         "dmesg" => cmd_dmesg(args),
         "echo" => cmd_echo(args),
@@ -4682,6 +4683,7 @@ fn dispatch(line: &str) {
         "power" => cmd_power(args),
         "display" => cmd_display(args),
         "vdesktop" | "vd" => cmd_vdesktop(args),
+        "keylayout" | "kbl" => cmd_keylayout(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -6087,6 +6089,76 @@ fn cmd_history(args: &str) {
 /// 256-color palette, cursor movement, scroll region, and insert/delete
 /// operations.
 #[allow(clippy::arithmetic_side_effects)]
+/// `scrollback` / `sb` — view or search the console scrollback buffer.
+///
+/// Usage:
+///   scrollback            — show scrollback stats
+///   scrollback N          — show last N lines of scrollback
+///   scrollback search P   — search scrollback for pattern P
+///   scrollback screen     — dump current screen text buffer
+fn cmd_scrollback(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "" => {
+            let count = crate::console::scrollback_count();
+            shell_println!("Scrollback: {} lines (max {})", count, 1000);
+            shell_println!("Usage: scrollback [N | search <pattern> | screen]");
+        }
+        "search" => {
+            let pattern = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if pattern.is_empty() {
+                shell_println!("Usage: scrollback search <pattern>");
+                return;
+            }
+            let results = crate::console::scrollback_search(&pattern);
+            if results.is_empty() {
+                shell_println!("No matches for '{}' in scrollback.", pattern);
+            } else {
+                shell_println!("{} match(es):", results.len());
+                // Show at most 20 matches to avoid flooding.
+                for (i, line) in results.iter().take(20).enumerate() {
+                    shell_println!("  {:>3}: {}", i + 1, line);
+                }
+                if results.len() > 20 {
+                    shell_println!("  ... ({} more)", results.len() - 20);
+                }
+            }
+        }
+        "screen" => {
+            let lines = crate::console::screen_text();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.is_empty() {
+                    shell_println!("{:>3}: {}", i + 1, line);
+                }
+            }
+        }
+        _ => {
+            // Try to parse as a number.
+            if let Ok(n) = sub.parse::<usize>() {
+                let count = crate::console::scrollback_count();
+                let start = count.saturating_sub(n);
+                if count == 0 {
+                    shell_println!("(scrollback empty)");
+                    return;
+                }
+                // Show from oldest to newest within the last N.
+                for rev_idx in (0..count).rev().take(n) {
+                    if let Some(line) = crate::console::scrollback_line(rev_idx) {
+                        let trimmed = line.trim_end();
+                        if !trimmed.is_empty() {
+                            shell_println!("{}", trimmed);
+                        }
+                    }
+                }
+            } else {
+                shell_println!("Usage: scrollback [N | search <pattern> | screen]");
+            }
+        }
+    }
+}
+
 fn cmd_ansi_test() {
     // Header
     shell_println!("\x1b[1;37m=== ANSI/VT100 Terminal Test ===\x1b[0m\n");
@@ -19654,6 +19726,31 @@ fn cmd_vdesktop(args: &str) {
     }
 }
 
+/// `keylayout` / `kbl` — keyboard layout manager.
+fn cmd_keylayout(args: &str) {
+    use crate::fs::keylayout;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "create" | "new" => { let name = parts.get(1).copied().unwrap_or(""); let desc = if parts.len() > 2 { parts[2..].join(" ") } else { String::new() }; if name.is_empty() { shell_println!("Usage: kbl create <name> [description]"); } else { match keylayout::create_layout(name, &desc) { Ok(()) => shell_println!("Created layout '{}'", name), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "remove" | "rm" => { let name = parts.get(1).copied().unwrap_or(""); if name.is_empty() { shell_println!("Usage: kbl remove <name>"); } else { match keylayout::remove_layout(name) { Ok(()) => shell_println!("Removed '{}'", name), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "list" | "ls" => { let layouts = keylayout::list_layouts(); if layouts.is_empty() { shell_println!("No layouts"); } else { let active = keylayout::active(); for (name, desc, builtin) in &layouts { shell_println!("{}{}: {}{}", if *name == active {"*"} else {" "}, name, desc, if *builtin {" [built-in]"} else {""}); } } }
+        "get" | "show" => { let name = parts.get(1).copied().unwrap_or(""); if let Some(l) = keylayout::get_layout(name) { shell_println!("Layout '{}': {} ({} remaps, {} disabled){}", l.name, l.description, l.remaps.len(), l.disabled.len(), if l.builtin {" [built-in]"} else {""}); for (&from, &to) in &l.remaps { shell_println!("  {} (0x{:02X}) → {} (0x{:02X})", keylayout::key_name(from), from, keylayout::key_name(to), to); } for &k in &l.disabled { shell_println!("  {} (0x{:02X}) [disabled]", keylayout::key_name(k), k); } } else { shell_println!("Layout '{}' not found", name); } }
+        "use" | "activate" => { let name = parts.get(1).copied().unwrap_or(""); match keylayout::set_active(name) { Ok(()) => shell_println!("Active: {}", if name.is_empty() {"(none)"} else {name}), Err(e) => shell_println!("Error: {:?}", e), } }
+        "active" => { let a = keylayout::active(); shell_println!("Active: {}", if a.is_empty() {"(none)"} else {&a}); }
+        "remap" => { let layout = parts.get(1).copied().unwrap_or(""); let from = parts.get(2).and_then(|s| keylayout::parse_key(s)); let to = parts.get(3).and_then(|s| keylayout::parse_key(s)); if let (Some(f), Some(t)) = (from, to) { match keylayout::remap(layout, f, t) { Ok(()) => shell_println!("Mapped {} → {} in '{}'", keylayout::key_name(f), keylayout::key_name(t), layout), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: kbl remap <layout> <from_key> <to_key>"); } }
+        "unmap" => { let layout = parts.get(1).copied().unwrap_or(""); let from = parts.get(2).and_then(|s| keylayout::parse_key(s)); if let Some(f) = from { match keylayout::unmap(layout, f) { Ok(()) => shell_println!("Unmapped {} in '{}'", keylayout::key_name(f), layout), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: kbl unmap <layout> <key>"); } }
+        "disable" => { let layout = parts.get(1).copied().unwrap_or(""); let key = parts.get(2).and_then(|s| keylayout::parse_key(s)); if let Some(k) = key { match keylayout::disable_key(layout, k) { Ok(()) => shell_println!("Disabled {} in '{}'", keylayout::key_name(k), layout), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: kbl disable <layout> <key>"); } }
+        "enable" => { let layout = parts.get(1).copied().unwrap_or(""); let key = parts.get(2).and_then(|s| keylayout::parse_key(s)); if let Some(k) = key { match keylayout::enable_key(layout, k) { Ok(()) => shell_println!("Enabled {} in '{}'", keylayout::key_name(k), layout), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: kbl enable <layout> <key>"); } }
+        "translate" | "xlat" => { let key = parts.get(1).and_then(|s| keylayout::parse_key(s)); if let Some(k) = key { match keylayout::translate(k) { Some(mapped) => shell_println!("{} → {}", keylayout::key_name(k), keylayout::key_name(mapped)), None => shell_println!("{} → (disabled)", keylayout::key_name(k)), } } else { shell_println!("Usage: kbl translate <key>"); } }
+        "init" => { match keylayout::init_defaults() { Ok(()) => shell_println!("Initialized default layouts"), Err(e) => shell_println!("Error: {:?}", e), } }
+        "test" => { match keylayout::self_test() { Ok(()) => shell_println!("All keylayout tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (lc, rc, tc, sc) = keylayout::stats(); shell_println!("Layouts:{} Remaps:{} Translates:{} Switches:{}", lc, rc, tc, sc); }
+        "reset" => { keylayout::clear_all(); keylayout::reset_stats(); shell_println!("Keyboard layouts reset"); }
+        _ => { shell_println!("keylayout: create/remove/list/get/use/active/remap/unmap/disable/enable/translate/init/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27183,7 +27280,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

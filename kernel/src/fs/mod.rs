@@ -107,6 +107,7 @@ pub mod sidebar;
 pub mod snapshot;
 pub mod sparse;
 pub mod splice;
+pub mod startmenu;
 pub mod statusbar;
 #[allow(dead_code)]
 pub mod rar;

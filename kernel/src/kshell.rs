@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar",
+    "systray", "tray", "taskbar", "startmenu", "smenu",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4409,6 +4409,7 @@ fn dispatch(line: &str) {
         "appregistry" | "appreg" => cmd_appregistry(args),
         "systray" | "tray" => cmd_systray(args),
         "taskbar" => cmd_taskbar(args),
+        "startmenu" | "smenu" => cmd_startmenu(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -17882,6 +17883,257 @@ fn cmd_taskbar(args: &str) {
     }
 }
 
+/// `startmenu` / `smenu` — start menu: favorites, search, power actions.
+fn cmd_startmenu(args: &str) {
+    use crate::fs::startmenu;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "fav" | "favorite" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            match action {
+                "add" => {
+                    let app_id = parts.get(2).copied().unwrap_or("");
+                    if app_id.is_empty() {
+                        shell_println!("Usage: smenu fav add <app-id>");
+                        return;
+                    }
+                    match startmenu::add_favorite(app_id) {
+                        Ok(()) => shell_println!("Added favorite: {}", app_id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" | "remove" => {
+                    let app_id = parts.get(2).copied().unwrap_or("");
+                    if app_id.is_empty() {
+                        shell_println!("Usage: smenu fav rm <app-id>");
+                        return;
+                    }
+                    match startmenu::remove_favorite(app_id) {
+                        Ok(()) => shell_println!("Removed favorite: {}", app_id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "reorder" => {
+                    let app_id = parts.get(2).copied().unwrap_or("");
+                    let pos = parts.get(3).and_then(|s| s.parse::<usize>().ok());
+                    if app_id.is_empty() || pos.is_none() {
+                        shell_println!("Usage: smenu fav reorder <app-id> <position>");
+                        return;
+                    }
+                    match startmenu::reorder_favorite(app_id, pos.unwrap_or(0)) {
+                        Ok(()) => shell_println!("Reordered: {}", app_id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                _ => {
+                    let favs = startmenu::favorites();
+                    if favs.is_empty() {
+                        shell_println!("No favorites set");
+                    } else {
+                        shell_println!("{} favorites:", favs.len());
+                        for f in &favs {
+                            shell_println!("  [{}] {} ({})", f.position, f.name, f.app_id);
+                        }
+                    }
+                }
+            }
+        }
+        "link" | "quicklink" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            match action {
+                "add" => {
+                    let app_id = parts.get(2).copied().unwrap_or("");
+                    let label = parts.get(3).copied().unwrap_or("");
+                    if app_id.is_empty() || label.is_empty() {
+                        shell_println!("Usage: smenu link add <app-id> <label> [icon]");
+                        return;
+                    }
+                    let icon = parts.get(4).copied().unwrap_or("icon-default");
+                    match startmenu::add_quick_link(app_id, label, icon) {
+                        Ok(()) => shell_println!("Added quick link: {}", label),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" | "remove" => {
+                    let app_id = parts.get(2).copied().unwrap_or("");
+                    if app_id.is_empty() {
+                        shell_println!("Usage: smenu link rm <app-id>");
+                        return;
+                    }
+                    match startmenu::remove_quick_link(app_id) {
+                        Ok(()) => shell_println!("Removed quick link: {}", app_id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                _ => {
+                    let links = startmenu::quick_links();
+                    if links.is_empty() {
+                        shell_println!("No quick links");
+                    } else {
+                        shell_println!("{} quick links:", links.len());
+                        for ql in &links {
+                            shell_println!("  {} ({})", ql.label, ql.app_id);
+                        }
+                    }
+                }
+            }
+        }
+        "recent" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            match action {
+                "clear" => {
+                    startmenu::clear_recent();
+                    shell_println!("Recent apps cleared");
+                }
+                "hide" | "off" => {
+                    startmenu::set_show_recent(false);
+                    shell_println!("Recent apps section hidden");
+                }
+                "show" | "on" => {
+                    startmenu::set_show_recent(true);
+                    shell_println!("Recent apps section shown");
+                }
+                _ => {
+                    let recent = startmenu::recent_apps();
+                    if recent.is_empty() {
+                        shell_println!("No recent apps");
+                    } else {
+                        shell_println!("{} recent apps:", recent.len());
+                        for r in &recent {
+                            shell_println!("  {} (x{}) — {}", r.name, r.launch_count, r.app_id);
+                        }
+                    }
+                }
+            }
+        }
+        "launch" => {
+            let app_id = parts.get(1).copied().unwrap_or("");
+            if app_id.is_empty() {
+                shell_println!("Usage: smenu launch <app-id>");
+                return;
+            }
+            match startmenu::record_launch(app_id) {
+                Ok(()) => shell_println!("Recorded launch: {}", app_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "search" => {
+            let query = parts.get(1).copied().unwrap_or("");
+            if query.is_empty() {
+                shell_println!("Usage: smenu search <query>");
+                return;
+            }
+            let results = startmenu::search(query);
+            if results.is_empty() {
+                shell_println!("No matches for: {}", query);
+            } else {
+                shell_println!("{} matches:", results.len());
+                for r in &results {
+                    shell_println!("  {} ({}) [{}]", r.name, r.app_id, r.match_desc);
+                }
+            }
+        }
+        "show" | "" => {
+            let sections = startmenu::build_menu();
+            for section in &sections {
+                match section {
+                    startmenu::MenuSection::Favorites(favs) => {
+                        shell_println!("★ Favorites:");
+                        for f in favs {
+                            shell_println!("  {}", f.name);
+                        }
+                    }
+                    startmenu::MenuSection::AllApps(groups) => {
+                        shell_println!("All Apps:");
+                        for g in groups {
+                            shell_println!("  [{}] ({} apps)", g.label, g.apps.len());
+                        }
+                    }
+                    startmenu::MenuSection::QuickLinks(links) => {
+                        shell_println!("Quick Links:");
+                        for ql in links {
+                            shell_println!("  {}", ql.label);
+                        }
+                    }
+                    startmenu::MenuSection::RecentApps(recent) => {
+                        shell_println!("Recent:");
+                        for r in recent {
+                            shell_println!("  {} (x{})", r.name, r.launch_count);
+                        }
+                    }
+                    startmenu::MenuSection::SystemActions(actions) => {
+                        shell_println!("Power:");
+                        for a in actions {
+                            shell_println!("  {}", a.label());
+                        }
+                    }
+                    startmenu::MenuSection::SearchResults(results) => {
+                        shell_println!("Search Results:");
+                        for r in results {
+                            shell_println!("  {} [{}]", r.name, r.match_desc);
+                        }
+                    }
+                }
+            }
+        }
+        "power" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            if action.is_empty() {
+                shell_println!("Available power actions:");
+                for a in startmenu::SystemAction::all() {
+                    shell_println!("  {}", a.label());
+                }
+                return;
+            }
+            match startmenu::SystemAction::from_str(action) {
+                Some(a) => shell_println!("Power action: {} (simulated)", a.label()),
+                None => shell_println!("Unknown action: {}", action),
+            }
+        }
+        "init" => {
+            match startmenu::init_defaults() {
+                Ok(()) => shell_println!("Default start menu configured"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "test" => {
+            match startmenu::self_test() {
+                Ok(()) => shell_println!("All start menu self-tests passed"),
+                Err(e) => shell_println!("Start menu self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (favs, qls, recent, opens, searches, launches) = startmenu::stats();
+            shell_println!("Favorites:   {}", favs);
+            shell_println!("Quick links: {}", qls);
+            shell_println!("Recent apps: {}", recent);
+            shell_println!("Open ops:    {}", opens);
+            shell_println!("Search ops:  {}", searches);
+            shell_println!("Launch ops:  {}", launches);
+        }
+        "reset" => {
+            startmenu::clear_all();
+            startmenu::reset_stats();
+            shell_println!("Start menu cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: smenu <subcommand>");
+            shell_println!("  show                           Display start menu");
+            shell_println!("  fav [add|rm|reorder] [args]    Manage favorites");
+            shell_println!("  link [add|rm] [args]           Manage quick links");
+            shell_println!("  recent [clear|hide|show]       Recent apps");
+            shell_println!("  launch <app-id>                Record a launch");
+            shell_println!("  search <query>                 Search apps");
+            shell_println!("  power [action]                 Power/session actions");
+            shell_println!("  init                           Set up defaults");
+            shell_println!("  test                           Run self-tests");
+            shell_println!("  stats                          Show statistics");
+            shell_println!("  reset                          Clear all data");
+        }
+    }
+}
+
 /// `systray` / `tray` — system tray icon management.
 fn cmd_systray(args: &str) {
     use crate::fs::systray;
@@ -24621,7 +24873,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

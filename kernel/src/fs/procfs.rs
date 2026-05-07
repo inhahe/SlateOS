@@ -167,6 +167,7 @@ const ROOT_FILES: &[&str] = &[
     "appregistry",
     "systray",
     "taskbar",
+    "startmenu",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3042,6 +3043,50 @@ fn gen_taskbar() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_startmenu() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (fav_n, ql_n, recent_n, open_ops, search_ops, launch_ops) = super::startmenu::stats();
+
+    out.push_str("Start Menu\n");
+    out.push_str("==========\n\n");
+    out.push_str(&format!("Favorites:   {}/{}\n", fav_n, 32));
+    out.push_str(&format!("Quick links: {}/{}\n", ql_n, 16));
+    out.push_str(&format!("Recent apps: {}/{}\n", recent_n, 20));
+    out.push_str(&format!("Open ops:    {}\n", open_ops));
+    out.push_str(&format!("Search ops:  {}\n", search_ops));
+    out.push_str(&format!("Launch ops:  {}\n\n", launch_ops));
+
+    let favs = super::startmenu::favorites();
+    if !favs.is_empty() {
+        out.push_str("Favorites:\n");
+        for f in &favs {
+            out.push_str(&format!("  [{}] {} ({})\n", f.position, f.name, f.app_id));
+        }
+        out.push_str("\n");
+    }
+
+    let links = super::startmenu::quick_links();
+    if !links.is_empty() {
+        out.push_str("Quick Links:\n");
+        for ql in &links {
+            out.push_str(&format!("  {} ({})\n", ql.label, ql.app_id));
+        }
+        out.push_str("\n");
+    }
+
+    let recent = super::startmenu::recent_apps();
+    if !recent.is_empty() {
+        out.push_str("Recent:\n");
+        for r in &recent {
+            out.push_str(&format!("  {} (x{}) — {}\n", r.name, r.launch_count, r.app_id));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3374,6 +3419,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "appregistry" => Ok(gen_appregistry()),
         "systray" => Ok(gen_systray()),
         "taskbar" => Ok(gen_taskbar()),
+        "startmenu" => Ok(gen_startmenu()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

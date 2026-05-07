@@ -787,11 +787,18 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] execve via SYS_FS_READ_FILE + SYS_PROCESS_EXEC (real implementation, not stub)
   - [x] fcntl: F_GETFD/F_SETFD/F_GETFL/F_SETFL/F_DUPFD/F_DUPFD_CLOEXEC
   - [x] read/write/close dispatch by handle type (File→SYS_FS_*, Pipe→SYS_PIPE_*, Console→SYS_CONSOLE_*)
+  - [x] Strings extended: strcat, strncat, strstr, strspn, strcspn, strpbrk, strtok, strdup (via mmap), strerror
+  - [x] stdlib: atoi, atol, strtol, strtoul (base auto-detect), abs, labs, qsort, bsearch, rand/srand
+  - [x] ctype: isalpha, isdigit, isalnum, isspace, isupper, islower, isprint, iscntrl, ispunct, isxdigit, isgraph, isblank, isascii, toupper, tolower, toascii
+  - [x] malloc/free/calloc/realloc via mmap-backed allocator (size header per allocation)
+  - [x] setjmp/longjmp: x86_64 assembly, saves/restores callee-saved registers
+  - [x] stdio: putchar, puts, fputs, fputc, fgetc, getchar, fwrite, fread, perror, stdout/stderr/stdin symbols
   - [ ] dup/dup2 for pipe handles (needs SYS_PIPE_DUP or fd-level refcounting)
   - [ ] ioctl
   - [ ] select/poll/epoll equivalents
   - [ ] signal handling shim (POSIX signals → native IPC)
   - [ ] socket API shim
+  - [ ] printf/snprintf (needs C variadic support or musl port)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

@@ -3082,7 +3082,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "assoc", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
+    "alias", "append", "archive", "assoc", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4354,6 +4354,7 @@ fn dispatch(line: &str) {
         "dirsync" => cmd_dirsync(args),
         "backup" => cmd_backup(args),
         "undelete" => cmd_undelete(args),
+        "archive" => cmd_archive(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -12678,6 +12679,195 @@ fn cmd_undelete(args: &str) {
     }
 }
 
+/// `archive` — unified archive management.
+fn cmd_archive(args: &str) {
+    use crate::fs::archive;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "list" | "ls" | "t" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: archive list <file>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    let fmt = archive::detect(&data);
+                    let fmt_label = fmt.map_or("unknown", |f| f.label());
+                    shell_println!("Archive: {} ({})", path, fmt_label);
+                    match archive::list(&data) {
+                        Ok(entries) => {
+                            for e in &entries {
+                                let kind_ch = match e.kind {
+                                    archive::EntryKind::File => ' ',
+                                    archive::EntryKind::Directory => 'd',
+                                    archive::EntryKind::Symlink => 'l',
+                                    archive::EntryKind::Other => '?',
+                                };
+                                shell_println!("{} {:>10}  {}", kind_ch, e.size, e.name);
+                            }
+                            shell_println!("({} entries)", entries.len());
+                        }
+                        Err(e) => shell_println!("Error listing: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "extract" | "x" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: archive extract <file> [dest]");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let dest = if parts.len() >= 3 {
+                resolve_path(parts[2])
+            } else {
+                String::from(".")
+            };
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    match archive::extract_all(&data, &dest) {
+                        Ok(result) => {
+                            shell_println!("Extracted to {}:", dest);
+                            shell_println!("  Files:   {}", result.files_extracted);
+                            shell_println!("  Dirs:    {}", result.dirs_created);
+                            shell_println!("  Bytes:   {}", result.bytes_written);
+                            if !result.errors.is_empty() {
+                                shell_println!("  Errors ({}):", result.errors.len());
+                                for e in &result.errors {
+                                    shell_println!("    ! {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => shell_println!("Error extracting: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "get" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: archive get <archive> <entry_name>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let entry_name = parts[2];
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    match archive::extract_one(&data, entry_name) {
+                        Ok(content) => {
+                            if let Ok(text) = core::str::from_utf8(&content) {
+                                shell_println!("{}", text);
+                            } else {
+                                shell_println!("(binary data, {} bytes)", content.len());
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "detect" | "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: archive detect <file>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    match archive::detect(&data) {
+                        Some(fmt) => {
+                            shell_println!("Format: {} ({})", fmt.label(), path);
+                            shell_println!("Extensions: {:?}", fmt.extensions());
+                            shell_println!("Create support: {}", fmt.supports_create());
+                        }
+                        None => {
+                            // Try extension-based detection.
+                            match archive::detect_from_extension(&path) {
+                                Some(fmt) => shell_println!("Format (by extension): {}", fmt.label()),
+                                None => shell_println!("Unknown archive format"),
+                            }
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "create" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: archive create <format> <output> <file1> [file2] ...");
+                shell_println!("Formats: zip, tar, cpio, ar");
+                return;
+            }
+            let fmt = match parts[1] {
+                "zip" => archive::ArchiveFormat::Zip,
+                "tar" => archive::ArchiveFormat::Tar,
+                "cpio" => archive::ArchiveFormat::Cpio,
+                "ar" => archive::ArchiveFormat::Ar,
+                other => {
+                    shell_println!("Unknown format: {}. Use: zip, tar, cpio, ar", other);
+                    return;
+                }
+            };
+            let output = resolve_path(parts[2]);
+            let mut entries = Vec::new();
+            for name in &parts[3..] {
+                let path = resolve_path(name);
+                match crate::fs::Vfs::read_file(&path) {
+                    Ok(data) => {
+                        let entry_name = path.rsplit('/').next().unwrap_or(&path);
+                        entries.push(archive::CreateEntry {
+                            name: String::from(entry_name),
+                            data,
+                            kind: archive::EntryKind::File,
+                        });
+                    }
+                    Err(e) => shell_println!("Warning: skipping {}: {:?}", path, e),
+                }
+            }
+            if entries.is_empty() {
+                shell_println!("No files to archive.");
+                return;
+            }
+            match archive::create(fmt, &entries) {
+                Ok(data) => {
+                    match crate::fs::Vfs::write_file(&output, &data) {
+                        Ok(()) => shell_println!("Created {} ({} bytes, {} entries)", output, data.len(), entries.len()),
+                        Err(e) => shell_println!("Error writing {}: {:?}", output, e),
+                    }
+                }
+                Err(e) => shell_println!("Error creating archive: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (lists, extracts, creates) = archive::stats();
+            shell_println!("Archive operations:");
+            shell_println!("  Listings:    {}", lists);
+            shell_println!("  Extractions: {}", extracts);
+            shell_println!("  Creations:   {}", creates);
+        }
+        _ => {
+            shell_println!("Usage: archive <command> [args]");
+            shell_println!();
+            shell_println!("Commands:");
+            shell_println!("  list <file>                        List archive contents");
+            shell_println!("  extract <file> [dest]              Extract all to directory");
+            shell_println!("  get <archive> <entry>              Extract single entry to stdout");
+            shell_println!("  detect <file>                      Detect archive format");
+            shell_println!("  create <fmt> <output> <files...>   Create archive");
+            shell_println!("  stats                              Show operation counts");
+            shell_println!();
+            shell_println!("Supported formats: ZIP, TAR, CPIO, AR, RAR5, 7z");
+            shell_println!("Create supports: zip, tar, cpio, ar");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -17959,7 +18149,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -28,6 +28,7 @@
 pub mod acl;
 #[allow(dead_code)]
 pub mod ar;
+pub mod archive;
 pub mod audit;
 pub mod associations;
 pub mod backup;

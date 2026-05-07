@@ -124,6 +124,7 @@ const ROOT_FILES: &[&str] = &[
     "dirsync",
     "backup",
     "undelete",
+    "archives",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1976,6 +1977,23 @@ fn gen_undelete() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/archives` — archive manager statistics.
+fn gen_archives() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (lists, extracts, creates) = super::archive::stats();
+
+    out.push_str("Archive Manager Statistics\n");
+    out.push_str("=========================\n\n");
+    out.push_str(&format!("Listings:    {}\n", lists));
+    out.push_str(&format!("Extractions: {}\n", extracts));
+    out.push_str(&format!("Creations:   {}\n", creates));
+    out.push_str("\nSupported formats: ZIP, TAR, CPIO, AR, RAR5, 7z\n");
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2041,6 +2059,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dirsync" => Ok(gen_dirsync()),
         "backup" => Ok(gen_backup()),
         "undelete" => Ok(gen_undelete()),
+        "archives" => Ok(gen_archives()),
         _ => Err(KernelError::NotFound),
     }
 }

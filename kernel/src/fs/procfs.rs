@@ -195,6 +195,7 @@ const ROOT_FILES: &[&str] = &[
     "scriptlang",
     "osreset",
     "bootcfg",
+    "swapcfg",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4006,6 +4007,45 @@ fn gen_bootcfg() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_swapcfg() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (area_count, active_count, total_bytes, ops) = super::swapcfg::stats();
+    let cfg = super::swapcfg::get_config();
+    let usage = super::swapcfg::usage();
+
+    out.push_str("Swap Configuration\n");
+    out.push_str("==================\n\n");
+    out.push_str(&format!("Enabled:      {}\n", cfg.enabled));
+    out.push_str(&format!("Swappiness:   {}\n", cfg.swappiness));
+    out.push_str(&format!("Min free:     {} bytes\n", cfg.min_free_bytes));
+    out.push_str(&format!("zswap:        {} ({})\n", cfg.zswap_enabled, cfg.zswap_algorithm));
+    out.push_str(&format!("Areas:        {} ({} active)\n", area_count, active_count));
+    out.push_str(&format!("Total:        {} bytes\n", total_bytes));
+    out.push_str(&format!("Used:         {} / {} bytes\n", usage.used_bytes, usage.total_bytes));
+    out.push_str(&format!("Operations:   {}\n", ops));
+
+    let areas = super::swapcfg::list_swaps();
+    if !areas.is_empty() {
+        out.push_str("\nAreas:\n");
+        for a in &areas {
+            let stype = match a.swap_type {
+                super::swapcfg::SwapType::File => "file",
+                super::swapcfg::SwapType::Partition => "partition",
+                super::swapcfg::SwapType::Compressed => "compressed",
+            };
+            let status = if a.active { "active" } else { "inactive" };
+            out.push_str(&format!(
+                "  id={} {} [{}] {} prio={} {}/{} bytes\n",
+                a.id, a.path, stype, status, a.priority.0, a.used_bytes, a.size_bytes
+            ));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4366,6 +4406,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "scriptlang" => Ok(gen_scriptlang()),
         "osreset" => Ok(gen_osreset()),
         "bootcfg" => Ok(gen_bootcfg()),
+        "swapcfg" => Ok(gen_swapcfg()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

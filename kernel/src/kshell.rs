@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4799,6 +4799,7 @@ fn dispatch(line: &str) {
         "scriptlang" | "slang" => cmd_scriptlang(args),
         "osreset" | "reset" => cmd_osreset(args),
         "bootcfg" | "boot" => cmd_bootcfg(args),
+        "swapcfg" | "swap" => cmd_swapcfg(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20453,6 +20454,49 @@ fn cmd_bootcfg(args: &str) {
     }
 }
 
+/// `swapcfg` / `swap` — swap space configuration and management.
+fn cmd_swapcfg(args: &str) {
+    use crate::fs::swapcfg;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "config" => { let cfg = swapcfg::get_config(); shell_println!("Swap enabled:  {}", cfg.enabled); shell_println!("Swappiness:    {}", cfg.swappiness); shell_println!("Min free:      {} bytes", cfg.min_free_bytes); shell_println!("zswap:         {} ({}, {}%)", cfg.zswap_enabled, cfg.zswap_algorithm, cfg.zswap_max_pool_pct); shell_println!("Hibernate ID:  {}", cfg.hibernate_swap_id); }
+        "list" | "ls" => { let areas = swapcfg::list_swaps(); if areas.is_empty() { shell_println!("No swap areas"); } else { for a in &areas { let stype = match a.swap_type { swapcfg::SwapType::File => "file", swapcfg::SwapType::Partition => "part", swapcfg::SwapType::Compressed => "zram" }; let status = if a.active { "active" } else { "off" }; let mb = a.size_bytes / (1024 * 1024); let used_mb = a.used_bytes / (1024 * 1024); shell_println!("  id={} {} [{}] {} {}MB/{}MB prio={}", a.id, a.path, stype, status, used_mb, mb, a.priority.0); } } }
+        "usage" => { let u = swapcfg::usage(); let total_mb = u.total_bytes / (1024 * 1024); let used_mb = u.used_bytes / (1024 * 1024); let free_mb = u.free_bytes / (1024 * 1024); shell_println!("Total: {}MB  Used: {}MB  Free: {}MB  Active areas: {}", total_mb, used_mb, free_mb, u.active_areas); shell_println!("Pages in: {}  Pages out: {}", u.pages_in, u.pages_out); }
+        "add" => { if parts.len() < 3 { shell_println!("Usage: swapcfg add <path> <size_mb> [file|partition|zram] [priority]"); } else { match parts[2].parse::<u64>() { Ok(mb) => { let stype = match parts.get(3).copied().unwrap_or("file") { "partition" | "part" => swapcfg::SwapType::Partition, "zram" | "compressed" => swapcfg::SwapType::Compressed, _ => swapcfg::SwapType::File }; let prio = parts.get(4).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0); match swapcfg::add_swap(stype, parts[1], mb * 1024 * 1024, prio, "") { Ok(id) => shell_println!("Added swap '{}' (id={}, {}MB)", parts[1], id, mb), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid size") } } }
+        "remove" | "rm" => { if parts.len() < 2 { shell_println!("Usage: swapcfg remove <id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match swapcfg::remove_swap(id) { Ok(()) => shell_println!("Removed swap {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "on" | "activate" => { if parts.len() < 2 { shell_println!("Usage: swapcfg on <id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match swapcfg::activate(id) { Ok(()) => shell_println!("Activated swap {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "off" | "deactivate" => { if parts.len() < 2 { shell_println!("Usage: swapcfg off <id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match swapcfg::deactivate(id) { Ok(()) => shell_println!("Deactivated swap {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
+        "resize" => { if parts.len() < 3 { shell_println!("Usage: swapcfg resize <id> <new_size_mb>"); } else { match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) { (Ok(id), Ok(mb)) => match swapcfg::resize(id, mb * 1024 * 1024) { Ok(()) => shell_println!("Resized swap {} to {}MB", id, mb), Err(e) => shell_println!("Error: {:?}", e) }, _ => shell_println!("Invalid arguments") } } }
+        "priority" | "prio" => { if parts.len() < 3 { shell_println!("Usage: swapcfg priority <id> <value>"); } else { match (parts[1].parse::<u64>(), parts[2].parse::<i32>()) { (Ok(id), Ok(p)) => match swapcfg::set_priority(id, p) { Ok(()) => shell_println!("Set priority {} for swap {}", p, id), Err(e) => shell_println!("Error: {:?}", e) }, _ => shell_println!("Invalid arguments") } } }
+        "swappiness" => { if parts.len() < 2 { shell_println!("Usage: swapcfg swappiness <0-100>"); } else { match parts[1].parse::<u32>() { Ok(v) => match swapcfg::set_swappiness(v) { Ok(()) => shell_println!("Swappiness set to {}", v), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid value") } } }
+        "enable" => { match swapcfg::set_enabled(true) { Ok(()) => shell_println!("Swap enabled"), Err(e) => shell_println!("Error: {:?}", e) } }
+        "disable" => { match swapcfg::set_enabled(false) { Ok(()) => shell_println!("Swap disabled"), Err(e) => shell_println!("Error: {:?}", e) } }
+        "zswap" => { if parts.len() < 3 { shell_println!("Usage: swapcfg zswap <on|off> <algorithm> [max_pool_%]"); } else { let on = matches!(parts[1], "on" | "true" | "yes"); let algo = parts[2]; let pct = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20); match swapcfg::set_zswap(on, algo, pct) { Ok(()) => shell_println!("zswap: {} algorithm={} pool={}%", if on { "enabled" } else { "disabled" }, algo, pct), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "stats" => { let (ac, active, total, ops) = swapcfg::stats(); let total_mb = total / (1024 * 1024); shell_println!("Areas: {} ({} active)  Total: {}MB  Ops: {}", ac, active, total_mb, ops); }
+        "init" => { swapcfg::init_defaults(); shell_println!("Swap configuration initialized with defaults"); }
+        "test" => { match swapcfg::self_test() { Ok(()) => shell_println!("swapcfg: all tests passed"), Err(e) => shell_println!("swapcfg: test FAILED: {:?}", e) } }
+        _ => {
+            shell_println!("swapcfg — swap space configuration");
+            shell_println!("  show             Show configuration");
+            shell_println!("  list             List swap areas");
+            shell_println!("  usage            Show usage stats");
+            shell_println!("  add <path> <mb>  Add swap area");
+            shell_println!("  remove <id>      Remove swap area");
+            shell_println!("  on <id>          Activate");
+            shell_println!("  off <id>         Deactivate");
+            shell_println!("  resize <id> <mb> Resize");
+            shell_println!("  priority <id> <v> Set priority");
+            shell_println!("  swappiness <n>   Set swappiness");
+            shell_println!("  enable/disable   Toggle swap");
+            shell_println!("  zswap <on> <alg> Configure zswap");
+            shell_println!("  stats            Show statistics");
+            shell_println!("  init             Load defaults");
+            shell_println!("  test             Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27982,7 +28026,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -85,6 +85,7 @@ pub mod policy;
 pub mod prefetch;
 pub mod preview;
 pub mod profile;
+pub mod properties;
 pub mod quota;
 pub mod readdir_plus;
 pub mod recent;

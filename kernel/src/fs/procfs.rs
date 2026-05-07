@@ -154,6 +154,7 @@ const ROOT_FILES: &[&str] = &[
     "columnview",
     "pathbar",
     "viewstate",
+    "properties",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2804,6 +2805,20 @@ fn gen_viewstate() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_properties() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (gathers, checksums) = super::properties::stats();
+
+    out.push_str("File Properties\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Gather calls: {}\n", gathers));
+    out.push_str(&format!("Checksums:    {}\n", checksums));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2899,6 +2914,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),
+        "properties" => Ok(gen_properties()),
         _ => Err(KernelError::NotFound),
     }
 }

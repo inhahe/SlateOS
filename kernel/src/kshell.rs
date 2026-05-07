@@ -3092,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
-    "pathbar", "prefetch", "preview", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
+    "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4384,6 +4384,7 @@ fn dispatch(line: &str) {
         "columnview" | "colview" => cmd_columnview(args),
         "pathbar" => cmd_pathbar(args),
         "viewstate" => cmd_viewstate(args),
+        "properties" | "prop" => cmd_properties(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -16080,6 +16081,88 @@ fn cmd_viewstate(args: &str) {
     }
 }
 
+/// `properties` — file properties (Properties dialog data).
+fn cmd_properties(args: &str) {
+    use crate::fs::properties;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let path_arg = parts.first().copied().unwrap_or(".");
+    let path = resolve_path(path_arg);
+
+    match properties::gather(&path) {
+        Ok(props) => {
+            // General tab.
+            shell_println!("=== General ===");
+            shell_println!("  Name:        {}", props.general.name);
+            shell_println!("  Type:        {}", props.general.type_description);
+            shell_println!("  MIME:        {}", props.general.mime_type);
+            if !props.general.opens_with.is_empty() {
+                shell_println!("  Opens with:  {}", props.general.opens_with);
+            }
+            shell_println!("  Location:    {}", props.general.location);
+            shell_println!("  Size:        {} bytes", props.general.size);
+            if props.general.size_on_disk > 0 {
+                shell_println!("  On disk:     {} bytes", props.general.size_on_disk);
+            }
+            shell_println!("  Created:     {} ns", props.general.created_ns);
+            shell_println!("  Modified:    {} ns", props.general.modified_ns);
+            shell_println!("  Accessed:    {} ns", props.general.accessed_ns);
+            if props.general.read_only { shell_println!("  [Read-only]"); }
+            if props.general.hidden { shell_println!("  [Hidden]"); }
+            if props.general.is_symlink {
+                shell_println!("  Link target: {}", props.general.link_target);
+            }
+            shell_println!("  Hard links:  {}", props.general.nlinks);
+
+            // Security tab.
+            shell_println!("\n=== Security ===");
+            shell_println!("  Owner:       {} (uid:{})", props.security.owner, props.security.uid);
+            shell_println!("  Group:       {} (gid:{})", props.security.group, props.security.gid);
+            shell_println!("  Permissions: {} ({:03o})", props.security.permissions_str, props.security.permissions);
+            if !props.security.xattrs.is_empty() {
+                shell_println!("  Extended attributes:");
+                for (k, v) in &props.security.xattrs {
+                    shell_println!("    {} = {}", k, v);
+                }
+            }
+
+            // Details tab.
+            if !props.details.is_empty() {
+                shell_println!("\n=== Details ===");
+                for field in &props.details {
+                    shell_println!("  {:20} {}", field.name, field.value);
+                }
+            }
+
+            // Disk usage (directories).
+            if let Some(ref usage) = props.disk_usage {
+                shell_println!("\n=== Contents ===");
+                shell_println!("  Files:       {}", usage.file_count);
+                shell_println!("  Folders:     {}", usage.dir_count);
+                shell_println!("  Total size:  {} bytes", usage.total_size);
+            }
+
+            // Checksum (offer to compute).
+            if !props.general.is_directory {
+                if let Some(second) = parts.get(1) {
+                    if *second == "--checksum" || *second == "-c" {
+                        match properties::compute_checksums(&path) {
+                            Ok(cs) => {
+                                shell_println!("\n=== Checksums ===");
+                                if let Some(crc) = cs.crc32 {
+                                    shell_println!("  CRC32:  {:08X}", crc);
+                                }
+                                shell_println!("  Size:   {} bytes", cs.computed_size);
+                            }
+                            Err(e) => shell_println!("Checksum error: {:?}", e),
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => shell_println!("Error: {:?}", e),
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -21648,7 +21731,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

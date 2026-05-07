@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4806,6 +4806,7 @@ fn dispatch(line: &str) {
         "installer" => cmd_installer(args),
         "timezone" | "tz" => cmd_timezone(args),
         "autostart" | "astart" => cmd_autostart(args),
+        "schedtune" | "stune" => cmd_schedtune(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -21433,6 +21434,343 @@ fn cmd_autostart(args: &str) {
     }
 }
 
+/// `schedtune` / `stune` — scheduler tuning settings.
+fn cmd_schedtune(args: &str) {
+    use crate::fs::schedtune;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "init" => {
+            schedtune::init_defaults();
+            shell_println!("Initialised default scheduler profiles.");
+        }
+        "list" | "ls" => {
+            let profiles = schedtune::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No scheduler profiles configured.");
+                return;
+            }
+            shell_println!("{:<4} {:<25} {:<12} {:<18} {:<8} {}",
+                "ID", "NAME", "WORKLOAD", "MODEL", "ACTIVE", "PREEMPT");
+            for p in &profiles {
+                shell_println!("{:<4} {:<25} {:<12} {:<18} {:<8} {:?}",
+                    p.id, p.name,
+                    format!("{:?}", p.workload),
+                    format!("{:?}", p.model),
+                    p.active,
+                    p.preempt);
+            }
+        }
+        "active" | "show" => {
+            match schedtune::active_profile() {
+                Ok(a) => {
+                    shell_println!("Active: {} (id={})", a.name, a.id);
+                    shell_println!("  Workload:       {:?}", a.workload);
+                    shell_println!("  Model:          {:?}", a.model);
+                    shell_println!("  Preempt:        {:?}", a.preempt);
+                    shell_println!("  Timeslice:      {} us", a.timeslice_us);
+                    shell_println!("  Min granularity:{} us", a.min_granularity_us);
+                    shell_println!("  Target latency: {} us", a.target_latency_us);
+                    shell_println!("  Priority levels:{}", a.priority_levels);
+                    shell_println!("  Interactive:    {}", a.interactive_boost);
+                    shell_println!("  Affinity:       {}", a.affinity_strictness);
+                    shell_println!("  Balance:        {:?} ({}ms)", a.balance_strategy, a.balance_interval_ms);
+                    shell_println!("  Per-CPU queues: {}", a.per_cpu_queues);
+                    shell_println!("  NUMA-aware:     {}", a.numa_aware);
+                    shell_println!("  Prio inherit:   {}", a.priority_inheritance);
+                    shell_println!("  Idle powersave: {}", a.idle_powersave);
+                    if a.requires_recompile {
+                        shell_println!("  ⚠ Requires recompile to apply");
+                    }
+                    if a.requires_reboot {
+                        shell_println!("  ⚠ Requires reboot to apply");
+                    }
+                }
+                Err(_) => shell_println!("No active profile."),
+            }
+        }
+        "get" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: schedtune get <id>"); return; }
+            };
+            match schedtune::get_profile(id) {
+                Ok(p) => {
+                    shell_println!("ID:            {}", p.id);
+                    shell_println!("Name:          {}", p.name);
+                    shell_println!("Workload:      {:?}", p.workload);
+                    shell_println!("Model:         {:?}", p.model);
+                    shell_println!("Preempt:       {:?}", p.preempt);
+                    shell_println!("Timeslice:     {} us", p.timeslice_us);
+                    shell_println!("Min gran:      {} us", p.min_granularity_us);
+                    shell_println!("Target lat:    {} us", p.target_latency_us);
+                    shell_println!("Priorities:    {}", p.priority_levels);
+                    shell_println!("Interactive:   {}", p.interactive_boost);
+                    shell_println!("Affinity:      {}", p.affinity_strictness);
+                    shell_println!("Balance:       {:?} ({}ms)", p.balance_strategy, p.balance_interval_ms);
+                    shell_println!("Per-CPU:       {}", p.per_cpu_queues);
+                    shell_println!("NUMA:          {}", p.numa_aware);
+                    shell_println!("Migration:     {} us", p.migration_cost_us);
+                    shell_println!("Prio inherit:  {}", p.priority_inheritance);
+                    shell_println!("Idle save:     {}", p.idle_powersave);
+                    shell_println!("Built-in:      {}", p.builtin);
+                    shell_println!("Active:        {}", p.active);
+                    shell_println!("Recompile:     {}", p.requires_recompile);
+                    shell_println!("Reboot:        {}", p.requires_reboot);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "create" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: schedtune create <name> <workload> <model>");
+                shell_println!("Workloads: desktop, server, gaming, dev, realtime, lowpower");
+                shell_println!("Models: prr, cfs, eevdf, bfs, rtfifo");
+                return;
+            }
+            let name = parts[1];
+            let workload = match parts[2] {
+                "desktop" => schedtune::WorkloadType::Desktop,
+                "server" => schedtune::WorkloadType::Server,
+                "gaming" => schedtune::WorkloadType::Gaming,
+                "dev" | "development" => schedtune::WorkloadType::Development,
+                "realtime" | "rt" => schedtune::WorkloadType::Realtime,
+                "lowpower" | "lp" => schedtune::WorkloadType::LowPower,
+                _ => { shell_println!("Unknown workload type."); return; }
+            };
+            let model = match parts[3] {
+                "prr" => schedtune::SchedModel::PriorityRoundRobin,
+                "cfs" => schedtune::SchedModel::Cfs,
+                "eevdf" => schedtune::SchedModel::Eevdf,
+                "bfs" => schedtune::SchedModel::Bfs,
+                "rtfifo" | "rt" => schedtune::SchedModel::RtFifo,
+                _ => { shell_println!("Unknown model."); return; }
+            };
+            match schedtune::create_profile(name, workload, model) {
+                Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: schedtune remove <id>"); return; }
+            };
+            match schedtune::remove_profile(id) {
+                Ok(()) => shell_println!("Removed profile {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "apply" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: schedtune apply <id>"); return; }
+            };
+            match schedtune::apply_profile(id) {
+                Ok(()) => shell_println!("Applied profile {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "timeslice" | "ts" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: schedtune timeslice <id> <us>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let us: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid microseconds."); return; }
+            };
+            match schedtune::set_timeslice(id, us) {
+                Ok(()) => shell_println!("Set timeslice to {} us.", us),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "preempt" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: schedtune preempt <id> <none|voluntary|full|realtime>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let pm = match parts[2] {
+                "none" => schedtune::PreemptModel::None,
+                "voluntary" | "vol" => schedtune::PreemptModel::Voluntary,
+                "full" => schedtune::PreemptModel::Full,
+                "realtime" | "rt" => schedtune::PreemptModel::RealTime,
+                _ => { shell_println!("Unknown model."); return; }
+            };
+            match schedtune::set_preempt(id, pm) {
+                Ok(()) => shell_println!("Set preemption model."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "latency" | "lat" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: schedtune latency <id> <us>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let us: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid microseconds."); return; }
+            };
+            match schedtune::set_target_latency(id, us) {
+                Ok(()) => shell_println!("Set target latency to {} us.", us),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "interactive" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: schedtune interactive <id> <on|off>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let on = parts[2] == "on" || parts[2] == "true";
+            match schedtune::set_interactive_boost(id, on) {
+                Ok(()) => shell_println!("Set interactive boost {}.", if on { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "affinity" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: schedtune affinity <id> <0-100>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let v: u8 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid value."); return; }
+            };
+            match schedtune::set_affinity(id, v) {
+                Ok(()) => shell_println!("Set affinity strictness to {}.", v),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "balance" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: schedtune balance <id> <steal|push|hybrid|pinned>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let bs = match parts[2] {
+                "steal" | "workstealing" => schedtune::BalanceStrategy::WorkStealing,
+                "push" => schedtune::BalanceStrategy::PushMigration,
+                "hybrid" => schedtune::BalanceStrategy::Hybrid,
+                "pinned" | "none" => schedtune::BalanceStrategy::Pinned,
+                _ => { shell_println!("Unknown strategy."); return; }
+            };
+            match schedtune::set_balance_strategy(id, bs) {
+                Ok(()) => shell_println!("Set balance strategy."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "numa" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: schedtune numa <id> <on|off>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let on = parts[2] == "on" || parts[2] == "true";
+            match schedtune::set_numa_aware(id, on) {
+                Ok(()) => shell_println!("Set NUMA-aware {}.", if on { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "tradeoffs" | "pros" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: schedtune tradeoffs <id>"); return; }
+            };
+            match schedtune::tradeoffs(id) {
+                Ok(info) => {
+                    shell_println!("{}", info.label);
+                    shell_println!();
+                    shell_println!("Advantages:");
+                    for a in &info.advantages {
+                        shell_println!("  + {}", a);
+                    }
+                    shell_println!();
+                    shell_println!("Disadvantages:");
+                    for d in &info.disadvantages {
+                        shell_println!("  - {}", d);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, active, tradeoffs, ops) = schedtune::stats();
+            shell_println!("Profiles:    {}", total);
+            shell_println!("Active:      {}", active);
+            shell_println!("Tradeoffs:   {}", tradeoffs);
+            shell_println!("Operations:  {}", ops);
+        }
+        "clear" => {
+            schedtune::clear_all();
+            shell_println!("Cleared all scheduler profiles.");
+        }
+        "test" => {
+            match schedtune::self_test() {
+                Ok(()) => shell_println!("schedtune: all tests passed."),
+                Err(e) => shell_println!("schedtune: test failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("schedtune — scheduler tuning parameters");
+            shell_println!();
+            shell_println!("Subcommands:");
+            shell_println!("  init                          Load default profiles");
+            shell_println!("  list / ls                     List all profiles");
+            shell_println!("  active / show                 Show active profile details");
+            shell_println!("  get <id>                      Show profile details");
+            shell_println!("  create <name> <wl> <model>    Create custom profile");
+            shell_println!("  remove / rm <id>              Remove custom profile");
+            shell_println!("  apply <id>                    Activate a profile");
+            shell_println!("  timeslice <id> <us>           Set time slice");
+            shell_println!("  preempt <id> <model>          Set preemption model");
+            shell_println!("  latency <id> <us>             Set target latency");
+            shell_println!("  interactive <id> <on|off>     Toggle interactive boost");
+            shell_println!("  affinity <id> <0-100>         Set CPU affinity strictness");
+            shell_println!("  balance <id> <strategy>       Set load balance strategy");
+            shell_println!("  numa <id> <on|off>            Toggle NUMA-aware scheduling");
+            shell_println!("  tradeoffs <id>                Show pros/cons");
+            shell_println!("  stats                         Show statistics");
+            shell_println!("  clear                         Clear all profiles");
+            shell_println!("  test                          Run self-tests");
+            shell_println!();
+            shell_println!("Workloads: desktop, server, gaming, dev, realtime, lowpower");
+            shell_println!("Models: prr, cfs, eevdf, bfs, rtfifo");
+            shell_println!("Preempt: none, voluntary, full, realtime");
+            shell_println!("Balance: steal, push, hybrid, pinned");
+            shell_println!("Alias: stune");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -29152,7 +29490,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

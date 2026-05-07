@@ -202,6 +202,7 @@ const ROOT_FILES: &[&str] = &[
     "swapcfg",
     "timezone",
     "autostart",
+    "schedtune",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4317,6 +4318,46 @@ fn gen_autostart() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_schedtune() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, active_count, tradeoff_count, ops) = super::schedtune::stats();
+
+    out.push_str("Scheduler Tuning\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Profiles:      {}\n", total));
+    out.push_str(&format!("Active:        {}\n", active_count));
+    out.push_str(&format!("Tradeoffs:     {}\n", tradeoff_count));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    if let Ok(a) = super::schedtune::active_profile() {
+        out.push_str(&format!("\nActive: {} ({:?})\n", a.name, a.workload));
+        out.push_str(&format!("  Model:       {:?}\n", a.model));
+        out.push_str(&format!("  Preempt:     {:?}\n", a.preempt));
+        out.push_str(&format!("  Timeslice:   {} us\n", a.timeslice_us));
+        out.push_str(&format!("  Latency:     {} us\n", a.target_latency_us));
+        out.push_str(&format!("  Interactive: {}\n", a.interactive_boost));
+        out.push_str(&format!("  Balance:     {:?}\n", a.balance_strategy));
+    }
+
+    let profiles = super::schedtune::list_profiles();
+    if !profiles.is_empty() {
+        out.push_str(&format!("\n{:<4} {:<25} {:<12} {:<18} {:<8} {}\n",
+            "ID", "NAME", "WORKLOAD", "MODEL", "ACTIVE", "PREEMPT"));
+        for p in &profiles {
+            out.push_str(&format!("{:<4} {:<25} {:<12} {:<18} {:<8} {:?}\n",
+                p.id, p.name,
+                format!("{:?}", p.workload),
+                format!("{:?}", p.model),
+                p.active,
+                p.preempt));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4684,6 +4725,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "swapcfg" => Ok(gen_swapcfg()),
         "timezone" => Ok(gen_timezone()),
         "autostart" => Ok(gen_autostart()),
+        "schedtune" => Ok(gen_schedtune()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

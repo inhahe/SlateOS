@@ -609,6 +609,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Filesystem snapshots (fs::snapshot): CAS-backed point-in-time directory tree snapshots with create/restore/delete/diff/list; branching (parent→child tree), selective include/exclude filters, metadata preservation; `fssnapshot`/`fssnap` kshell command; /proc/snapshots; 8 self-tests
   - [x] Disk space reclamation daemon (fs::reclaim): multi-phase coordinated cleanup (cache flush → CAS GC → tmpwatch → trash purge → journal flush) with configurable watermarks (90%/80% default), per-phase enable/disable, periodic check() entry point; `reclaim` kshell command; /proc/reclaim; 6 self-tests
   - [x] Atomic filesystem transactions (fs::transaction): write-ahead grouped operations (write/remove/mkdir/rename/symlink) with undo-stack rollback on failure, max 64 ops per transaction, dirty state detection for failed rollbacks; `fstx` kshell command with 11 subcommands; /proc/transactions; 6 self-tests
+  - [x] Persistent change tracking (fs::changetrack): cursor-based journal bookmark system for detecting filesystem changes across restarts; register/unregister named cursors, changes (advance) and peek (read-only) queries, path prefix and event type filtering, gap detection for journal eviction, disk persistence to /_CHANGE_CURSORS; `changetrack`/`ct` kshell command (9 subcommands); /proc/changetrack; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

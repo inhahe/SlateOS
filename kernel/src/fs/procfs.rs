@@ -119,6 +119,7 @@ const ROOT_FILES: &[&str] = &[
     "dedup",
     "search",
     "tags",
+    "usage",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1841,6 +1842,58 @@ fn gen_tags() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/usage` — disk usage analyzer statistics.
+fn gen_usage() -> Vec<u8> {
+    use crate::fs::usage;
+    let mut out = String::with_capacity(1024);
+
+    out.push_str(&format!("Disk Usage Analyzer ({} analyses run)\n\n", usage::analyses_run()));
+
+    if let Some(report) = usage::last_report() {
+        out.push_str(&format!("Last analysis: {}\n", report.root));
+        out.push_str(&format!("  total size:   {}\n", usage::format_size(report.total_size)));
+        out.push_str(&format!("  files:        {}\n", report.file_count));
+        out.push_str(&format!("  directories:  {}\n", report.dir_count));
+        out.push_str(&format!("  avg file:     {}\n", usage::format_size(report.avg_file_size)));
+        out.push_str(&format!("  median file:  {}\n", usage::format_size(report.median_file_size)));
+
+        if !report.top_dirs.is_empty() {
+            out.push_str("\nTop Directories:\n");
+            for d in report.top_dirs.iter().take(10) {
+                out.push_str(&format!("  {:>10} {}\n", usage::format_size(d.size), d.path));
+            }
+        }
+
+        if !report.by_extension.is_empty() {
+            out.push_str("\nBy Extension:\n");
+            for e in report.by_extension.iter().take(10) {
+                out.push_str(&format!(
+                    "  .{:8} {:>10} ({} files)\n",
+                    e.extension,
+                    usage::format_size(e.total_size),
+                    e.count
+                ));
+            }
+        }
+
+        out.push_str("\nAge Distribution:\n");
+        out.push_str(&format!("  <1 day:  {} files, {}\n", report.by_age.last_day.count, usage::format_size(report.by_age.last_day.size)));
+        out.push_str(&format!("  <1 week: {} files, {}\n", report.by_age.last_week.count, usage::format_size(report.by_age.last_week.size)));
+        out.push_str(&format!("  <1 month:{} files, {}\n", report.by_age.last_month.count, usage::format_size(report.by_age.last_month.size)));
+        out.push_str(&format!("  <1 year: {} files, {}\n", report.by_age.last_year.count, usage::format_size(report.by_age.last_year.size)));
+        out.push_str(&format!("  >1 year: {} files, {}\n", report.by_age.older.count, usage::format_size(report.by_age.older.size)));
+
+        out.push_str("\nWasted Space:\n");
+        out.push_str(&format!("  empty files:  {}\n", report.wasted.empty_files));
+        out.push_str(&format!("  tiny files:   {} ({})\n", report.wasted.tiny_files, usage::format_size(report.wasted.tiny_size)));
+        out.push_str(&format!("  dup names:    {}\n", report.wasted.duplicate_names));
+    } else {
+        out.push_str("(no analysis cached; run `diskuse` to analyze)\n");
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1901,6 +1954,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dedup" => Ok(gen_dedup()),
         "search" => Ok(gen_search()),
         "tags" => Ok(gen_tags()),
+        "usage" => Ok(gen_usage()),
         _ => Err(KernelError::NotFound),
     }
 }

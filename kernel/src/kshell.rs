@@ -3113,6 +3113,7 @@ const COMMANDS: &[&str] = &[
     "encrypt",
     "fsearch",
     "tag",
+    "diskuse",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4344,6 +4345,7 @@ fn dispatch(line: &str) {
         "encrypt" => cmd_encrypt(args),
         "fsearch" => cmd_fsearch(args),
         "tag" => cmd_tag(args),
+        "diskuse" => cmd_diskuse(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -11977,6 +11979,111 @@ fn cmd_tag(args: &str) {
     }
 }
 
+/// `diskuse [path]` — detailed disk usage analysis.
+///
+/// Runs a comprehensive disk usage analysis showing top dirs,
+/// top files, extension breakdown, age distribution, and wasted space.
+fn cmd_diskuse(args: &str) {
+    use crate::fs::usage;
+
+    let root = if args.is_empty() { "/" } else { args.trim() };
+
+    shell_println!("Analyzing disk usage from '{}'...", root);
+
+    match usage::analyze_path(root) {
+        Ok(report) => {
+            shell_println!();
+            shell_println!("=== Disk Usage Report: {} ===", report.root);
+            shell_println!();
+            shell_println!("  Total size:      {}", usage::format_size(report.total_size));
+            shell_println!("  Files:           {}", report.file_count);
+            shell_println!("  Directories:     {}", report.dir_count);
+            shell_println!("  Symlinks:        {}", report.symlink_count);
+            shell_println!("  Avg file size:   {}", usage::format_size(report.avg_file_size));
+            shell_println!("  Median file size:{}", usage::format_size(report.median_file_size));
+
+            if !report.top_dirs.is_empty() {
+                shell_println!();
+                shell_println!("--- Top Directories ---");
+                for d in report.top_dirs.iter().take(10) {
+                    let pct = if report.total_size > 0 {
+                        d.size * 100 / report.total_size
+                    } else {
+                        0
+                    };
+                    shell_println!("  {:>10} {:>3}%  {}", usage::format_size(d.size), pct, d.path);
+                }
+            }
+
+            if !report.top_files.is_empty() {
+                shell_println!();
+                shell_println!("--- Top Files ---");
+                for f in report.top_files.iter().take(10) {
+                    shell_println!("  {:>10}  {}", usage::format_size(f.size), f.path);
+                }
+            }
+
+            if !report.by_extension.is_empty() {
+                shell_println!();
+                shell_println!("--- By Extension ---");
+                for e in report.by_extension.iter().take(10) {
+                    let pct = if report.total_size > 0 {
+                        e.total_size * 100 / report.total_size
+                    } else {
+                        0
+                    };
+                    shell_println!(
+                        "  .{:8} {:>10} {:>3}%  ({} files)",
+                        e.extension,
+                        usage::format_size(e.total_size),
+                        pct,
+                        e.count
+                    );
+                }
+            }
+
+            shell_println!();
+            shell_println!("--- Age Distribution ---");
+            shell_println!(
+                "  < 1 day:    {:>6} files  {}",
+                report.by_age.last_day.count,
+                usage::format_size(report.by_age.last_day.size)
+            );
+            shell_println!(
+                "  < 1 week:   {:>6} files  {}",
+                report.by_age.last_week.count,
+                usage::format_size(report.by_age.last_week.size)
+            );
+            shell_println!(
+                "  < 1 month:  {:>6} files  {}",
+                report.by_age.last_month.count,
+                usage::format_size(report.by_age.last_month.size)
+            );
+            shell_println!(
+                "  < 1 year:   {:>6} files  {}",
+                report.by_age.last_year.count,
+                usage::format_size(report.by_age.last_year.size)
+            );
+            shell_println!(
+                "  > 1 year:   {:>6} files  {}",
+                report.by_age.older.count,
+                usage::format_size(report.by_age.older.size)
+            );
+
+            shell_println!();
+            shell_println!("--- Wasted Space ---");
+            shell_println!("  Empty files (0 B):   {}", report.wasted.empty_files);
+            shell_println!(
+                "  Tiny files (<64 B):  {} ({})",
+                report.wasted.tiny_files,
+                usage::format_size(report.wasted.tiny_size)
+            );
+            shell_println!("  Duplicate names:     {}", report.wasted.duplicate_names);
+        }
+        Err(e) => shell_println!("diskuse: {:?}", e),
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -17235,7 +17342,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

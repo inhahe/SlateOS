@@ -1685,3 +1685,229 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
     con.cursor_row = rows.saturating_sub(1);
     con.cursor_col = 0;
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Self-test: exercise the ANSI escape sequence parser.
+///
+/// Tests state machine transitions, parameter parsing, cursor movement,
+/// SGR attribute handling, scroll region, and color support without
+/// relying on visual inspection — checks internal state via the CONSOLE
+/// lock.
+pub fn self_test() {
+    crate::serial_println!("[console] Running self-test...");
+
+    // Test 1: Basic initialization state.
+    {
+        let con = CONSOLE.lock();
+        assert!(con.initialized, "console not initialized");
+        assert!(con.cols > 0 && con.rows > 0, "invalid dimensions");
+        crate::serial_println!("[console]   Dimensions: {}x{} OK", con.cols, con.rows);
+    }
+
+    // Test 2: Cursor positioning via CSI H.
+    {
+        // Move to row 5, col 10 (1-based).
+        write_str_no_serial("\x1b[5;10H");
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 4, "CUP row");
+        assert_eq!(con.cursor_col, 9, "CUP col");
+        crate::serial_println!("[console]   CUP cursor positioning: OK");
+    }
+
+    // Test 3: Relative cursor movement.
+    {
+        write_str_no_serial("\x1b[1;1H"); // Home
+        write_str_no_serial("\x1b[3B");    // Down 3
+        write_str_no_serial("\x1b[5C");    // Right 5
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 3, "CUD");
+        assert_eq!(con.cursor_col, 5, "CUF");
+        drop(con);
+
+        write_str_no_serial("\x1b[2A");    // Up 2
+        write_str_no_serial("\x1b[1D");    // Left 1
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 1, "CUU");
+        assert_eq!(con.cursor_col, 4, "CUB");
+        crate::serial_println!("[console]   Relative cursor movement: OK");
+    }
+
+    // Test 4: CHA and VPA.
+    {
+        write_str_no_serial("\x1b[1;1H"); // Home
+        write_str_no_serial("\x1b[15G");   // Column 15
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_col, 14, "CHA");
+        drop(con);
+
+        write_str_no_serial("\x1b[8d");    // Row 8
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 7, "VPA");
+        crate::serial_println!("[console]   CHA/VPA absolute positioning: OK");
+    }
+
+    // Test 5: CNL and CPL.
+    {
+        write_str_no_serial("\x1b[5;10H"); // Row 5, col 10
+        write_str_no_serial("\x1b[2E");     // Next line ×2
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 6, "CNL row");
+        assert_eq!(con.cursor_col, 0, "CNL col");
+        drop(con);
+
+        write_str_no_serial("\x1b[1F");     // Previous line ×1
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 5, "CPL row");
+        assert_eq!(con.cursor_col, 0, "CPL col");
+        crate::serial_println!("[console]   CNL/CPL next/prev line: OK");
+    }
+
+    // Test 6: SGR attribute tracking.
+    {
+        // Reset, then set bold + underline + reverse.
+        write_str_no_serial("\x1b[0m");
+        write_str_no_serial("\x1b[1;4;7m");
+        let con = CONSOLE.lock();
+        assert!(con.bold, "bold not set");
+        assert!(con.underline, "underline not set");
+        assert!(con.reverse, "reverse not set");
+        assert!(!con.dim, "dim should not be set");
+        drop(con);
+
+        // Reset all.
+        write_str_no_serial("\x1b[0m");
+        let con = CONSOLE.lock();
+        assert!(!con.bold, "bold not cleared");
+        assert!(!con.underline, "underline not cleared");
+        assert!(!con.reverse, "reverse not cleared");
+        crate::serial_println!("[console]   SGR attributes: OK");
+    }
+
+    // Test 7: Foreground color selection.
+    {
+        write_str_no_serial("\x1b[0m");
+        write_str_no_serial("\x1b[31m"); // Red
+        let con = CONSOLE.lock();
+        assert_eq!(con.fg_color, ANSI_COLORS[1], "fg should be red");
+        drop(con);
+
+        write_str_no_serial("\x1b[94m"); // Bright blue
+        let con = CONSOLE.lock();
+        assert_eq!(con.fg_color, ANSI_COLORS[12], "fg should be bright blue");
+        drop(con);
+
+        write_str_no_serial("\x1b[39m"); // Default fg
+        let con = CONSOLE.lock();
+        assert_eq!(con.fg_color, FG_COLOR, "fg should be default");
+        crate::serial_println!("[console]   Foreground color: OK");
+    }
+
+    // Test 8: 256-color.
+    {
+        write_str_no_serial("\x1b[0m");
+        // 256-color index 196 = bright red from the cube.
+        // Index 196 = 16 + 36*5 + 6*0 + 0 → pure red
+        let expected = color_256(196);
+        write_str_no_serial("\x1b[38;5;196m");
+        let con = CONSOLE.lock();
+        assert_eq!(con.fg_color, expected, "256-color fg");
+        drop(con);
+        write_str_no_serial("\x1b[0m");
+        crate::serial_println!("[console]   256-color support: OK");
+    }
+
+    // Test 9: Scroll region setup.
+    {
+        write_str_no_serial("\x1b[0m");
+        let rows = {
+            let con = CONSOLE.lock();
+            con.rows
+        };
+        write_str_no_serial("\x1b[5;20r"); // Scroll region rows 5-20
+        let con = CONSOLE.lock();
+        assert_eq!(con.scroll_top, 4, "scroll_top");
+        assert_eq!(con.scroll_bottom, 19, "scroll_bottom");
+        // DECSTBM resets cursor to home.
+        assert_eq!(con.cursor_row, 0, "DECSTBM cursor row");
+        assert_eq!(con.cursor_col, 0, "DECSTBM cursor col");
+        drop(con);
+
+        // Reset scroll region.
+        write_str_no_serial("\x1b[r");
+        let con = CONSOLE.lock();
+        assert_eq!(con.scroll_top, 0, "scroll_top reset");
+        assert_eq!(con.scroll_bottom, rows.saturating_sub(1), "scroll_bottom reset");
+        crate::serial_println!("[console]   Scroll region (DECSTBM): OK");
+    }
+
+    // Test 10: Cursor save/restore (ESC 7 / ESC 8).
+    {
+        write_str_no_serial("\x1b[0m\x1b[10;20H"); // Position at (10,20)
+        write_str_no_serial("\x1b[32m");             // Green foreground
+        write_str_no_serial("\x1b7");                 // Save cursor (DECSC)
+
+        write_str_no_serial("\x1b[1;1H\x1b[31m");   // Move and change color
+
+        write_str_no_serial("\x1b8");                 // Restore cursor (DECRC)
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 9, "DECRC row");
+        assert_eq!(con.cursor_col, 19, "DECRC col");
+        assert_eq!(con.fg_color, ANSI_COLORS[2], "DECRC fg color");
+        crate::serial_println!("[console]   DECSC/DECRC cursor save/restore: OK");
+    }
+
+    // Test 11: SCP/RCP (ESC[s / ESC[u).
+    {
+        write_str_no_serial("\x1b[0m\x1b[3;7H");    // Position at (3,7)
+        write_str_no_serial("\x1b[s");                // Save cursor (SCP)
+        write_str_no_serial("\x1b[15;30H");           // Move elsewhere
+        write_str_no_serial("\x1b[u");                // Restore (RCP)
+        let con = CONSOLE.lock();
+        assert_eq!(con.cursor_row, 2, "RCP row");
+        assert_eq!(con.cursor_col, 6, "RCP col");
+        crate::serial_println!("[console]   SCP/RCP cursor save/restore: OK");
+    }
+
+    // Test 12: DEC private mode ? prefix parsing.
+    {
+        // ESC[?25l should set ansi_private and handle mode 25.
+        // We can't observe cursor visibility (it's a no-op) but we
+        // can verify the parser doesn't break.
+        write_str_no_serial("\x1b[?25l");
+        write_str_no_serial("\x1b[?25h");
+        // If we get here without panic, the parser handled ? prefix.
+        crate::serial_println!("[console]   DEC private mode parsing: OK");
+    }
+
+    // Test 13: Full reset (ESC c).
+    {
+        write_str_no_serial("\x1b[1;4;7;31m"); // Bold+underline+reverse+red
+        write_str_no_serial("\x1bc");            // RIS
+        let con = CONSOLE.lock();
+        assert!(!con.bold, "RIS bold");
+        assert!(!con.underline, "RIS underline");
+        assert!(!con.reverse, "RIS reverse");
+        assert!(!con.dim, "RIS dim");
+        assert_eq!(con.fg_color, FG_COLOR, "RIS fg");
+        assert_eq!(con.bg_color, BG_COLOR, "RIS bg");
+        assert_eq!(con.scroll_top, 0, "RIS scroll_top");
+        crate::serial_println!("[console]   Full reset (RIS): OK");
+    }
+
+    // Clean up: reset state for normal operation.
+    write_str_no_serial("\x1b[0m\x1b[r");
+    crate::serial_println!("[console] Self-test PASSED");
+}
+
+/// Write a string to the console without mirroring to serial.
+///
+/// Used by self-test so escape sequences affect the framebuffer console
+/// state without polluting the serial log with control characters.
+fn write_str_no_serial(s: &str) {
+    for byte in s.bytes() {
+        putchar(byte);
+    }
+}

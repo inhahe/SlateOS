@@ -1353,6 +1353,9 @@ extern "C" fn kmain() -> ! {
         serial_println!("[fb] Self-test failed: {} (non-fatal)", e);
     }
 
+    // Console VT100/ANSI escape sequence self-test.
+    console::self_test();
+
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.
     mm::integ_test::self_test();

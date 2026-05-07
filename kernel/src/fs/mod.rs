@@ -109,6 +109,7 @@ pub mod power;
 pub mod prefetch;
 pub mod preview;
 pub mod profile;
+pub mod progmgr;
 pub mod properties;
 pub mod queryable;
 pub mod quota;

@@ -191,6 +191,7 @@ const ROOT_FILES: &[&str] = &[
     "partmgr",
     "locale",
     "useracct",
+    "progmgr",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3849,6 +3850,41 @@ fn gen_useracct() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_progmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, installed, snaps, ops) = super::progmgr::stats();
+
+    out.push_str("Program Manager\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Programs:   {} ({} installed)\n", total, installed));
+    out.push_str(&format!("Snapshots:  {}\n", snaps));
+    out.push_str(&format!("Operations: {}\n", ops));
+
+    let progs = super::progmgr::list_programs();
+    if !progs.is_empty() {
+        out.push_str("\nPrograms:\n");
+        for p in &progs {
+            let prio = match p.priority {
+                super::progmgr::PriorityLevel::Idle => "idle",
+                super::progmgr::PriorityLevel::BelowNormal => "below",
+                super::progmgr::PriorityLevel::Normal => "normal",
+                super::progmgr::PriorityLevel::AboveNormal => "above",
+                super::progmgr::PriorityLevel::High => "high",
+                super::progmgr::PriorityLevel::Realtime => "rt",
+            };
+            let status = if p.installed { "installed" } else { "removed" };
+            out.push_str(&format!(
+                "  {} v{} [{}] prio={} caps={} snaps={}\n",
+                p.name, p.version, status, prio, p.capabilities.len(), p.snapshots.len()
+            ));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4205,6 +4241,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "partmgr" => Ok(gen_partmgr()),
         "locale" => Ok(gen_locale()),
         "useracct" => Ok(gen_useracct()),
+        "progmgr" => Ok(gen_progmgr()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

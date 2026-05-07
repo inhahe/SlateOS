@@ -115,6 +115,7 @@ const ROOT_FILES: &[&str] = &[
     "transactions",
     "changetrack",
     "fcompress",
+    "encryption",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1757,6 +1758,27 @@ fn gen_fcompress() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_encryption() -> Vec<u8> {
+    use crate::fs::encrypt;
+    let (enc, dec, keys) = encrypt::stats();
+    let key_list = encrypt::list_keys();
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!("File encryption: ChaCha20 + HMAC-SHA256\n\n"));
+    out.push_str(&format!("  keys stored:      {}\n", keys));
+    out.push_str(&format!("  files encrypted:  {}\n", enc));
+    out.push_str(&format!("  files decrypted:  {}\n\n", dec));
+
+    if !key_list.is_empty() {
+        out.push_str("  Key names:\n");
+        for k in &key_list {
+            out.push_str(&format!("    {}\n", k.name));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1813,6 +1835,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "transactions" => Ok(gen_transactions()),
         "changetrack" => Ok(gen_changetrack()),
         "fcompress" => Ok(gen_fcompress()),
+        "encryption" => Ok(gen_encryption()),
         _ => Err(KernelError::NotFound),
     }
 }

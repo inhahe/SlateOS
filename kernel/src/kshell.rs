@@ -3110,6 +3110,7 @@ const COMMANDS: &[&str] = &[
     "fstx",
     "changetrack", "ct",
     "fcompress", "fc",
+    "encrypt",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4338,6 +4339,7 @@ fn dispatch(line: &str) {
         "fstx" => cmd_fstx(args),
         "changetrack" | "ct" => cmd_changetrack(args),
         "fcompress" | "fc" => cmd_fcompress(args),
+        "encrypt" => cmd_encrypt(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -11413,6 +11415,188 @@ fn cmd_fcompress(args: &str) {
     }
 }
 
+/// `encrypt` — file encryption using ChaCha20 + HMAC-SHA256.
+///
+/// Subcommands:
+///   encrypt key add NAME PASSPHRASE   - derive and store a key
+///   encrypt key rm NAME               - remove a key
+///   encrypt key list                  - list stored keys
+///   encrypt file PATH KEY             - encrypt a file in-place
+///   encrypt decrypt PATH KEY          - decrypt a file in-place
+///   encrypt read PATH KEY             - decrypt and display (no write)
+///   encrypt info PATH                 - show encryption status
+///   encrypt status                    - show stats
+fn cmd_encrypt(args: &str) {
+    use crate::fs::encrypt;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.first().copied().unwrap_or("status") {
+        "key" | "keys" => {
+            match parts.get(1).copied().unwrap_or("list") {
+                "add" | "create" => {
+                    if parts.len() < 4 {
+                        shell_println!("Usage: encrypt key add NAME PASSPHRASE");
+                        return;
+                    }
+                    let name = parts[2];
+                    let pass = parts[3..].join(" ");
+                    match encrypt::add_key(name, &pass) {
+                        Ok(()) => shell_println!("Key '{}' added.", name),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" | "remove" | "del" => {
+                    if parts.len() < 3 {
+                        shell_println!("Usage: encrypt key rm NAME");
+                        return;
+                    }
+                    match encrypt::remove_key(parts[2]) {
+                        Ok(()) => shell_println!("Key '{}' removed.", parts[2]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "list" | "ls" => {
+                    let keys = encrypt::list_keys();
+                    if keys.is_empty() {
+                        shell_println!("No encryption keys stored.");
+                    } else {
+                        shell_println!("Stored keys:");
+                        for k in &keys {
+                            shell_println!("  {}", k.name);
+                        }
+                    }
+                }
+                _ => shell_println!("Usage: encrypt key <add|rm|list>"),
+            }
+        }
+        "file" | "enc" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: encrypt file PATH KEY_NAME");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let key_name = parts[2];
+
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    if encrypt::is_encrypted(&data) {
+                        shell_println!("File is already encrypted.");
+                        return;
+                    }
+                    match encrypt::encrypt(&data, key_name) {
+                        Ok(encrypted) => {
+                            match crate::fs::Vfs::write_file(&path, &encrypted) {
+                                Ok(()) => shell_println!(
+                                    "Encrypted {} ({} -> {} bytes)",
+                                    path, data.len(), encrypted.len()
+                                ),
+                                Err(e) => shell_println!("Error writing: {:?}", e),
+                            }
+                        }
+                        Err(e) => shell_println!("Encryption failed: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "decrypt" | "dec" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: encrypt decrypt PATH KEY_NAME");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let key_name = parts[2];
+
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    if !encrypt::is_encrypted(&data) {
+                        shell_println!("File is not encrypted (no FENC header).");
+                        return;
+                    }
+                    match encrypt::decrypt(&data, key_name) {
+                        Ok(plaintext) => {
+                            match crate::fs::Vfs::write_file(&path, &plaintext) {
+                                Ok(()) => shell_println!(
+                                    "Decrypted {} ({} -> {} bytes)",
+                                    path, data.len(), plaintext.len()
+                                ),
+                                Err(e) => shell_println!("Error writing: {:?}", e),
+                            }
+                        }
+                        Err(crate::error::KernelError::PermissionDenied) => {
+                            shell_println!("Authentication failed — wrong key or file tampered.");
+                        }
+                        Err(e) => shell_println!("Decryption failed: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "read" | "cat" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: encrypt read PATH KEY_NAME");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let key_name = parts[2];
+
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    if !encrypt::is_encrypted(&data) {
+                        shell_println!("File is not encrypted.");
+                        return;
+                    }
+                    match encrypt::decrypt(&data, key_name) {
+                        Ok(plaintext) => {
+                            if let Ok(text) = core::str::from_utf8(&plaintext) {
+                                shell_println!("{}", text);
+                            } else {
+                                shell_println!("(binary data, {} bytes)", plaintext.len());
+                            }
+                        }
+                        Err(crate::error::KernelError::PermissionDenied) => {
+                            shell_println!("Authentication failed — wrong key or tampered.");
+                        }
+                        Err(e) => shell_println!("Decryption failed: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: encrypt info PATH");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    let info = encrypt::file_info(&data);
+                    if info.encrypted {
+                        shell_println!("File: {} (ENCRYPTED)", path);
+                        shell_println!("  Cipher:   {}", info.cipher);
+                        shell_println!("  Original: {} bytes", info.original_size);
+                        shell_println!("  Stored:   {} bytes", info.stored_size);
+                    } else {
+                        shell_println!("File: {} (not encrypted)", path);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "status" | "stats" => {
+            let (enc, dec, keys) = encrypt::stats();
+            shell_println!("Encryption stats:");
+            shell_println!("  Keys stored:      {}", keys);
+            shell_println!("  Files encrypted:  {}", enc);
+            shell_println!("  Files decrypted:  {}", dec);
+        }
+        _ => {
+            shell_println!("Usage: encrypt <key|file|decrypt|read|info|status> [args...]");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -16671,7 +16855,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

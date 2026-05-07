@@ -3111,6 +3111,7 @@ const COMMANDS: &[&str] = &[
     "changetrack", "ct",
     "fcompress", "fc",
     "encrypt",
+    "fsearch",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4340,6 +4341,7 @@ fn dispatch(line: &str) {
         "changetrack" | "ct" => cmd_changetrack(args),
         "fcompress" | "fc" => cmd_fcompress(args),
         "encrypt" => cmd_encrypt(args),
+        "fsearch" => cmd_fsearch(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -11597,6 +11599,207 @@ fn cmd_encrypt(args: &str) {
     }
 }
 
+/// `fsearch` — advanced file search with compound queries.
+///
+/// Subcommands:
+///   fsearch name <pattern> [path]   — search by name substring
+///   fsearch glob <pattern> [path]   — search by glob pattern
+///   fsearch ext <ext> [path]        — search by file extension
+///   fsearch size <min> [max] [path] — search by size range
+///   fsearch type <file|dir> [path]  — search by entry type
+///   fsearch query [path]            — interactive compound query
+///   fsearch stats                   — show search statistics
+fn cmd_fsearch(args: &str) {
+    use crate::fs::search;
+
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    let sub = parts.first().copied().unwrap_or("");
+    let rest = if parts.len() > 1 { parts[1].trim() } else { "" };
+
+    match sub {
+        "name" => {
+            // fsearch name <pattern> [path]
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let pattern = tok.first().copied().unwrap_or("");
+            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+
+            if pattern.is_empty() {
+                shell_println!("Usage: fsearch name <pattern> [path]");
+                return;
+            }
+
+            match search::Query::new()
+                .name_contains(pattern)
+                .limit(50)
+                .execute(root)
+            {
+                Ok(results) => {
+                    shell_println!("Found {} result(s):", results.len());
+                    for r in &results {
+                        let typ = match r.entry_type {
+                            crate::fs::EntryType::File => "F",
+                            crate::fs::EntryType::Directory => "D",
+                            _ => "?",
+                        };
+                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path);
+                    }
+                }
+                Err(e) => shell_println!("Search error: {:?}", e),
+            }
+        }
+        "glob" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let pattern = tok.first().copied().unwrap_or("");
+            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+
+            if pattern.is_empty() {
+                shell_println!("Usage: fsearch glob <pattern> [path]");
+                return;
+            }
+
+            match search::Query::new()
+                .name_glob(pattern)
+                .limit(50)
+                .execute(root)
+            {
+                Ok(results) => {
+                    shell_println!("Found {} result(s):", results.len());
+                    for r in &results {
+                        let typ = match r.entry_type {
+                            crate::fs::EntryType::File => "F",
+                            crate::fs::EntryType::Directory => "D",
+                            _ => "?",
+                        };
+                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path);
+                    }
+                }
+                Err(e) => shell_println!("Search error: {:?}", e),
+            }
+        }
+        "ext" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let ext = tok.first().copied().unwrap_or("");
+            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+
+            if ext.is_empty() {
+                shell_println!("Usage: fsearch ext <extension> [path]");
+                return;
+            }
+
+            match search::Query::new()
+                .extension(ext)
+                .limit(50)
+                .execute(root)
+            {
+                Ok(results) => {
+                    shell_println!("Found {} .{} file(s):", results.len(), ext);
+                    for r in &results {
+                        shell_println!("  {:>8} {}", r.size, r.path);
+                    }
+                }
+                Err(e) => shell_println!("Search error: {:?}", e),
+            }
+        }
+        "size" => {
+            // fsearch size <min> [max] [path]
+            let tok: Vec<&str> = rest.split_whitespace().collect();
+            if tok.is_empty() {
+                shell_println!("Usage: fsearch size <min> [max] [path]");
+                return;
+            }
+
+            let min: u64 = match tok[0].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("Invalid min size: {}", tok[0]);
+                    return;
+                }
+            };
+
+            let mut max: Option<u64> = None;
+            let mut root = "/";
+
+            if tok.len() >= 2 {
+                if let Ok(v) = tok[1].parse::<u64>() {
+                    max = Some(v);
+                    if tok.len() >= 3 {
+                        root = tok[2];
+                    }
+                } else {
+                    root = tok[1];
+                }
+            }
+
+            let mut q = search::Query::new()
+                .size_min(min)
+                .files_only()
+                .limit(50);
+            if let Some(mx) = max {
+                q = q.size_max(mx);
+            }
+
+            match q.execute(root) {
+                Ok(results) => {
+                    shell_println!("Found {} file(s) >= {} bytes:", results.len(), min);
+                    for r in &results {
+                        shell_println!("  {:>8} {}", r.size, r.path);
+                    }
+                }
+                Err(e) => shell_println!("Search error: {:?}", e),
+            }
+        }
+        "type" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let typ = tok.first().copied().unwrap_or("");
+            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+
+            let q = match typ {
+                "file" | "f" => search::Query::new().files_only().limit(50),
+                "dir" | "d" => search::Query::new().dirs_only().limit(50),
+                _ => {
+                    shell_println!("Usage: fsearch type <file|dir> [path]");
+                    return;
+                }
+            };
+
+            match q.execute(root) {
+                Ok(results) => {
+                    shell_println!("Found {} result(s):", results.len());
+                    for r in &results {
+                        let t = match r.entry_type {
+                            crate::fs::EntryType::File => "F",
+                            crate::fs::EntryType::Directory => "D",
+                            _ => "?",
+                        };
+                        shell_println!("  [{}] {:>8} {}", t, r.size, r.path);
+                    }
+                }
+                Err(e) => shell_println!("Search error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (searches, results) = search::stats();
+            shell_println!("File Search Statistics:");
+            shell_println!("  total searches: {}", searches);
+            shell_println!("  total results:  {}", results);
+            if searches > 0 {
+                shell_println!("  avg results:    {}", results / searches);
+            }
+        }
+        _ => {
+            shell_println!("Usage: fsearch <name|glob|ext|size|type|stats> [args...]");
+            shell_println!();
+            shell_println!("Subcommands:");
+            shell_println!("  name <pattern> [path]   Search by name substring");
+            shell_println!("  glob <pattern> [path]   Search by glob pattern");
+            shell_println!("  ext <extension> [path]  Search by file extension");
+            shell_println!("  size <min> [max] [path] Search by size range");
+            shell_println!("  type <file|dir> [path]  Search by entry type");
+            shell_println!("  stats                   Show search statistics");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -16855,7 +17058,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

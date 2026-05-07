@@ -117,6 +117,7 @@ const ROOT_FILES: &[&str] = &[
     "fcompress",
     "encryption",
     "dedup",
+    "search",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1796,6 +1797,22 @@ fn gen_dedup() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/search` — file search engine statistics.
+fn gen_search() -> Vec<u8> {
+    use crate::fs::search;
+    let (searches, results) = search::stats();
+    let mut out = String::with_capacity(256);
+
+    out.push_str("File Search Engine\n\n");
+    out.push_str(&format!("  total searches:  {}\n", searches));
+    out.push_str(&format!("  total results:   {}\n", results));
+    if searches > 0 {
+        out.push_str(&format!("  avg results:     {}\n", results / searches));
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1854,6 +1871,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fcompress" => Ok(gen_fcompress()),
         "encryption" => Ok(gen_encryption()),
         "dedup" => Ok(gen_dedup()),
+        "search" => Ok(gen_search()),
         _ => Err(KernelError::NotFound),
     }
 }

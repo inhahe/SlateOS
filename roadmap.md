@@ -809,7 +809,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] PC speaker driver (PIT channel 2): tone(freq)/off()/beep(freq, dur) API, startup chime, self-test
   - [x] Virtio-sound driver: PCI probe (legacy 0x1058 + modern 0x1059), legacy I/O transport, 4 virtqueues (control/event/TX/RX), PCM stream info query, set_params/prepare/start/stop/release lifecycle, 440 Hz test tone playback (48kHz/S16/stereo), kshell `audio` integration with fallback chain (virtio→HDA→pcspk)
   - [x] AC97 legacy audio driver: Intel ICH family (8 device IDs), dual-BAR PIO (NAM mixer + NABM bus master), cold reset, codec config, BDL ring buffer DMA playback, variable rate audio
-- [ ] Audio mixing (per-app volume control)
+- [x] Audio mixing (per-app volume control)
+  - [x] Software mixer: 8 concurrent streams, per-stream volume/mute, master volume/mute, 48kHz/S16/stereo, 32-bit intermediate summing with i16 clamping, ring buffers (16KB/stream), kshell `mixer` command
 - [ ] System notification sounds
 - [ ] Sound history (which apps played/are playing sound)
 

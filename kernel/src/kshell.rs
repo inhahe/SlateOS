@@ -3128,7 +3128,7 @@ const COMMANDS: &[&str] = &[
     "ktimer", "ktrace", "lockdep", "lz4", "lz4cat", "rng", "supervisor", "sv", "timers", "trace", "unlz4", "xattr", "xxd", "zip", "zstd", "zstdcat",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
-    "local", "read", "return", "shift", "trap", "typeof", "until", "xargs", "yes",
+    "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
 ];
 
 /// Find the longest common prefix among a set of strings.
@@ -5718,6 +5718,79 @@ fn cmd_ansi_test() {
     shell_println!(" <- saved/restored position");
 
     shell_println!("\n\x1b[1;37m=== Test Complete ===\x1b[0m");
+}
+
+/// `unicode` / `unicodetest` — demonstrate Unicode rendering capabilities.
+///
+/// Shows box drawing characters, block elements, geometric shapes, arrows,
+/// and common symbols to verify the framebuffer console renders them
+/// correctly.
+fn cmd_unicode_test() {
+    shell_println!("\x1b[1;37m=== Unicode Rendering Test ===\x1b[0m\n");
+
+    // 1. Box drawing — single-line box.
+    shell_println!("\x1b[36mBox Drawing (single):\x1b[0m");
+    shell_println!("  \u{250C}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}");
+    shell_println!("  \u{2502}  Hello, Unicode!   \u{2502}");
+    shell_println!("  \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}");
+
+    // 2. Box drawing — double-line box.
+    shell_println!("\x1b[36mBox Drawing (double):\x1b[0m");
+    shell_println!("  \u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}");
+    shell_println!("  \u{2551}  Double-line box   \u{2551}");
+    shell_println!("  \u{255A}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255D}");
+
+    // 3. Box drawing — table with junctions.
+    shell_println!("\x1b[36mTable with junctions:\x1b[0m");
+    shell_println!("  \u{250C}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{252C}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{252C}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}");
+    shell_println!("  \u{2502} Hdr \u{2502} Hdr \u{2502} Hdr \u{2502}");
+    shell_println!("  \u{251C}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{253C}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{253C}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2524}");
+    shell_println!("  \u{2502}  A  \u{2502}  B  \u{2502}  C  \u{2502}");
+    shell_println!("  \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2534}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}");
+
+    // 4. Block elements.
+    shell_println!("\n\x1b[36mBlock Elements:\x1b[0m");
+    shell_print!("  Full:  ");
+    shell_println!("\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}");
+    shell_print!("  Shade: ");
+    shell_println!("\u{2591}\u{2591}\u{2592}\u{2592}\u{2593}\u{2593}\u{2588}\u{2588}");
+    shell_print!("  Half:  ");
+    shell_println!("\u{2580}\u{2580}\u{2580}\u{2580}\u{2584}\u{2584}\u{2584}\u{2584}");
+    shell_print!("  Frac:  ");
+    shell_println!("\u{2581}\u{2582}\u{2583}\u{2584}\u{2585}\u{2586}\u{2587}\u{2588}");
+    shell_print!("  RFrac: ");
+    shell_println!("\u{2589}\u{258A}\u{258B}\u{258C}\u{258D}\u{258E}\u{258F} ");
+
+    // 5. Geometric shapes.
+    shell_println!("\n\x1b[36mGeometric Shapes:\x1b[0m");
+    shell_print!("  ");
+    // Black square, white square, black up triangle, white up triangle,
+    // black circle, white circle, black diamond, white diamond.
+    shell_println!("\u{25A0} \u{25A1} \u{25B2} \u{25B3} \u{25CF} \u{25CB} \u{25C6} \u{25C7}");
+
+    // 6. Arrows.
+    shell_println!("\n\x1b[36mArrows:\x1b[0m");
+    shell_print!("  ");
+    shell_println!("\u{2190} \u{2191} \u{2192} \u{2193} \u{2194} \u{2195} \u{2196} \u{2197} \u{2198} \u{2199}");
+
+    // 7. Common symbols.
+    shell_println!("\n\x1b[36mSymbols:\x1b[0m");
+    shell_print!("  ");
+    // Bullet, middle dot, ellipsis, check, cross, star, em-dash, en-dash.
+    shell_println!("\u{2022} \u{00B7} \u{2026} \u{2713} \u{2717} \u{2605} \u{2014} \u{2013}");
+    shell_print!("  ");
+    // Left/right guillemets, left/right single quotes, left/right double quotes.
+    shell_println!("\u{00AB}text\u{00BB}  \u{2018}single\u{2019}  \u{201C}double\u{201D}");
+
+    // 8. Mixed box-drawing art: a small progress bar.
+    shell_println!("\n\x1b[36mProgress bar demo:\x1b[0m");
+    shell_print!("  \u{2502}");
+    // 12 filled, 8 empty out of 20.
+    for _ in 0..12 { shell_print!("\u{2588}"); }
+    for _ in 0..8  { shell_print!("\u{2591}"); }
+    shell_println!("\u{2502} 60%");
+
+    shell_println!("\n\x1b[1;37m=== Unicode Test Complete ===\x1b[0m");
 }
 
 #[allow(clippy::arithmetic_side_effects)]

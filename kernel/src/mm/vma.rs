@@ -330,3 +330,101 @@ impl AddressSpace {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Self-test for VMA management (no hardware interaction — pure data structure).
+pub fn self_test() {
+    serial_println!("[vma] Running self-test...");
+
+    // Use a fake PML4 address (we only test data structure operations,
+    // not actual page table manipulation).
+    let mut addr_space = AddressSpace::new(0xAAAA_0000);
+    assert_eq!(addr_space.pml4_phys(), 0xAAAA_0000);
+
+    let frame_size = FRAME_SIZE as u64;
+
+    // Test 1: Add a VMA.
+    let vma1 = Vma {
+        start: 0x0000_4000_0000_0000,
+        end: 0x0000_4000_0000_0000 + 4 * frame_size,
+        kind: VmaKind::Anonymous,
+        flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+    };
+    addr_space.add_vma(vma1).expect("add_vma should succeed");
+    serial_println!("[vma]   Add VMA: OK");
+
+    // Test 2: Find VMA containing an address.
+    let found = addr_space.find_vma(0x0000_4000_0000_0000 + frame_size);
+    assert!(found.is_some(), "should find VMA");
+    assert_eq!(found.unwrap().kind, VmaKind::Anonymous);
+    serial_println!("[vma]   Find VMA: OK");
+
+    // Test 3: Address outside VMA returns None.
+    let outside = addr_space.find_vma(0x0000_5000_0000_0000);
+    assert!(outside.is_none(), "address outside VMA should be None");
+    serial_println!("[vma]   Outside VMA: OK");
+
+    // Test 4: Overlapping VMA is rejected.
+    let overlap = Vma {
+        start: 0x0000_4000_0000_0000 + 2 * frame_size,
+        end: 0x0000_4000_0000_0000 + 6 * frame_size,
+        kind: VmaKind::Anonymous,
+        flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+    };
+    let result = addr_space.add_vma(overlap);
+    assert!(result.is_err(), "overlapping VMA should be rejected");
+    serial_println!("[vma]   Overlap rejection: OK");
+
+    // Test 5: Non-overlapping VMA succeeds.
+    let vma2 = Vma {
+        start: 0x0000_4000_0001_0000,
+        end: 0x0000_4000_0001_0000 + 2 * frame_size,
+        kind: VmaKind::Stack,
+        flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+    };
+    addr_space.add_vma(vma2).expect("non-overlapping VMA should succeed");
+    serial_println!("[vma]   Non-overlapping add: OK");
+
+    // Test 6: Remove VMA by start address.
+    let removed = addr_space.remove_vma(0x0000_4000_0001_0000);
+    assert!(removed.is_some(), "should remove existing VMA");
+    assert_eq!(removed.unwrap().kind, VmaKind::Stack);
+    serial_println!("[vma]   Remove VMA: OK");
+
+    // Test 7: Remove non-existent VMA returns None.
+    let no_remove = addr_space.remove_vma(0xDEAD_0000);
+    assert!(no_remove.is_none(), "non-existent VMA removal should be None");
+    serial_println!("[vma]   Remove non-existent: OK");
+
+    // Test 8: Misaligned VMA is rejected.
+    let misaligned = Vma {
+        start: 0x0000_4000_0000_0001, // Not frame-aligned
+        end: 0x0000_4000_0000_4000,
+        kind: VmaKind::Anonymous,
+        flags: PageFlags::PRESENT,
+    };
+    let result = addr_space.add_vma(misaligned);
+    assert!(result.is_err(), "misaligned VMA should be rejected");
+    serial_println!("[vma]   Alignment check: OK");
+
+    // Test 9: Vma contains() and len().
+    let vma3 = Vma {
+        start: 0x1000_0000,
+        end: 0x1000_0000 + 3 * frame_size,
+        kind: VmaKind::Guard,
+        flags: PageFlags::empty(),
+    };
+    assert!(vma3.contains(0x1000_0000));
+    assert!(vma3.contains(0x1000_0000 + frame_size));
+    assert!(!vma3.contains(0x1000_0000 + 3 * frame_size)); // End is exclusive.
+    assert_eq!(vma3.len(), 3 * frame_size);
+    serial_println!("[vma]   contains/len: OK");
+
+    // Clean up: remove remaining VMA.
+    addr_space.remove_vma(0x0000_4000_0000_0000);
+
+    serial_println!("[vma] Self-test PASSED");
+}

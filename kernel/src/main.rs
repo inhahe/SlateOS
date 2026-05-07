@@ -1256,6 +1256,10 @@ extern "C" fn kmain() -> ! {
     // Verifies fragmentation analysis, rmap iteration, and migration API.
     mm::compact::self_test();
 
+    // Step 22e⅞++++p4: VMA management self-test.
+    // Verifies add/remove/find/overlap/alignment checks for address spaces.
+    mm::vma::self_test();
+
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.
     selftest::self_test();

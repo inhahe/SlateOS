@@ -113,6 +113,7 @@ const ROOT_FILES: &[&str] = &[
     "snapshots",
     "reclaim",
     "transactions",
+    "certmgr",
     "changetrack",
     "fcompress",
     "encryption",
@@ -1789,6 +1790,59 @@ fn gen_transactions() -> Vec<u8> {
                 transaction::TxState::Dirty => "DIRTY",
             };
             out.push_str(&format!("{:<6} {:<12} {:<6} {}\n", t.id.0, state, t.ops_count, t.label));
+        }
+    }
+
+    out.into_bytes()
+}
+
+/// Generate `/proc/certmgr` — certificate store status.
+fn gen_certmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, roots, servers, requests, ops) = super::certmgr::stats();
+
+    out.push_str("Certificate Manager\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Total certs:   {}\n", total));
+    out.push_str(&format!("Root CAs:      {}\n", roots));
+    out.push_str(&format!("Server certs:  {}\n", servers));
+    out.push_str(&format!("ACME requests: {}\n", requests));
+    out.push_str(&format!("Threshold:     {} days\n", super::certmgr::renewal_threshold()));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    let certs = super::certmgr::list_certs();
+    if !certs.is_empty() {
+        out.push_str(&format!("\n{:<6} {:<28} {:<12} {:<10} {:<10} {}\n",
+            "ID", "CN", "TYPE", "SOURCE", "STATUS", "AUTO"));
+        for c in &certs {
+            let ct = match c.cert_type {
+                super::certmgr::CertType::Root => "root",
+                super::certmgr::CertType::Intermediate => "inter",
+                super::certmgr::CertType::Server => "server",
+                super::certmgr::CertType::Client => "client",
+                super::certmgr::CertType::CodeSigning => "code",
+                super::certmgr::CertType::SelfSigned => "self",
+            };
+            let src = match c.source {
+                super::certmgr::CertSource::System => "system",
+                super::certmgr::CertSource::UserImported => "user",
+                super::certmgr::CertSource::LetsEncrypt => "LE",
+                super::certmgr::CertSource::Acme => "acme",
+                super::certmgr::CertSource::Generated => "gen",
+            };
+            let st = match c.status {
+                super::certmgr::CertStatus::Valid => "valid",
+                super::certmgr::CertStatus::Expired => "expired",
+                super::certmgr::CertStatus::Revoked => "revoked",
+                super::certmgr::CertStatus::NotYetValid => "future",
+                super::certmgr::CertStatus::Untrusted => "untrusted",
+                super::certmgr::CertStatus::Disabled => "disabled",
+            };
+            let auto = if c.auto_renew { "yes" } else { "no" };
+            out.push_str(&format!("{:<6} {:<28} {:<12} {:<10} {:<10} {}\n",
+                c.id, c.common_name, ct, src, st, auto));
         }
     }
 
@@ -4373,6 +4427,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "snapshots" => Ok(gen_snapshots()),
         "reclaim" => Ok(gen_reclaim()),
         "transactions" => Ok(gen_transactions()),
+        "certmgr" => Ok(gen_certmgr()),
         "changetrack" => Ok(gen_changetrack()),
         "fcompress" => Ok(gen_fcompress()),
         "encryption" => Ok(gen_encryption()),

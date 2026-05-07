@@ -43,6 +43,7 @@ pub mod bench;
 pub mod bzip2;
 pub mod cache;
 pub mod cas;
+pub mod certmgr;
 pub mod clipboard;
 pub mod colorpicker;
 pub mod changetrack;

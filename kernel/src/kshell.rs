@@ -3442,7 +3442,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap",
-    "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
+    "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
@@ -4801,6 +4801,7 @@ fn dispatch(line: &str) {
         "osreset" | "reset" => cmd_osreset(args),
         "bootcfg" | "boot" => cmd_bootcfg(args),
         "swapcfg" | "swap" => cmd_swapcfg(args),
+        "certmgr" | "cert" => cmd_certmgr(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20630,6 +20631,127 @@ fn cmd_fstune(args: &str) {
     }
 }
 
+/// `certmgr` / `cert` — SSL/TLS certificate management.
+fn cmd_certmgr(args: &str) {
+    use crate::fs::certmgr;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let certs = certmgr::list_certs();
+            if certs.is_empty() { shell_println!("No certificates"); return; }
+            shell_println!("{:<6} {:<28} {:<10} {:<8} {:<10} {}", "ID", "CN", "TYPE", "SRC", "STATUS", "AUTO");
+            for c in &certs {
+                let ct = match c.cert_type { certmgr::CertType::Root => "root", certmgr::CertType::Intermediate => "inter", certmgr::CertType::Server => "server", certmgr::CertType::Client => "client", certmgr::CertType::CodeSigning => "code", certmgr::CertType::SelfSigned => "self" };
+                let src = match c.source { certmgr::CertSource::System => "sys", certmgr::CertSource::UserImported => "user", certmgr::CertSource::LetsEncrypt => "LE", certmgr::CertSource::Acme => "acme", certmgr::CertSource::Generated => "gen" };
+                let st = match c.status { certmgr::CertStatus::Valid => "valid", certmgr::CertStatus::Expired => "expired", certmgr::CertStatus::Revoked => "revoked", certmgr::CertStatus::NotYetValid => "future", certmgr::CertStatus::Untrusted => "untrust", certmgr::CertStatus::Disabled => "off" };
+                shell_println!("{:<6} {:<28} {:<10} {:<8} {:<10} {}", c.id, c.common_name, ct, src, st, if c.auto_renew { "yes" } else { "no" });
+            }
+        }
+        "info" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match certmgr::get_cert(id) {
+                Ok(c) => {
+                    shell_println!("ID:          {}", c.id);
+                    shell_println!("CN:          {}", c.common_name);
+                    shell_println!("SANs:        {}", if c.alt_names.is_empty() { alloc::string::String::from("(none)") } else { c.alt_names.join(", ") });
+                    shell_println!("Type:        {:?}", c.cert_type);
+                    shell_println!("Source:      {:?}", c.source);
+                    shell_println!("Status:      {:?}", c.status);
+                    shell_println!("Key:         {:?}", c.key_type);
+                    shell_println!("Issuer:      {}", c.issuer);
+                    shell_println!("Serial:      {}", c.serial);
+                    shell_println!("Fingerprint: {}", c.fingerprint);
+                    shell_println!("Service:     {}", if c.service.is_empty() { "(system-wide)" } else { &c.service });
+                    shell_println!("Auto-renew:  {}", c.auto_renew);
+                    shell_println!("Renewals:    {}", c.renewal_count);
+                    shell_println!("Cert path:   {}", c.cert_path);
+                    shell_println!("Key path:    {}", c.key_path);
+                    shell_println!("Pinned:      {}", c.pinned);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "import" => {
+            let cn = parts.get(1).copied().unwrap_or("unknown");
+            let ct = match parts.get(2).copied().unwrap_or("server") {
+                "root" => certmgr::CertType::Root, "inter" => certmgr::CertType::Intermediate, "client" => certmgr::CertType::Client, "code" => certmgr::CertType::CodeSigning, "self" => certmgr::CertType::SelfSigned, _ => certmgr::CertType::Server,
+            };
+            let cert_path = parts.get(3).copied().unwrap_or("/etc/ssl/certs/cert.pem");
+            let key_path = parts.get(4).copied().unwrap_or("");
+            match certmgr::import_cert(cn, ct, certmgr::CertSource::UserImported, certmgr::KeyType::EcdsaP256, "User", cert_path, key_path) {
+                Ok(id) => shell_println!("Imported {} (ID {})", cn, id), Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match certmgr::remove_cert(id) { Ok(()) => shell_println!("Removed"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "san" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let name = parts.get(2).copied().unwrap_or("");
+            match certmgr::add_san(id, name) { Ok(()) => shell_println!("SAN added: {}", name), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "service" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let svc = parts.get(2).copied().unwrap_or("");
+            match certmgr::set_service(id, svc) { Ok(()) => shell_println!("Service set: {}", svc), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "status" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let st = match parts.get(2).copied().unwrap_or("valid") {
+                "expired" => certmgr::CertStatus::Expired, "revoked" => certmgr::CertStatus::Revoked, "disabled" | "off" => certmgr::CertStatus::Disabled, "untrusted" => certmgr::CertStatus::Untrusted, _ => certmgr::CertStatus::Valid,
+            };
+            match certmgr::set_status(id, st) { Ok(()) => shell_println!("Status updated"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "autorenew" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let on = parts.get(2).copied().unwrap_or("on") != "off";
+            match certmgr::set_auto_renew(id, on) { Ok(()) => shell_println!("Auto-renew {}", if on { "enabled" } else { "disabled" }), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "pin" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let on = parts.get(2).copied().unwrap_or("on") != "off";
+            match certmgr::set_pinned(id, on) { Ok(()) => shell_println!("{}", if on { "Pinned" } else { "Unpinned" }), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "renew" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match certmgr::renew_cert(id) { Ok(()) => shell_println!("Renewed"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "threshold" => {
+            let days: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if days == 0 { shell_println!("Renewal threshold: {} days", certmgr::renewal_threshold()); }
+            else { match certmgr::set_renewal_threshold(days) { Ok(()) => shell_println!("Threshold set to {} days", days), Err(e) => shell_println!("Error: {:?}", e) } }
+        }
+        "request" => {
+            let domain = parts.get(1).copied().unwrap_or("example.com");
+            let email = parts.get(2).copied().unwrap_or("admin@example.com");
+            match certmgr::request_cert(domain, email, certmgr::KeyType::EcdsaP256, certmgr::ChallengeType::Http01) {
+                Ok(id) => shell_println!("ACME request {} for {}", id, domain), Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "complete" => {
+            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match certmgr::complete_request(id) { Ok(cid) => shell_println!("Certificate created (ID {})", cid), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "requests" => {
+            let reqs = certmgr::list_requests();
+            if reqs.is_empty() { shell_println!("No pending requests"); return; }
+            for r in &reqs { shell_println!("ID {} domain={} state={:?}", r.id, r.domain, r.state); }
+        }
+        "find" => {
+            let domain = parts.get(1).copied().unwrap_or("");
+            let matches = certmgr::certs_for_domain(domain);
+            if matches.is_empty() { shell_println!("No certs for {}", domain); }
+            else { for c in &matches { shell_println!("ID {} {} ({:?})", c.id, c.common_name, c.status); } }
+        }
+        "stats" => { let (t, r, s, req, ops) = certmgr::stats(); shell_println!("Total: {}  Roots: {}  Servers: {}  Requests: {}  Ops: {}", t, r, s, req, ops); }
+        "init" => { certmgr::init_defaults(); shell_println!("Defaults initialised"); }
+        "test" => { match certmgr::self_test() { Ok(()) => shell_println!("All tests passed"), Err(e) => shell_println!("Test failed: {:?}", e) } }
+        _ => shell_println!("Usage: certmgr <list|info|import|remove|san|service|status|autorenew|pin|renew|threshold|request|complete|requests|find|stats|init|test>"),
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -28159,7 +28281,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

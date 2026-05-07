@@ -988,7 +988,16 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [x] Application-level atomic write transactions (Vfs::atomic_write, write-temp-sync-rename pattern, atomic_write_preserve for metadata, VFS self-test)
 
 ### 5.3 Additional schedulers (if needed)
-- [ ] EEVDF-style scheduler (for users wanting sophisticated fairness)
+- [x] EEVDF-style scheduler (for users wanting sophisticated fairness)
+  - [x] EevdfScheduler struct: BTreeMap run queue keyed by (deadline, task_id), reverse index for O(log n) dequeue
+  - [x] 32-entry geometric weight table (ratio ~1.25× per level, modeled on Linux sched_prio_to_weight)
+  - [x] Virtual runtime tracking: advances as VRUNTIME_UNIT / weight per tick
+  - [x] Virtual deadline computation: vruntime + time_slice * VRUNTIME_UNIT / weight
+  - [x] Eligibility check: task.vruntime <= min_vruntime
+  - [x] New/waking task placement at min_vruntime (anti-starvation)
+  - [x] Work stealing (least-urgent tasks from back of BTreeMap)
+  - [x] Scheduler trait implementation, WorkloadProfile integration, has_real_work
+  - [x] 9 self-tests: pick_next ordering, tick vruntime advance, dequeue, equal-priority fairness, weighted fairness, steal, has_ready/has_real_work, workload profiles, anti-starvation
 - [ ] Deadline scheduler (for real-time/audio workloads)
 - [ ] Selectable in settings, requires reboot to switch
 

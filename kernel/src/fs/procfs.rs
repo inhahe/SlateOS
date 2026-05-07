@@ -155,6 +155,7 @@ const ROOT_FILES: &[&str] = &[
     "openwith",
     "preview",
     "sidebar",
+    "statusbar",
     "templates",
     "columnview",
     "pathbar",
@@ -2901,6 +2902,19 @@ fn gen_sidebar() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_statusbar() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let gen_count = super::statusbar::stats();
+
+    out.push_str("Status Bar\n");
+    out.push_str("==========\n\n");
+    out.push_str(&format!("Generates: {}\n", gen_count));
+
+    out.into_bytes()
+}
+
 fn gen_openwith() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3027,6 +3041,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "openwith" => Ok(gen_openwith()),
         "preview" => Ok(gen_preview()),
         "sidebar" => Ok(gen_sidebar()),
+        "statusbar" => Ok(gen_statusbar()),
         "templates" => Ok(gen_templates()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),

@@ -44,6 +44,7 @@ pub mod clipboard;
 pub mod changetrack;
 pub mod columnview;
 pub mod compress;
+pub mod contextmenu;
 #[allow(dead_code)]
 pub mod cpio;
 pub mod dedup;

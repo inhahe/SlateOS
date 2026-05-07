@@ -148,6 +148,7 @@ const ROOT_FILES: &[&str] = &[
     "bookmarks",
     "clipboard",
     "dragdrop",
+    "contextmenu",
     "fileops",
     "fileselect",
     "preview",
@@ -2806,6 +2807,30 @@ fn gen_viewstate() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_contextmenu() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (builds, executes, ext_count) = super::contextmenu::stats();
+
+    out.push_str("Context Menu\n");
+    out.push_str("============\n\n");
+    out.push_str(&format!("Builds:      {}\n", builds));
+    out.push_str(&format!("Executions:  {}\n", executes));
+    out.push_str(&format!("Extensions:  {}\n", ext_count));
+
+    let exts = super::contextmenu::list_extensions();
+    if !exts.is_empty() {
+        out.push_str("\nRegistered Extensions:\n");
+        for (id, name, enabled, items) in &exts {
+            out.push_str(&format!("  #{}: {} ({} items) {}\n", id, name, items,
+                                  if *enabled { "enabled" } else { "disabled" }));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_fileselect() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -2932,6 +2957,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "bookmarks" => Ok(gen_bookmarks()),
         "clipboard" => Ok(gen_clipboard()),
         "dragdrop" => Ok(gen_dragdrop()),
+        "contextmenu" => Ok(gen_contextmenu()),
         "fileops" => Ok(gen_fileops()),
         "fileselect" => Ok(gen_fileselect()),
         "preview" => Ok(gen_preview()),

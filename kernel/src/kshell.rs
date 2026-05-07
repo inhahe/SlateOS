@@ -3084,7 +3084,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 const COMMANDS: &[&str] = &[
     "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
-    "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
+    "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "find", "findex", "finfo", "fops", "fsel", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
@@ -4129,6 +4129,18 @@ fn execute_pipe_chain(segments: &[&str]) {
 /// Commands that support piped input will read from the input string
 /// when no file argument is provided.  Commands that don't support
 /// piped input ignore the input and execute normally.
+/// Split a string into the first whitespace-delimited word and the rest.
+///
+/// Returns `(first_word, remaining)`.  If there is no second word,
+/// `remaining` is an empty string.
+fn split_first_word(s: &str) -> (&str, &str) {
+    let s = s.trim_start();
+    match s.find(|c: char| c.is_whitespace()) {
+        Some(pos) => (&s[..pos], s[pos..].trim_start()),
+        None => (s, ""),
+    }
+}
+
 fn dispatch_with_input(line: &str, input: &str) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
@@ -4377,6 +4389,7 @@ fn dispatch(line: &str) {
         "thumbcache" | "tcache" => cmd_thumbcache(args),
         "bookmark" | "bm" => cmd_bookmark(args),
         "clipboard" | "clip" => cmd_clipboard(args),
+        "contextmenu" | "ctxmenu" => cmd_contextmenu(args),
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
         "fileselect" | "fsel" => cmd_fileselect(args),
@@ -15222,6 +15235,121 @@ fn cmd_clipboard(args: &str) {
     }
 }
 
+/// `contextmenu` / `ctxmenu` — context menu system.
+fn cmd_contextmenu(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "build" => {
+            // contextmenu build <target> [path]
+            let target_str = parts.get(1).copied().unwrap_or("file");
+            let path = parts.get(2).map(|p| resolve_path(p)).unwrap_or_else(get_cwd);
+            let target = match target_str {
+                "file" => crate::fs::contextmenu::ContextTarget::File,
+                "dir" | "directory" => crate::fs::contextmenu::ContextTarget::Directory,
+                "multi" => crate::fs::contextmenu::ContextTarget::MultiSelection,
+                "desktop" => crate::fs::contextmenu::ContextTarget::DesktopBackground,
+                "explorer" => crate::fs::contextmenu::ContextTarget::ExplorerBackground,
+                "taskbar" => crate::fs::contextmenu::ContextTarget::Taskbar,
+                _ => {
+                    shell_println!("Unknown target: {}. Use: file, dir, multi, desktop, explorer, taskbar", target_str);
+                    return;
+                }
+            };
+            let menu = crate::fs::contextmenu::build(target, &path);
+            shell_println!("Context menu for {:?} on '{}':", menu.target, menu.target_path);
+            for item in &menu.items {
+                if item.separator {
+                    shell_println!("  ─────────────────────");
+                } else if !item.submenu.is_empty() {
+                    shell_println!("  {} ►  ({})", item.label, item.submenu.len());
+                    for sub_item in &item.submenu {
+                        if sub_item.separator {
+                            shell_println!("    ───────────");
+                        } else {
+                            shell_println!("    {}", sub_item.label);
+                        }
+                    }
+                } else {
+                    let shortcut = if item.shortcut.is_empty() {
+                        String::new()
+                    } else {
+                        alloc::format!("  ({})", item.shortcut)
+                    };
+                    let enabled = if item.enabled { "" } else { " [disabled]" };
+                    shell_println!("  {}{}{}", item.label, shortcut, enabled);
+                }
+            }
+        }
+        "extensions" | "ext" => {
+            let exts = crate::fs::contextmenu::list_extensions();
+            if exts.is_empty() {
+                shell_println!("(no registered extensions)");
+            } else {
+                shell_println!("{:<6} {:<20} {:<8} {}", "ID", "Application", "Status", "Items");
+                shell_println!("{}", "-".repeat(50));
+                for (id, name, enabled, items) in &exts {
+                    shell_println!("#{:<5} {:<20} {:<8} {}",
+                                   id, name,
+                                   if *enabled { "on" } else { "off" },
+                                   items);
+                }
+            }
+        }
+        "enable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match crate::fs::contextmenu::set_extension_enabled(id, true) {
+                    Ok(()) => shell_println!("Extension #{} enabled", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: contextmenu enable <ext-id>");
+            }
+        }
+        "disable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match crate::fs::contextmenu::set_extension_enabled(id, false) {
+                    Ok(()) => shell_println!("Extension #{} disabled", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: contextmenu disable <ext-id>");
+            }
+        }
+        "remove" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match crate::fs::contextmenu::unregister_extension(id) {
+                    Ok(()) => shell_println!("Extension #{} removed", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: contextmenu remove <ext-id>");
+            }
+        }
+        "stats" => {
+            let (builds, executes, ext_count) = crate::fs::contextmenu::stats();
+            shell_println!("Builds:     {}", builds);
+            shell_println!("Executions: {}", executes);
+            shell_println!("Extensions: {}", ext_count);
+        }
+        "reset" => {
+            crate::fs::contextmenu::reset_stats();
+            shell_println!("Context menu stats reset");
+        }
+        _ => {
+            shell_println!("Usage: contextmenu <subcommand>");
+            shell_println!("  build <target> [path]  Build context menu");
+            shell_println!("    targets: file, dir, multi, desktop, explorer, taskbar");
+            shell_println!("  extensions             List registered extensions");
+            shell_println!("  enable <id>            Enable an extension");
+            shell_println!("  disable <id>           Disable an extension");
+            shell_println!("  remove <id>            Remove an extension");
+            shell_println!("  stats                  Show statistics");
+            shell_println!("  reset                  Reset statistics");
+        }
+    }
+}
+
 /// `dragdrop` — drag-and-drop subsystem management.
 fn cmd_dragdrop(args: &str) {
     use crate::fs::dragdrop;
@@ -21935,7 +22063,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "fileops" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

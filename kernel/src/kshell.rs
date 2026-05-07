@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4415,6 +4415,7 @@ fn dispatch(line: &str) {
         "hotkey" => cmd_hotkey(args),
         "widgets" | "widget" => cmd_widgets(args),
         "soundmixer" | "smixer" => cmd_soundmixer(args),
+        "wallpaper" | "wp" => cmd_wallpaper(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -18561,6 +18562,291 @@ fn cmd_soundmixer(args: &str) {
     }
 }
 
+/// `wallpaper` / `wp` — desktop background management.
+fn cmd_wallpaper(args: &str) {
+    use crate::fs::wallpaper;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "set" => {
+            // wallpaper set <path>
+            let path = if parts.len() > 1 { parts[1..].join(" ") } else { alloc::string::String::new() };
+            if path.is_empty() {
+                shell_println!("Usage: wallpaper set <path>");
+            } else {
+                match wallpaper::set_image(&path) {
+                    Ok(()) => shell_println!("Wallpaper set: {}", path),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "color" => {
+            let color = parts.get(1).copied().unwrap_or("");
+            if color.is_empty() {
+                let cfg = wallpaper::current();
+                shell_println!("Background color: {}", cfg.background_color);
+            } else {
+                wallpaper::set_solid_color(color).unwrap_or_else(|e| {
+                    shell_println!("Error: {:?}", e);
+                });
+                shell_println!("Solid color set: {}", color);
+            }
+        }
+        "fit" => {
+            if let Some(mode) = parts.get(1).and_then(|s| wallpaper::FitMode::from_str(s)) {
+                wallpaper::set_fit_mode(mode);
+                shell_println!("Fit mode: {}", mode.label());
+            } else {
+                let cfg = wallpaper::current();
+                shell_println!("Fit mode: {} (fill/fit/stretch/center/tile/span)", cfg.fit_mode.label());
+            }
+        }
+        "bgcolor" => {
+            let color = parts.get(1).copied().unwrap_or("");
+            if color.is_empty() {
+                shell_println!("Usage: wallpaper bgcolor <#hex>");
+            } else {
+                wallpaper::set_background_color(color);
+                shell_println!("Background color: {}", color);
+            }
+        }
+        "offset" => {
+            let x = parts.get(1).and_then(|s| s.parse::<f32>().ok());
+            let y = parts.get(2).and_then(|s| s.parse::<f32>().ok());
+            if let (Some(x), Some(y)) = (x, y) {
+                wallpaper::set_offset(x, y);
+                shell_println!("Offset: ({:.2}, {:.2})", x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+            } else {
+                let cfg = wallpaper::current();
+                shell_println!("Offset: ({:.2}, {:.2})", cfg.offset_x, cfg.offset_y);
+                shell_println!("Usage: wallpaper offset <x 0.0-1.0> <y 0.0-1.0>");
+            }
+        }
+        "slideshow" => {
+            // wallpaper slideshow <path1> <path2> ... [--interval N]
+            let mut paths: Vec<&str> = Vec::new();
+            let mut interval = 300u64;
+            let mut i = 1;
+            while i < parts.len() {
+                if parts.get(i).copied() == Some("--interval") {
+                    if let Some(v) = parts.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                        interval = v;
+                    }
+                    i += 2;
+                } else if let Some(p) = parts.get(i) {
+                    paths.push(p);
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            if paths.is_empty() {
+                shell_println!("Usage: wallpaper slideshow <path1> [path2 ...] [--interval N]");
+            } else {
+                match wallpaper::set_slideshow(&paths, interval) {
+                    Ok(()) => shell_println!("Slideshow: {} images, {}s interval", paths.len(), interval),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "next" => {
+            match wallpaper::slideshow_next() {
+                Ok(path) => shell_println!("Next: {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "prev" => {
+            match wallpaper::slideshow_prev() {
+                Ok(path) => shell_println!("Previous: {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pause" => {
+            wallpaper::set_slideshow_running(false);
+            shell_println!("Slideshow paused");
+        }
+        "resume" => {
+            wallpaper::set_slideshow_running(true);
+            shell_println!("Slideshow resumed");
+        }
+        "interval" => {
+            if let Some(secs) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                wallpaper::set_slideshow_interval(secs);
+                shell_println!("Slideshow interval: {}s", secs);
+            } else {
+                let cfg = wallpaper::current();
+                shell_println!("Interval: {}s", cfg.slideshow_interval_secs);
+            }
+        }
+        "animated" => {
+            let source = if parts.len() > 1 { parts[1..].join(" ") } else { alloc::string::String::new() };
+            if source.is_empty() {
+                shell_println!("Usage: wallpaper animated <source>");
+            } else {
+                match wallpaper::set_animated(&source) {
+                    Ok(()) => shell_println!("Animated wallpaper: {}", source),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "dynamic" => {
+            let source = if parts.len() > 1 { parts[1..].join(" ") } else { alloc::string::String::new() };
+            if source.is_empty() {
+                shell_println!("Usage: wallpaper dynamic <source>");
+            } else {
+                match wallpaper::set_dynamic(&source) {
+                    Ok(()) => shell_println!("Dynamic wallpaper: {}", source),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "login" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            if val == "on" || val == "true" || val == "yes" {
+                wallpaper::set_use_for_login(true);
+                shell_println!("Login screen uses desktop wallpaper");
+            } else if val == "off" || val == "false" || val == "no" {
+                wallpaper::set_use_for_login(false);
+                shell_println!("Login screen uses separate wallpaper");
+            } else {
+                shell_println!("Login wallpaper: {}", if wallpaper::use_for_login() { "same" } else { "separate" });
+            }
+        }
+        "monitor" => {
+            // wallpaper monitor <id> <path>
+            let mon = parts.get(1).copied().unwrap_or("");
+            let path = if parts.len() > 2 { parts[2..].join(" ") } else { alloc::string::String::new() };
+            if mon.is_empty() {
+                shell_println!("Usage: wallpaper monitor <id> <path>");
+            } else if path.is_empty() {
+                let wp = wallpaper::wallpaper_for_monitor(mon);
+                shell_println!("Monitor '{}': {}", mon, if wp.is_empty() { "(none)" } else { &wp });
+            } else {
+                match wallpaper::set_per_monitor(mon, &path) {
+                    Ok(()) => shell_println!("Monitor '{}' wallpaper: {}", mon, path),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "random" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            if val == "boot" {
+                let cur = wallpaper::current().random_on_boot;
+                wallpaper::set_random_on_boot(!cur);
+                shell_println!("Random on boot: {}", !cur);
+            } else if val == "daily" {
+                let cur = wallpaper::current().change_daily;
+                wallpaper::set_change_daily(!cur);
+                shell_println!("Change daily: {}", !cur);
+            } else {
+                let cfg = wallpaper::current();
+                shell_println!("Random on boot: {}, daily: {}", cfg.random_on_boot, cfg.change_daily);
+            }
+        }
+        "exclude" => {
+            let pattern = if parts.len() > 1 { parts[1..].join(" ") } else { alloc::string::String::new() };
+            if pattern.is_empty() {
+                let cfg = wallpaper::current();
+                if cfg.exclusions.is_empty() {
+                    shell_println!("No exclusions");
+                } else {
+                    for (i, e) in cfg.exclusions.iter().enumerate() {
+                        shell_println!("  [{}] {}", i, e);
+                    }
+                }
+            } else {
+                match wallpaper::add_exclusion(&pattern) {
+                    Ok(()) => shell_println!("Exclusion added: {}", pattern),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unexclude" => {
+            if let Some(idx) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) {
+                match wallpaper::remove_exclusion(idx) {
+                    Ok(()) => shell_println!("Exclusion {} removed", idx),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: wallpaper unexclude <index>");
+            }
+        }
+        "history" => {
+            let hist = wallpaper::history();
+            if hist.is_empty() {
+                shell_println!("No wallpaper history");
+            } else {
+                shell_println!("{:40} {:12} {}", "PATH", "SOURCE", "TIME_NS");
+                for h in hist.iter().take(20) {
+                    shell_println!("{:40} {:12} {}", h.path, h.source, h.set_at_ns);
+                }
+            }
+        }
+        "show" | "info" => {
+            let cfg = wallpaper::current();
+            shell_println!("Kind:       {}", cfg.kind.label());
+            shell_println!("Image:      {}", if cfg.image_path.is_empty() { "(none)" } else { &cfg.image_path });
+            shell_println!("Fit:        {}", cfg.fit_mode.label());
+            shell_println!("BG Color:   {}", cfg.background_color);
+            shell_println!("Offset:     ({:.2}, {:.2})", cfg.offset_x, cfg.offset_y);
+            shell_println!("Login:      {}", if cfg.use_for_login { "same as desktop" } else { "separate" });
+            shell_println!("Slideshow:  {} images, {}s, {}",
+                cfg.slideshow_paths.len(), cfg.slideshow_interval_secs,
+                if cfg.slideshow_running { "running" } else { "paused" });
+            shell_println!("Random:     boot={} daily={}", cfg.random_on_boot, cfg.change_daily);
+            if !cfg.per_monitor.is_empty() {
+                shell_println!("Per-monitor:");
+                for (mon, path) in &cfg.per_monitor {
+                    shell_println!("  {} → {}", mon, path);
+                }
+            }
+        }
+        "test" => {
+            shell_println!("Running wallpaper self-tests...");
+            match wallpaper::self_test() {
+                Ok(()) => shell_println!("All wallpaper tests passed"),
+                Err(e) => shell_println!("Test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (slides, hist, sets, advances) = wallpaper::stats();
+            shell_println!("Slideshow:  {} images", slides);
+            shell_println!("History:    {}/64", hist);
+            shell_println!("Sets:       {}", sets);
+            shell_println!("Advances:   {}", advances);
+        }
+        "reset" => {
+            wallpaper::clear_all();
+            wallpaper::reset_stats();
+            shell_println!("Wallpaper state reset");
+        }
+        _ => {
+            shell_println!("Usage: wallpaper <subcommand>");
+            shell_println!("  set <path>                    Set static wallpaper");
+            shell_println!("  color <#hex>                  Set solid color");
+            shell_println!("  fit [fill|fit|stretch|center|tile|span]  Get/set fit mode");
+            shell_println!("  bgcolor <#hex>                Set letterbox color");
+            shell_println!("  offset <x> <y>                Set crop offset (0.0-1.0)");
+            shell_println!("  slideshow <p1> [p2...] [--interval N]  Set slideshow");
+            shell_println!("  next / prev                   Navigate slideshow");
+            shell_println!("  pause / resume                Control slideshow");
+            shell_println!("  interval <secs>               Set slideshow interval");
+            shell_println!("  animated <source>             Set animated wallpaper");
+            shell_println!("  dynamic <source>              Set dynamic wallpaper");
+            shell_println!("  login [on|off]                Login screen wallpaper");
+            shell_println!("  monitor <id> [path]           Per-monitor wallpaper");
+            shell_println!("  random [boot|daily]           Toggle random options");
+            shell_println!("  exclude [pattern]             Add/list exclusions");
+            shell_println!("  unexclude <index>             Remove exclusion");
+            shell_println!("  history                       Wallpaper history");
+            shell_println!("  show                          Show current config");
+            shell_println!("  test                          Run self-tests");
+            shell_println!("  stats                         Show statistics");
+            shell_println!("  reset                         Clear all");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -26090,7 +26376,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

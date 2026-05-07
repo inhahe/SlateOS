@@ -173,6 +173,7 @@ const ROOT_FILES: &[&str] = &[
     "hotkeys",
     "widgets",
     "soundmixer",
+    "wallpaper",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3254,6 +3255,31 @@ fn gen_soundmixer() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_wallpaper() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let cfg = super::wallpaper::current();
+    let (slide_count, hist_count, sets, advances) = super::wallpaper::stats();
+
+    out.push_str("Desktop Wallpaper\n");
+    out.push_str("=================\n\n");
+    out.push_str(&format!("Kind:       {}\n", cfg.kind.label()));
+    out.push_str(&format!("Image:      {}\n", if cfg.image_path.is_empty() { "(none)" } else { &cfg.image_path }));
+    out.push_str(&format!("Fit:        {}\n", cfg.fit_mode.label()));
+    out.push_str(&format!("BG Color:   {}\n", cfg.background_color));
+    out.push_str(&format!("Login:      {}\n", if cfg.use_for_login { "same as desktop" } else { "separate" }));
+    out.push_str(&format!("Random:     boot={} daily={}\n", cfg.random_on_boot, cfg.change_daily));
+    out.push_str(&format!("Slideshow:  {} images, {}s interval, {}\n",
+        slide_count, cfg.slideshow_interval_secs,
+        if cfg.slideshow_running { "running" } else { "paused" }));
+    out.push_str(&format!("History:    {}/{}\n", hist_count, 64));
+    out.push_str(&format!("Sets:       {}\n", sets));
+    out.push_str(&format!("Advances:   {}\n", advances));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3592,6 +3618,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "hotkeys" => Ok(gen_hotkeys()),
         "widgets" => Ok(gen_widgets()),
         "soundmixer" => Ok(gen_soundmixer()),
+        "wallpaper" => Ok(gen_wallpaper()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

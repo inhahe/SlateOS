@@ -132,6 +132,7 @@ pub mod undelete;
 pub mod usage;
 pub mod vfs;
 pub mod viewstate;
+pub mod wallpaper;
 pub mod widgets;
 #[allow(dead_code)]
 pub mod sevenz;

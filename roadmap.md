@@ -326,6 +326,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 ### 2.2 Essential drivers
 - [-] Keyboard (PS/2 and USB HID)
   - [x] PS/2 keyboard driver (scan code set 1, IRQ 1, modifier tracking, ASCII echo)
+  - [x] PS/2 mouse driver (IRQ 12, 3/4-byte packets, IntelliMouse scroll wheel, ring buffer)
 - [x] Framebuffer / basic display (UEFI GOP framebuffer initially)
   - [x] 8x16 VGA bitmap font, framebuffer text console (160x50 @ 1280x800)
 - [x] Storage (NVMe, AHCI/SATA)
@@ -603,6 +604,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Temporary file cleanup (fs::tmpwatch): age-based /tmp cleanup with configurable watch dirs, exclude prefixes, dry-run mode, cumulative stats; `tmpwatch` kshell command; 10 self-tests
   - [x] Filesystem audit logging (fs::audit): structured security audit trail with rule-based filtering (path prefix, operation mask, UID, failures-only), 4096-entry ring buffer, lock-free disable fast path; `audit` kshell command; 10 self-tests
   - [x] Mount namespaces (fs::mount_ns): per-process filesystem view isolation, child inherits parent mounts then diverges, process binding with refcount, read-only enforcement, nested namespace control; `namespace`/`ns` kshell command; 10 self-tests
+  - [x] ISO 9660 enhancements: Joliet UCS-2 filename parsing (was detected but ignored), Rock Ridge SUSP/RRIP extensions (PX/TF/NM/SL/CL/RE for POSIX metadata, timestamps, symlinks, deep dirs), multi-extent files (>4 GiB), directory record timestamps → FileMeta; readlink() for RR symlinks; 6 self-tests
+  - [x] VFS enforcement hooks: intercept pre-checks and quota enforcement wired into write_file, write_at, remove, mkdir, rmdir, rename, link, symlink; quota charge/release on success/delete; audit logging for all mutating operations
+  - [x] Filesystem snapshots (fs::snapshot): CAS-backed point-in-time directory tree snapshots with create/restore/delete/diff/list; branching (parent→child tree), selective include/exclude filters, metadata preservation; `fssnapshot`/`fssnap` kshell command; /proc/snapshots; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

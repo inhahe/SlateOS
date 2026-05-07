@@ -110,6 +110,7 @@ const ROOT_FILES: &[&str] = &[
     "namespaces",
     "rlimits",
     "audit",
+    "snapshots",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1633,6 +1634,29 @@ fn gen_audit() -> Vec<u8> {
     s.into_bytes()
 }
 
+fn gen_snapshots() -> Vec<u8> {
+    use crate::fs::snapshot;
+    let snaps = snapshot::list();
+    let mut s = String::with_capacity(512);
+
+    s.push_str(&format!("Filesystem snapshots: {}\n\n", snaps.len()));
+
+    if !snaps.is_empty() {
+        s.push_str(&format!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
+            "ID", "NAME", "PATH", "FILES", "BYTES", "PARENT"));
+        for snap in &snaps {
+            let parent_str = snap.parent
+                .map(|p| format!("{}", p.0))
+                .unwrap_or_else(|| String::from("-"));
+            s.push_str(&format!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
+                snap.id.0, snap.name, snap.root_path,
+                snap.file_count, snap.total_bytes, parent_str));
+        }
+    }
+
+    s.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1684,6 +1708,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "namespaces" => Ok(gen_namespaces()),
         "rlimits" => Ok(gen_rlimits()),
         "audit" => Ok(gen_audit()),
+        "snapshots" => Ok(gen_snapshots()),
         _ => Err(KernelError::NotFound),
     }
 }

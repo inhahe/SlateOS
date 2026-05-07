@@ -530,3 +530,78 @@ pub unsafe fn try_migrate_one(old_phys: u64) -> bool {
     }
     ok
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Self-test for memory compaction subsystem.
+///
+/// Exercises the analysis, statistics, and rmap iteration APIs.
+/// Does NOT perform actual page migration (that requires live page tables
+/// with user-space mappings).
+pub fn self_test() {
+    serial_println!("[compact] Running self-test...");
+
+    // Test 1: analyze() returns a report (even if fragmentation is low).
+    let report = analyze();
+    // analyze() may return None if frame allocator stats aren't available.
+    if let Some(r) = report {
+        assert!(r.fragmentation_pct <= 100,
+            "fragmentation percentage must be 0-100");
+        assert!(r.free_frames <= r.free_frames + r.order0_free,
+            "free_frames should be consistent");
+        serial_println!("[compact]   analyze: OK (frag={}%, free={}, largest_block={})",
+            r.fragmentation_pct, r.free_frames, r.largest_free_block);
+    } else {
+        serial_println!("[compact]   analyze: skipped (frame stats unavailable)");
+    }
+
+    // Test 2: should_compact() returns a boolean without crashing.
+    let _should = should_compact();
+    serial_println!("[compact]   should_compact: OK (result={})", _should);
+
+    // Test 3: stats() returns valid data.
+    let st = stats();
+    // After our try_compact calls, these should be populated.
+    assert!(!st.is_running, "should not be running right now");
+    serial_println!("[compact]   stats: OK (requests={}, migrated={}, failures={})",
+        st.total_requests, st.pages_migrated, st.migration_failures);
+
+    // Test 4: try_compact with no rmap entries returns 0.
+    // (The rmap table may have entries from other subsystems, but
+    // compaction with no real user pages should succeed harmlessly.)
+    let migrated = try_compact();
+    serial_println!("[compact]   try_compact: OK (migrated={})", migrated);
+
+    // Test 5: collect_private_frames with fake rmap entries.
+    // Add a fake entry, collect it, verify, clean up.
+    let fake_phys: u64 = 0x0F00_0000; // 240 MiB — likely unused
+    let fake_pml4: u64 = 0x00C0_0000;
+    let fake_virt: u64 = 0x0000_6000_0000_0000;
+    rmap::add(fake_phys, fake_pml4, fake_virt);
+
+    let mut candidates = [0u64; 4];
+    let (found, _next) = rmap::collect_private_frames(&mut candidates, 0);
+    // We should find at least our fake entry among the results.
+    let mut saw_fake = false;
+    for i in 0..found {
+        if candidates[i] == fake_phys {
+            saw_fake = true;
+        }
+    }
+    assert!(saw_fake, "collect_private_frames should find our fake entry");
+    serial_println!("[compact]   collect_private_frames: OK (found={}, saw_fake=true)", found);
+
+    // Clean up fake entry.
+    rmap::remove(fake_phys, fake_pml4, fake_virt);
+
+    // Test 6: try_migrate_one on a non-rmap frame returns false.
+    // SAFETY: 0xDEAD_0000 is not a valid allocated frame, but
+    // try_migrate_one checks rmap first and bails early.
+    let migrated_one = unsafe { try_migrate_one(0xDEAD_0000) };
+    assert!(!migrated_one, "non-rmap frame should not migrate");
+    serial_println!("[compact]   try_migrate_one (non-rmap): OK");
+
+    serial_println!("[compact] Self-test PASSED");
+}

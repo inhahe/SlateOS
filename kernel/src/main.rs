@@ -1248,6 +1248,14 @@ extern "C" fn kmain() -> ! {
     // Tracks memory fragmentation over time for trend analysis.
     mm::frag_history::self_test();
 
+    // Step 22e⅞++++p2: Memory type accounting self-test.
+    // Verifies charge/uncharge/peak tracking for memory usage breakdown.
+    mm::memtype::self_test();
+
+    // Step 22e⅞++++p3: Memory compaction self-test.
+    // Verifies fragmentation analysis, rmap iteration, and migration API.
+    mm::compact::self_test();
+
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.
     selftest::self_test();

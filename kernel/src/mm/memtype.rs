@@ -228,3 +228,61 @@ pub fn total_accounted() -> u64 {
     }
     total
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Self-test for memory type accounting.
+pub fn self_test() {
+    use crate::serial_println;
+    serial_println!("[memtype] Running self-test...");
+
+    // Test 1: Charge increases counter and updates peak.
+    let before = current(MemType::Other);
+    charge(MemType::Other, 10);
+    let after = current(MemType::Other);
+    assert_eq!(after, before + 10, "charge should increase counter");
+    serial_println!("[memtype]   Charge: OK");
+
+    // Test 2: Uncharge decreases counter.
+    uncharge(MemType::Other, 5);
+    let now = current(MemType::Other);
+    assert_eq!(now, before + 5, "uncharge should decrease counter");
+    serial_println!("[memtype]   Uncharge: OK");
+
+    // Test 3: Peak is at least as high as current after charge.
+    let st = stats();
+    let idx = MemType::Other as usize;
+    assert!(st.peak[idx] >= st.current[idx],
+        "peak should be >= current");
+    serial_println!("[memtype]   Peak tracking: OK");
+
+    // Test 4: Uncharge below zero saturates to 0 (no underflow).
+    uncharge(MemType::Other, 5); // Back to `before`.
+    let extra_uncharge = before + 100;
+    uncharge(MemType::Other, extra_uncharge);
+    let underflow = current(MemType::Other);
+    assert_eq!(underflow, 0, "underflow should saturate to 0");
+    // Restore approximate original value.
+    charge(MemType::Other, before);
+    serial_println!("[memtype]   Underflow saturation: OK");
+
+    // Test 5: type_name returns valid names.
+    assert_eq!(type_name(MemType::PageTable), "PageTable");
+    assert_eq!(type_name(MemType::Swap), "Swap");
+    serial_println!("[memtype]   Type names: OK");
+
+    // Test 6: total_accounted is consistent.
+    let total = total_accounted();
+    let st = stats();
+    let sum: u64 = st.current.iter().sum();
+    assert_eq!(total, sum, "total should equal sum of all types");
+    serial_println!("[memtype]   Total consistency: OK");
+
+    // Test 7: all_type_names has correct count.
+    assert_eq!(all_type_names().len(), 11);
+    serial_println!("[memtype]   all_type_names: OK");
+
+    serial_println!("[memtype] Self-test PASSED");
+}

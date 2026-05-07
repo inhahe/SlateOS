@@ -1774,6 +1774,28 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
         }
     }
 
+    // For high-order allocations, try memory compaction before OOM.
+    // Compaction migrates privately-mapped pages to lower addresses,
+    // consolidating free space for large contiguous allocations.
+    if order > 0 && super::compact::should_compact() {
+        let migrated = super::compact::try_compact();
+        if migrated > 0 {
+            crate::klog!(Info, "mm.frame",
+                "compaction: migrated={} pages, retrying order={}",
+                migrated, order
+            );
+            let mut guard = allocator.lock();
+            match guard.alloc_inner(order) {
+                Ok(addr) => return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError),
+                Err(KernelError::OutOfMemory) => {
+                    // Compaction didn't produce a contiguous block.
+                    // Fall through to OOM handler.
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     // Last resort: invoke the OOM handler.
     // The handler may kill a process (policy 0/1) or return 0 (policy 2).
     let oom_freed = super::oom::handle_oom(needed);

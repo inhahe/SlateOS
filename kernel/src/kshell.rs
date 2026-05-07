@@ -3087,7 +3087,7 @@ const COMMANDS: &[&str] = &[
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
-    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
+    "firewall", "flock", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
@@ -4358,6 +4358,7 @@ fn dispatch(line: &str) {
         "batch" => cmd_batch(args),
         "linkcheck" => cmd_linkcheck(args),
         "fsprofile" => cmd_fsprofile(args),
+        "fspolicy" => cmd_fspolicy(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13163,6 +13164,105 @@ fn cmd_fsprofile(args: &str) {
     }
 }
 
+/// Filesystem policy engine — centralized tuning and workload profiles.
+fn cmd_fspolicy(args: &str) {
+    use crate::fs::policy;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "apply" => {
+            let name = if parts.len() >= 2 { parts[1] } else {
+                shell_println!("Usage: fspolicy apply <desktop|server|dev|gaming>");
+                return;
+            };
+            match policy::FsProfile::from_name(name) {
+                Some(p) => {
+                    policy::apply_profile(p);
+                    shell_println!("Applied filesystem profile: {}", p.label());
+                }
+                None => {
+                    shell_println!("Unknown profile: {}", name);
+                    shell_println!("Available: desktop, server, dev, gaming");
+                }
+            }
+        }
+        "show" | "list" | "" => {
+            let profile = policy::current_profile();
+            shell_println!("Filesystem Policy");
+            shell_println!("  Active profile: {}",
+                match profile {
+                    Some(p) => p.label(),
+                    None => "custom (manually tuned)",
+                });
+            shell_println!();
+            shell_println!("  {:28} {:>10} {}", "SETTING", "VALUE", "DESCRIPTION");
+            shell_println!("  {}", "-".repeat(70));
+            let settings = policy::list_settings();
+            for s in &settings {
+                shell_println!("  {:28} {:>10} {}", s.key, s.value, s.description);
+            }
+        }
+        "get" => {
+            let key = if parts.len() >= 2 { parts[1] } else {
+                shell_println!("Usage: fspolicy get <key>");
+                return;
+            };
+            match policy::get_setting(key) {
+                Some(val) => shell_println!("{} = {}", key, val),
+                None => shell_println!("Unknown setting: {}", key),
+            }
+        }
+        "set" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: fspolicy set <key> <value>");
+                return;
+            }
+            let key = parts[1];
+            let value = parts[2];
+            match policy::set_setting(key, value) {
+                Ok(()) => shell_println!("Set {} = {}", key, value),
+                Err(e) => shell_println!("Error: {}", e),
+            }
+        }
+        "presets" | "compare" => {
+            shell_println!("  {:28} {:>8} {:>8} {:>8} {:>8}",
+                "SETTING", "Desktop", "Server", "Dev", "Gaming");
+            shell_println!("  {}", "-".repeat(64));
+            let settings = policy::list_settings();
+            for s in &settings {
+                shell_println!("  {:28} {:>8} {:>8} {:>8} {:>8}",
+                    s.key, s.presets[0], s.presets[1], s.presets[2], s.presets[3]);
+            }
+        }
+        "detect" => {
+            match policy::detect_profile() {
+                Some(p) => shell_println!("Current settings match profile: {}", p.label()),
+                None => shell_println!("Current settings do not match any preset profile."),
+            }
+        }
+        "export" => {
+            let text = policy::export_settings();
+            shell_println!("{}", text);
+        }
+        "stats" => {
+            let st = policy::stats();
+            shell_println!("Profiles applied: {} | Settings changed: {} | Queries: {}",
+                st.profiles_applied, st.settings_changed, st.settings_queried);
+        }
+        _ => {
+            shell_println!("Usage: fspolicy <command>");
+            shell_println!("  show|list           Show current settings (default)");
+            shell_println!("  apply <profile>     Apply preset (desktop/server/dev/gaming)");
+            shell_println!("  get <key>           Get a single setting value");
+            shell_println!("  set <key> <value>   Set a single setting (marks profile custom)");
+            shell_println!("  presets             Compare all profile presets side-by-side");
+            shell_println!("  detect              Detect which profile matches current settings");
+            shell_println!("  export              Export current config as text");
+            shell_println!("  stats               Show policy engine counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18501,7 +18601,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

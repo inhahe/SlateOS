@@ -128,6 +128,7 @@ const ROOT_FILES: &[&str] = &[
     "batch",
     "linkcheck",
     "profile",
+    "fspolicy",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2078,6 +2079,44 @@ fn gen_profile() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/fspolicy` — filesystem policy engine status.
+fn gen_fspolicy() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let profile = super::policy::current_profile();
+    let stats = super::policy::stats();
+
+    out.push_str("Filesystem Policy Engine\n");
+    out.push_str("========================\n\n");
+    out.push_str(&format!("Active profile:    {}\n",
+        match profile {
+            Some(p) => p.label(),
+            None => "custom (manually tuned)",
+        }));
+    out.push_str(&format!("Profiles applied:  {}\n", stats.profiles_applied));
+    out.push_str(&format!("Settings changed:  {}\n", stats.settings_changed));
+    out.push_str(&format!("Settings queried:  {}\n\n", stats.settings_queried));
+
+    out.push_str("Current Settings\n");
+    out.push_str("----------------\n");
+    let settings = super::policy::list_settings();
+    for s in &settings {
+        out.push_str(&format!("  {:28} = {:8}  # {}\n", s.key, s.value, s.description));
+    }
+
+    out.push_str("\nProfile Presets\n");
+    out.push_str("---------------\n");
+    out.push_str(&format!("  {:28} {:>8} {:>8} {:>8} {:>8}\n",
+        "SETTING", "Desktop", "Server", "Dev", "Gaming"));
+    for s in &settings {
+        out.push_str(&format!("  {:28} {:>8} {:>8} {:>8} {:>8}\n",
+            s.key, s.presets[0], s.presets[1], s.presets[2], s.presets[3]));
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2147,6 +2186,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "batch" => Ok(gen_batch()),
         "linkcheck" => Ok(gen_linkcheck()),
         "profile" => Ok(gen_profile()),
+        "fspolicy" => Ok(gen_fspolicy()),
         _ => Err(KernelError::NotFound),
     }
 }

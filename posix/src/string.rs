@@ -643,3 +643,126 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     unsafe { strcpy(dest, s); }
     dest
 }
+
+/// Duplicate at most `n` bytes of a string.
+///
+/// Allocates memory for a copy of at most `n` bytes from `s`,
+/// plus a null terminator.  The result is always null-terminated.
+///
+/// # Safety
+///
+/// `s` must be a valid null-terminated string (or valid for `n` bytes).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    // Find actual length (min of strlen and n).
+    let len = unsafe { strnlen(s, n) };
+    let size = len.wrapping_add(1);
+
+    let ptr = crate::mman::mmap(
+        core::ptr::null_mut(),
+        size,
+        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
+        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+
+    if ptr == crate::mman::MAP_FAILED {
+        return core::ptr::null_mut();
+    }
+
+    let dest = ptr.cast::<u8>();
+    // SAFETY: mmap returned valid memory, len bytes + null.
+    unsafe { memcpy(dest, s, len); }
+    unsafe { *dest.add(len) = 0; }
+    dest
+}
+
+/// Find the last occurrence of byte `c` in the first `n` bytes of `s`.
+///
+/// Scans backward from position `n-1`.
+///
+/// # Safety
+///
+/// `s` must be valid for `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memrchr(s: *const u8, c: i32, n: usize) -> *const u8 {
+    let val = c as u8;
+    let mut i = n;
+    while i > 0 {
+        i = i.wrapping_sub(1);
+        if unsafe { *s.add(i) } == val {
+            return unsafe { s.add(i) };
+        }
+    }
+    core::ptr::null()
+}
+
+/// Copy `n` bytes from `src` to `dest`, guaranteeing non-overlap.
+///
+/// Identical to `memcpy` — exists for C programs that reference
+/// `bcopy` (BSD legacy).
+///
+/// # Safety
+///
+/// `src` and `dest` must be valid for `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcopy(src: *const u8, dest: *mut u8, n: usize) {
+    unsafe { memmove(dest, src, n); }
+}
+
+/// Set `n` bytes to zero.
+///
+/// # Safety
+///
+/// `s` must be valid for `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bzero(s: *mut u8, n: usize) {
+    unsafe { memset(s, 0, n); }
+}
+
+/// Compare two strings, case-insensitive.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcasecmp(s1: *const u8, s2: *const u8) -> i32 {
+    let mut i: usize = 0;
+    loop {
+        let a = unsafe { *s1.add(i) };
+        let b = unsafe { *s2.add(i) };
+        let la = a.to_ascii_lowercase();
+        let lb = b.to_ascii_lowercase();
+        if la != lb || a == 0 {
+            return i32::from(la).wrapping_sub(i32::from(lb));
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Compare at most `n` bytes of two strings, case-insensitive.
+///
+/// # Safety
+///
+/// Both strings must be valid for at least `n` bytes or be
+/// null-terminated before `n`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    let mut i: usize = 0;
+    while i < n {
+        let a = unsafe { *s1.add(i) };
+        let b = unsafe { *s2.add(i) };
+        let la = a.to_ascii_lowercase();
+        let lb = b.to_ascii_lowercase();
+        if la != lb || a == 0 {
+            return i32::from(la).wrapping_sub(i32::from(lb));
+        }
+        i = i.wrapping_add(1);
+    }
+    0
+}

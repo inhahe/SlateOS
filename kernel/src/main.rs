@@ -48,6 +48,7 @@
 extern crate alloc;
 
 // Module declarations.
+mod ac97;
 mod acpi;
 mod apic;
 mod backtrace;
@@ -681,6 +682,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("[virtio-snd] Init: {:?} (non-fatal)", e);
     }
 
+    // AC97 audio controller: legacy audio for older hardware/VMs.
+    // QEMU: `-device AC97,audiodev=a0 -audiodev sdl,id=a0`
+    if let Err(e) = ac97::init(boot_info.hhdm_offset) {
+        serial_println!("[ac97] Init: {:?} (non-fatal)", e);
+    }
+
     console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
 
     // Step 20d-3: Initialize networking stack.
@@ -1307,6 +1314,9 @@ extern "C" fn kmain() -> ! {
 
     // Virtio-sound self-test.
     virtio::sound::self_test();
+
+    // AC97 audio self-test.
+    ac97::self_test();
 
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {

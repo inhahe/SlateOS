@@ -3093,7 +3093,7 @@ const COMMANDS: &[&str] = &[
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "prefetch", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
-    "reboot", "ren", "renice", "rev", "rm",
+    "reboot", "recent", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
@@ -4370,6 +4370,7 @@ fn dispatch(line: &str) {
         "lsplus" => cmd_lsplus(args),
         "fsfreeze" => cmd_fsfreeze(args),
         "seal" => cmd_seal(args),
+        "recent" => cmd_recent(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14364,6 +14365,164 @@ fn cmd_seal(args: &str) {
     }
 }
 
+fn cmd_recent(args: &str) {
+    use crate::fs::recent::{self, AccessType, RecentFilter};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "show" | "" => {
+            // recent [list] [-n N] [-t type]
+            let mut limit: usize = 20;
+            let mut type_filter: Option<AccessType> = None;
+            let mut i = if sub == "list" || sub == "show" { 1 } else { 0 };
+            while i < parts.len() {
+                match parts[i] {
+                    "-n" | "--limit" => {
+                        if let Some(n_str) = parts.get(i + 1) {
+                            if let Ok(n) = n_str.parse::<usize>() {
+                                limit = n;
+                            }
+                        }
+                        i += 2;
+                    }
+                    "-t" | "--type" => {
+                        if let Some(t_str) = parts.get(i + 1) {
+                            type_filter = AccessType::from_name(t_str);
+                        }
+                        i += 2;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+            let filter = RecentFilter {
+                access_type: type_filter,
+                limit,
+                ..Default::default()
+            };
+            let entries = recent::query(&filter);
+            if entries.is_empty() {
+                shell_println!("No recent files.");
+            } else {
+                shell_println!("{:40} {:8} {:>5} {}", "PATH", "TYPE", "COUNT", "SOURCE");
+                shell_println!("{}", "-".repeat(70));
+                for e in &entries {
+                    shell_println!("{:40} {:8} {:>5} {}", e.path, e.access_type.label(), e.access_count, e.source);
+                }
+                shell_println!("\n{} entries shown.", entries.len());
+            }
+        }
+        "record" | "add" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: recent record <path> <type> [source]");
+                shell_println!("  Types: open, modify, create, exec");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let access_type = match AccessType::from_name(parts[2]) {
+                Some(t) => t,
+                None => { shell_println!("Unknown type: {}. Use: open, modify, create, exec", parts[2]); return; }
+            };
+            let source = if parts.len() > 3 { parts[3] } else { "kshell" };
+            recent::record(&path, access_type, source);
+            shell_println!("Recorded: {} ({})", path, access_type.label());
+        }
+        "clear" => {
+            recent::clear();
+            shell_println!("Recent files list cleared.");
+        }
+        "remove" | "rm" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: recent remove <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            if recent::remove(&path) {
+                shell_println!("Removed: {}", path);
+            } else {
+                shell_println!("Not found: {}", path);
+            }
+        }
+        "exclude" => {
+            let action = parts.get(1).copied().unwrap_or("list");
+            match action {
+                "add" => {
+                    if parts.len() < 3 {
+                        shell_println!("Usage: recent exclude add <prefix>");
+                        return;
+                    }
+                    recent::add_exclude(parts[2]);
+                    shell_println!("Excluded prefix: {}", parts[2]);
+                }
+                "rm" | "remove" => {
+                    if parts.len() < 3 {
+                        shell_println!("Usage: recent exclude remove <prefix>");
+                        return;
+                    }
+                    if recent::remove_exclude(parts[2]) {
+                        shell_println!("Removed exclude: {}", parts[2]);
+                    } else {
+                        shell_println!("Not found: {}", parts[2]);
+                    }
+                }
+                "list" | "" => {
+                    let excludes = recent::list_excludes();
+                    shell_println!("Default excludes: /tmp, /proc, /sys, /dev");
+                    if excludes.is_empty() {
+                        shell_println!("Custom excludes:  (none)");
+                    } else {
+                        shell_println!("Custom excludes:");
+                        for e in &excludes {
+                            shell_println!("  {}", e);
+                        }
+                    }
+                }
+                _ => shell_println!("Usage: recent exclude <add|remove|list> [prefix]"),
+            }
+        }
+        "enable" => {
+            recent::set_enabled(true);
+            shell_println!("Recent files tracking enabled.");
+        }
+        "disable" => {
+            recent::set_enabled(false);
+            shell_println!("Recent files tracking disabled.");
+        }
+        "expire" => {
+            let expired = recent::expire();
+            shell_println!("Expired {} entries beyond retention period.", expired);
+        }
+        "stats" => {
+            let (recorded, queried, evicted, excluded, count, enabled) = recent::stats();
+            shell_println!("Recent Files Statistics");
+            shell_println!("  Status:     {}", if enabled { "enabled" } else { "disabled" });
+            shell_println!("  Tracked:    {}/1024", count);
+            shell_println!("  Recorded:   {}", recorded);
+            shell_println!("  Queried:    {}", queried);
+            shell_println!("  Evicted:    {}", evicted);
+            shell_println!("  Excluded:   {}", excluded);
+            let ret_ns = recent::get_retention_ns();
+            let ret_days = ret_ns / (24 * 60 * 60 * 1_000_000_000);
+            shell_println!("  Retention:  {} days", ret_days);
+        }
+        "reset" => {
+            recent::reset_stats();
+            shell_println!("Recent files statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: recent <command>");
+            shell_println!("  list|show [-n N] [-t type]  List recent files (default)");
+            shell_println!("  record <path> <type> [src]  Record a file access");
+            shell_println!("  remove <path>              Remove from recent list");
+            shell_println!("  clear                      Clear all entries");
+            shell_println!("  exclude <add|rm|list> [p]  Manage exclusion prefixes");
+            shell_println!("  enable|disable             Toggle tracking");
+            shell_println!("  expire                     Remove expired entries");
+            shell_println!("  stats                      Show statistics");
+            shell_println!("  reset                      Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -16416,11 +16575,22 @@ fn cmd_audio(args: &str) {
                 crate::console_println!("Virtio Sound: not detected");
             }
 
+            // AC97 status.
+            let (ac97_avail, ac97_rate, ac97_playing, ac97_vendor) = crate::ac97::status_info();
+            if ac97_avail {
+                crate::console_println!("AC97 Audio:");
+                crate::console_println!("  Codec: {:08x}", ac97_vendor);
+                crate::console_println!("  Rate:  {} Hz", ac97_rate);
+                crate::console_println!("  Playing: {}", if ac97_playing { "yes" } else { "no" });
+            } else {
+                crate::console_println!("AC97: not detected");
+            }
+
             // PC speaker is always available.
             crate::console_println!("PC Speaker: available");
         }
         "play" => {
-            // Try virtio-sound first (better quality), fall back to HDA, then pcspk.
+            // Try virtio-sound first (better quality), fall back to HDA, then AC97, then pcspk.
             if crate::virtio::sound::is_available() {
                 crate::console_println!("Playing via virtio-sound (440 Hz, 1 sec)...");
                 match crate::virtio::sound::play_test_tone(1000) {
@@ -16443,6 +16613,12 @@ fn cmd_audio(args: &str) {
                     }
                     Err(e) => crate::console_println!("Failed to configure output: {:?}", e),
                 }
+            } else if crate::ac97::is_available() {
+                crate::console_println!("Playing via AC97 (440 Hz, 1 sec)...");
+                match crate::ac97::play_test_tone(1000) {
+                    Ok(()) => crate::console_println!("Done."),
+                    Err(e) => crate::console_println!("AC97 error: {:?}", e),
+                }
             } else {
                 // Fall back to PC speaker.
                 crate::console_println!("Playing via PC speaker (440 Hz, 1 sec)...");
@@ -16456,6 +16632,7 @@ fn cmd_audio(args: &str) {
             if crate::hda::is_initialized() {
                 let _ = crate::hda::stop_playback();
             }
+            let _ = crate::ac97::stop();
             crate::pcspk::off();
             crate::console_println!("Playback stopped.");
         }
@@ -19740,7 +19917,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

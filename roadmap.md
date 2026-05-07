@@ -1065,7 +1065,16 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] Self-tests: memtype accounting, compaction subsystem, VMA management
 
 ### 5.5 Container support
-- [ ] Namespace primitives (PID, network, mount, user)
+- [-] Namespace primitives (PID, network, mount, user)
+  - [x] PID namespace: hierarchical PID isolation (max 64 namespaces)
+    - [x] Per-namespace PID number space (local PIDs from 1, monotonic)
+    - [x] Bidirectional PID translation (global ↔ local)
+    - [x] Visibility hierarchy: parent sees children, not vice versa
+    - [x] Init process tracking (PID 1, exit triggers cleanup signal)
+    - [x] 18 self-tests: lifecycle, alloc/free, translation, visibility, init, separate spaces
+  - [ ] Network namespace: separate routing tables, interface assignments
+  - [ ] Mount namespace: separate mount point trees
+  - [ ] User namespace: UID/GID remapping
 - [-] Resource control groups (CPU, memory, I/O limits per group)
   - [x] cgroup.rs: hierarchical group tree (max 256 groups, root always exists)
   - [x] CPU controller: per-group quota/period (quota_ticks per period_ticks), cpu_charge() hot-path check, cpu_period_reset() for BSP timer

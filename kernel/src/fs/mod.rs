@@ -78,6 +78,7 @@ pub mod mime;
 pub mod mount_ns;
 pub mod notify;
 pub mod overlay;
+pub mod pathbar;
 pub mod pipe;
 pub mod procfs;
 pub mod policy;

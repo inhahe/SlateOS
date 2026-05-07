@@ -152,6 +152,7 @@ const ROOT_FILES: &[&str] = &[
     "preview",
     "templates",
     "columnview",
+    "pathbar",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2767,6 +2768,25 @@ fn gen_columnview() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_pathbar() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (nav_count, complete_count, hist_len, recent_len) = super::pathbar::stats();
+
+    out.push_str("Path Bar / Navigation\n");
+    out.push_str("=====================\n\n");
+    out.push_str(&format!("Navigations:   {}\n", nav_count));
+    out.push_str(&format!("Completions:   {}\n", complete_count));
+    out.push_str(&format!("History:       {}/{}\n", hist_len, 256));
+    out.push_str(&format!("Recent dirs:   {}/{}\n", recent_len, 32));
+    out.push_str(&format!("Current:       {}\n", super::pathbar::current()));
+    out.push_str(&format!("Can go back:   {}\n", super::pathbar::can_go_back()));
+    out.push_str(&format!("Can go forward:{}\n", super::pathbar::can_go_forward()));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2860,6 +2880,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "preview" => Ok(gen_preview()),
         "templates" => Ok(gen_templates()),
         "columnview" => Ok(gen_columnview()),
+        "pathbar" => Ok(gen_pathbar()),
         _ => Err(KernelError::NotFound),
     }
 }

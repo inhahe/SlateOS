@@ -3092,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
-    "prefetch", "preview", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
+    "pathbar", "prefetch", "preview", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4382,6 +4382,7 @@ fn dispatch(line: &str) {
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
+        "pathbar" => cmd_pathbar(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -15847,6 +15848,128 @@ fn cmd_columnview(args: &str) {
     }
 }
 
+/// `pathbar` — path bar navigation and autocomplete.
+fn cmd_pathbar(args: &str) {
+    use crate::fs::pathbar;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "breadcrumbs" | "crumbs" => {
+            let path_arg = parts.get(1).copied().unwrap_or(".");
+            let path = resolve_path(path_arg);
+            let crumbs = pathbar::parse_breadcrumbs(&path);
+            for c in &crumbs {
+                let marker = if c.current { " ← current" } else { "" };
+                shell_println!("  {} → {}{}", c.name, c.path, marker);
+            }
+        }
+        "complete" | "ac" => {
+            let partial = parts.get(1).copied().unwrap_or("");
+            if partial.is_empty() {
+                shell_println!("Usage: pathbar complete <partial_path>");
+                return;
+            }
+            let cwd = get_cwd();
+            let completions = pathbar::autocomplete(partial, &cwd);
+            if completions.is_empty() {
+                shell_println!("No completions for '{}'.", partial);
+            } else {
+                for c in &completions {
+                    let kind = if c.is_dir { "dir " } else { "file" };
+                    shell_println!("  [{}] {}", kind, c.text);
+                }
+            }
+        }
+        "go" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: pathbar go <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match pathbar::go(&path) {
+                Ok(()) => shell_println!("Navigated to: {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "back" => {
+            match pathbar::back() {
+                Some(path) => shell_println!("Back to: {}", path),
+                None => shell_println!("No back history."),
+            }
+        }
+        "forward" | "fwd" => {
+            match pathbar::forward() {
+                Some(path) => shell_println!("Forward to: {}", path),
+                None => shell_println!("No forward history."),
+            }
+        }
+        "up" => {
+            match pathbar::up() {
+                Ok(path) => shell_println!("Up to: {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "history" | "hist" => {
+            let hist = pathbar::history();
+            if hist.is_empty() {
+                shell_println!("No navigation history.");
+            } else {
+                for (i, entry) in hist.iter().enumerate() {
+                    shell_println!("  {:4} {}", i, entry.path);
+                }
+            }
+        }
+        "recent" => {
+            let rec = pathbar::recent();
+            if rec.is_empty() {
+                shell_println!("No recent directories.");
+            } else {
+                for entry in &rec {
+                    shell_println!("  {}", entry.path);
+                }
+            }
+        }
+        "normalize" | "norm" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: pathbar normalize <path>");
+                return;
+            }
+            shell_println!("{}", pathbar::normalize(path_arg));
+        }
+        "stats" | "" => {
+            let (nav, complete, hist, recent_len) = pathbar::stats();
+            shell_println!("Path bar statistics:");
+            shell_println!("  Navigations:  {}", nav);
+            shell_println!("  Completions:  {}", complete);
+            shell_println!("  History:      {}/{}", hist, 256);
+            shell_println!("  Recent dirs:  {}/{}", recent_len, 32);
+            shell_println!("  Current:      {}", pathbar::current());
+        }
+        "reset" => {
+            pathbar::clear_history();
+            pathbar::clear_recent();
+            pathbar::reset_stats();
+            shell_println!("Path bar reset.");
+        }
+        _ => {
+            shell_println!("Usage: pathbar <command>");
+            shell_println!("  breadcrumbs <path>   Show breadcrumb segments");
+            shell_println!("  complete <partial>   Autocomplete a path");
+            shell_println!("  go <path>            Navigate to path");
+            shell_println!("  back                 Go back in history");
+            shell_println!("  forward              Go forward in history");
+            shell_println!("  up                   Go to parent directory");
+            shell_println!("  history              Show navigation history");
+            shell_println!("  recent               Show recent directories");
+            shell_println!("  normalize <path>     Normalize a path");
+            shell_println!("  stats                Show statistics (default)");
+            shell_println!("  reset                Clear history and reset");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -21415,7 +21538,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -334,7 +334,24 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [x] Storage (NVMe, AHCI/SATA)
   - [x] AHCI/SATA driver: PCI detection, BAR5 MMIO, per-port init, IDENTIFY, READ/WRITE DMA EXT, multi-sector batching
   - [x] NVMe driver: PCI detection, BAR0 64-bit MMIO, admin/IO queue pairs, IDENTIFY ctrl/ns, PRP-based READ/WRITE, polling completion
-- [ ] USB host controller (xHCI)
+- [x] USB host controller (xHCI)
+  - [x] PCI detection (class 0x0C, subclass 0x03, prog-if 0x30)
+  - [x] 64-bit BAR0 MMIO mapping with NO_CACHE (handles addresses above 4G)
+  - [x] Capability register parsing (HCSPARAMS1/HCCPARAMS1, slots/ports/context size)
+  - [x] Controller reset and initialization (halt, HCRST, wait for CNR clear)
+  - [x] DCBAA (Device Context Base Address Array) allocation and configuration
+  - [x] Command Ring setup with Link TRB wraparound and Producer Cycle State
+  - [x] Event Ring + ERST (Event Ring Segment Table) + Interrupter 0 configuration
+  - [x] Port scanning and status detection (speed, connected, enabled)
+  - [x] Port reset with PRC-based completion detection
+  - [x] Enable Slot command + Address Device command with Input Context
+  - [x] Endpoint 0 Transfer Ring setup (per-slot, max packet size based on speed)
+  - [x] Control transfers (Setup/Data/Status stage TRBs, IOC, direction handling)
+  - [x] GET_DESCRIPTOR (Device Descriptor read, 18-byte USB device descriptor parsing)
+  - [x] Full device enumeration (detect → reset → slot → address → descriptor)
+  - [x] Kshell `usb` command (status/ports/devices/rescan)
+  - [x] Graceful fallback when no controller present
+  - [x] Verified with QEMU qemu-xhci + usb-kbd + usb-mouse (2 devices enumerated)
 - [-] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
   - [x] Intel e1000 driver: PCI detection (82540EM/82574L/I217/I211), BAR0 MMIO with explicit page table mapping, MAC from RAL0/RAH0 + EEPROM fallback, TX/RX descriptor rings (16 RX / 32 TX), link auto-negotiation, polling send/recv
   - [x] Unified network driver abstraction: send_frame()/recv_frame() try virtio-net then e1000 then rtl8139

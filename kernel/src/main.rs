@@ -144,6 +144,8 @@ mod timekeeping;
 mod tlb;
 mod virtio;
 mod watchdog;
+#[allow(dead_code)]
+mod xhci;
 mod watchpoint;
 mod wchan;
 mod workqueue;
@@ -736,6 +738,10 @@ extern "C" fn kmain() -> ! {
     // Registers devices as nvme0n1, nvme1n1, etc.  No-op without NVMe hardware.
     nvme::init(boot_info.hhdm_offset);
 
+    // xHCI USB host controller: detect and enumerate USB devices.
+    // No-op without xHCI hardware (common in QEMU unless -device qemu-xhci).
+    xhci::init(boot_info.hhdm_offset);
+
     // Step 20e-2: Add disk-backed swap alongside zram.
     // Multi-device swap: zram (priority 100) handles most evictions with
     // zero I/O latency; disk (priority 0) catches overflow when zram is full.
@@ -1306,6 +1312,9 @@ extern "C" fn kmain() -> ! {
 
     // NVMe driver self-test.
     nvme::self_test();
+
+    // xHCI USB host controller self-test.
+    xhci::self_test();
 
     // Intel e1000 NIC self-test.
     e1000::self_test();

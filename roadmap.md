@@ -1108,7 +1108,16 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] Sysctl parameters: cgroup.cpu_period, cgroup.io_ops_max_default, cgroup.io_bytes_max_default
     - [x] Kshell `cgroup io` command for interactive limit management
     - [x] 7 new self-tests (25 total): ops throttle, period reset, bytes throttle, unlimited, effective limits, would_throttle, cpu_period tunable
-- [ ] Port Docker (or equivalent container runtime)
+- [-] Container runtime support
+  - [x] Container lifecycle manager (kernel/src/container.rs)
+    - [x] ContainerConfig builder: name, UID/GID mappings, CPU/mem/IO limits, network
+    - [x] Atomic create with rollback (pidns + userns + netns + cgroup as unit)
+    - [x] State machine: Created → Running → Stopped/Failed → deleted
+    - [x] Process tracking across all sub-resources
+    - [x] kshell `container`/`ct` command: list/create/delete/start/stop/info/test
+    - [x] 14 self-tests
+  - [ ] OCI-compatible container image format parsing
+  - [ ] Port Docker (or equivalent container runtime)
 
 ### 5.6 Additional software
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)

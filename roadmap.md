@@ -335,9 +335,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 - [ ] USB host controller (xHCI)
 - [-] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
   - [x] Intel e1000 driver: PCI detection (82540EM/82574L/I217/I211), BAR0 MMIO with explicit page table mapping, MAC from RAL0/RAH0 + EEPROM fallback, TX/RX descriptor rings (16 RX / 32 TX), link auto-negotiation, polling send/recv
-  - [x] Unified network driver abstraction: send_frame()/recv_frame() try virtio-net then e1000
+  - [x] Unified network driver abstraction: send_frame()/recv_frame() try virtio-net then e1000 then rtl8139
   - [x] DHCP works end-to-end over e1000 (verified: QEMU 10.0.2.15)
-  - [ ] Realtek RTL8139/RTL8169 for real hardware
+  - [x] Realtek RTL8139 driver: PCI detection (0x10EC:0x8139/0x8138/0x8136), PIO registers, 8K RX ring buffer, 4-descriptor TX, DMA, shared IRQ handling
 - [x] Timer (HPET, APIC timer)
   - [x] Local APIC timer (calibrated via PIT, 100 Hz periodic, preemptive scheduling)
   - [x] HPET (High Precision Event Timer): ACPI table discovery, MMIO mapping, 100 MHz monotonic counter, ticks_to_ns conversion, self-test

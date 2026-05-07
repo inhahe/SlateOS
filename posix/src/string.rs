@@ -294,3 +294,195 @@ pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *const u8 {
         i = i.wrapping_add(1);
     }
 }
+
+/// Concatenate two C strings.
+///
+/// Appends `src` to the end of `dest`.
+///
+/// # Safety
+///
+/// `dest` must have enough space for the combined string.
+/// Both must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
+    // Find end of dest.
+    let mut i: usize = 0;
+    while unsafe { *dest.add(i) } != 0 {
+        i = i.wrapping_add(1);
+    }
+    // Copy src.
+    let mut j: usize = 0;
+    loop {
+        let c = unsafe { *src.add(j) };
+        unsafe { *dest.add(i) = c; }
+        if c == 0 {
+            break;
+        }
+        i = i.wrapping_add(1);
+        j = j.wrapping_add(1);
+    }
+    dest
+}
+
+/// Concatenate at most `n` bytes of `src` to `dest`.
+///
+/// # Safety
+///
+/// `dest` must have enough space for the combined string (up to n extra
+/// bytes + null terminator).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strncat(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
+    // Find end of dest.
+    let mut i: usize = 0;
+    while unsafe { *dest.add(i) } != 0 {
+        i = i.wrapping_add(1);
+    }
+    // Copy up to n bytes from src.
+    let mut j: usize = 0;
+    while j < n {
+        let c = unsafe { *src.add(j) };
+        unsafe { *dest.add(i) = c; }
+        if c == 0 {
+            return dest;
+        }
+        i = i.wrapping_add(1);
+        j = j.wrapping_add(1);
+    }
+    // Null-terminate.
+    unsafe { *dest.add(i) = 0; }
+    dest
+}
+
+/// Find the first occurrence of substring `needle` in `haystack`.
+///
+/// Returns a pointer to the beginning of the match, or NULL if not found.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
+    // Empty needle matches everything.
+    if unsafe { *needle } == 0 {
+        return haystack;
+    }
+
+    let mut h: usize = 0;
+    while unsafe { *haystack.add(h) } != 0 {
+        let mut j: usize = 0;
+        loop {
+            let n = unsafe { *needle.add(j) };
+            if n == 0 {
+                // Full match.
+                return unsafe { haystack.add(h) };
+            }
+            let hc = unsafe { *haystack.add(h.wrapping_add(j)) };
+            if hc != n {
+                break;
+            }
+            j = j.wrapping_add(1);
+        }
+        h = h.wrapping_add(1);
+    }
+    core::ptr::null()
+}
+
+/// Compute the length of the initial segment of `s` consisting
+/// entirely of bytes in `accept`.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::many_single_char_names)] // POSIX function signature, C convention variables.
+pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> SizeT {
+    let mut i: usize = 0;
+    'outer: loop {
+        let c = unsafe { *s.add(i) };
+        if c == 0 {
+            return i;
+        }
+        let mut j: usize = 0;
+        loop {
+            let a = unsafe { *accept.add(j) };
+            if a == 0 {
+                break 'outer;
+            }
+            if c == a {
+                break;
+            }
+            j = j.wrapping_add(1);
+        }
+        i = i.wrapping_add(1);
+    }
+    i
+}
+
+/// Compute the length of the initial segment of `s` consisting
+/// entirely of bytes NOT in `reject`.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+#[allow(clippy::many_single_char_names)]
+pub unsafe extern "C" fn strcspn(s: *const u8, reject: *const u8) -> SizeT {
+    let mut i: usize = 0;
+    loop {
+        let c = unsafe { *s.add(i) };
+        if c == 0 {
+            return i;
+        }
+        let mut j: usize = 0;
+        loop {
+            let r = unsafe { *reject.add(j) };
+            if r == 0 {
+                break;
+            }
+            if c == r {
+                return i;
+            }
+            j = j.wrapping_add(1);
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Duplicate a string.
+///
+/// Allocates memory for a copy of `s` using `mmap`.  The caller must
+/// free the result with `free()` (when we have a heap) or `munmap`.
+///
+/// Note: This is a no_std stub — returns NULL since we have no heap.
+///
+/// # Safety
+///
+/// `s` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    let len = unsafe { strlen(s) };
+    let size = len.wrapping_add(1);
+
+    // Allocate via mmap (anonymous mapping).
+    let ptr = crate::mman::mmap(
+        core::ptr::null_mut(),
+        size,
+        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
+        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+
+    if ptr == crate::mman::MAP_FAILED {
+        return core::ptr::null_mut();
+    }
+
+    let dest = ptr.cast::<u8>();
+    // SAFETY: mmap returned valid memory of sufficient size.
+    unsafe { strcpy(dest, s); }
+    dest
+}

@@ -74,6 +74,7 @@ pub mod pipe;
 pub mod process;
 pub mod spawn;
 pub mod stat;
+pub mod stdlib;
 pub mod string;
 pub mod syscall;
 pub mod time;

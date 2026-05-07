@@ -326,12 +326,12 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] virtio-gpu driver (modern PCI transport, MMIO BARs, PCI capability parsing, 2D framebuffer, resource management, scanout config)
 
 ### 2.2 Essential drivers
-- [-] Keyboard (PS/2 and USB HID)
+- [x] Keyboard (PS/2 and USB HID)
   - [x] PS/2 keyboard driver (scan code set 1, IRQ 1, modifier tracking, ASCII echo)
   - [x] PS/2 mouse driver (IRQ 12, 3/4-byte packets, IntelliMouse scroll wheel, ring buffer)
   - [x] USB HID class driver: config descriptor parsing, SET_CONFIGURATION, SET_PROTOCOL (boot), SET_IDLE, interrupt endpoint detection
-  - [ ] USB HID interrupt transfer polling (read input reports from keyboard/mouse)
-  - [ ] USB HID keycode-to-scancode translation (bridge to existing keyboard subsystem)
+  - [x] USB HID interrupt transfer polling (poll_keyboard/poll_mouse via event ring)
+  - [x] USB HID keycode-to-scancode translation (HID_TO_SCANCODE table, handle_usb_hid_report integration with keyboard ring buffer)
 - [x] Framebuffer / basic display (UEFI GOP framebuffer initially)
   - [x] 8x16 VGA bitmap font, framebuffer text console (160x50 @ 1280x800)
 - [x] Storage (NVMe, AHCI/SATA)

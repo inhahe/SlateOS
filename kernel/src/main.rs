@@ -111,6 +111,7 @@ mod lockdep;
 mod mm;
 mod msi;
 mod net;
+mod netns;
 mod numa;
 mod nvme;
 mod pci;
@@ -1277,6 +1278,13 @@ extern "C" fn kmain() -> ! {
     // and full host UID resolution through nested namespaces.
     userns::init();
     userns::self_test();
+
+    // Step 22e⅞++++p8: Network namespace subsystem init + self-test.
+    // Per-container network isolation with independent interface config,
+    // routing tables (longest-prefix match + metric tie-breaking), and
+    // process tracking.
+    netns::init();
+    netns::self_test();
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.

@@ -4934,6 +4934,7 @@ fn dispatch(line: &str) {
         "cgroup" => cmd_cgroup(args),
         "pidns" => cmd_pidns(args),
         "userns" => cmd_userns(args),
+        "netns" => cmd_netns(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
@@ -30936,6 +30937,253 @@ fn cmd_userns(args: &str) {
     }
 }
 
+fn cmd_netns(args: &str) {
+    use crate::netns;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let count = netns::active_count();
+            crate::console_println!("=== Network Namespaces ({} active) ===", count);
+            crate::console_println!(
+                "{:<5} {:<5} {:<16} {:<16} {:<16} {:<6} {:<5}",
+                "ID", "Up", "IP", "Gateway", "DNS", "Routes", "Procs"
+            );
+            for id in 0..netns::MAX_NAMESPACES as u32 {
+                if let Some(s) = netns::stats(id) {
+                    let up = if s.iface_up { "yes" } else { "no" };
+                    crate::console_println!(
+                        "{:<5} {:<5} {:<16} {:<16} {:<16} {:<6} {:<5}",
+                        id, up, alloc::format!("{}", s.ip),
+                        alloc::format!("{}", s.gateway),
+                        alloc::format!("{}", s.dns),
+                        s.route_count, s.nr_procs
+                    );
+                }
+            }
+        }
+        "create" => {
+            match netns::create() {
+                Ok(id) => crate::console_println!("Created network namespace {}", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" | "rm" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: netns delete <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            match netns::delete(id) {
+                Ok(()) => crate::console_println!("Deleted network namespace {}", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "ifconfig" | "config" => {
+            // netns ifconfig <ns> <ip> <mask> <gw> <dns>
+            if parts.len() < 6 {
+                crate::console_println!("Usage: netns ifconfig <ns> <ip> <mask> <gw> <dns>");
+                crate::console_println!("  Example: netns ifconfig 1 10.0.0.2 255.255.255.0 10.0.0.1 8.8.8.8");
+                return;
+            }
+            let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
+            let parse_ip = |s: &str| -> Option<netns::Ipv4Addr> {
+                let octets: alloc::vec::Vec<&str> = s.split('.').collect();
+                if octets.len() != 4 { return None; }
+                Some(netns::Ipv4Addr::new(
+                    octets[0].parse().ok()?,
+                    octets[1].parse().ok()?,
+                    octets[2].parse().ok()?,
+                    octets[3].parse().ok()?,
+                ))
+            };
+            let Some(ip) = parse_ip(parts[2]) else {
+                crate::console_println!("Invalid IP address: {}", parts[2]);
+                return;
+            };
+            let Some(mask) = parse_ip(parts[3]) else {
+                crate::console_println!("Invalid subnet mask: {}", parts[3]);
+                return;
+            };
+            let Some(gw) = parse_ip(parts[4]) else {
+                crate::console_println!("Invalid gateway: {}", parts[4]);
+                return;
+            };
+            let Some(dns) = parse_ip(parts[5]) else {
+                crate::console_println!("Invalid DNS: {}", parts[5]);
+                return;
+            };
+            match netns::configure_interface(ns, ip, mask, gw, dns) {
+                Ok(()) => crate::console_println!(
+                    "Configured ns {}: IP {} mask {} gw {} dns {}", ns, ip, mask, gw, dns
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "route" => {
+            // netns route <ns> — show routes
+            // netns route <ns> add <dest> <mask> <gw> [metric]
+            // netns route <ns> del <dest> <mask>
+            let Some(ns_str) = parts.get(1) else {
+                crate::console_println!("Usage: netns route <ns> [add|del ...]");
+                return;
+            };
+            let Ok(ns) = ns_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            let sub = parts.get(2).copied().unwrap_or("");
+            let parse_ip = |s: &str| -> Option<netns::Ipv4Addr> {
+                let octets: alloc::vec::Vec<&str> = s.split('.').collect();
+                if octets.len() != 4 { return None; }
+                Some(netns::Ipv4Addr::new(
+                    octets[0].parse().ok()?,
+                    octets[1].parse().ok()?,
+                    octets[2].parse().ok()?,
+                    octets[3].parse().ok()?,
+                ))
+            };
+            match sub {
+                "" | "show" => {
+                    let rt = netns::routes(ns);
+                    if rt.is_empty() {
+                        crate::console_println!("No routes in namespace {}", ns);
+                    } else {
+                        crate::console_println!("=== Routes (ns {}) ===", ns);
+                        crate::console_println!("{:<18} {:<18} {:<18} {:<7}", "Destination", "Mask", "Gateway", "Metric");
+                        for r in &rt {
+                            crate::console_println!(
+                                "{:<18} {:<18} {:<18} {:<7}",
+                                alloc::format!("{}", r.destination),
+                                alloc::format!("{}", r.mask),
+                                alloc::format!("{}", r.gateway),
+                                r.metric
+                            );
+                        }
+                    }
+                }
+                "add" => {
+                    if parts.len() < 6 {
+                        crate::console_println!("Usage: netns route <ns> add <dest> <mask> <gw> [metric]");
+                        return;
+                    }
+                    let Some(dest) = parse_ip(parts[3]) else {
+                        crate::console_println!("Invalid destination");
+                        return;
+                    };
+                    let Some(mask) = parse_ip(parts[4]) else {
+                        crate::console_println!("Invalid mask");
+                        return;
+                    };
+                    let Some(gw) = parse_ip(parts[5]) else {
+                        crate::console_println!("Invalid gateway");
+                        return;
+                    };
+                    let metric = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(100);
+                    match netns::add_route(ns, dest, mask, gw, metric) {
+                        Ok(()) => crate::console_println!(
+                            "Added route: {} mask {} via {} metric {}", dest, mask, gw, metric
+                        ),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                }
+                "del" | "delete" => {
+                    if parts.len() < 5 {
+                        crate::console_println!("Usage: netns route <ns> del <dest> <mask>");
+                        return;
+                    }
+                    let Some(dest) = parse_ip(parts[3]) else {
+                        crate::console_println!("Invalid destination");
+                        return;
+                    };
+                    let Some(mask) = parse_ip(parts[4]) else {
+                        crate::console_println!("Invalid mask");
+                        return;
+                    };
+                    match netns::remove_route(ns, dest, mask) {
+                        Ok(()) => crate::console_println!("Removed route: {} mask {}", dest, mask),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                }
+                _ => {
+                    crate::console_println!("Usage: netns route <ns> [show|add|del]");
+                }
+            }
+        }
+        "stats" | "info" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: netns stats <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            let Some(s) = netns::stats(id) else {
+                crate::console_println!("Network namespace {} not found", id);
+                return;
+            };
+            crate::console_println!("=== Network Namespace {} ===", id);
+            crate::console_println!("  Interface:  {}", if s.iface_up { "up" } else { "down" });
+            crate::console_println!("  IP:         {}", s.ip);
+            crate::console_println!("  Subnet:     {}", s.subnet_mask);
+            crate::console_println!("  Gateway:    {}", s.gateway);
+            crate::console_println!("  DNS:        {}", s.dns);
+            crate::console_println!("  Routes:     {}", s.route_count);
+            crate::console_println!("  Processes:  {}", s.nr_procs);
+            // Show routing table.
+            let rt = netns::routes(id);
+            if !rt.is_empty() {
+                crate::console_println!("  Routing table:");
+                for r in &rt {
+                    crate::console_println!(
+                        "    {} mask {} via {} metric {}",
+                        r.destination, r.mask, r.gateway, r.metric
+                    );
+                }
+            }
+        }
+        "up" | "down" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: netns up|down <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid namespace ID");
+                return;
+            };
+            let up = cmd == "up";
+            match netns::set_interface_up(id, up) {
+                Ok(()) => crate::console_println!(
+                    "Namespace {} interface {}", id, if up { "up" } else { "down" }
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "test" => {
+            netns::self_test();
+        }
+        _ => {
+            crate::console_println!("Usage: netns [list|create|delete|ifconfig|route|stats|up|down|test]");
+            crate::console_println!("  netns                              — list active network namespaces");
+            crate::console_println!("  netns create                       — create a new namespace");
+            crate::console_println!("  netns delete ID                    — delete empty namespace");
+            crate::console_println!("  netns ifconfig NS IP MASK GW DNS   — configure interface");
+            crate::console_println!("  netns route NS                     — show routing table");
+            crate::console_println!("  netns route NS add D M GW [metric] — add route");
+            crate::console_println!("  netns route NS del D M             — remove route");
+            crate::console_println!("  netns stats ID                     — detailed stats");
+            crate::console_println!("  netns up|down ID                   — set interface up/down");
+            crate::console_println!("  netns test                         — run self-test");
+        }
+    }
+}
+
 ///   capreq approve ID     — approve a pending request
 ///   capreq deny ID        — deny a pending request
 ///   capreq test           — submit a test request
@@ -33298,7 +33546,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

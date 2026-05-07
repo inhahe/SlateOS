@@ -152,6 +152,7 @@ const ROOT_FILES: &[&str] = &[
     "deskicons",
     "fileops",
     "fileselect",
+    "openwith",
     "preview",
     "templates",
     "columnview",
@@ -2876,6 +2877,22 @@ fn gen_fileselect() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_openwith() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (opens, defaults, recent, apps) = super::openwith::stats();
+
+    out.push_str("Open With\n");
+    out.push_str("=========\n\n");
+    out.push_str(&format!("Opens:           {}\n", opens));
+    out.push_str(&format!("Default changes: {}\n", defaults));
+    out.push_str(&format!("Recent entries:  {}\n", recent));
+    out.push_str(&format!("Known apps:      {}\n", apps));
+
+    out.into_bytes()
+}
+
 fn gen_properties() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -2983,6 +3000,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "deskicons" => Ok(gen_deskicons()),
         "fileops" => Ok(gen_fileops()),
         "fileselect" => Ok(gen_fileselect()),
+        "openwith" => Ok(gen_openwith()),
         "preview" => Ok(gen_preview()),
         "templates" => Ok(gen_templates()),
         "columnview" => Ok(gen_columnview()),

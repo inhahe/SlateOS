@@ -3091,7 +3091,7 @@ const COMMANDS: &[&str] = &[
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
-    "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
+    "move", "net", "nl", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
@@ -4394,6 +4394,7 @@ fn dispatch(line: &str) {
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
         "fileselect" | "fsel" => cmd_fileselect(args),
+        "openw" => cmd_openwith(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
@@ -15991,6 +15992,148 @@ fn check_char(state: crate::fs::fileselect::CheckState) -> char {
     }
 }
 
+/// `openw` — Open With dialog infrastructure.
+fn cmd_openwith(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "choices" => {
+            // openw choices <file>
+            if let Some(path) = parts.get(1) {
+                let resolved = resolve_path(path);
+                match crate::fs::openwith::build_choices(&resolved) {
+                    Ok(choices) => {
+                        if choices.is_empty() {
+                            shell_println!("No applications found for {}", resolved);
+                        } else {
+                            shell_println!("Open With choices for {}:", resolved);
+                            shell_println!("{:<25} {:<15} {:<8} {}", "Application", "Reason", "Default", "Uses");
+                            shell_println!("{}", "-".repeat(60));
+                            for c in &choices {
+                                let reason = match c.reason {
+                                    crate::fs::openwith::ChoiceReason::RegisteredHandler => "registered",
+                                    crate::fs::openwith::ChoiceReason::RecentlyUsed => "recent",
+                                    crate::fs::openwith::ChoiceReason::InstalledApp => "installed",
+                                };
+                                let def = if c.is_default { "*" } else { "" };
+                                shell_println!("{:<25} {:<15} {:<8} {}", c.app_name, reason, def, c.use_count);
+                            }
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: openw choices <file>");
+            }
+        }
+        "open" => {
+            // openw open <file> <app-path> [--default]
+            if parts.len() < 3 {
+                shell_println!("Usage: openw open <file> <app-path> [--default]");
+                return;
+            }
+            let file = resolve_path(parts[1]);
+            let app_path = parts[2];
+            let set_default = parts.contains(&"--default");
+            let app_name = app_path.rsplit('/').next().unwrap_or(app_path);
+            match crate::fs::openwith::open_with(&file, app_path, app_name, set_default) {
+                Ok(result) => {
+                    shell_println!("Opened {} with {}", result.file_path, result.app_path);
+                    if result.default_changed {
+                        shell_println!("  (set as default for this type)");
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "default" => {
+            // openw default <file>
+            if let Some(path) = parts.get(1) {
+                let resolved = resolve_path(path);
+                match crate::fs::openwith::current_default(&resolved) {
+                    Some(name) => shell_println!("Default app for {}: {}", resolved, name),
+                    None => shell_println!("No default app for {}", resolved),
+                }
+            } else {
+                shell_println!("Usage: openw default <file>");
+            }
+        }
+        "recent" => {
+            // openw recent <mime-type>
+            if let Some(mime) = parts.get(1) {
+                let entries = crate::fs::openwith::recent_for_type(mime);
+                if entries.is_empty() {
+                    shell_println!("No recent choices for {}", mime);
+                } else {
+                    shell_println!("Recent apps for {}:", mime);
+                    for (path, name, count) in &entries {
+                        shell_println!("  {} ({}) — {} uses", name, path, count);
+                    }
+                }
+            } else {
+                shell_println!("Usage: openw recent <mime-type>");
+            }
+        }
+        "apps" => {
+            let apps = crate::fs::openwith::list_apps();
+            if apps.is_empty() {
+                shell_println!("(no registered applications)");
+            } else {
+                shell_println!("{:<30} {}", "Path", "Name");
+                shell_println!("{}", "-".repeat(50));
+                for (path, name) in &apps {
+                    shell_println!("{:<30} {}", path, name);
+                }
+            }
+        }
+        "register" => {
+            // openw register <app-path> <app-name>
+            if parts.len() < 3 {
+                shell_println!("Usage: openw register <app-path> <app-name>");
+                return;
+            }
+            let app_path = parts[1];
+            let app_name = parts[2..].join(" ");
+            match crate::fs::openwith::register_app(app_path, &app_name) {
+                Ok(()) => shell_println!("Registered: {} ({})", app_name, app_path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clear" => {
+            if let Some(mime) = parts.get(1) {
+                crate::fs::openwith::clear_recent_for_type(mime);
+                shell_println!("Cleared recent choices for {}", mime);
+            } else {
+                crate::fs::openwith::clear_recent();
+                shell_println!("Cleared all recent choices");
+            }
+        }
+        "stats" => {
+            let (opens, defaults, recent, apps) = crate::fs::openwith::stats();
+            shell_println!("Opens:           {}", opens);
+            shell_println!("Default changes: {}", defaults);
+            shell_println!("Recent entries:  {}", recent);
+            shell_println!("Known apps:      {}", apps);
+        }
+        "reset" => {
+            crate::fs::openwith::reset_stats();
+            shell_println!("Open With stats reset");
+        }
+        _ => {
+            shell_println!("Usage: openw <subcommand>");
+            shell_println!("  choices <file>       Show app choices for file");
+            shell_println!("  open <file> <app>    Open file with app [--default]");
+            shell_println!("  default <file>       Show default app for file");
+            shell_println!("  recent <mime>        Show recent choices for type");
+            shell_println!("  apps                 List known applications");
+            shell_println!("  register <path> <name>  Register an application");
+            shell_println!("  clear [mime]         Clear recent choices");
+            shell_println!("  stats                Show statistics");
+            shell_println!("  reset                Reset statistics");
+        }
+    }
+}
+
 /// `preview` — file preview/thumbnail generation.
 fn cmd_preview(args: &str) {
     use crate::fs::preview;
@@ -22196,7 +22339,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "openw" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

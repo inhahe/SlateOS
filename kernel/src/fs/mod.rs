@@ -80,6 +80,7 @@ pub mod memfs;
 pub mod mime;
 pub mod mount_ns;
 pub mod notify;
+pub mod openwith;
 pub mod overlay;
 pub mod pathbar;
 pub mod pipe;

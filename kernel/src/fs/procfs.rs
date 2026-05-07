@@ -184,6 +184,7 @@ const ROOT_FILES: &[&str] = &[
     "ime",
     "netindicator",
     "winsnap",
+    "colorpicker",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3608,6 +3609,36 @@ fn gen_winsnap() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_colorpicker() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (active, pal_count, recent_count, picks, samples) = super::colorpicker::stats();
+
+    out.push_str("Color Picker\n");
+    out.push_str("============\n\n");
+    out.push_str(&format!("Active pickers: {}\n", active));
+    out.push_str(&format!("Palettes:       {}\n", pal_count));
+    out.push_str(&format!("Recent colors:  {}\n", recent_count));
+    out.push_str(&format!("Picks:          {}\n", picks));
+    out.push_str(&format!("Samples:        {}\n\n", samples));
+
+    let palettes = super::colorpicker::list_palettes();
+    for p in &palettes {
+        out.push_str(&format!("{}: {} colors\n", p.name, p.colors.len()));
+    }
+
+    let recent = super::colorpicker::recent_colors();
+    if !recent.is_empty() {
+        out.push_str("\nRecent:\n");
+        for c in &recent {
+            out.push_str(&format!("  {}\n", c.to_hex()));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3957,6 +3988,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "ime" => Ok(gen_ime()),
         "netindicator" => Ok(gen_netindicator()),
         "winsnap" => Ok(gen_winsnap()),
+        "colorpicker" => Ok(gen_colorpicker()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

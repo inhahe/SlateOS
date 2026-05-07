@@ -43,6 +43,7 @@ pub mod bzip2;
 pub mod cache;
 pub mod cas;
 pub mod clipboard;
+pub mod colorpicker;
 pub mod changetrack;
 pub mod columnview;
 pub mod compress;

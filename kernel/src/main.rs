@@ -51,6 +51,7 @@ extern crate alloc;
 mod ac97;
 mod acpi;
 mod apic;
+mod audio_history;
 mod audio_mixer;
 mod audio_notify;
 mod backtrace;
@@ -1325,6 +1326,9 @@ extern "C" fn kmain() -> ! {
 
     // System notification sounds self-test.
     audio_notify::self_test();
+
+    // Sound history self-test.
+    audio_history::self_test();
 
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {

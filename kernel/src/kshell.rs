@@ -3095,7 +3095,7 @@ const COMMANDS: &[&str] = &[
     "prefetch", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
-    "splice", "strings", "tac", "tr",
+    "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
     "then", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
@@ -4366,6 +4366,7 @@ fn dispatch(line: &str) {
         "splice" => cmd_splice(args),
         "directio" => cmd_directio(args),
         "fstrim" => cmd_fstrim(args),
+        "sparse" => cmd_sparse(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13932,6 +13933,158 @@ fn cmd_fstrim(args: &str) {
     }
 }
 
+fn cmd_sparse(args: &str) {
+    use crate::fs::sparse;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "punch" | "hole" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: sparse punch <path> <offset> <length>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let offset: u64 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid offset"); return; }
+            };
+            let length: u64 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid length"); return; }
+            };
+            match sparse::punch_hole(&path, offset, length) {
+                Ok(r) => shell_println!("Punched {} bytes at offset {} (hole={})",
+                    r.bytes_affected, offset, r.created_hole),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "zero" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: sparse zero <path> <offset> <length>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let offset: u64 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid offset"); return; }
+            };
+            let length: u64 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid length"); return; }
+            };
+            match sparse::zero_range(&path, offset, length) {
+                Ok(r) => shell_println!("Zeroed {} bytes at offset {}", r.bytes_affected, offset),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "collapse" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: sparse collapse <path> <offset> <length>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let offset: u64 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid offset"); return; }
+            };
+            let length: u64 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid length"); return; }
+            };
+            match sparse::collapse_range(&path, offset, length) {
+                Ok(r) => shell_println!("Collapsed {} bytes at offset {}", r.bytes_affected, offset),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "insert" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: sparse insert <path> <offset> <length>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let offset: u64 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid offset"); return; }
+            };
+            let length: u64 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid length"); return; }
+            };
+            match sparse::insert_range(&path, offset, length) {
+                Ok(r) => shell_println!("Inserted {} zero bytes at offset {}", r.bytes_affected, offset),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "map" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: sparse map <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match sparse::map_regions(&path) {
+                Ok(map) => {
+                    shell_println!("Sparse map: {} ({} bytes)", path, map.file_size);
+                    shell_println!("  Data: {} bytes | Holes: {} bytes", map.data_bytes, map.hole_bytes);
+                    if map.file_size > 0 {
+                        let ratio = (map.hole_bytes as f64 / map.file_size as f64) * 100.0;
+                        shell_println!("  Sparseness: {:.1}%", ratio);
+                    }
+                    shell_println!();
+                    shell_println!("  {:>12} {:>12} {:>6}", "OFFSET", "LENGTH", "TYPE");
+                    shell_println!("  {}", "-".repeat(34));
+                    for region in &map.regions {
+                        shell_println!("  {:>12} {:>12} {:>6}",
+                            region.offset, region.length, region.kind.label());
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "tracked" => {
+            let files = sparse::list_tracked();
+            if files.is_empty() {
+                shell_println!("No tracked sparse files.");
+            } else {
+                shell_println!("{:40} {:>6}", "PATH", "HOLES");
+                shell_println!("{}", "-".repeat(48));
+                for (path, holes) in &files {
+                    shell_println!("{:40} {:>6}", path, holes);
+                }
+            }
+        }
+        "stats" | "show" | "" => {
+            let (punches, punch_bytes, zeros, collapses, inserts, maps, tracked) = sparse::stats();
+            shell_println!("Sparse File Statistics");
+            shell_println!("  Tracked files:   {}/256", tracked);
+            shell_println!("  Punch holes:     {} ({} bytes)", punches, punch_bytes);
+            shell_println!("  Zero ranges:     {}", zeros);
+            shell_println!("  Collapse ranges: {}", collapses);
+            shell_println!("  Insert ranges:   {}", inserts);
+            shell_println!("  Map queries:     {}", maps);
+        }
+        "clear" => {
+            sparse::clear_tracking();
+            shell_println!("Sparse tracking data cleared.");
+        }
+        "reset" => {
+            sparse::reset_stats();
+            shell_println!("Sparse statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: sparse <command>");
+            shell_println!("  punch <path> <off> <len>    Punch a hole (deallocate range)");
+            shell_println!("  zero <path> <off> <len>     Zero a range (keep allocated)");
+            shell_println!("  collapse <path> <off> <len> Remove range, shift data down");
+            shell_println!("  insert <path> <off> <len>   Insert zeros, shift data up");
+            shell_println!("  map <path>                  Show sparse region map");
+            shell_println!("  list|tracked                List tracked sparse files");
+            shell_println!("  stats|show                  Show statistics (default)");
+            shell_println!("  clear                       Clear tracking data");
+            shell_println!("  reset                       Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -19308,7 +19461,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -136,6 +136,7 @@ const ROOT_FILES: &[&str] = &[
     "splice",
     "directio",
     "fstrim",
+    "sparse",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2313,6 +2314,36 @@ fn gen_fstrim() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/sparse` — sparse file management status.
+fn gen_sparse() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (punches, punch_bytes, zeros, collapses, inserts, maps, tracked) =
+        super::sparse::stats();
+
+    out.push_str("Sparse File Management\n");
+    out.push_str("======================\n\n");
+    out.push_str(&format!("Tracked files:    {}/{}\n", tracked, 256));
+    out.push_str(&format!("Punch holes:      {} ({} bytes)\n", punches, punch_bytes));
+    out.push_str(&format!("Zero ranges:      {}\n", zeros));
+    out.push_str(&format!("Collapse ranges:  {}\n", collapses));
+    out.push_str(&format!("Insert ranges:    {}\n", inserts));
+    out.push_str(&format!("Map queries:      {}\n\n", maps));
+
+    let files = super::sparse::list_tracked();
+    if files.is_empty() {
+        out.push_str("No tracked sparse files.\n");
+    } else {
+        out.push_str(&format!("{:40} {:>6}\n", "PATH", "HOLES"));
+        for (path, holes) in &files {
+            out.push_str(&format!("{:40} {:>6}\n", path, holes));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2390,6 +2421,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "splice" => Ok(gen_splice()),
         "directio" => Ok(gen_directio()),
         "fstrim" => Ok(gen_fstrim()),
+        "sparse" => Ok(gen_sparse()),
         _ => Err(KernelError::NotFound),
     }
 }

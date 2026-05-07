@@ -96,6 +96,7 @@ pub mod recent;
 pub mod reclaim;
 pub mod search;
 pub mod sealing;
+pub mod sidebar;
 pub mod snapshot;
 pub mod sparse;
 pub mod splice;

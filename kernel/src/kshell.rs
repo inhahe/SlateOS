@@ -3094,7 +3094,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
-    "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
+    "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "template", "test",
@@ -4395,6 +4395,7 @@ fn dispatch(line: &str) {
         "fileops" | "fops" => cmd_fileops(args),
         "fileselect" | "fsel" => cmd_fileselect(args),
         "openw" => cmd_openwith(args),
+        "sidebar" => cmd_sidebar(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
@@ -4493,6 +4494,7 @@ fn dispatch(line: &str) {
         "soundhist" => cmd_soundhist(),
         "gfx" => cmd_gfx(args),
         "gpu" => cmd_gpu(args),
+        "usb" => cmd_usb(args),
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
@@ -16134,6 +16136,138 @@ fn cmd_openwith(args: &str) {
     }
 }
 
+/// `sidebar` — file explorer navigation sidebar.
+fn cmd_sidebar(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let sidebar = crate::fs::sidebar::build();
+            for section in &sidebar.sections {
+                let marker = if section.expanded { "v" } else { ">" };
+                shell_println!("[{}] {} ({} items)", marker, section.label, section.items.len());
+                if section.expanded {
+                    for item in &section.items {
+                        let info = if item.usage_info.is_empty() {
+                            String::new()
+                        } else {
+                            alloc::format!("  ({})", item.usage_info)
+                        };
+                        shell_println!("    {} → {}{}", item.label, item.path, info);
+                    }
+                }
+            }
+        }
+        "toggle" => {
+            if let Some(section) = parts.get(1) {
+                let kind = match *section {
+                    "quickaccess" | "qa" => Some(crate::fs::sidebar::SectionKind::QuickAccess),
+                    "thispc" | "pc" => Some(crate::fs::sidebar::SectionKind::ThisPC),
+                    "network" | "net" => Some(crate::fs::sidebar::SectionKind::Network),
+                    "recent" => Some(crate::fs::sidebar::SectionKind::Recent),
+                    "tags" => Some(crate::fs::sidebar::SectionKind::Tags),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    let expanded = crate::fs::sidebar::toggle_expanded(kind);
+                    shell_println!("{}: {}", section, if expanded { "expanded" } else { "collapsed" });
+                } else {
+                    shell_println!("Unknown section: {}. Use: quickaccess, thispc, network, recent, tags", section);
+                }
+            } else {
+                shell_println!("Usage: sidebar toggle <section>");
+            }
+        }
+        "hide" => {
+            if let Some(section) = parts.get(1) {
+                let kind = parse_section_kind(section);
+                if let Some(kind) = kind {
+                    crate::fs::sidebar::hide_section(kind);
+                    shell_println!("{} hidden", section);
+                } else {
+                    shell_println!("Unknown section: {}", section);
+                }
+            } else {
+                shell_println!("Usage: sidebar hide <section>");
+            }
+        }
+        "unhide" => {
+            if let Some(section) = parts.get(1) {
+                let kind = parse_section_kind(section);
+                if let Some(kind) = kind {
+                    crate::fs::sidebar::show_section(kind);
+                    shell_println!("{} shown", section);
+                } else {
+                    shell_println!("Unknown section: {}", section);
+                }
+            } else {
+                shell_println!("Usage: sidebar unhide <section>");
+            }
+        }
+        "pin" => {
+            // sidebar pin <path> [label]
+            if let Some(path) = parts.get(1) {
+                let resolved = resolve_path(path);
+                let label = if parts.len() > 2 {
+                    parts[2..].join(" ")
+                } else {
+                    String::from(resolved.rsplit('/').next().unwrap_or(&resolved))
+                };
+                match crate::fs::sidebar::pin_to_quick_access(&resolved, &label) {
+                    Ok(()) => shell_println!("Pinned: {} ({})", label, resolved),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: sidebar pin <path> [label]");
+            }
+        }
+        "unpin" => {
+            if let Some(path) = parts.get(1) {
+                let resolved = resolve_path(path);
+                match crate::fs::sidebar::unpin_from_quick_access(&resolved) {
+                    Ok(()) => shell_println!("Unpinned: {}", resolved),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: sidebar unpin <path>");
+            }
+        }
+        "stats" => {
+            let (builds, sections, hidden) = crate::fs::sidebar::stats();
+            shell_println!("Builds:   {}", builds);
+            shell_println!("Sections: {}", sections);
+            shell_println!("Hidden:   {}", hidden);
+        }
+        "reset" => {
+            crate::fs::sidebar::reset_stats();
+            shell_println!("Sidebar stats reset");
+        }
+        _ => {
+            shell_println!("Usage: sidebar <subcommand>");
+            shell_println!("  show                 Show sidebar tree");
+            shell_println!("  toggle <section>     Toggle expand/collapse");
+            shell_println!("  hide <section>       Hide a section");
+            shell_println!("  unhide <section>     Show a section");
+            shell_println!("  pin <path> [label]   Pin to Quick Access");
+            shell_println!("  unpin <path>         Unpin from Quick Access");
+            shell_println!("  stats                Show statistics");
+            shell_println!("  reset                Reset statistics");
+            shell_println!("Sections: quickaccess, thispc, network, recent, tags");
+        }
+    }
+}
+
+fn parse_section_kind(name: &str) -> Option<crate::fs::sidebar::SectionKind> {
+    match name {
+        "quickaccess" | "qa" => Some(crate::fs::sidebar::SectionKind::QuickAccess),
+        "thispc" | "pc" => Some(crate::fs::sidebar::SectionKind::ThisPC),
+        "network" | "net" => Some(crate::fs::sidebar::SectionKind::Network),
+        "recent" => Some(crate::fs::sidebar::SectionKind::Recent),
+        "tags" => Some(crate::fs::sidebar::SectionKind::Tags),
+        _ => None,
+    }
+}
+
 /// `preview` — file preview/thumbnail generation.
 fn cmd_preview(args: &str) {
     use crate::fs::preview;
@@ -19137,6 +19271,84 @@ fn cmd_gpu(args: &str) {
             crate::console_println!("  fill    - Fill display with color (red/green/blue/0xAARRGGBB)");
             crate::console_println!("  flush   - Force display refresh");
             crate::console_println!("  test    - Draw color bar test pattern");
+        }
+    }
+}
+
+fn cmd_usb(args: &str) {
+    let sub = args.split_whitespace().next().unwrap_or("status");
+    match sub {
+        "status" | "info" => {
+            if !crate::xhci::is_available() {
+                crate::console_println!("USB (xHCI): not available");
+                crate::console_println!("  Add `-device qemu-xhci` to QEMU to enable");
+                return;
+            }
+            crate::console_println!("USB (xHCI): active");
+            let ports = crate::xhci::port_status();
+            let connected = ports.iter().filter(|p| p.connected).count();
+            crate::console_println!("  Ports: {} total, {} connected", ports.len(), connected);
+            let devs = crate::xhci::devices();
+            crate::console_println!("  Devices: {} enumerated", devs.len());
+        }
+        "ports" => {
+            let ports = crate::xhci::port_status();
+            if ports.is_empty() {
+                crate::console_println!("No USB ports detected");
+                return;
+            }
+            crate::console_println!("USB Ports:");
+            for p in &ports {
+                let status = if p.connected {
+                    if p.enabled { "connected, enabled" } else { "connected, disabled" }
+                } else {
+                    "empty"
+                };
+                let spd = match p.speed {
+                    1 => "Full (12M)",
+                    2 => "Low (1.5M)",
+                    3 => "High (480M)",
+                    4 => "Super (5G)",
+                    _ => "-",
+                };
+                crate::console_println!("  Port {:2}: {} [{}]", p.number, status, spd);
+            }
+        }
+        "devices" | "devs" => {
+            let devs = crate::xhci::devices();
+            if devs.is_empty() {
+                crate::console_println!("No USB devices enumerated");
+                return;
+            }
+            crate::console_println!("USB Devices:");
+            for d in &devs {
+                let spd = match d.speed {
+                    1 => "FS",
+                    2 => "LS",
+                    3 => "HS",
+                    4 => "SS",
+                    _ => "??",
+                };
+                crate::console_println!(
+                    "  Slot {:2}: {:04X}:{:04X} class={:02X}/{:02X} port={} [{}]",
+                    d.slot_id, d.vendor_id, d.product_id,
+                    d.device_class, d.device_subclass,
+                    d.port, spd
+                );
+            }
+        }
+        "rescan" => {
+            crate::console_println!("Rescanning USB ports...");
+            crate::xhci::rescan();
+            let devs = crate::xhci::devices();
+            crate::console_println!("Found {} device(s)", devs.len());
+        }
+        _ => {
+            crate::console_println!("Usage: usb [status|ports|devices|rescan]");
+            crate::console_println!("  status  - Show USB controller status");
+            crate::console_println!("  ports   - List USB ports and connection status");
+            crate::console_println!("  devices - List enumerated USB devices");
+            crate::console_println!("  rescan  - Re-enumerate devices");
         }
     }
 }
@@ -22339,7 +22551,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "openw" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "openw" | "sidebar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

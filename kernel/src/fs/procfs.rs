@@ -154,6 +154,7 @@ const ROOT_FILES: &[&str] = &[
     "fileselect",
     "openwith",
     "preview",
+    "sidebar",
     "templates",
     "columnview",
     "pathbar",
@@ -2877,6 +2878,29 @@ fn gen_fileselect() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sidebar() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (builds, sections, hidden) = super::sidebar::stats();
+
+    out.push_str("Sidebar\n");
+    out.push_str("=======\n\n");
+    out.push_str(&format!("Builds:   {}\n", builds));
+    out.push_str(&format!("Sections: {}\n", sections));
+    out.push_str(&format!("Hidden:   {}\n", hidden));
+
+    let sidebar = super::sidebar::build();
+    for section in &sidebar.sections {
+        out.push_str(&format!("\n[{}] {} ({} items)\n",
+                              if section.expanded { "v" } else { ">" },
+                              section.label,
+                              section.items.len()));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_openwith() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3002,6 +3026,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fileselect" => Ok(gen_fileselect()),
         "openwith" => Ok(gen_openwith()),
         "preview" => Ok(gen_preview()),
+        "sidebar" => Ok(gen_sidebar()),
         "templates" => Ok(gen_templates()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),

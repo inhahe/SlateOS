@@ -3088,7 +3088,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fstrim", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp",
+    "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
@@ -4367,6 +4367,7 @@ fn dispatch(line: &str) {
         "directio" => cmd_directio(args),
         "fstrim" => cmd_fstrim(args),
         "sparse" => cmd_sparse(args),
+        "lsplus" => cmd_lsplus(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14085,6 +14086,98 @@ fn cmd_sparse(args: &str) {
     }
 }
 
+fn cmd_lsplus(args: &str) {
+    use crate::fs::readdir_plus::{self, ListOptions, SortOrder, TypeFilter};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    let mut dir_path = String::new();
+    let mut sort = SortOrder::Name;
+    let mut type_filter = TypeFilter::All;
+    let mut pattern = String::new();
+    let mut show_hidden = true;
+    let mut show_stats = false;
+
+    let mut i = 0;
+    while i < parts.len() {
+        match parts[i] {
+            "-s" | "--sort" => {
+                if let Some(&val) = parts.get(i + 1) {
+                    sort = SortOrder::from_name(val).unwrap_or(SortOrder::Name);
+                    i += 1;
+                }
+            }
+            "-t" | "--type" => {
+                if let Some(&val) = parts.get(i + 1) {
+                    type_filter = match val {
+                        "file" | "f" => TypeFilter::FilesOnly,
+                        "dir" | "d" => TypeFilter::DirsOnly,
+                        "link" | "l" => TypeFilter::SymlinksOnly,
+                        _ => TypeFilter::All,
+                    };
+                    i += 1;
+                }
+            }
+            "-p" | "--pattern" => {
+                if let Some(&val) = parts.get(i + 1) {
+                    pattern = String::from(val);
+                    i += 1;
+                }
+            }
+            "-A" => show_hidden = false,
+            "--stats" => show_stats = true,
+            other => {
+                if dir_path.is_empty() {
+                    dir_path = resolve_path(other);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if show_stats {
+        let (calls, entries, fetched, errors) = readdir_plus::stats();
+        shell_println!("readdir+ stats: {} calls, {} entries, {} metadata fetched, {} errors",
+            calls, entries, fetched, errors);
+        return;
+    }
+
+    if dir_path.is_empty() {
+        dir_path = cwd();
+    }
+
+    let opts = ListOptions {
+        sort,
+        type_filter,
+        pattern,
+        show_hidden,
+        limit: 0,
+        offset: 0,
+    };
+
+    match readdir_plus::readdir_plus(&dir_path, &opts) {
+        Ok(result) => {
+            shell_println!("{} entries ({} total bytes):", result.total_count, result.total_size);
+            shell_println!();
+            shell_println!("  {:4} {:>10} {:40}", "TYPE", "SIZE", "NAME");
+            shell_println!("  {}", "-".repeat(58));
+            for entry in &result.entries {
+                let type_str = match entry.entry_type {
+                    crate::fs::EntryType::File => "FILE",
+                    crate::fs::EntryType::Directory => "DIR ",
+                    crate::fs::EntryType::Symlink => "LINK",
+                    crate::fs::EntryType::VolumeLabel => "VOL ",
+                };
+                let size = entry.meta.as_ref().map_or(0, |m| m.size);
+                shell_println!("  {:4} {:>10} {}", type_str, size, entry.name);
+            }
+            if result.has_more {
+                shell_println!("  ... ({} more)", result.total_count - result.entries.len());
+            }
+        }
+        Err(e) => shell_println!("Error: {:?}", e),
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -19461,7 +19554,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

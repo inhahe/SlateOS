@@ -797,6 +797,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] assert: __assert_fail for C assert() macro
   - [x] environ: getenv/setenv/unsetenv (static 128-entry store), environ pointer
   - [x] C runtime: atexit (32 handlers LIFO), exit, __libc_start_main (glibc convention)
+  - [x] locale: setlocale (C locale only), localeconv (static lconv)
+  - [x] pthread stubs: pthread_create/join/detach (ENOSYS), working mutex ops, pthread_once, TSD (64 keys)
   - [ ] dup/dup2 for pipe handles (needs SYS_PIPE_DUP or fd-level refcounting)
   - [ ] ioctl
   - [ ] select/poll/epoll equivalents

@@ -183,6 +183,7 @@ const ROOT_FILES: &[&str] = &[
     "a11y",
     "ime",
     "netindicator",
+    "winsnap",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3576,6 +3577,37 @@ fn gen_netindicator() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_winsnap() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (snapped, layout_count, snap_ops) = super::winsnap::stats();
+    let cfg = super::winsnap::config();
+
+    out.push_str("Window Snapping\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Enabled:       {}\n", cfg.enabled));
+    out.push_str(&format!("Edge distance: {}px\n", cfg.edge_distance));
+    out.push_str(&format!("Preview:       {}\n", cfg.show_preview));
+    out.push_str(&format!("Animation:     {}ms\n", cfg.animation_ms));
+    out.push_str(&format!("Corner snap:   {}\n", cfg.corner_snap));
+    out.push_str(&format!("Thirds:        {}\n", cfg.thirds));
+    out.push_str(&format!("Snapped wins:  {}\n", snapped));
+    out.push_str(&format!("Snap ops:      {}\n", snap_ops));
+    out.push_str(&format!("Layouts:       {}\n\n", layout_count));
+
+    let layouts = super::winsnap::list_layouts();
+    for l in &layouts {
+        out.push_str(&format!("{}: {} ({} zones)\n", l.name, l.description, l.zones.len()));
+        for z in &l.zones {
+            out.push_str(&format!("  {} ({},{} {}x{})\n",
+                z.name, z.x_pct, z.y_pct, z.w_pct, z.h_pct));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3924,6 +3956,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "a11y" => Ok(gen_a11y()),
         "ime" => Ok(gen_ime()),
         "netindicator" => Ok(gen_netindicator()),
+        "winsnap" => Ok(gen_winsnap()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

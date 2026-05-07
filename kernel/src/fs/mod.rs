@@ -143,6 +143,7 @@ pub mod vfs;
 pub mod viewstate;
 pub mod wallpaper;
 pub mod widgets;
+pub mod winsnap;
 #[allow(dead_code)]
 pub mod sevenz;
 #[allow(dead_code)]

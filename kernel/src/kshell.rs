@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4787,6 +4787,7 @@ fn dispatch(line: &str) {
         "a11y" | "accessibility" => cmd_a11y(args),
         "ime" => cmd_ime(args),
         "netindicator" | "netind" => cmd_netindicator(args),
+        "winsnap" | "wsnap" => cmd_winsnap(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -19975,6 +19976,37 @@ fn cmd_netindicator(args: &str) {
     }
 }
 
+/// `winsnap` / `wsnap` — window snapping and tiling.
+fn cmd_winsnap(args: &str) {
+    use crate::fs::winsnap;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "snap" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); let pos_s = parts.get(2).copied().unwrap_or(""); if let Some(pos) = winsnap::SnapPosition::from_str(pos_s) { let (x, y, w, h) = winsnap::snap(wid, pos, 0, 0, 800, 600); shell_println!("Window {} → {} at ({},{} {}x{})", wid, pos.label(), x, y, w, h); } else { shell_println!("Usage: wsnap snap <wid> <left|right|top|bottom|tl|tr|bl|br|max|l3|c3|r3|restore>"); } }
+        "unsnap" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); if let Some((x, y, w, h)) = winsnap::unsnap(wid) { shell_println!("Restored {} to ({},{} {}x{})", wid, x, y, w, h); } else { shell_println!("Window {} not snapped", wid); } }
+        "state" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); match winsnap::window_snap_state(wid) { Some(p) => shell_println!("Window {}: {}", wid, p.label()), None => shell_println!("Window {} not snapped", wid), } }
+        "detect" => { let cx = parts.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0); let cy = parts.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0); match winsnap::detect_zone(cx, cy) { Some(p) => shell_println!("Zone at ({},{}): {}", cx, cy, p.label()), None => shell_println!("No snap zone at ({},{})", cx, cy), } }
+        "remove" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); winsnap::remove_window(wid); shell_println!("Removed tracking for window {}", wid); }
+        "layouts" | "ls" => { let layouts = winsnap::list_layouts(); if layouts.is_empty() { shell_println!("No layouts"); } else { for l in &layouts { shell_println!("{}: {} ({} zones)", l.name, l.description, l.zones.len()); for z in &l.zones { shell_println!("  {} ({},{} {}x{})", z.name, z.x_pct, z.y_pct, z.w_pct, z.h_pct); } } } }
+        "addlayout" => { let name = parts.get(1).copied().unwrap_or(""); let desc = parts[2..].join(" "); if name.is_empty() { shell_println!("Usage: wsnap addlayout <name> <desc>"); } else { match winsnap::add_layout(name, &desc) { Ok(()) => shell_println!("Layout '{}' created", name), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "rmlayout" => { let name = parts.get(1).copied().unwrap_or(""); match winsnap::remove_layout(name) { Ok(()) => shell_println!("Removed layout '{}'", name), Err(e) => shell_println!("Error: {:?}", e), } }
+        "addzone" => { let lay = parts.get(1).copied().unwrap_or(""); let zname = parts.get(2).copied().unwrap_or(""); let xp = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let yp = parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let wp = parts.get(5).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let hp = parts.get(6).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); if lay.is_empty() || zname.is_empty() { shell_println!("Usage: wsnap addzone <layout> <name> <x> <y> <w> <h> (0-1000)"); } else { match winsnap::add_zone(lay, zname, xp, yp, wp, hp) { Ok(()) => shell_println!("Zone '{}' added to '{}'", zname, lay), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "enabled" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { winsnap::set_enabled(true); shell_println!("Snapping enabled"); } "off"|"false" => { winsnap::set_enabled(false); shell_println!("Snapping disabled"); } _ => { shell_println!("Snapping: {}", winsnap::config().enabled); } } }
+        "edge" => { if let Some(px) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) { winsnap::set_edge_distance(px); shell_println!("Edge distance: {}px", px); } else { shell_println!("Edge distance: {}px", winsnap::config().edge_distance); } }
+        "preview" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { winsnap::set_show_preview(true); shell_println!("Preview: on"); } "off"|"false" => { winsnap::set_show_preview(false); shell_println!("Preview: off"); } _ => { shell_println!("Preview: {}", winsnap::config().show_preview); } } }
+        "animation" => { if let Some(ms) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) { winsnap::set_animation_ms(ms); shell_println!("Animation: {}ms", ms); } else { shell_println!("Animation: {}ms", winsnap::config().animation_ms); } }
+        "corner" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { winsnap::set_corner_snap(true); shell_println!("Corner snap: on"); } "off"|"false" => { winsnap::set_corner_snap(false); shell_println!("Corner snap: off"); } _ => { shell_println!("Corner snap: {}", winsnap::config().corner_snap); } } }
+        "thirds" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { winsnap::set_thirds(true); shell_println!("Thirds: on"); } "off"|"false" => { winsnap::set_thirds(false); shell_println!("Thirds: off"); } _ => { shell_println!("Thirds: {}", winsnap::config().thirds); } } }
+        "screen" => { let w = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let h = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); if w > 0 && h > 0 { winsnap::set_screen(w, h); shell_println!("Screen: {}x{}", w, h); } else { shell_println!("Usage: wsnap screen <width> <height>"); } }
+        "config" => { let cfg = winsnap::config(); shell_println!("Enabled: {}  Edge: {}px  Preview: {}  Anim: {}ms  Corner: {}  Thirds: {}", cfg.enabled, cfg.edge_distance, cfg.show_preview, cfg.animation_ms, cfg.corner_snap, cfg.thirds); }
+        "init" => { winsnap::init_defaults(); shell_println!("Default layouts initialized"); }
+        "test" => { match winsnap::self_test() { Ok(()) => shell_println!("All winsnap tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (sc, lc, ops) = winsnap::stats(); shell_println!("Snapped:{} Layouts:{} Ops:{}", sc, lc, ops); }
+        "reset" => { winsnap::clear_all(); winsnap::reset_stats(); shell_println!("Window snap reset"); }
+        _ => { shell_println!("winsnap: snap/unsnap/state/detect/remove/layouts/addlayout/rmlayout/addzone/enabled/edge/preview/animation/corner/thirds/screen/config/init/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27504,7 +27536,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

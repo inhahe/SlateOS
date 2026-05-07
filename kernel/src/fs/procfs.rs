@@ -172,6 +172,7 @@ const ROOT_FILES: &[&str] = &[
     "theme",
     "hotkeys",
     "widgets",
+    "soundmixer",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3218,6 +3219,41 @@ fn gen_widgets() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_soundmixer() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (streams, apps, devices, vol_changes, total_streams) = super::soundmixer::stats();
+    let master = super::soundmixer::master_volume();
+    let muted = super::soundmixer::master_muted();
+
+    out.push_str("Sound Mixer\n");
+    out.push_str("===========\n\n");
+    out.push_str(&format!("Master:   {}%{}\n", master, if muted { " (MUTED)" } else { "" }));
+    out.push_str(&format!("Ducking:  {}\n", super::soundmixer::ducking_policy().label()));
+    out.push_str(&format!("Devices:  {}/{}\n", devices, 32));
+    out.push_str(&format!("Apps:     {}/{}\n", apps, 128));
+    out.push_str(&format!("Streams:  {}/{}\n", streams, 256));
+    out.push_str(&format!("Vol chg:  {}\n", vol_changes));
+    out.push_str(&format!("Created:  {}\n\n", total_streams));
+
+    let app_list = super::soundmixer::app_entries();
+    if !app_list.is_empty() {
+        out.push_str(&format!("{:20} {:20} {:6} {:6} {:8} {}\n",
+            "APP_ID", "NAME", "VOL", "MUTED", "STREAMS", "PLAYING"));
+        for a in &app_list {
+            out.push_str(&format!("{:20} {:20} {:6} {:6} {:8} {}\n",
+                a.app_id, a.app_name,
+                format!("{}%", a.volume),
+                if a.muted { "yes" } else { "no" },
+                a.stream_count,
+                if a.playing { "YES" } else { "-" }));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3555,6 +3591,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "theme" => Ok(gen_theme()),
         "hotkeys" => Ok(gen_hotkeys()),
         "widgets" => Ok(gen_widgets()),
+        "soundmixer" => Ok(gen_soundmixer()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

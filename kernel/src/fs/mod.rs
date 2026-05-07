@@ -107,6 +107,7 @@ pub mod search;
 pub mod sealing;
 pub mod sidebar;
 pub mod snapshot;
+pub mod soundmixer;
 pub mod sparse;
 pub mod splice;
 pub mod startmenu;

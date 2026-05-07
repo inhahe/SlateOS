@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4414,6 +4414,7 @@ fn dispatch(line: &str) {
         "theme" => cmd_theme(args),
         "hotkey" => cmd_hotkey(args),
         "widgets" | "widget" => cmd_widgets(args),
+        "soundmixer" | "smixer" => cmd_soundmixer(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -18275,6 +18276,291 @@ fn cmd_widgets(args: &str) {
     }
 }
 
+/// `soundmixer` / `smixer` — per-app volume control.
+fn cmd_soundmixer(args: &str) {
+    use crate::fs::soundmixer;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "vol" | "volume" => {
+            // soundmixer vol [value]
+            if let Some(v) = parts.get(1).and_then(|s| s.parse::<u8>().ok()) {
+                soundmixer::set_master_volume(v);
+                shell_println!("Master volume: {}%", v.min(100));
+            } else {
+                shell_println!("Master volume: {}%{}", soundmixer::master_volume(),
+                    if soundmixer::master_muted() { " (MUTED)" } else { "" });
+            }
+        }
+        "mute" => {
+            let new = soundmixer::toggle_master_mute();
+            shell_println!("Master {}", if new { "muted" } else { "unmuted" });
+        }
+        "adddev" => {
+            // soundmixer adddev <id> <name...>
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() || parts.len() < 3 {
+                shell_println!("Usage: soundmixer adddev <id> <name...>");
+            } else {
+                let name = parts[2..].join(" ");
+                match soundmixer::add_device(id, &name) {
+                    Ok(()) => shell_println!("Device '{}' added", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rmdev" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() {
+                shell_println!("Usage: soundmixer rmdev <id>");
+            } else {
+                match soundmixer::remove_device(id) {
+                    Ok(()) => shell_println!("Device '{}' removed", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "default" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() {
+                shell_println!("Usage: soundmixer default <device_id>");
+            } else {
+                match soundmixer::set_default_device(id) {
+                    Ok(()) => shell_println!("Default device: {}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "devvol" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            let vol = parts.get(2).and_then(|s| s.parse::<u8>().ok());
+            if id.is_empty() || vol.is_none() {
+                shell_println!("Usage: soundmixer devvol <device_id> <0-100>");
+            } else if let Some(v) = vol {
+                match soundmixer::set_device_volume(id, v) {
+                    Ok(()) => shell_println!("Device '{}' volume: {}%", id, v.min(100)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "devices" => {
+            let devs = soundmixer::list_devices();
+            if devs.is_empty() {
+                shell_println!("No audio devices");
+            } else {
+                shell_println!("{:16} {:24} {:6} {:6} {}",
+                    "ID", "NAME", "VOL", "MUTED", "DEFAULT");
+                for d in &devs {
+                    shell_println!("{:16} {:24} {:6} {:6} {}",
+                        d.id, d.name,
+                        alloc::format!("{}%", d.volume),
+                        if d.muted { "yes" } else { "no" },
+                        if d.is_default { "*" } else { "" });
+                }
+            }
+        }
+        "appvol" => {
+            // soundmixer appvol <app_id> <vol>
+            let app = parts.get(1).copied().unwrap_or("");
+            let vol = parts.get(2).and_then(|s| s.parse::<u8>().ok());
+            if app.is_empty() || vol.is_none() {
+                shell_println!("Usage: soundmixer appvol <app_id> <0-100>");
+            } else if let Some(v) = vol {
+                match soundmixer::set_app_volume(app, v) {
+                    Ok(()) => shell_println!("App '{}' volume: {}%", app, v.min(100)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "appmute" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let val = parts.get(2).copied().unwrap_or("true");
+            if app.is_empty() {
+                shell_println!("Usage: soundmixer appmute <app_id> [true|false]");
+            } else {
+                let muted = val != "false" && val != "0";
+                match soundmixer::set_app_muted(app, muted) {
+                    Ok(()) => shell_println!("App '{}' {}", app, if muted { "muted" } else { "unmuted" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "approute" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let dev = parts.get(2).copied();
+            if app.is_empty() {
+                shell_println!("Usage: soundmixer approute <app_id> [device_id]");
+            } else {
+                match soundmixer::set_app_output(app, dev) {
+                    Ok(()) => {
+                        let target = dev.unwrap_or("default");
+                        shell_println!("App '{}' routed to '{}'", app, target);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "apps" => {
+            let entries = soundmixer::app_entries();
+            if entries.is_empty() {
+                shell_println!("No audio apps");
+            } else {
+                shell_println!("{:20} {:20} {:6} {:6} {:8} {:7} {}",
+                    "APP_ID", "NAME", "VOL", "MUTED", "STREAMS", "PLAYING", "EFF.VOL");
+                for a in &entries {
+                    let eff = soundmixer::effective_volume(&a.app_id);
+                    shell_println!("{:20} {:20} {:6} {:6} {:8} {:7} {}%",
+                        a.app_id, a.app_name,
+                        alloc::format!("{}%", a.volume),
+                        if a.muted { "yes" } else { "no" },
+                        a.stream_count,
+                        if a.playing { "YES" } else { "-" },
+                        eff);
+                }
+            }
+        }
+        "stream" => {
+            // soundmixer stream <app_id> <name> <label> [category]
+            let app_id = parts.get(1).copied().unwrap_or("");
+            let name = parts.get(2).copied().unwrap_or("");
+            let label = parts.get(3).copied().unwrap_or("");
+            let cat = parts.get(4).copied()
+                .and_then(soundmixer::StreamCategory::from_str)
+                .unwrap_or(soundmixer::StreamCategory::Application);
+            if app_id.is_empty() || name.is_empty() {
+                shell_println!("Usage: soundmixer stream <app_id> <name> <label> [category]");
+                shell_println!("Categories: system comm media game app");
+            } else {
+                match soundmixer::register_stream(app_id, name, label, cat) {
+                    Ok(id) => shell_println!("Stream registered: id={} app={}", id, app_id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unstream" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match soundmixer::unregister_stream(id) {
+                    Ok(()) => shell_println!("Stream {} unregistered", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: soundmixer unstream <stream_id>");
+            }
+        }
+        "play" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match soundmixer::report_activity(id) {
+                    Ok(()) => shell_println!("Stream {} now playing", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: soundmixer play <stream_id>");
+            }
+        }
+        "stop" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match soundmixer::report_inactive(id) {
+                    Ok(()) => shell_println!("Stream {} stopped", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: soundmixer stop <stream_id>");
+            }
+        }
+        "streams" => {
+            let streams = soundmixer::list_streams();
+            if streams.is_empty() {
+                shell_println!("No streams");
+            } else {
+                shell_println!("{:6} {:16} {:16} {:6} {:12} {}",
+                    "ID", "APP", "LABEL", "VOL", "CATEGORY", "ACTIVE");
+                for s in &streams {
+                    shell_println!("{:<6} {:16} {:16} {:6} {:12} {}",
+                        s.id, s.app_id, s.label,
+                        alloc::format!("{}%", s.volume),
+                        s.category.label(),
+                        if s.active { "YES" } else { "-" });
+                }
+            }
+        }
+        "history" => {
+            let hist = soundmixer::sound_history();
+            if hist.is_empty() {
+                shell_println!("No sound history");
+            } else {
+                shell_println!("{:20} {:20} {:30} {}",
+                    "APP_ID", "NAME", "DESCRIPTION", "TIME_NS");
+                for h in hist.iter().take(30) {
+                    shell_println!("{:20} {:20} {:30} {}",
+                        h.app_id, h.app_name, h.description, h.timestamp_ns);
+                }
+            }
+        }
+        "duck" => {
+            // soundmixer duck [policy]
+            if let Some(p) = parts.get(1).and_then(|s| soundmixer::DuckingPolicy::from_str(s)) {
+                soundmixer::set_ducking_policy(p);
+                shell_println!("Ducking policy: {}", p.label());
+            } else {
+                let current = soundmixer::ducking_policy();
+                shell_println!("Ducking: {} (none/comm/bg)", current.label());
+            }
+        }
+        "init" => {
+            soundmixer::init_defaults();
+            shell_println!("Default audio device initialized");
+        }
+        "test" => {
+            shell_println!("Running sound mixer self-tests...");
+            match soundmixer::self_test() {
+                Ok(()) => shell_println!("All sound mixer tests passed"),
+                Err(e) => shell_println!("Test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (streams, apps, devs, vol_ch, total) = soundmixer::stats();
+            let master = soundmixer::master_volume();
+            let muted = soundmixer::master_muted();
+            shell_println!("Master:  {}%{}", master, if muted { " (MUTED)" } else { "" });
+            shell_println!("Devices: {}/32", devs);
+            shell_println!("Apps:    {}/128", apps);
+            shell_println!("Streams: {}/256", streams);
+            shell_println!("Vol chg: {}", vol_ch);
+            shell_println!("Created: {}", total);
+        }
+        "reset" => {
+            soundmixer::clear_all();
+            soundmixer::reset_stats();
+            shell_println!("Sound mixer reset");
+        }
+        _ => {
+            shell_println!("Usage: soundmixer <subcommand>");
+            shell_println!("  vol [0-100]                   Get/set master volume");
+            shell_println!("  mute                          Toggle master mute");
+            shell_println!("  adddev <id> <name...>         Add audio device");
+            shell_println!("  rmdev <id>                    Remove audio device");
+            shell_println!("  default <id>                  Set default device");
+            shell_println!("  devvol <id> <0-100>           Set device volume");
+            shell_println!("  devices                       List audio devices");
+            shell_println!("  appvol <app> <0-100>          Set per-app volume");
+            shell_println!("  appmute <app> [true|false]    Mute/unmute app");
+            shell_println!("  approute <app> [device]       Route app to device");
+            shell_println!("  apps                          List app audio entries");
+            shell_println!("  stream <app> <name> <label> [cat]  Register stream");
+            shell_println!("  unstream <id>                 Unregister stream");
+            shell_println!("  play <id>                     Mark stream active");
+            shell_println!("  stop <id>                     Mark stream inactive");
+            shell_println!("  streams                       List all streams");
+            shell_println!("  history                       Sound event history");
+            shell_println!("  duck [none|comm|bg]           Get/set ducking policy");
+            shell_println!("  init                          Add default device");
+            shell_println!("  test                          Run self-tests");
+            shell_println!("  stats                         Show statistics");
+            shell_println!("  reset                         Clear all");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -25804,7 +26090,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

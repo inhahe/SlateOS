@@ -54,6 +54,7 @@ pub mod credentials;
 pub mod cursorsettings;
 pub mod dedup;
 pub mod deskicons;
+pub mod detailcols;
 pub mod devfs;
 pub mod directio;
 pub mod display;

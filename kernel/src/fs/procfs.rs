@@ -187,6 +187,7 @@ const ROOT_FILES: &[&str] = &[
     "colorpicker",
     "cursorsettings",
     "kbsettings",
+    "detailcols",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3713,6 +3714,27 @@ fn gen_kbsettings() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_detailcols() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (col_count, bind_count, user_count, queries) = super::detailcols::stats();
+
+    out.push_str("Detail Columns\n");
+    out.push_str("==============\n\n");
+    out.push_str(&format!("Columns:    {}\n", col_count));
+    out.push_str(&format!("Bindings:   {}\n", bind_count));
+    out.push_str(&format!("User prefs: {}\n", user_count));
+    out.push_str(&format!("Queries:    {}\n\n", queries));
+
+    let bindings = super::detailcols::list_bindings();
+    for b in &bindings {
+        out.push_str(&format!("{} → {} columns\n", b.mime_pattern, b.column_ids.len()));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4065,6 +4087,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "colorpicker" => Ok(gen_colorpicker()),
         "cursorsettings" => Ok(gen_cursorsettings()),
         "kbsettings" => Ok(gen_kbsettings()),
+        "detailcols" => Ok(gen_detailcols()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

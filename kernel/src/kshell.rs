@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4791,6 +4791,7 @@ fn dispatch(line: &str) {
         "colorpicker" | "cpick" => cmd_colorpicker(args),
         "cursorsettings" | "cursor" => cmd_cursorsettings(args),
         "kbsettings" | "kbs" => cmd_kbsettings(args),
+        "detailcols" | "dcols" => cmd_detailcols(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20109,6 +20110,31 @@ fn cmd_kbsettings(args: &str) {
     }
 }
 
+/// `detailcols` / `dcols` — file explorer detail columns.
+fn cmd_detailcols(args: &str) {
+    use crate::fs::detailcols;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "ls" => { let cat = parts.get(1).and_then(|s| detailcols::ColumnCategory::from_str(s)); let cols = detailcols::list_columns(cat); if cols.is_empty() { shell_println!("No columns"); } else { for c in &cols { shell_println!("  {} [{}] {} ({}{})", c.id, c.category.label(), c.display_name, c.col_type.label(), if c.source_app.is_empty() { String::new() } else { alloc::format!(", app={}", c.source_app) }); } shell_println!("{} columns", cols.len()); } }
+        "get" => { let id = parts.get(1).copied().unwrap_or(""); match detailcols::get_column(id) { Ok(c) => shell_println!("{}: {} [{}] {} w={} sort={}", c.id, c.display_name, c.category.label(), c.col_type.label(), c.default_width, c.sortable), Err(e) => shell_println!("Error: {:?}", e), } }
+        "register" => { let id = parts.get(1).copied().unwrap_or(""); let name = parts.get(2).copied().unwrap_or(""); let ct = parts.get(3).and_then(|s| detailcols::ColumnType::from_str(s)).unwrap_or(detailcols::ColumnType::Text); let cat = parts.get(4).and_then(|s| detailcols::ColumnCategory::from_str(s)).unwrap_or(detailcols::ColumnCategory::AppDefined); if id.is_empty() || name.is_empty() { shell_println!("Usage: dcols register <id> <name> [type] [category]"); } else { match detailcols::register_column(id, name, ct, cat, 15, true, "shell") { Ok(()) => shell_println!("Registered column '{}'", id), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "unregister" => { let id = parts.get(1).copied().unwrap_or(""); match detailcols::unregister_column(id) { Ok(()) => shell_println!("Unregistered '{}'", id), Err(e) => shell_println!("Error: {:?}", e), } }
+        "bind" => { let mime = parts.get(1).copied().unwrap_or(""); let col_ids: Vec<&str> = parts[2..].to_vec(); if mime.is_empty() || col_ids.is_empty() { shell_println!("Usage: dcols bind <mime> <col_id> [col_id...]"); } else { match detailcols::bind_columns(mime, &col_ids) { Ok(()) => shell_println!("Bound {} columns to {}", col_ids.len(), mime), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "unbind" => { let mime = parts.get(1).copied().unwrap_or(""); match detailcols::unbind(mime) { Ok(()) => shell_println!("Unbound {}", mime), Err(e) => shell_println!("Error: {:?}", e), } }
+        "bindings" => { let bindings = detailcols::list_bindings(); if bindings.is_empty() { shell_println!("No bindings"); } else { for b in &bindings { shell_println!("  {} → {}", b.mime_pattern, b.column_ids.join(", ")); } } }
+        "query" => { let types: Vec<&str> = parts[1..].to_vec(); if types.is_empty() { shell_println!("Usage: dcols query <mime> [mime...]"); } else { let cols = detailcols::columns_for_types(&types); shell_println!("Columns for {:?}:", types); for c in &cols { shell_println!("  {} ({})", c.display_name, c.id); } } }
+        "userset" => { let mime = parts.get(1).copied().unwrap_or(""); let col_ids: Vec<&str> = parts[2..].to_vec(); if mime.is_empty() { shell_println!("Usage: dcols userset <mime> <col_id> [col_id...]"); } else { match detailcols::set_user_columns(mime, &col_ids) { Ok(()) => shell_println!("User columns set for {}", mime), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "userclear" => { let mime = parts.get(1).copied().unwrap_or(""); match detailcols::clear_user_columns(mime) { Ok(()) => shell_println!("Cleared user selection for {}", mime), Err(e) => shell_println!("Error: {:?}", e), } }
+        "userlist" => { let sels = detailcols::list_user_selections(); if sels.is_empty() { shell_println!("No user selections"); } else { for s in &sels { shell_println!("  {} → {}", s.mime_pattern, s.visible_columns.join(", ")); } } }
+        "init" => { detailcols::init_defaults(); shell_println!("Default columns initialized"); }
+        "test" => { match detailcols::self_test() { Ok(()) => shell_println!("All detailcols tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (cc, bc, uc, qc) = detailcols::stats(); shell_println!("Columns:{} Bindings:{} UserPrefs:{} Queries:{}", cc, bc, uc, qc); }
+        "reset" => { detailcols::clear_all(); detailcols::reset_stats(); shell_println!("Detail columns reset"); }
+        _ => { shell_println!("detailcols: list/get/register/unregister/bind/unbind/bindings/query/userset/userclear/userlist/init/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27638,7 +27664,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

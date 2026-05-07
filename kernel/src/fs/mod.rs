@@ -79,6 +79,7 @@ pub mod quota;
 pub mod readdir_plus;
 pub mod reclaim;
 pub mod search;
+pub mod sealing;
 pub mod snapshot;
 pub mod sparse;
 pub mod splice;

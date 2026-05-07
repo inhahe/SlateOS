@@ -3094,7 +3094,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
     "prefetch", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
-    "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
+    "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tee", "test",
@@ -4369,6 +4369,7 @@ fn dispatch(line: &str) {
         "sparse" => cmd_sparse(args),
         "lsplus" => cmd_lsplus(args),
         "fsfreeze" => cmd_fsfreeze(args),
+        "seal" => cmd_seal(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14276,6 +14277,93 @@ fn cmd_fsfreeze(args: &str) {
     }
 }
 
+fn cmd_seal(args: &str) {
+    use crate::fs::sealing::{self, SealFlags};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "add" | "set" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: seal add <path> <seals>");
+                shell_println!("  Seals: shrink, grow, write, seal, exec, all");
+                shell_println!("  Combine with + or ,: shrink+grow+write");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let flags = SealFlags::from_str(parts[2]);
+            if flags.is_empty() {
+                shell_println!("No valid seals specified.");
+                return;
+            }
+            match sealing::add_seals(&path, flags) {
+                Ok(total) => shell_println!("Sealed {}: {}", path, total.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" | "query" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: seal get <path>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let seals = sealing::get_seals(&path);
+            shell_println!("{}: {}", path, seals.label());
+        }
+        "check" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: seal check <path> <write|shrink|grow|addseal|exec>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let op = match parts[2] {
+                "write" | "w" => sealing::SealOp::Write,
+                "shrink" | "s" => sealing::SealOp::Shrink,
+                "grow" | "g" => sealing::SealOp::Grow,
+                "addseal" | "seal" => sealing::SealOp::AddSeal,
+                "exec" | "x" => sealing::SealOp::ChangeExec,
+                _ => { shell_println!("Unknown op: {}", parts[2]); return; }
+            };
+            match sealing::check_seals(&path, op) {
+                Ok(()) => shell_println!("ALLOWED: {} on {}", parts[2], path),
+                Err(_) => shell_println!("DENIED: {} on {} (sealed)", parts[2], path),
+            }
+        }
+        "list" | "show" | "" => {
+            let files = sealing::list_sealed();
+            if files.is_empty() {
+                shell_println!("No sealed files.");
+            } else {
+                shell_println!("{:40} {}", "PATH", "SEALS");
+                shell_println!("{}", "-".repeat(60));
+                for (path, flags) in &files {
+                    shell_println!("{:40} {}", path, flags.label());
+                }
+            }
+        }
+        "stats" => {
+            let (seal_ops, check_ops, denied, count) = sealing::stats();
+            shell_println!("Sealing Statistics");
+            shell_println!("  Sealed files: {}/512", count);
+            shell_println!("  Seal ops:     {}", seal_ops);
+            shell_println!("  Check ops:    {}", check_ops);
+            shell_println!("  Denied ops:   {}", denied);
+        }
+        "reset" => {
+            sealing::reset_stats();
+            shell_println!("Sealing statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: seal <command>");
+            shell_println!("  add <path> <seals>         Add seals (shrink+grow+write+seal+exec)");
+            shell_println!("  get <path>                 Query current seals");
+            shell_println!("  check <path> <op>          Check if operation is permitted");
+            shell_println!("  list|show                  List sealed files (default)");
+            shell_println!("  stats                      Show statistics");
+            shell_println!("  reset                      Reset counters");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -19652,7 +19740,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

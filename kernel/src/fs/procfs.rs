@@ -139,6 +139,7 @@ const ROOT_FILES: &[&str] = &[
     "sparse",
     "readdir_plus",
     "freeze",
+    "sealing",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2399,6 +2400,33 @@ fn gen_freeze() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/sealing` — file sealing status.
+fn gen_sealing() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (seal_ops, check_ops, denied, sealed_count) = super::sealing::stats();
+
+    out.push_str("File Sealing\n");
+    out.push_str("============\n\n");
+    out.push_str(&format!("Sealed files:    {}/{}\n", sealed_count, 512));
+    out.push_str(&format!("Seal operations: {}\n", seal_ops));
+    out.push_str(&format!("Seal checks:     {}\n", check_ops));
+    out.push_str(&format!("Denied ops:      {}\n\n", denied));
+
+    let files = super::sealing::list_sealed();
+    if files.is_empty() {
+        out.push_str("No sealed files.\n");
+    } else {
+        out.push_str(&format!("{:40} {}\n", "PATH", "SEALS"));
+        for (path, flags) in &files {
+            out.push_str(&format!("{:40} {}\n", path, flags.label()));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2479,6 +2507,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sparse" => Ok(gen_sparse()),
         "readdir_plus" => Ok(gen_readdir_plus()),
         "freeze" => Ok(gen_freeze()),
+        "sealing" => Ok(gen_sealing()),
         _ => Err(KernelError::NotFound),
     }
 }

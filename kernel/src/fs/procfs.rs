@@ -207,6 +207,7 @@ const ROOT_FILES: &[&str] = &[
     "capsettings",
     "vpn",
     "dyndns",
+    "loginscreen",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4505,6 +4506,28 @@ fn gen_dyndns() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_loginscreen() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (synced, changes, ops) = super::loginscreen::stats();
+    let cfg = super::loginscreen::config();
+
+    out.push_str("Login Screen\n");
+    out.push_str("============\n\n");
+    out.push_str(&format!("Background:    {:?}\n", cfg.background_mode));
+    out.push_str(&format!("Synced:        {}\n", synced));
+    out.push_str(&format!("Fit:           {:?}\n", cfg.fit_mode));
+    out.push_str(&format!("Blur:          {}\n", cfg.blur_amount));
+    out.push_str(&format!("Clock:         {:?}\n", cfg.clock_position));
+    out.push_str(&format!("User list:     {:?}\n", cfg.user_list));
+    out.push_str(&format!("Lock timeout:  {} s\n", cfg.lock_timeout_s));
+    out.push_str(&format!("Changes:       {}\n", changes));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4877,6 +4900,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "capsettings" => Ok(gen_capsettings()),
         "vpn" => Ok(gen_vpn()),
         "dyndns" => Ok(gen_dyndns()),
+        "loginscreen" => Ok(gen_loginscreen()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

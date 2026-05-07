@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4811,6 +4811,7 @@ fn dispatch(line: &str) {
         "capsettings" | "caps" => cmd_capsettings(args),
         "vpn" => cmd_vpn(args),
         "dyndns" | "ddns" => cmd_dyndns(args),
+        "loginscreen" | "logscr" => cmd_loginscreen(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -23045,6 +23046,183 @@ fn cmd_dyndns(args: &str) {
     }
 }
 
+/// `loginscreen` / `logscr` — login screen configuration.
+fn cmd_loginscreen(args: &str) {
+    use crate::fs::loginscreen;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "init" => {
+            loginscreen::init_defaults();
+            shell_println!("Initialised login screen defaults.");
+        }
+        "show" => {
+            let cfg = loginscreen::config();
+            shell_println!("Background:    {:?}", cfg.background_mode);
+            shell_println!("Image:         {}", if cfg.background_path.is_empty() { "-" } else { &cfg.background_path });
+            shell_println!("Color:         #{}", cfg.background_color);
+            shell_println!("Synced:        {}", cfg.synced_with_desktop);
+            shell_println!("Fit:           {:?}", cfg.fit_mode);
+            shell_println!("Blur:          {}", cfg.blur_amount);
+            shell_println!("Clock:         {:?}", cfg.clock_position);
+            shell_println!("Show date:     {}", cfg.show_date);
+            shell_println!("Show weather:  {}", cfg.show_weather);
+            shell_println!("User list:     {:?}", cfg.user_list);
+            shell_println!("Last login:    {}", cfg.show_last_login);
+            shell_println!("Virt keyboard: {}", cfg.virtual_keyboard);
+            shell_println!("A11y button:   {}", cfg.show_a11y);
+            shell_println!("Power button:  {}", cfg.show_power);
+            shell_println!("Lock timeout:  {} s", cfg.lock_timeout_s);
+            shell_println!("Message:       {}", if cfg.message.is_empty() { "-" } else { &cfg.message });
+            shell_println!("Logo:          {}", if cfg.logo_path.is_empty() { "-" } else { &cfg.logo_path });
+        }
+        "bg" => {
+            let mode = match parts.get(1).copied() {
+                Some("image") => loginscreen::BackgroundMode::Image,
+                Some("color") | Some("solid") => loginscreen::BackgroundMode::SolidColor,
+                Some("gradient") => loginscreen::BackgroundMode::Gradient,
+                Some("slideshow") => loginscreen::BackgroundMode::Slideshow,
+                Some("blur") => loginscreen::BackgroundMode::BlurDesktop,
+                _ => { shell_println!("Usage: loginscreen bg <image|color|gradient|slideshow|blur>"); return; }
+            };
+            loginscreen::set_background_mode(mode);
+            shell_println!("Set background mode to {:?}.", mode);
+        }
+        "image" => {
+            match parts.get(1) {
+                Some(path) => {
+                    loginscreen::set_background_image(path);
+                    shell_println!("Set background image to {}.", path);
+                }
+                None => shell_println!("Usage: loginscreen image <path>"),
+            }
+        }
+        "sync" => {
+            loginscreen::sync_with_desktop();
+            shell_println!("Synced login screen with desktop wallpaper.");
+        }
+        "fit" => {
+            let mode = match parts.get(1).copied() {
+                Some("fill") => loginscreen::FitMode::Fill,
+                Some("fit") => loginscreen::FitMode::Fit,
+                Some("stretch") => loginscreen::FitMode::Stretch,
+                Some("center") => loginscreen::FitMode::Center,
+                Some("tile") => loginscreen::FitMode::Tile,
+                _ => { shell_println!("Usage: loginscreen fit <fill|fit|stretch|center|tile>"); return; }
+            };
+            loginscreen::set_fit_mode(mode);
+            shell_println!("Set fit mode to {:?}.", mode);
+        }
+        "blur" => {
+            let amt: u8 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: loginscreen blur <0-100>"); return; }
+            };
+            loginscreen::set_blur(amt);
+            shell_println!("Set blur amount to {}.", amt);
+        }
+        "clock" => {
+            let pos = match parts.get(1).copied() {
+                Some("tl") | Some("topleft") => loginscreen::ClockPosition::TopLeft,
+                Some("tc") | Some("topcenter") => loginscreen::ClockPosition::TopCenter,
+                Some("tr") | Some("topright") => loginscreen::ClockPosition::TopRight,
+                Some("bl") | Some("bottomleft") => loginscreen::ClockPosition::BottomLeft,
+                Some("bc") | Some("bottomcenter") => loginscreen::ClockPosition::BottomCenter,
+                Some("br") | Some("bottomright") => loginscreen::ClockPosition::BottomRight,
+                Some("hidden") | Some("off") => loginscreen::ClockPosition::Hidden,
+                _ => { shell_println!("Usage: loginscreen clock <tl|tc|tr|bl|bc|br|hidden>"); return; }
+            };
+            loginscreen::set_clock_position(pos);
+            shell_println!("Set clock position.");
+        }
+        "userlist" => {
+            let mode = match parts.get(1).copied() {
+                Some("all") => loginscreen::UserListMode::ShowAll,
+                Some("recent") => loginscreen::UserListMode::RecentOnly,
+                Some("text") => loginscreen::UserListMode::TextEntry,
+                Some("hidden") | Some("off") => loginscreen::UserListMode::Hidden,
+                _ => { shell_println!("Usage: loginscreen userlist <all|recent|text|hidden>"); return; }
+            };
+            loginscreen::set_user_list(mode);
+            shell_println!("Set user list mode.");
+        }
+        "timeout" => {
+            let secs: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: loginscreen timeout <seconds>"); return; }
+            };
+            loginscreen::set_lock_timeout(secs);
+            shell_println!("Set lock timeout to {} s.", secs);
+        }
+        "message" | "msg" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: loginscreen message <text...>");
+                return;
+            }
+            let msg = parts[1..].join(" ");
+            loginscreen::set_message(&msg);
+            shell_println!("Set message.");
+        }
+        "logo" => {
+            match parts.get(1) {
+                Some(path) => {
+                    loginscreen::set_logo(path);
+                    shell_println!("Set logo to {}.", path);
+                }
+                None => shell_println!("Usage: loginscreen logo <path>"),
+            }
+        }
+        "keyboard" | "vkb" => {
+            let on = parts.get(1).copied() == Some("on") || parts.get(1).copied() == Some("true");
+            loginscreen::set_virtual_keyboard(on);
+            shell_println!("Virtual keyboard {}.", if on { "enabled" } else { "disabled" });
+        }
+        "stats" => {
+            let (synced, changes, ops) = loginscreen::stats();
+            shell_println!("Synced:      {}", synced);
+            shell_println!("Changes:     {}", changes);
+            shell_println!("Operations:  {}", ops);
+        }
+        "clear" => {
+            loginscreen::clear_all();
+            shell_println!("Reset login screen configuration.");
+        }
+        "test" => {
+            match loginscreen::self_test() {
+                Ok(()) => shell_println!("loginscreen: all tests passed."),
+                Err(e) => shell_println!("loginscreen: test failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("loginscreen — login screen configuration");
+            shell_println!();
+            shell_println!("Subcommands:");
+            shell_println!("  init                          Load defaults");
+            shell_println!("  show                          Show current settings");
+            shell_println!("  bg <mode>                     Set background mode");
+            shell_println!("  image <path>                  Set background image");
+            shell_println!("  sync                          Sync with desktop wallpaper");
+            shell_println!("  fit <mode>                    Set image fit mode");
+            shell_println!("  blur <0-100>                  Set blur amount");
+            shell_println!("  clock <position>              Set clock position");
+            shell_println!("  userlist <mode>               Set user list mode");
+            shell_println!("  timeout <seconds>             Set lock timeout");
+            shell_println!("  message <text...>             Set custom message");
+            shell_println!("  logo <path>                   Set logo image");
+            shell_println!("  keyboard <on|off>             Toggle virtual keyboard");
+            shell_println!("  stats / clear / test");
+            shell_println!();
+            shell_println!("Background: image, color, gradient, slideshow, blur");
+            shell_println!("Fit: fill, fit, stretch, center, tile");
+            shell_println!("Clock: tl, tc, tr, bl, bc, br, hidden");
+            shell_println!("Userlist: all, recent, text, hidden");
+            shell_println!("Alias: logscr");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -30823,7 +31001,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

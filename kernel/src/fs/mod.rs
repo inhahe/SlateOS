@@ -98,6 +98,7 @@ pub mod kbsettings;
 pub mod keylayout;
 pub mod linkcheck;
 pub mod locale;
+pub mod loginscreen;
 #[allow(dead_code)]
 pub mod lz4;
 pub mod memfs;

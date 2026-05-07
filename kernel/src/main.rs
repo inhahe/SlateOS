@@ -142,6 +142,7 @@ mod sysctl;
 mod thermal;
 mod timekeeping;
 mod tlb;
+mod unicode;
 mod virtio;
 mod watchdog;
 #[allow(dead_code)]
@@ -1355,6 +1356,9 @@ extern "C" fn kmain() -> ! {
 
     // Console VT100/ANSI escape sequence self-test.
     console::self_test();
+
+    // Unicode support self-test (UTF-8 decoding, box drawing, block elements).
+    unicode::self_test();
 
     // Step 22e⅞++++f: Memory subsystem integration tests.
     // End-to-end tests exercising alloc→map→access→unmap→free pipeline.

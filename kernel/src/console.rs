@@ -155,6 +155,12 @@ struct ConsoleInner {
     saved_bold: bool,
     /// Whether the CSI sequence has a '?' prefix (DEC private mode).
     ansi_private: bool,
+    /// UTF-8 multi-byte accumulator buffer (max 4 bytes per codepoint).
+    utf8_buf: [u8; 4],
+    /// Expected total byte length of the current UTF-8 sequence (0 = idle).
+    utf8_len: u8,
+    /// Number of bytes accumulated so far in `utf8_buf`.
+    utf8_pos: u8,
     /// ANSI escape sequence parser state.
     ansi_state: AnsiState,
     /// CSI parameter accumulator (up to 8 parameters).
@@ -196,6 +202,9 @@ impl ConsoleInner {
             saved_bg_color: BG_COLOR,
             saved_bold: false,
             ansi_private: false,
+            utf8_buf: [0; 4],
+            utf8_len: 0,
+            utf8_pos: 0,
             ansi_state: AnsiState::Normal,
             ansi_params: [0; 8],
             ansi_param_count: 0,
@@ -212,6 +221,9 @@ impl ConsoleInner {
         self.ansi_cur_param = 0;
         self.ansi_has_digit = false;
         self.ansi_private = false;
+        // Also abort any in-progress UTF-8 sequence.
+        self.utf8_len = 0;
+        self.utf8_pos = 0;
     }
 
     /// Finalize the current CSI parameter and start a new one.
@@ -346,15 +358,44 @@ pub fn clear() {
     con.cursor_row = 0;
 }
 
-/// Render a single character at the current cursor position and advance
-/// the cursor.
+/// Render a single byte at the current cursor position.
 ///
-/// Handles `\n` (newline), `\r` (carriage return), `\t` (tab), and
-/// ANSI/VT100 escape sequences (colors, cursor movement, screen clearing).
+/// Multi-byte UTF-8 sequences are accumulated internally.  When a
+/// complete codepoint is decoded, the corresponding glyph is rendered.
+/// Control characters (`\n`, `\r`, `\t`, `ESC`, `BS`) are always
+/// single-byte and processed immediately.  ANSI/VT100 escape sequences
+/// are handled via the existing CSI state machine.
 pub fn putchar(c: u8) {
     let mut con = CONSOLE.lock();
     if !con.initialized {
         return;
+    }
+
+    // If we are accumulating a multi-byte UTF-8 sequence (and not inside
+    // an escape sequence), check if `c` is a valid continuation byte.
+    if con.utf8_len > 0 && con.ansi_state == AnsiState::Normal {
+        if c & 0xC0 == 0x80 {
+            // Valid continuation byte — accumulate.
+            let pos = con.utf8_pos as usize;
+            if pos < 4 {
+                con.utf8_buf[pos] = c;
+            }
+            con.utf8_pos = con.utf8_pos.saturating_add(1);
+            if con.utf8_pos >= con.utf8_len {
+                // Sequence complete — decode and render.
+                let cp = crate::unicode::decode_utf8(con.utf8_buf, con.utf8_len);
+                con.utf8_len = 0;
+                con.utf8_pos = 0;
+                render_codepoint(&mut con, cp);
+            }
+            return;
+        }
+        // Not a continuation byte — abort the incomplete sequence,
+        // render a replacement character, then fall through to process
+        // `c` normally.
+        con.utf8_len = 0;
+        con.utf8_pos = 0;
+        render_codepoint(&mut con, 0xFFFD);
     }
 
     match con.ansi_state {
@@ -407,33 +448,66 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
             }
         }
         _ => {
-            // Render the glyph at the current cursor position with
-            // attribute-aware colors (reverse, dim, invisible, underline,
-            // strikethrough).
-            let col = con.cursor_col;
-            let row = con.cursor_row;
-            let fb = con.fb_addr;
-            let pitch = con.fb_pitch;
-            let fg = effective_fg(con);
-            let bg = effective_bg(con);
-
-            draw_glyph_full(fb, pitch, col, row, c, fg, bg,
-                            con.underline, con.strikethrough);
-
-            // Advance cursor.
-            con.cursor_col = col.saturating_add(1);
-            if con.cursor_col >= con.cols {
-                con.cursor_col = 0;
-                if con.cursor_row >= con.scroll_bottom {
-                    // At scroll region bottom — scroll region up.
-                    scroll_up_locked(con);
-                } else if con.cursor_row >= con.rows.saturating_sub(1) {
-                    // At absolute bottom — scroll full screen.
-                    scroll_up_locked(con);
+            if c < 0x80 {
+                // ASCII printable — render directly as codepoint.
+                render_codepoint(con, u32::from(c));
+            } else {
+                // Potential UTF-8 lead byte.
+                let seq_len = crate::unicode::utf8_seq_len(c);
+                if seq_len >= 2 {
+                    // Start multi-byte UTF-8 accumulation.
+                    con.utf8_buf[0] = c;
+                    con.utf8_len = seq_len;
+                    con.utf8_pos = 1;
                 } else {
-                    con.cursor_row = con.cursor_row.saturating_add(1);
+                    // Invalid lead byte (stray continuation or overlong).
+                    render_codepoint(con, 0xFFFD);
                 }
             }
+        }
+    }
+}
+
+/// Render a Unicode codepoint at the current cursor position and advance
+/// the cursor.
+///
+/// Handles both narrow (1-cell) and wide (2-cell) characters.  Wide
+/// characters are rendered by drawing the glyph across two cell widths
+/// (the second cell is blanked to prevent stale pixels).
+fn render_codepoint(con: &mut ConsoleInner, cp: u32) {
+    let (glyph, is_wide) = crate::unicode::glyph_for_codepoint(cp);
+    let col = con.cursor_col;
+    let row = con.cursor_row;
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let fg = effective_fg(con);
+    let bg = effective_bg(con);
+
+    // Draw the glyph at the current position.
+    draw_glyph_bitmap(fb, pitch, col, row, &glyph, fg, bg,
+                      con.underline, con.strikethrough);
+
+    if is_wide && col.saturating_add(1) < con.cols {
+        // Wide character occupies 2 cells.  Clear the second cell so no
+        // stale character fragments remain.  A more sophisticated approach
+        // would stretch the glyph, but clearing is correct for now.
+        draw_glyph_bitmap(fb, pitch, col.saturating_add(1), row,
+                          &[0u8; 16], fg, bg, false, false);
+    }
+
+    // Advance cursor by 1 or 2 cells.
+    let advance = if is_wide { 2u32 } else { 1u32 };
+    con.cursor_col = col.saturating_add(advance);
+
+    // Handle line wrap.
+    if con.cursor_col >= con.cols {
+        con.cursor_col = 0;
+        if con.cursor_row >= con.scroll_bottom {
+            scroll_up_locked(con);
+        } else if con.cursor_row >= con.rows.saturating_sub(1) {
+            scroll_up_locked(con);
+        } else {
+            con.cursor_row = con.cursor_row.saturating_add(1);
         }
     }
 }
@@ -1634,6 +1708,40 @@ fn draw_glyph_full(
             // bit at position (7 - gx) is set.
             let shift = 7u32.wrapping_sub(gx);
             // shift is always 0..7, safe for u8.
+            #[allow(clippy::cast_possible_truncation)]
+            let bit = (glyph_row >> (shift as u8)) & 1;
+            let color = if bit != 0 || is_underline_row || is_strike_row {
+                fg
+            } else {
+                bg
+            };
+            put_pixel(fb, pitch, x, y, color);
+        }
+    }
+}
+
+/// Draw a glyph from a pre-computed 8×16 bitmap array.
+///
+/// Like [`draw_glyph_full`] but takes a `&[u8; 16]` bitmap directly
+/// instead of looking up a character code in the font table.  Used for
+/// Unicode codepoints outside the ASCII range.
+fn draw_glyph_bitmap(
+    fb: u64, pitch: u32, col: u32, row: u32, bitmap: &[u8; 16],
+    fg: u32, bg: u32, underline: bool, strikethrough: bool,
+) {
+    let px_x = col.wrapping_mul(GLYPH_WIDTH);
+    let px_y = row.wrapping_mul(GLYPH_HEIGHT);
+
+    for (gy, &glyph_row) in bitmap.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        let y = px_y.wrapping_add(gy as u32);
+
+        let is_underline_row = underline && gy == 14;
+        let is_strike_row = strikethrough && gy == 8;
+
+        for gx in 0..GLYPH_WIDTH {
+            let x = px_x.wrapping_add(gx);
+            let shift = 7u32.wrapping_sub(gx);
             #[allow(clippy::cast_possible_truncation)]
             let bit = (glyph_row >> (shift as u8)) & 1;
             let color = if bit != 0 || is_underline_row || is_strike_row {

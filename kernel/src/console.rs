@@ -1,10 +1,31 @@
-//! Framebuffer text console for kernel output.
+//! VT100/xterm-compatible framebuffer text console.
 //!
 //! Renders text to a linear framebuffer provided by the Limine bootloader
 //! using an 8x16 bitmap font.  The console maintains cursor position,
 //! handles newlines/tabs/carriage returns, scrolls when the cursor
 //! reaches the bottom, and mirrors all output to the serial port for
 //! debugging.
+//!
+//! ## ANSI/VT100 escape sequence support
+//!
+//! The console implements a comprehensive subset of VT100/xterm escape
+//! sequences, sufficient for curses-based programs (nano, less, vi):
+//!
+//! - **Cursor movement**: CUU(A), CUD(B), CUF(C), CUB(D), CUP(H/f),
+//!   CNL(E), CPL(F), CHA(G), VPA(d)
+//! - **Cursor save/restore**: ESC 7/8 (DECSC/DECRC with attributes),
+//!   ESC[s/u (SCP/RCP position only)
+//! - **Erase**: ED(J) 0/1/2/3, EL(K) 0/1/2, ECH(X)
+//! - **Insert/delete**: ICH(@), DCH(P), IL(L), DL(M)
+//! - **Scroll**: SU(S), SD(T), DECSTBM(r) scroll regions,
+//!   ESC D (IND), ESC M (RI), ESC E (NEL)
+//! - **SGR attributes**: bold(1), dim(2), underline(4), reverse(7),
+//!   invisible(8), strikethrough(9), and their off codes
+//! - **Colors**: 16 standard ANSI, 256-color (38;5;n), truecolor (38;2;r;g;b)
+//! - **DEC private modes**: ?25 cursor visibility, ?1049 alt screen,
+//!   ?7 auto-wrap
+//! - **Device status**: DSR(6n) cursor position report
+//! - **Reset**: ESC c (RIS)
 //!
 //! ## Pixel format
 //!
@@ -80,6 +101,9 @@ enum AnsiState {
 }
 
 /// Internal console state, protected by a mutex.
+// The console needs many boolean flags for VT100 attribute tracking
+// (bold, dim, underline, reverse, invisible, strikethrough, etc.).
+#[allow(clippy::struct_excessive_bools)]
 struct ConsoleInner {
     /// Virtual address of the framebuffer start.
     fb_addr: u64,
@@ -105,6 +129,32 @@ struct ConsoleInner {
     bg_color: u32,
     /// Whether bold/bright mode is active.
     bold: bool,
+    /// Whether dim/faint mode is active (SGR 2).
+    dim: bool,
+    /// Whether underline mode is active (SGR 4).
+    underline: bool,
+    /// Whether reverse video mode is active (SGR 7).
+    reverse: bool,
+    /// Whether invisible/hidden mode is active (SGR 8).
+    invisible: bool,
+    /// Whether strikethrough mode is active (SGR 9).
+    strikethrough: bool,
+    /// Scroll region top row (inclusive, 0-based). Default = 0.
+    scroll_top: u32,
+    /// Scroll region bottom row (inclusive, 0-based). Default = rows - 1.
+    scroll_bottom: u32,
+    /// Saved cursor position (column) — for ESC 7 / ESC [ s.
+    saved_cursor_col: u32,
+    /// Saved cursor position (row) — for ESC 7 / ESC [ s.
+    saved_cursor_row: u32,
+    /// Saved foreground color (for DEC cursor save with attributes).
+    saved_fg_color: u32,
+    /// Saved background color (for DEC cursor save with attributes).
+    saved_bg_color: u32,
+    /// Saved bold state.
+    saved_bold: bool,
+    /// Whether the CSI sequence has a '?' prefix (DEC private mode).
+    ansi_private: bool,
     /// ANSI escape sequence parser state.
     ansi_state: AnsiState,
     /// CSI parameter accumulator (up to 8 parameters).
@@ -133,6 +183,19 @@ impl ConsoleInner {
             fg_color: FG_COLOR,
             bg_color: BG_COLOR,
             bold: false,
+            dim: false,
+            underline: false,
+            reverse: false,
+            invisible: false,
+            strikethrough: false,
+            scroll_top: 0,
+            scroll_bottom: 0, // Set properly in init()
+            saved_cursor_col: 0,
+            saved_cursor_row: 0,
+            saved_fg_color: FG_COLOR,
+            saved_bg_color: BG_COLOR,
+            saved_bold: false,
+            ansi_private: false,
             ansi_state: AnsiState::Normal,
             ansi_params: [0; 8],
             ansi_param_count: 0,
@@ -148,6 +211,7 @@ impl ConsoleInner {
         self.ansi_param_count = 0;
         self.ansi_cur_param = 0;
         self.ansi_has_digit = false;
+        self.ansi_private = false;
     }
 
     /// Finalize the current CSI parameter and start a new one.
@@ -219,6 +283,8 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
     con.rows = rows;
     con.cursor_col = 0;
     con.cursor_row = 0;
+    con.scroll_top = 0;
+    con.scroll_bottom = rows.saturating_sub(1);
     con.initialized = true;
 
     // Clear the screen to the background color so we start fresh.
@@ -333,14 +399,18 @@ fn putchar_normal(con: &mut ConsoleInner, c: u8) {
             }
         }
         _ => {
-            // Render the glyph at the current cursor position with current colors.
+            // Render the glyph at the current cursor position with
+            // attribute-aware colors (reverse, dim, invisible, underline,
+            // strikethrough).
             let col = con.cursor_col;
             let row = con.cursor_row;
             let fb = con.fb_addr;
             let pitch = con.fb_pitch;
-            let fg = con.fg_color;
+            let fg = effective_fg(con);
+            let bg = effective_bg(con);
 
-            draw_glyph_colored(fb, pitch, col, row, c, fg);
+            draw_glyph_full(fb, pitch, col, row, c, fg, bg,
+                            con.underline, con.strikethrough);
 
             // Advance cursor.
             con.cursor_col = col.saturating_add(1);
@@ -365,12 +435,66 @@ fn putchar_escape(con: &mut ConsoleInner, c: u8) {
             con.ansi_param_count = 0;
             con.ansi_cur_param = 0;
             con.ansi_has_digit = false;
+            con.ansi_private = false;
         }
         b'c' => {
             // RIS (Reset to Initial State) — ESC c
             con.fg_color = FG_COLOR;
             con.bg_color = BG_COLOR;
             con.bold = false;
+            con.dim = false;
+            con.underline = false;
+            con.reverse = false;
+            con.invisible = false;
+            con.strikethrough = false;
+            con.scroll_top = 0;
+            con.scroll_bottom = con.rows.saturating_sub(1);
+            con.ansi_reset();
+        }
+        b'7' => {
+            // DECSC (Save Cursor) — ESC 7
+            con.saved_cursor_col = con.cursor_col;
+            con.saved_cursor_row = con.cursor_row;
+            con.saved_fg_color = con.fg_color;
+            con.saved_bg_color = con.bg_color;
+            con.saved_bold = con.bold;
+            con.ansi_reset();
+        }
+        b'8' => {
+            // DECRC (Restore Cursor) — ESC 8
+            con.cursor_col = con.saved_cursor_col;
+            con.cursor_row = con.saved_cursor_row;
+            con.fg_color = con.saved_fg_color;
+            con.bg_color = con.saved_bg_color;
+            con.bold = con.saved_bold;
+            con.ansi_reset();
+        }
+        b'D' => {
+            // IND (Index — move cursor down, scroll if at bottom of region)
+            if con.cursor_row >= con.scroll_bottom {
+                scroll_region_up(con, 1);
+            } else {
+                con.cursor_row = con.cursor_row.saturating_add(1);
+            }
+            con.ansi_reset();
+        }
+        b'M' => {
+            // RI (Reverse Index — move cursor up, scroll down if at top of region)
+            if con.cursor_row <= con.scroll_top {
+                scroll_region_down(con, 1);
+            } else {
+                con.cursor_row = con.cursor_row.saturating_sub(1);
+            }
+            con.ansi_reset();
+        }
+        b'E' => {
+            // NEL (Next Line — cursor to beginning of next line)
+            con.cursor_col = 0;
+            if con.cursor_row >= con.scroll_bottom {
+                scroll_region_up(con, 1);
+            } else {
+                con.cursor_row = con.cursor_row.saturating_add(1);
+            }
             con.ansi_reset();
         }
         _ => {
@@ -381,6 +505,22 @@ fn putchar_escape(con: &mut ConsoleInner, c: u8) {
 }
 
 /// Handle a character within a CSI sequence (ESC [ ...).
+///
+/// Supports the standard VT100/xterm CSI commands needed for
+/// curses-based terminal programs (nano, less, vi, etc.):
+///
+/// - Cursor movement: CUU(A), CUD(B), CUF(C), CUB(D), CUP(H/f), CNL(E), CPL(F), CHA(G)
+/// - Erase: ED(J), EL(K), ECH(X)
+/// - Insert/delete: ICH(@), DCH(P), IL(L), DL(M)
+/// - Scroll: SU(S), SD(T), DECSTBM(r)
+/// - Cursor save/restore: SCP(s), RCP(u)
+/// - SGR attributes: bold, dim, underline, reverse, invisible, strikethrough, colors
+/// - DEC private modes: cursor show/hide (?25h/l), alt screen (?1049h/l)
+/// - Device status: DSR(n) — cursor position report
+// The CSI handler is a large match statement covering ~30 VT100 commands.
+// Splitting it further would hurt readability since each arm is 3-5 lines.
+// Cursor/scroll arithmetic is small and checked/clamped.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation, clippy::too_many_lines)]
 fn putchar_csi(con: &mut ConsoleInner, c: u8) {
     match c {
         b'0'..=b'9' => {
@@ -393,10 +533,14 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
             // Parameter separator.
             con.ansi_next_param();
         }
+        b'?' => {
+            // DEC private mode prefix — sets flag for h/l commands.
+            con.ansi_private = true;
+        }
         // --- Final bytes (command characters) ---
         b'm' => {
             // SGR (Select Graphic Rendition) — colors and attributes.
-            con.ansi_next_param(); // Finalize last param.
+            con.ansi_next_param();
             handle_sgr(con);
             con.ansi_reset();
         }
@@ -437,6 +581,29 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
             con.cursor_col = con.cursor_col.saturating_sub(n);
             con.ansi_reset();
         }
+        b'E' => {
+            // CNL (Cursor Next Line) — move down n lines, to column 1.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            con.cursor_row = (con.cursor_row + n).min(con.rows.saturating_sub(1));
+            con.cursor_col = 0;
+            con.ansi_reset();
+        }
+        b'F' => {
+            // CPL (Cursor Previous Line) — move up n lines, to column 1.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            con.cursor_row = con.cursor_row.saturating_sub(n);
+            con.cursor_col = 0;
+            con.ansi_reset();
+        }
+        b'G' => {
+            // CHA (Cursor Horizontal Absolute) — move to column n.
+            con.ansi_next_param();
+            let col = con.ansi_param(0, 1).saturating_sub(1) as u32;
+            con.cursor_col = col.min(con.cols.saturating_sub(1));
+            con.ansi_reset();
+        }
         b'J' => {
             // ED (Erase in Display).
             con.ansi_next_param();
@@ -451,8 +618,131 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
             handle_erase_line(con, mode);
             con.ansi_reset();
         }
+        b'L' => {
+            // IL (Insert Lines) — insert n blank lines at cursor row,
+            // scrolling existing lines down within the scroll region.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            handle_insert_lines(con, n);
+            con.ansi_reset();
+        }
+        b'M' => {
+            // DL (Delete Lines) — delete n lines at cursor row,
+            // scrolling lines below up within the scroll region.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            handle_delete_lines(con, n);
+            con.ansi_reset();
+        }
+        b'@' => {
+            // ICH (Insert Characters) — insert n blank characters at cursor,
+            // shifting existing characters right.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            handle_insert_chars(con, n);
+            con.ansi_reset();
+        }
+        b'P' => {
+            // DCH (Delete Characters) — delete n characters at cursor,
+            // shifting remaining characters left.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            handle_delete_chars(con, n);
+            con.ansi_reset();
+        }
+        b'X' => {
+            // ECH (Erase Characters) — erase n characters starting at cursor
+            // without moving the cursor.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            let fb = con.fb_addr;
+            let pitch = con.fb_pitch;
+            let bg = effective_bg(con);
+            for i in 0..n {
+                let col = con.cursor_col + i;
+                if col >= con.cols { break; }
+                erase_cell(fb, pitch, col, con.cursor_row, bg);
+            }
+            con.ansi_reset();
+        }
+        b'S' => {
+            // SU (Scroll Up) — scroll the scroll region up by n lines.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            scroll_region_up(con, n);
+            con.ansi_reset();
+        }
+        b'T' => {
+            // SD (Scroll Down) — scroll the scroll region down by n lines.
+            con.ansi_next_param();
+            let n = con.ansi_param(0, 1) as u32;
+            scroll_region_down(con, n);
+            con.ansi_reset();
+        }
+        b'r' => {
+            // DECSTBM (Set Top and Bottom Margins / Scroll Region).
+            // ESC [ top ; bottom r
+            // Default: top=1, bottom=rows (full screen).
+            con.ansi_next_param();
+            let top = con.ansi_param(0, 1).saturating_sub(1) as u32;
+            let bottom = con.ansi_param(1, con.rows as u16).saturating_sub(1) as u32;
+            let max_row = con.rows.saturating_sub(1);
+            con.scroll_top = top.min(max_row);
+            con.scroll_bottom = bottom.min(max_row);
+            // Ensure top < bottom.
+            if con.scroll_top >= con.scroll_bottom {
+                con.scroll_top = 0;
+                con.scroll_bottom = max_row;
+            }
+            // DECSTBM moves cursor to home position.
+            con.cursor_col = 0;
+            con.cursor_row = 0;
+            con.ansi_reset();
+        }
+        b's' => {
+            // SCP (Save Cursor Position) — ESC [ s
+            con.saved_cursor_col = con.cursor_col;
+            con.saved_cursor_row = con.cursor_row;
+            con.ansi_reset();
+        }
+        b'u' => {
+            // RCP (Restore Cursor Position) — ESC [ u
+            con.cursor_col = con.saved_cursor_col.min(con.cols.saturating_sub(1));
+            con.cursor_row = con.saved_cursor_row.min(con.rows.saturating_sub(1));
+            con.ansi_reset();
+        }
+        b'd' => {
+            // VPA (Vertical Position Absolute) — move to row n.
+            con.ansi_next_param();
+            let row = con.ansi_param(0, 1).saturating_sub(1) as u32;
+            con.cursor_row = row.min(con.rows.saturating_sub(1));
+            con.ansi_reset();
+        }
+        b'n' => {
+            // DSR (Device Status Report).
+            con.ansi_next_param();
+            let mode = con.ansi_param(0, 0);
+            if mode == 6 {
+                // CPR (Cursor Position Report) — respond with ESC [ row ; col R.
+                // In a real terminal this would be sent back via the input
+                // stream.  For now, log it to serial for debugging.
+                crate::serial_println!(
+                    "\x1b[{};{}R",
+                    con.cursor_row + 1,
+                    con.cursor_col + 1
+                );
+            }
+            con.ansi_reset();
+        }
         b'h' | b'l' => {
-            // Set/reset mode — ignore (used for cursor visibility etc.)
+            // Set (h) / Reset (l) mode.
+            con.ansi_next_param();
+            if con.ansi_private {
+                let mode = con.ansi_param(0, 0);
+                let set = c == b'h';
+                handle_dec_private_mode(con, mode, set);
+            }
+            // Non-private modes are silently ignored.
             con.ansi_reset();
         }
         _ => {
@@ -471,16 +761,28 @@ fn putchar_csi(con: &mut ConsoleInner, c: u8) {
 }
 
 /// Handle SGR (Select Graphic Rendition) parameters.
+///
+/// Supports: reset(0), bold(1), dim(2), underline(4), reverse(7),
+/// invisible(8), strikethrough(9), normal intensity(22), no underline(24),
+/// no reverse(27), visible(28), no strikethrough(29), foreground colors
+/// (30-37, 39, 90-97), background colors (40-47, 49, 100-107),
+/// and 256-color (38;5;n / 48;5;n).
 fn handle_sgr(con: &mut ConsoleInner) {
     // If no parameters, treat as reset (SGR 0).
     if con.ansi_param_count == 0 {
         con.fg_color = FG_COLOR;
         con.bg_color = BG_COLOR;
         con.bold = false;
+        con.dim = false;
+        con.underline = false;
+        con.reverse = false;
+        con.invisible = false;
+        con.strikethrough = false;
         return;
     }
 
-    for i in 0..con.ansi_param_count {
+    let mut i = 0;
+    while i < con.ansi_param_count {
         let param = con.ansi_params[i];
         match param {
             0 => {
@@ -488,23 +790,83 @@ fn handle_sgr(con: &mut ConsoleInner) {
                 con.fg_color = FG_COLOR;
                 con.bg_color = BG_COLOR;
                 con.bold = false;
+                con.dim = false;
+                con.underline = false;
+                con.reverse = false;
+                con.invisible = false;
+                con.strikethrough = false;
             }
             1 => {
                 // Bold / bright.
                 con.bold = true;
-                // If current fg is a standard color (0-7), switch to bright.
-                // Simple approach: just set the bold flag and use it when
-                // selecting colors.
+            }
+            2 => {
+                // Dim / faint.
+                con.dim = true;
+            }
+            4 => {
+                // Underline.
+                con.underline = true;
+            }
+            7 => {
+                // Reverse video.
+                con.reverse = true;
+            }
+            8 => {
+                // Invisible / hidden.
+                con.invisible = true;
+            }
+            9 => {
+                // Strikethrough (crossed-out).
+                con.strikethrough = true;
             }
             22 => {
-                // Normal intensity (not bold).
+                // Normal intensity (not bold, not dim).
                 con.bold = false;
+                con.dim = false;
+            }
+            24 => {
+                // Not underlined.
+                con.underline = false;
+            }
+            27 => {
+                // Not reversed.
+                con.reverse = false;
+            }
+            28 => {
+                // Visible (not hidden).
+                con.invisible = false;
+            }
+            29 => {
+                // Not strikethrough.
+                con.strikethrough = false;
             }
             // Standard foreground colors (30-37).
             30..=37 => {
                 let idx = (param - 30) as usize;
                 let color_idx = if con.bold { idx + 8 } else { idx };
                 con.fg_color = ANSI_COLORS[color_idx];
+            }
+            38 => {
+                // Extended foreground color.
+                // 38;5;n = 256-color, 38;2;r;g;b = truecolor.
+                if i + 1 < con.ansi_param_count && con.ansi_params[i + 1] == 5 {
+                    // 256-color mode.
+                    if i + 2 < con.ansi_param_count {
+                        let n = con.ansi_params[i + 2] as usize;
+                        con.fg_color = color_256(n);
+                        i += 2; // Skip the 5;n parameters.
+                    }
+                } else if i + 1 < con.ansi_param_count && con.ansi_params[i + 1] == 2 {
+                    // Truecolor mode: 38;2;r;g;b
+                    if i + 4 < con.ansi_param_count {
+                        let r = (con.ansi_params[i + 2] & 0xFF) as u32;
+                        let g = (con.ansi_params[i + 3] & 0xFF) as u32;
+                        let b = (con.ansi_params[i + 4] & 0xFF) as u32;
+                        con.fg_color = (r << 16) | (g << 8) | b;
+                        i += 4;
+                    }
+                }
             }
             39 => {
                 // Default foreground color.
@@ -514,6 +876,26 @@ fn handle_sgr(con: &mut ConsoleInner) {
             40..=47 => {
                 let idx = (param - 40) as usize;
                 con.bg_color = ANSI_COLORS[idx];
+            }
+            48 => {
+                // Extended background color.
+                if i + 1 < con.ansi_param_count && con.ansi_params[i + 1] == 5 {
+                    // 256-color mode.
+                    if i + 2 < con.ansi_param_count {
+                        let n = con.ansi_params[i + 2] as usize;
+                        con.bg_color = color_256(n);
+                        i += 2;
+                    }
+                } else if i + 1 < con.ansi_param_count && con.ansi_params[i + 1] == 2 {
+                    // Truecolor mode: 48;2;r;g;b
+                    if i + 4 < con.ansi_param_count {
+                        let r = (con.ansi_params[i + 2] & 0xFF) as u32;
+                        let g = (con.ansi_params[i + 3] & 0xFF) as u32;
+                        let b = (con.ansi_params[i + 4] & 0xFF) as u32;
+                        con.bg_color = (r << 16) | (g << 8) | b;
+                        i += 4;
+                    }
+                }
             }
             49 => {
                 // Default background color.
@@ -533,6 +915,37 @@ fn handle_sgr(con: &mut ConsoleInner) {
                 // Unsupported SGR parameter — ignore.
             }
         }
+        i += 1;
+    }
+}
+
+/// Convert a 256-color index to BGRA u32.
+///
+/// 0-7: standard colors, 8-15: bright colors, 16-231: 6×6×6 RGB cube,
+/// 232-255: 24-step grayscale ramp.
+// Color arithmetic is intentionally wrapping/truncating for palette math.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn color_256(n: usize) -> u32 {
+    match n {
+        0..=15 => ANSI_COLORS[n],
+        16..=231 => {
+            // 6×6×6 color cube: index = 16 + 36*r + 6*g + b
+            let idx = n - 16;
+            let b_val = (idx % 6) as u32;
+            let g_val = ((idx / 6) % 6) as u32;
+            let r_val = (idx / 36) as u32;
+            // Scale 0-5 to 0-255: 0→0, 1→95, 2→135, 3→175, 4→215, 5→255
+            let scale = |v: u32| -> u32 {
+                if v == 0 { 0 } else { 55 + v * 40 }
+            };
+            (scale(r_val) << 16) | (scale(g_val) << 8) | scale(b_val)
+        }
+        232..=255 => {
+            // Grayscale ramp: 24 shades from 8 to 238.
+            let gray = ((n - 232) * 10 + 8) as u32;
+            (gray << 16) | (gray << 8) | gray
+        }
+        _ => FG_COLOR, // Out of range — use default.
     }
 }
 
@@ -616,6 +1029,346 @@ fn handle_erase_line(con: &mut ConsoleInner, mode: u16) {
         _ => {}
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scroll region operations
+// ---------------------------------------------------------------------------
+
+/// Scroll the scroll region up by `n` lines.
+///
+/// Lines at the top of the region are lost; new blank lines appear at
+/// the bottom.  Only the region between `scroll_top` and `scroll_bottom`
+/// is affected.
+// Row/pixel arithmetic is small and clamped.
+#[allow(clippy::arithmetic_side_effects)]
+fn scroll_region_up(con: &mut ConsoleInner, n: u32) {
+    if !con.initialized { return; }
+    let region_height = con.scroll_bottom - con.scroll_top + 1;
+    let n = n.min(region_height);
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let cols = con.cols;
+    let bg = effective_bg(con);
+
+    // Copy rows: move row (top + n) to row (top), etc.
+    for dst_row in con.scroll_top..=(con.scroll_bottom.saturating_sub(n)) {
+        let src_row = dst_row + n;
+        if src_row > con.scroll_bottom { break; }
+        copy_row(fb, pitch, cols, src_row, dst_row);
+    }
+
+    // Clear the bottom n rows.
+    for row in (con.scroll_bottom + 1 - n)..=con.scroll_bottom {
+        for col in 0..cols {
+            erase_cell(fb, pitch, col, row, bg);
+        }
+    }
+}
+
+/// Scroll the scroll region down by `n` lines.
+///
+/// Lines at the bottom of the region are lost; new blank lines appear
+/// at the top.
+// Row/pixel arithmetic is small and clamped.
+#[allow(clippy::arithmetic_side_effects)]
+fn scroll_region_down(con: &mut ConsoleInner, n: u32) {
+    if !con.initialized { return; }
+    let region_height = con.scroll_bottom - con.scroll_top + 1;
+    let n = n.min(region_height);
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let cols = con.cols;
+    let bg = effective_bg(con);
+
+    // Copy rows bottom-up: move row (bottom - n) to row (bottom), etc.
+    let mut dst_row = con.scroll_bottom;
+    while dst_row >= con.scroll_top + n {
+        let src_row = dst_row - n;
+        copy_row(fb, pitch, cols, src_row, dst_row);
+        if dst_row == 0 { break; }
+        dst_row -= 1;
+    }
+
+    // Clear the top n rows.
+    for row in con.scroll_top..(con.scroll_top + n).min(con.scroll_bottom + 1) {
+        for col in 0..cols {
+            erase_cell(fb, pitch, col, row, bg);
+        }
+    }
+}
+
+/// Copy one row of character cells to another row (pixel-level copy).
+// Pixel arithmetic is small and bounded by framebuffer dimensions.
+#[allow(clippy::arithmetic_side_effects)]
+fn copy_row(fb: u64, pitch: u32, cols: u32, src_row: u32, dst_row: u32) {
+    let src_y = src_row * GLYPH_HEIGHT;
+    let dst_y = dst_row * GLYPH_HEIGHT;
+    for gy in 0..GLYPH_HEIGHT {
+        let src_offset = ((src_y + gy) as u64) * (pitch as u64);
+        let dst_offset = ((dst_y + gy) as u64) * (pitch as u64);
+        let row_bytes = (cols * GLYPH_WIDTH * 4) as usize; // 4 bytes per pixel
+        // SAFETY: Both source and destination are within the framebuffer
+        // (bounded by fb_height * pitch).  The copy is non-overlapping
+        // because src_row != dst_row.
+        unsafe {
+            let src = (fb + src_offset) as *const u8;
+            let dst = (fb + dst_offset) as *mut u8;
+            ptr::copy_nonoverlapping(src, dst, row_bytes);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Line insert/delete
+// ---------------------------------------------------------------------------
+
+/// Insert `n` blank lines at the cursor's current row.
+///
+/// Lines below the cursor (within the scroll region) shift down; lines
+/// pushed past the scroll region bottom are lost.
+// Row arithmetic is small and clamped.
+#[allow(clippy::arithmetic_side_effects)]
+fn handle_insert_lines(con: &mut ConsoleInner, n: u32) {
+    if !con.initialized { return; }
+    let cur = con.cursor_row;
+    if cur < con.scroll_top || cur > con.scroll_bottom { return; }
+
+    let n = n.min(con.scroll_bottom - cur + 1);
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let cols = con.cols;
+    let bg = effective_bg(con);
+
+    // Shift rows down (bottom-up to avoid overwriting).
+    let mut dst = con.scroll_bottom;
+    while dst >= cur + n {
+        let src = dst - n;
+        copy_row(fb, pitch, cols, src, dst);
+        if dst == 0 { break; }
+        dst -= 1;
+    }
+
+    // Clear the inserted lines.
+    for row in cur..(cur + n).min(con.scroll_bottom + 1) {
+        for col in 0..cols {
+            erase_cell(fb, pitch, col, row, bg);
+        }
+    }
+    con.cursor_col = 0;
+}
+
+/// Delete `n` lines at the cursor's current row.
+///
+/// Lines below shift up; blank lines appear at the scroll region bottom.
+// Row arithmetic is small and clamped.
+#[allow(clippy::arithmetic_side_effects)]
+fn handle_delete_lines(con: &mut ConsoleInner, n: u32) {
+    if !con.initialized { return; }
+    let cur = con.cursor_row;
+    if cur < con.scroll_top || cur > con.scroll_bottom { return; }
+
+    let n = n.min(con.scroll_bottom - cur + 1);
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let cols = con.cols;
+    let bg = effective_bg(con);
+
+    // Shift rows up.
+    for dst in cur..=(con.scroll_bottom.saturating_sub(n)) {
+        let src = dst + n;
+        if src > con.scroll_bottom { break; }
+        copy_row(fb, pitch, cols, src, dst);
+    }
+
+    // Clear the bottom lines.
+    for row in (con.scroll_bottom + 1 - n)..=con.scroll_bottom {
+        for col in 0..cols {
+            erase_cell(fb, pitch, col, row, bg);
+        }
+    }
+    con.cursor_col = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Character insert/delete
+// ---------------------------------------------------------------------------
+
+/// Insert `n` blank characters at the cursor position.
+///
+/// Characters to the right shift right; characters pushed past the right
+/// margin are lost.
+// Column/pixel arithmetic is small and bounded.
+#[allow(clippy::arithmetic_side_effects)]
+fn handle_insert_chars(con: &mut ConsoleInner, n: u32) {
+    if !con.initialized { return; }
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let row = con.cursor_row;
+    let bg = effective_bg(con);
+    let n = n.min(con.cols - con.cursor_col);
+
+    // Shift characters right (from right to left to avoid overwriting).
+    let mut dst_col = con.cols.saturating_sub(1);
+    while dst_col >= con.cursor_col + n {
+        let src_col = dst_col - n;
+        copy_cell(fb, pitch, src_col, row, dst_col, row);
+        if dst_col == 0 { break; }
+        dst_col -= 1;
+    }
+
+    // Clear the inserted positions.
+    for col in con.cursor_col..(con.cursor_col + n).min(con.cols) {
+        erase_cell(fb, pitch, col, row, bg);
+    }
+}
+
+/// Delete `n` characters at the cursor position.
+///
+/// Characters to the right shift left; blank characters appear at the
+/// right margin.
+// Column/pixel arithmetic is small and bounded.
+#[allow(clippy::arithmetic_side_effects)]
+fn handle_delete_chars(con: &mut ConsoleInner, n: u32) {
+    if !con.initialized { return; }
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let row = con.cursor_row;
+    let bg = effective_bg(con);
+    let n = n.min(con.cols - con.cursor_col);
+
+    // Shift characters left.
+    for dst_col in con.cursor_col..(con.cols.saturating_sub(n)) {
+        let src_col = dst_col + n;
+        if src_col >= con.cols { break; }
+        copy_cell(fb, pitch, src_col, row, dst_col, row);
+    }
+
+    // Clear the rightmost positions.
+    for col in (con.cols - n)..con.cols {
+        erase_cell(fb, pitch, col, row, bg);
+    }
+}
+
+/// Copy a single character cell from (src_col, src_row) to (dst_col, dst_row).
+// Pixel arithmetic is small and bounded by framebuffer dimensions.
+#[allow(clippy::arithmetic_side_effects)]
+fn copy_cell(fb: u64, pitch: u32, src_col: u32, src_row: u32, dst_col: u32, dst_row: u32) {
+    let src_px_x = src_col * GLYPH_WIDTH;
+    let src_px_y = src_row * GLYPH_HEIGHT;
+    let dst_px_x = dst_col * GLYPH_WIDTH;
+    let dst_px_y = dst_row * GLYPH_HEIGHT;
+    for gy in 0..GLYPH_HEIGHT {
+        for gx in 0..GLYPH_WIDTH {
+            let src_x = src_px_x + gx;
+            let src_y = src_px_y + gy;
+            let dst_x = dst_px_x + gx;
+            let dst_y = dst_px_y + gy;
+            // SAFETY: Coordinates are within framebuffer bounds (bounded by
+            // cols*GLYPH_WIDTH and rows*GLYPH_HEIGHT).
+            let color = unsafe {
+                let offset = (src_y as u64) * (pitch as u64) + (src_x as u64) * 4;
+                ptr::read_volatile((fb + offset) as *const u32)
+            };
+            put_pixel(fb, pitch, dst_x, dst_y, color);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DEC private mode handling
+// ---------------------------------------------------------------------------
+
+/// Handle DEC private mode set/reset (ESC [ ? N h/l).
+///
+/// Supports:
+/// - ?25: cursor visibility (currently a no-op since we don't draw a
+///   hardware cursor, but we track state for compatibility)
+/// - ?1049: alternate screen buffer (clear screen on set, restore on reset)
+/// - ?7: auto-wrap mode (silently accepted)
+fn handle_dec_private_mode(con: &mut ConsoleInner, mode: u16, set: bool) {
+    match mode {
+        25 => {
+            // DECTCEM — cursor visibility.  We don't draw a blinking cursor
+            // yet, so this is a no-op.  Programs like vi send this.
+        }
+        1049 => {
+            // Alternate screen buffer.
+            if set {
+                // Enter alt screen: save cursor and clear display.
+                con.saved_cursor_col = con.cursor_col;
+                con.saved_cursor_row = con.cursor_row;
+                con.saved_fg_color = con.fg_color;
+                con.saved_bg_color = con.bg_color;
+                con.saved_bold = con.bold;
+                con.cursor_col = 0;
+                con.cursor_row = 0;
+                // Clear the screen.
+                let fb = con.fb_addr;
+                let pitch = con.fb_pitch;
+                let bg = effective_bg(con);
+                for row in 0..con.rows {
+                    for col in 0..con.cols {
+                        erase_cell(fb, pitch, col, row, bg);
+                    }
+                }
+            } else {
+                // Leave alt screen: restore cursor.  A real terminal would
+                // restore the main screen content, but we don't have a
+                // backing store yet — just restore cursor and clear.
+                con.cursor_col = con.saved_cursor_col;
+                con.cursor_row = con.saved_cursor_row;
+                con.fg_color = con.saved_fg_color;
+                con.bg_color = con.saved_bg_color;
+                con.bold = con.saved_bold;
+                let fb = con.fb_addr;
+                let pitch = con.fb_pitch;
+                let bg = effective_bg(con);
+                for row in 0..con.rows {
+                    for col in 0..con.cols {
+                        erase_cell(fb, pitch, col, row, bg);
+                    }
+                }
+            }
+        }
+        7 => {
+            // DECAWM — auto-wrap mode.  We always auto-wrap, so this is
+            // accepted silently for compatibility.
+        }
+        _ => {
+            // Unknown DEC private mode — ignore.
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attribute helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the effective foreground color, accounting for dim and reverse.
+fn effective_fg(con: &ConsoleInner) -> u32 {
+    if con.invisible {
+        return effective_bg(con);
+    }
+    let fg = if con.reverse { con.bg_color } else { con.fg_color };
+    if con.dim {
+        // Dim: halve the RGB channels.
+        let r = (fg >> 16) & 0xFF;
+        let g = (fg >> 8) & 0xFF;
+        let b = fg & 0xFF;
+        ((r >> 1) << 16) | ((g >> 1) << 8) | (b >> 1)
+    } else {
+        fg
+    }
+}
+
+/// Compute the effective background color, accounting for reverse.
+fn effective_bg(con: &ConsoleInner) -> u32 {
+    if con.reverse { con.fg_color } else { con.bg_color }
+}
+
+// ---------------------------------------------------------------------------
+// Low-level cell operations
+// ---------------------------------------------------------------------------
 
 /// Erase a single character cell (fill with background color).
 fn erase_cell(fb: u64, pitch: u32, col: u32, row: u32, bg: u32) {
@@ -836,6 +1589,18 @@ fn draw_glyph(fb: u64, pitch: u32, col: u32, row: u32, ch: u8) {
 /// Draw a single glyph at text position (col, row) with a custom
 /// foreground color.  Background is always [`BG_COLOR`].
 fn draw_glyph_colored(fb: u64, pitch: u32, col: u32, row: u32, ch: u8, fg: u32) {
+    draw_glyph_full(fb, pitch, col, row, ch, fg, BG_COLOR, false, false);
+}
+
+/// Draw a single glyph with full attribute support.
+///
+/// Renders the glyph with custom foreground and background colors,
+/// optional underline (horizontal line on row 14 of 16), and optional
+/// strikethrough (horizontal line on row 8 of 16).
+fn draw_glyph_full(
+    fb: u64, pitch: u32, col: u32, row: u32, ch: u8,
+    fg: u32, bg: u32, underline: bool, strikethrough: bool,
+) {
     let glyph = font::glyph(ch);
     let px_x = col.wrapping_mul(GLYPH_WIDTH);
     let px_y = row.wrapping_mul(GLYPH_HEIGHT);
@@ -844,6 +1609,12 @@ fn draw_glyph_colored(fb: u64, pitch: u32, col: u32, row: u32, ch: u8, fg: u32) 
         // gy is in 0..16, fits in u32.
         #[allow(clippy::cast_possible_truncation)]
         let y = px_y.wrapping_add(gy as u32);
+
+        // Underline on row 14 (second-to-last row of 16-pixel glyph).
+        let is_underline_row = underline && gy == 14;
+        // Strikethrough on row 8 (middle of glyph).
+        let is_strike_row = strikethrough && gy == 8;
+
         for gx in 0..GLYPH_WIDTH {
             let x = px_x.wrapping_add(gx);
             // MSB (bit 7) is the leftmost pixel.  Check whether the
@@ -852,23 +1623,36 @@ fn draw_glyph_colored(fb: u64, pitch: u32, col: u32, row: u32, ch: u8, fg: u32) 
             // shift is always 0..7, safe for u8.
             #[allow(clippy::cast_possible_truncation)]
             let bit = (glyph_row >> (shift as u8)) & 1;
-            let color = if bit != 0 { fg } else { BG_COLOR };
+            let color = if bit != 0 || is_underline_row || is_strike_row {
+                fg
+            } else {
+                bg
+            };
             put_pixel(fb, pitch, x, y, color);
         }
     }
 }
 
-/// Scroll the screen up by one text row (GLYPH_HEIGHT pixels).
+/// Scroll the screen up by one text row within the scroll region.
 ///
 /// The caller must hold the `CONSOLE` lock.
 ///
-/// Copies all rows up by one glyph height using `core::ptr::copy`,
-/// then clears the last row to the background color.
+/// If the scroll region covers the full screen, uses a fast memmove.
+/// Otherwise delegates to `scroll_region_up` for partial-screen scrolling.
 fn scroll_up_locked(con: &mut ConsoleInner) {
     let fb = con.fb_addr;
     let pitch = con.fb_pitch;
     let rows = con.rows;
 
+    // If cursor is within a scroll region, use region-aware scrolling.
+    if con.scroll_top != 0 || con.scroll_bottom != rows.saturating_sub(1) {
+        scroll_region_up(con, 1);
+        con.cursor_row = con.scroll_bottom;
+        con.cursor_col = 0;
+        return;
+    }
+
+    // Fast path: full-screen scroll via memmove.
     // Total pixel rows to copy = (rows - 1) * GLYPH_HEIGHT.
     let copy_pixel_rows = rows.saturating_sub(1).saturating_mul(GLYPH_HEIGHT);
 

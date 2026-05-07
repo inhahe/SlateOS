@@ -3092,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
-    "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
+    "prefetch", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "strings", "tac", "tr",
@@ -4362,6 +4362,7 @@ fn dispatch(line: &str) {
         "fsbench" => cmd_fsbench(args),
         "ionice" => cmd_ionice(args),
         "atime" => cmd_atime(args),
+        "prefetch" => cmd_prefetch(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -13549,6 +13550,89 @@ fn cmd_atime(args: &str) {
     }
 }
 
+/// File access pattern hinting and prefetch control.
+fn cmd_prefetch(args: &str) {
+    use crate::fs::prefetch::{self, AccessAdvice};
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "advise" | "hint" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: prefetch advise <path> <normal|seq|rand|willneed|dontneed>");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match AccessAdvice::from_name(parts[2]) {
+                Some(advice) => {
+                    prefetch::advise(&path, advice);
+                    shell_println!("Advised {}: {}", path, advice.label());
+                }
+                None => shell_println!("Unknown advice: {} (use: normal, seq, rand, willneed, dontneed)", parts[2]),
+            }
+        }
+        "load" | "fetch" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: prefetch load <path> [offset] [length]");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let offset: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let len: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match prefetch::prefetch(&path, offset, len) {
+                Ok(r) => shell_println!("Prefetched {} bytes from {}", r.bytes_prefetched, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "show" | "" => {
+            let entries = prefetch::list_active();
+            let (advises, prefetches, bytes, active) = prefetch::stats();
+            shell_println!("Prefetch / Access Advisory");
+            shell_println!("  Active entries: {}/256", active);
+            shell_println!("  Advise calls:   {} | Prefetch calls: {} | Bytes: {}",
+                advises, prefetches, bytes);
+            if entries.is_empty() {
+                shell_println!();
+                shell_println!("  No active advice entries.");
+            } else {
+                shell_println!();
+                shell_println!("  {:40} {}", "PATH", "ADVICE");
+                shell_println!("  {}", "-".repeat(52));
+                for (path, advice) in &entries {
+                    shell_println!("  {:40} {}", path, advice.label());
+                }
+            }
+        }
+        "clear" => {
+            if parts.len() >= 2 {
+                let path = resolve_path(parts[1]);
+                if prefetch::clear_advice(&path) {
+                    shell_println!("Cleared advice for {}", path);
+                } else {
+                    shell_println!("No advice found for {}", path);
+                }
+            } else {
+                prefetch::clear_all();
+                shell_println!("Cleared all advice entries.");
+            }
+        }
+        "stats" => {
+            let (advises, prefetches, bytes, active) = prefetch::stats();
+            shell_println!("Active: {} | Advises: {} | Prefetches: {} | Bytes: {}",
+                active, advises, prefetches, bytes);
+        }
+        _ => {
+            shell_println!("Usage: prefetch <command>");
+            shell_println!("  advise <path> <hint>   Set access advice for a file");
+            shell_println!("  load <path> [off] [n]  Prefetch file data into cache");
+            shell_println!("  list|show              Show active advice entries (default)");
+            shell_println!("  clear [path]           Clear advice (one or all)");
+            shell_println!("  stats                  Show counters");
+            shell_println!();
+            shell_println!("Hints: normal, seq(uential), rand(om), willneed, dontneed");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -18887,7 +18971,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

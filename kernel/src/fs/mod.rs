@@ -70,6 +70,7 @@ pub mod overlay;
 pub mod pipe;
 pub mod procfs;
 pub mod policy;
+pub mod prefetch;
 pub mod profile;
 pub mod quota;
 pub mod reclaim;

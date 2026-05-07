@@ -132,6 +132,7 @@ const ROOT_FILES: &[&str] = &[
     "fsbench",
     "ioprio",
     "atime",
+    "prefetch",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2200,6 +2201,33 @@ fn gen_atime() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/prefetch` — file prefetch/advisory status.
+fn gen_prefetch() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (advises, prefetches, bytes, active) = super::prefetch::stats();
+
+    out.push_str("File Prefetch / Access Advisory\n");
+    out.push_str("===============================\n\n");
+    out.push_str(&format!("Active advice entries: {}/{}\n", active, 256));
+    out.push_str(&format!("Advise calls:         {}\n", advises));
+    out.push_str(&format!("Prefetch calls:       {}\n", prefetches));
+    out.push_str(&format!("Bytes prefetched:     {}\n\n", bytes));
+
+    let entries = super::prefetch::list_active();
+    if entries.is_empty() {
+        out.push_str("No active advice entries.\n");
+    } else {
+        out.push_str(&format!("{:40} {}\n", "PATH", "ADVICE"));
+        for (path, advice) in &entries {
+            out.push_str(&format!("{:40} {}\n", path, advice.label()));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2273,6 +2301,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fsbench" => Ok(gen_fsbench()),
         "ioprio" => Ok(gen_ioprio()),
         "atime" => Ok(gen_atime()),
+        "prefetch" => Ok(gen_prefetch()),
         _ => Err(KernelError::NotFound),
     }
 }

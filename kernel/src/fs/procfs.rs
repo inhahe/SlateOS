@@ -161,6 +161,7 @@ const ROOT_FILES: &[&str] = &[
     "toolbar",
     "queryable",
     "immutable",
+    "fcomment",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2827,6 +2828,32 @@ fn gen_immutable() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fcomment() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (comment_count, set_ops, get_ops, search_ops) = super::fcomment::stats();
+
+    out.push_str("File Comments\n");
+    out.push_str("=============\n\n");
+    out.push_str(&format!("Comments:    {}/{}\n", comment_count, 65536));
+    out.push_str(&format!("Set ops:     {}\n", set_ops));
+    out.push_str(&format!("Get ops:     {}\n", get_ops));
+    out.push_str(&format!("Search ops:  {}\n\n", search_ops));
+
+    let all = super::fcomment::list(None);
+    if !all.is_empty() {
+        out.push_str(&format!("{:40} {:8} {}\n", "PATH", "LENGTH", "PREVIEW"));
+        for (path, comment) in &all {
+            let preview: String = comment.chars().take(40).collect();
+            let preview = preview.replace('\n', " ");
+            out.push_str(&format!("{:40} {:8} {}\n", path, comment.len(), preview));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3153,6 +3180,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "toolbar" => Ok(gen_toolbar()),
         "queryable" => Ok(gen_queryable()),
         "immutable" => Ok(gen_immutable()),
+        "fcomment" => Ok(gen_fcomment()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

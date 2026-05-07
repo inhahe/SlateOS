@@ -3094,7 +3094,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
-    "fflags",
+    "fcomment", "fflags",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
@@ -4401,6 +4401,7 @@ fn dispatch(line: &str) {
         "statusbar" => cmd_statusbar(args),
         "toolbar" => cmd_toolbar(args),
         "queryable" | "qattr" => cmd_queryable(args),
+        "fcomment" => cmd_fcomment(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -16819,6 +16820,142 @@ fn cmd_queryable(args: &str) {
     }
 }
 
+/// `fcomment` — file comments and annotations.
+fn cmd_fcomment(args: &str) {
+    use crate::fs::fcomment;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "set" => {
+            // fcomment set <path> <comment text...>
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() || parts.len() < 3 {
+                shell_println!("Usage: fcomment set <path> <comment text...>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            // Join remaining parts as comment text.
+            let comment: String = parts[2..].iter()
+                .enumerate()
+                .fold(String::new(), |mut acc, (i, s)| {
+                    if i > 0 { acc.push(' '); }
+                    acc.push_str(s);
+                    acc
+                });
+            match fcomment::set(&path, &comment) {
+                Ok(()) => shell_println!("Comment set on {} ({} bytes)", path, comment.len()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" | "show" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: fcomment get <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match fcomment::get(&path) {
+                Some(comment) => shell_println!("{}", comment),
+                None => shell_println!("No comment on {}", path),
+            }
+        }
+        "append" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() || parts.len() < 3 {
+                shell_println!("Usage: fcomment append <path> <text...>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            let text: String = parts[2..].iter()
+                .enumerate()
+                .fold(String::new(), |mut acc, (i, s)| {
+                    if i > 0 { acc.push(' '); }
+                    acc.push_str(s);
+                    acc
+                });
+            match fcomment::append(&path, &text) {
+                Ok(()) => shell_println!("Appended to comment on {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rm" | "remove" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: fcomment rm <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            match fcomment::remove(&path) {
+                Ok(()) => shell_println!("Comment removed from {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "search" => {
+            let needle = parts.get(1).copied().unwrap_or("");
+            let root = parts.get(2).map(|p| resolve_path(p));
+            if needle.is_empty() {
+                shell_println!("Usage: fcomment search <text> [root]");
+                return;
+            }
+            let results = fcomment::search(needle, root.as_deref());
+            if results.is_empty() {
+                shell_println!("No matches");
+            } else {
+                shell_println!("{} results:", results.len());
+                for (path, comment) in &results {
+                    let preview: String = comment.chars().take(60).collect();
+                    let preview = preview.replace('\n', " ");
+                    shell_println!("  {} — {}", path, preview);
+                }
+            }
+        }
+        "list" | "" => {
+            let root = parts.get(1).map(|p| resolve_path(p));
+            let all = fcomment::list(root.as_deref());
+            if all.is_empty() {
+                shell_println!("No commented files");
+            } else {
+                shell_println!("{} commented files:", all.len());
+                for (path, comment) in &all {
+                    let preview: String = comment.chars().take(50).collect();
+                    let preview = preview.replace('\n', " ");
+                    shell_println!("  {:40} {}", path, preview);
+                }
+            }
+        }
+        "test" => {
+            match fcomment::self_test() {
+                Ok(()) => shell_println!("All fcomment self-tests passed"),
+                Err(e) => shell_println!("File comment self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, sets, gets, searches) = fcomment::stats();
+            shell_println!("Comments:    {}", count);
+            shell_println!("Set ops:     {}", sets);
+            shell_println!("Get ops:     {}", gets);
+            shell_println!("Search ops:  {}", searches);
+        }
+        "reset" => {
+            fcomment::clear_all();
+            fcomment::reset_stats();
+            shell_println!("File comments cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: fcomment <subcommand>");
+            shell_println!("  set <path> <text...>   Set comment on file");
+            shell_println!("  get <path>             Show comment");
+            shell_println!("  append <path> <text>   Append to comment");
+            shell_println!("  rm <path>              Remove comment");
+            shell_println!("  search <text> [root]   Search comments");
+            shell_println!("  list [root]            List commented files");
+            shell_println!("  test                   Run self-tests");
+            shell_println!("  stats                  Show statistics");
+            shell_println!("  reset                  Clear all data and stats");
+        }
+    }
+}
+
 /// `fflags` — immutable / append-only / file protection flags.
 fn cmd_fflags(args: &str) {
     use crate::fs::immutable;
@@ -23288,7 +23425,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

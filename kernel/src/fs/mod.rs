@@ -56,6 +56,7 @@ pub mod dragdrop;
 pub mod encrypt;
 pub mod ext4;
 pub mod fat;
+pub mod fcomment;
 pub mod fcompress;
 pub mod fileinfo;
 pub mod fileops;

@@ -57,6 +57,7 @@ pub mod overlay;
 pub mod pipe;
 pub mod procfs;
 pub mod quota;
+pub mod reclaim;
 pub mod snapshot;
 #[allow(dead_code)]
 pub mod rar;

@@ -111,6 +111,7 @@ const ROOT_FILES: &[&str] = &[
     "rlimits",
     "audit",
     "snapshots",
+    "reclaim",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1657,6 +1658,28 @@ fn gen_snapshots() -> Vec<u8> {
     s.into_bytes()
 }
 
+fn gen_reclaim() -> Vec<u8> {
+    use crate::fs::reclaim;
+    let s = reclaim::stats();
+    let (hi, lo) = reclaim::watermarks();
+    let p = reclaim::phases();
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!("Space reclamation: {}\n\n", if reclaim::is_enabled() { "enabled" } else { "disabled" }));
+    out.push_str(&format!("  watermarks:   high={}% low={}%\n", hi, lo));
+    out.push_str(&format!("  triggers:     {}\n", s.trigger_count));
+    out.push_str(&format!("  total freed:  {} bytes\n", s.total_bytes_freed));
+    out.push_str(&format!("  CAS blobs:    {}\n", s.total_cas_blobs));
+    out.push_str(&format!("  tmp files:    {}\n", s.total_tmpwatch_files));
+    out.push_str(&format!("  trash items:  {}\n", s.total_trash_items));
+    out.push_str(&format!("  journal ents: {}\n", s.total_journal_entries));
+    out.push_str(&format!("  active:       {}\n\n", s.active));
+    out.push_str(&format!("  phases: cache={} cas={} tmp={} trash={} journal={}\n",
+        p.cache, p.cas_gc, p.tmpwatch, p.trash, p.journal));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1709,6 +1732,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "rlimits" => Ok(gen_rlimits()),
         "audit" => Ok(gen_audit()),
         "snapshots" => Ok(gen_snapshots()),
+        "reclaim" => Ok(gen_reclaim()),
         _ => Err(KernelError::NotFound),
     }
 }

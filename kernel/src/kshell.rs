@@ -3106,6 +3106,7 @@ const COMMANDS: &[&str] = &[
     "audit",
     "namespace", "ns",
     "fssnapshot", "fssnap",
+    "reclaim",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4330,6 +4331,7 @@ fn dispatch(line: &str) {
         "audit" => cmd_audit(args),
         "namespace" | "ns" => cmd_namespace(args),
         "fssnapshot" | "fssnap" => cmd_fssnapshot(args),
+        "reclaim" => cmd_reclaim(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -10724,6 +10726,79 @@ fn cmd_fssnapshot(args: &str) {
     }
 }
 
+/// `reclaim` — disk space reclamation management.
+///
+/// Subcommands:
+///   run          Force a reclamation pass now
+///   status       Show reclamation stats and config
+///   enable/disable  Toggle auto-reclamation
+///   watermark HIGH LOW  Set trigger/stop thresholds
+fn cmd_reclaim(args: &str) {
+    use crate::fs::reclaim;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.first().copied().unwrap_or("status") {
+        "run" | "--run" => {
+            shell_println!("Running space reclamation...");
+            match reclaim::run() {
+                Some(r) => {
+                    shell_println!("Reclamation complete:");
+                    shell_println!("  Cache flushed:    {} bytes", r.cache_freed);
+                    shell_println!("  CAS GC:           {} blobs, {} bytes", r.cas_gc_blobs, r.cas_gc_bytes);
+                    shell_println!("  Tmpwatch cleaned: {} files", r.tmpwatch_cleaned);
+                    shell_println!("  Trash purged:     {} items", r.trash_purged);
+                    shell_println!("  Journal flushed:  {} entries", r.journal_trimmed);
+                    shell_println!("  Total freed:      ~{} bytes", r.total_freed);
+                    shell_println!("  Disk usage after: {}%", r.usage_after);
+                }
+                None => shell_println!("Reclamation already running or disabled."),
+            }
+        }
+        "status" | "stats" => {
+            let s = reclaim::stats();
+            let (hi, lo) = reclaim::watermarks();
+            let p = reclaim::phases();
+            shell_println!("Space reclamation: {}", if reclaim::is_enabled() { "enabled" } else { "disabled" });
+            shell_println!("  Watermarks:    high={}% low={}%", hi, lo);
+            shell_println!("  Triggers:      {}", s.trigger_count);
+            shell_println!("  Total freed:   {} bytes", s.total_bytes_freed);
+            shell_println!("  CAS blobs:     {}", s.total_cas_blobs);
+            shell_println!("  Tmpwatch files:{}", s.total_tmpwatch_files);
+            shell_println!("  Trash items:   {}", s.total_trash_items);
+            shell_println!("  Journal ents:  {}", s.total_journal_entries);
+            shell_println!("  Active:        {}", s.active);
+            shell_println!("  Phases: cache={} cas={} tmp={} trash={} journal={}",
+                p.cache, p.cas_gc, p.tmpwatch, p.trash, p.journal);
+        }
+        "enable" => {
+            reclaim::set_enabled(true);
+            shell_println!("Reclamation enabled.");
+        }
+        "disable" => {
+            reclaim::set_enabled(false);
+            shell_println!("Reclamation disabled.");
+        }
+        "watermark" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: reclaim watermark HIGH LOW  (e.g., 90 80)");
+                return;
+            }
+            let hi = parts[1].parse::<u64>().unwrap_or(90);
+            let lo = parts[2].parse::<u64>().unwrap_or(80);
+            if lo >= hi {
+                shell_println!("Error: LOW must be < HIGH");
+                return;
+            }
+            reclaim::set_high_watermark(hi);
+            reclaim::set_low_watermark(lo);
+            shell_println!("Watermarks set: high={}% low={}%", hi, lo);
+        }
+        _ => {
+            shell_println!("Usage: reclaim [run|status|enable|disable|watermark HIGH LOW]");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -15915,7 +15990,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

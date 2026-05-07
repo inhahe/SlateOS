@@ -3115,6 +3115,7 @@ const COMMANDS: &[&str] = &[
     "tag",
     "diskuse",
     "fshealth",
+    "fswatch",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4348,6 +4349,7 @@ fn dispatch(line: &str) {
         "tag" => cmd_tag(args),
         "diskuse" => cmd_diskuse(args),
         "fshealth" => cmd_fshealth(args),
+        "fswatch" => cmd_fswatch(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -12123,6 +12125,160 @@ fn cmd_fshealth(_args: &str) {
     }
 }
 
+/// `fswatch` — create and read filesystem watches.
+///
+/// Subcommands:
+///   fswatch <path>                 — create watch and drain events
+///   fswatch create <path> [mask]   — create a watch (returns ID)
+///   fswatch read <id> [count]      — read events from a watch
+///   fswatch close <id>             — close a watch
+///   fswatch pending <id>           — show pending event count
+fn cmd_fswatch(args: &str) {
+    use crate::fs::notify;
+
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    let sub = parts.first().copied().unwrap_or("");
+    let rest = if parts.len() > 1 { parts[1].trim() } else { "" };
+
+    match sub {
+        "create" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let path = tok.first().copied().unwrap_or("");
+            if path.is_empty() {
+                shell_println!("Usage: fswatch create <path> [mask]");
+                shell_println!("  Masks: create,delete,modify,rename,metadata,all (default: all)");
+                return;
+            }
+
+            let mask_str = if tok.len() > 1 { tok[1].trim() } else { "all" };
+            let mask = parse_event_mask(mask_str);
+            let recursive = true;
+
+            match notify::create_watch(path, mask, recursive) {
+                Ok(id) => shell_println!("Watch created: id={} path={}", id, path),
+                Err(e) => shell_println!("fswatch create: {:?}", e),
+            }
+        }
+        "read" => {
+            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+            let id_str = tok.first().copied().unwrap_or("");
+            let count_str = if tok.len() > 1 { tok[1].trim() } else { "20" };
+
+            if id_str.is_empty() {
+                shell_println!("Usage: fswatch read <id> [count]");
+                return;
+            }
+
+            let id: u64 = match id_str.parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid watch ID: {}", id_str); return; }
+            };
+            let count: usize = count_str.parse().unwrap_or(20);
+
+            match notify::read_events(id, count) {
+                Ok(events) => {
+                    if events.is_empty() {
+                        shell_println!("(no pending events)");
+                    } else {
+                        for ev in &events {
+                            let kind = match ev.event_type {
+                                notify::FsEventType::Created => "CREATE",
+                                notify::FsEventType::Deleted => "DELETE",
+                                notify::FsEventType::Modified => "MODIFY",
+                                notify::FsEventType::Renamed => "RENAME",
+                                notify::FsEventType::MetadataChanged => "META",
+                                notify::FsEventType::Accessed => "ACCESS",
+                                notify::FsEventType::Overflow => "OVERFLOW",
+                            };
+                            if let Some(ref new) = ev.new_path {
+                                shell_println!("  {:8} {} -> {}", kind, ev.path, new);
+                            } else {
+                                shell_println!("  {:8} {}", kind, ev.path);
+                            }
+                        }
+                    }
+                }
+                Err(e) => shell_println!("fswatch read: {:?}", e),
+            }
+        }
+        "close" => {
+            if rest.is_empty() {
+                shell_println!("Usage: fswatch close <id>");
+                return;
+            }
+            let id: u64 = match rest.parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid watch ID: {}", rest); return; }
+            };
+            match notify::close_watch(id) {
+                Ok(()) => shell_println!("Watch {} closed", id),
+                Err(e) => shell_println!("fswatch close: {:?}", e),
+            }
+        }
+        "pending" => {
+            if rest.is_empty() {
+                shell_println!("Usage: fswatch pending <id>");
+                return;
+            }
+            let id: u64 = match rest.parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid watch ID: {}", rest); return; }
+            };
+            match notify::pending_count(id) {
+                Ok(n) => shell_println!("{} event(s) pending", n),
+                Err(e) => shell_println!("fswatch pending: {:?}", e),
+            }
+        }
+        _ => {
+            // Default: if arg looks like a path, create watch + drain events.
+            if !sub.is_empty() && (sub.starts_with('/') || sub == ".") {
+                let mask = notify::FsEventMask::ALL_CHANGES;
+                match notify::create_watch(sub, mask, true) {
+                    Ok(id) => {
+                        shell_println!("Watch {} on '{}' (use 'fswatch read {}' to check events)", id, sub, id);
+                    }
+                    Err(e) => shell_println!("fswatch: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: fswatch <path|create|read|close|pending>");
+                shell_println!();
+                shell_println!("Quick:   fswatch /path        Create a watch on path");
+                shell_println!();
+                shell_println!("Subcommands:");
+                shell_println!("  create <path> [mask]   Create a watch (returns ID)");
+                shell_println!("  read <id> [count]      Read events from a watch");
+                shell_println!("  close <id>             Close a watch");
+                shell_println!("  pending <id>           Show pending event count");
+                shell_println!();
+                shell_println!("Masks: create,delete,modify,rename,metadata,all");
+            }
+        }
+    }
+}
+
+/// Parse a comma-separated event mask string.
+fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
+    use crate::fs::notify::FsEventMask;
+    let mut mask = FsEventMask(0);
+    for part in s.split(',') {
+        match part.trim() {
+            "create" => mask = FsEventMask(mask.0 | FsEventMask::CREATE.0),
+            "delete" => mask = FsEventMask(mask.0 | FsEventMask::DELETE.0),
+            "modify" => mask = FsEventMask(mask.0 | FsEventMask::MODIFY.0),
+            "rename" => mask = FsEventMask(mask.0 | FsEventMask::RENAME.0),
+            "metadata" | "meta" => mask = FsEventMask(mask.0 | FsEventMask::METADATA.0),
+            "access" => mask = FsEventMask(mask.0 | FsEventMask::ACCESS.0),
+            "all" => mask = FsEventMask::ALL_CHANGES,
+            _ => {}
+        }
+    }
+    if mask.0 == 0 {
+        FsEventMask::ALL_CHANGES
+    } else {
+        mask
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -17381,7 +17537,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -3342,7 +3342,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4684,6 +4684,7 @@ fn dispatch(line: &str) {
         "display" => cmd_display(args),
         "vdesktop" | "vd" => cmd_vdesktop(args),
         "keylayout" | "kbl" => cmd_keylayout(args),
+        "screenshot" | "scap" => cmd_screenshot(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -19751,6 +19752,36 @@ fn cmd_keylayout(args: &str) {
     }
 }
 
+/// `screenshot` / `scap` — screen capture.
+fn cmd_screenshot(args: &str) {
+    use crate::fs::screenshot;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "full" | "screen" => { let w = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1920); let h = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1080); match screenshot::capture_full(w, h) { Ok(id) => shell_println!("Captured full screen #{} ({}x{})", id, w, h), Err(e) => shell_println!("Error: {:?}", e), } }
+        "window" | "win" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); let w = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(800); let h = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(600); if wid == 0 { shell_println!("Usage: scap window <window_id> [w] [h]"); } else { match screenshot::capture_window(wid, w, h) { Ok(id) => shell_println!("Captured window #{} ({}x{})", id, w, h), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "region" | "rect" => { let x = parts.get(1).and_then(|s| s.parse::<u32>().ok()); let y = parts.get(2).and_then(|s| s.parse::<u32>().ok()); let w = parts.get(3).and_then(|s| s.parse::<u32>().ok()); let h = parts.get(4).and_then(|s| s.parse::<u32>().ok()); if let (Some(x), Some(y), Some(w), Some(h)) = (x, y, w, h) { match screenshot::capture_region(x, y, w, h) { Ok(id) => shell_println!("Captured region #{} ({}x{} at {},{})", id, w, h, x, y), Err(e) => shell_println!("Error: {:?}", e), } } else { shell_println!("Usage: scap region <x> <y> <w> <h>"); } }
+        "monitor" | "mon" => { let mid = parts.get(1).copied().unwrap_or(""); let w = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1920); let h = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1080); if mid.is_empty() { shell_println!("Usage: scap monitor <id> [w] [h]"); } else { match screenshot::capture_monitor(mid, w, h) { Ok(id) => shell_println!("Captured monitor '{}' #{}", mid, id), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "get" => { let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); if let Some(s) = screenshot::get(id) { shell_println!("#{}: {} {}x{} {} {}", s.id, s.kind.label(), s.width, s.height, s.format.label(), s.path); } else { shell_println!("Screenshot #{} not found", id); } }
+        "history" | "list" | "ls" => { let shots = screenshot::history(); if shots.is_empty() { shell_println!("No screenshots"); } else { for s in &shots { shell_println!("#{}: {} {}x{} {}", s.id, s.kind.label(), s.width, s.height, s.path); } } }
+        "recent" => { let n = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(5); let shots = screenshot::recent(n); for s in &shots { shell_println!("#{}: {} {}x{} {}", s.id, s.kind.label(), s.width, s.height, s.path); } }
+        "delete" | "rm" => { let id = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); match screenshot::delete(id) { Ok(()) => shell_println!("Deleted #{}", id), Err(e) => shell_println!("Error: {:?}", e), } }
+        "clear" => { screenshot::clear_history(); shell_println!("History cleared"); }
+        "dir" | "savedir" => { let dir = parts.get(1).copied().unwrap_or(""); if dir.is_empty() { shell_println!("Save dir: {}", screenshot::config().save_dir); } else { match screenshot::set_save_dir(dir) { Ok(()) => shell_println!("Save dir: {}", dir), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "format" | "fmt" => { if let Some(f) = parts.get(1).and_then(|s| screenshot::ImageFormat::from_str(s)) { screenshot::set_format(f); shell_println!("Format: {}", f.label()); } else { shell_println!("Format: {} (png/jpeg/bmp/webp)", screenshot::config().format.label()); } }
+        "quality" => { if let Some(q) = parts.get(1).and_then(|s| s.parse::<u8>().ok()) { screenshot::set_jpeg_quality(q); shell_println!("JPEG quality: {}", q.clamp(1, 100)); } else { shell_println!("JPEG quality: {}", screenshot::config().jpeg_quality); } }
+        "cursor" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { screenshot::set_include_cursor(true); shell_println!("Cursor: on"); } "off"|"false" => { screenshot::set_include_cursor(false); shell_println!("Cursor: off"); } _ => { shell_println!("Cursor: {}", screenshot::config().include_cursor); } } }
+        "sound" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { screenshot::set_play_sound(true); shell_println!("Sound: on"); } "off"|"false" => { screenshot::set_play_sound(false); shell_println!("Sound: off"); } _ => { shell_println!("Sound: {}", screenshot::config().play_sound); } } }
+        "delay" => { if let Some(d) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) { screenshot::set_delay(d); shell_println!("Delay: {}s", d); } else { shell_println!("Delay: {}s", screenshot::config().delay_seconds); } }
+        "clipboard" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { screenshot::set_copy_to_clipboard(true); shell_println!("Clipboard: on"); } "off"|"false" => { screenshot::set_copy_to_clipboard(false); shell_println!("Clipboard: off"); } _ => { shell_println!("Clipboard: {}", screenshot::config().copy_to_clipboard); } } }
+        "init" => { screenshot::init_defaults(); shell_println!("Screenshot defaults initialized"); }
+        "test" => { match screenshot::self_test() { Ok(()) => shell_println!("All screenshot tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (hc, cc) = screenshot::stats(); shell_println!("History:{} Captures:{}", hc, cc); }
+        "reset" => { screenshot::clear_all(); screenshot::reset_stats(); shell_println!("Screenshot reset"); }
+        _ => { shell_println!("screenshot: full/window/region/monitor/get/history/recent/delete/clear/dir/format/quality/cursor/sound/delay/clipboard/init/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27280,7 +27311,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

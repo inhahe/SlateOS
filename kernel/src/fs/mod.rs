@@ -107,6 +107,7 @@ pub mod readdir_plus;
 pub mod recent;
 pub mod reclaim;
 pub mod rundialog;
+pub mod screenshot;
 pub mod search;
 pub mod sealing;
 pub mod sidebar;

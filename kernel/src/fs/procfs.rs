@@ -179,6 +179,7 @@ const ROOT_FILES: &[&str] = &[
     "display",
     "vdesktop",
     "keylayout",
+    "screenshot",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3451,6 +3452,32 @@ fn gen_keylayout() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_screenshot() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (hc, cc) = super::screenshot::stats();
+    let cfg = super::screenshot::config();
+
+    out.push_str("Screenshot\n");
+    out.push_str("==========\n\n");
+    out.push_str(&format!("History:    {}\n", hc));
+    out.push_str(&format!("Captures:   {}\n", cc));
+    out.push_str(&format!("Save dir:   {}\n", if cfg.save_dir.is_empty() { "(default)" } else { &cfg.save_dir }));
+    out.push_str(&format!("Format:     {}\n", cfg.format.label()));
+    out.push_str(&format!("Cursor:     {}\n", cfg.include_cursor));
+    out.push_str(&format!("Clipboard:  {}\n", cfg.copy_to_clipboard));
+    out.push_str(&format!("Delay:      {}s\n\n", cfg.delay_seconds));
+
+    let shots = super::screenshot::recent(10);
+    for s in &shots {
+        out.push_str(&format!("#{}: {} {}x{} {}\n",
+            s.id, s.kind.label(), s.width, s.height, s.path));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3795,6 +3822,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "display" => Ok(gen_display()),
         "vdesktop" => Ok(gen_vdesktop()),
         "keylayout" => Ok(gen_keylayout()),
+        "screenshot" => Ok(gen_screenshot()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

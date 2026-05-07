@@ -185,6 +185,7 @@ const ROOT_FILES: &[&str] = &[
     "netindicator",
     "winsnap",
     "colorpicker",
+    "cursorsettings",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3639,6 +3640,41 @@ fn gen_colorpicker() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_cursorsettings() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let cfg = super::cursorsettings::config();
+    let (theme_count, changes) = super::cursorsettings::stats();
+
+    out.push_str("Cursor Settings\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Active theme:     {}\n", cfg.active_theme));
+    out.push_str(&format!("Cursor size:      {}px\n", cfg.cursor_size));
+    out.push_str(&format!("Speed:            {}\n", cfg.speed));
+    out.push_str(&format!("Accel profile:    {}\n", cfg.accel_profile.label()));
+    out.push_str(&format!("Button layout:    {}\n", cfg.button_layout.label()));
+    out.push_str(&format!("Double-click:     {}ms\n", cfg.double_click_ms));
+    out.push_str(&format!("Scroll speed:     {}\n", cfg.scroll_speed));
+    out.push_str(&format!("Natural scroll:   {}\n", cfg.natural_scroll));
+    out.push_str(&format!("Trail:            {}{}\n",
+        cfg.show_trail,
+        if cfg.show_trail { alloc::format!(" (len={})", cfg.trail_length) } else { String::new() }));
+    out.push_str(&format!("Locate on Ctrl:   {}\n", cfg.locate_on_ctrl));
+    out.push_str(&format!("Hide while typing:{}\n", cfg.hide_while_typing));
+    out.push_str(&format!("Themes:           {}\n", theme_count));
+    out.push_str(&format!("Changes:          {}\n\n", changes));
+
+    let themes = super::cursorsettings::list_themes();
+    for t in &themes {
+        out.push_str(&format!("{}: {} ({}px, {} cursors{})\n",
+            t.name, t.description, t.base_size, t.cursors.len(),
+            if t.builtin { ", builtin" } else { "" }));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3989,6 +4025,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "netindicator" => Ok(gen_netindicator()),
         "winsnap" => Ok(gen_winsnap()),
         "colorpicker" => Ok(gen_colorpicker()),
+        "cursorsettings" => Ok(gen_cursorsettings()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

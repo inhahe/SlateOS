@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4793,6 +4793,7 @@ fn dispatch(line: &str) {
         "kbsettings" | "kbs" => cmd_kbsettings(args),
         "detailcols" | "dcols" => cmd_detailcols(args),
         "partmgr" | "pmgr" => cmd_partmgr(args),
+        "locale" | "lcl" => cmd_locale(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20162,6 +20163,35 @@ fn cmd_partmgr(args: &str) {
     }
 }
 
+/// `locale` / `lcl` — locale and regional settings.
+fn cmd_locale(args: &str) {
+    use crate::fs::locale;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "lang" => { let tag = parts.get(1).copied().unwrap_or(""); if tag.is_empty() { shell_println!("Language: {}", locale::language()); } else { match locale::set_language(tag) { Ok(()) => shell_println!("Language: {}", tag), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "fallback" => { let tag = parts.get(1).copied().unwrap_or(""); if tag.is_empty() { shell_println!("Fallback: {}", locale::config().fallback_language); } else { locale::set_fallback_language(tag); shell_println!("Fallback: {}", tag); } }
+        "region" => { let tag = parts.get(1).copied().unwrap_or(""); if tag.is_empty() { shell_println!("Region: {}", locale::config().region_format); } else { locale::set_region_format(tag); shell_println!("Region: {}", tag); } }
+        "number" => { if let Some(fmt) = parts.get(1).and_then(|s| locale::NumberSeparator::from_str(s)) { locale::set_number_format(fmt); shell_println!("Numbers: {}", fmt.label()); } else { shell_println!("Numbers: {} (commadot/dotcomma/spacecomma/apostrophedot)", locale::config().number_format.label()); } }
+        "currency" => { let sym = parts.get(1).copied().unwrap_or(""); let pos = parts.get(2).copied().unwrap_or("before"); if sym.is_empty() { let cfg = locale::config(); shell_println!("Currency: {} ({})", cfg.currency_symbol, if cfg.currency_before {"before"} else {"after"}); } else { locale::set_currency(sym, pos != "after"); shell_println!("Currency: {} ({})", sym, pos); } }
+        "date" => { if let Some(ord) = parts.get(1).and_then(|s| locale::DateOrder::from_str(s)) { locale::set_date_order(ord); shell_println!("Date: {}", ord.label()); } else { shell_println!("Date: {} (mdy/dmy/ymd)", locale::config().date_order.label()); } }
+        "datesep" => { if let Some(sep) = parts.get(1).and_then(|s| locale::DateSeparator::from_str(s)) { locale::set_date_separator(sep); shell_println!("Date separator: {}", sep.label()); } else { shell_println!("Date separator: {} (slash/dash/dot)", locale::config().date_separator.label()); } }
+        "time" => { if let Some(fmt) = parts.get(1).and_then(|s| locale::TimeFormat::from_str(s)) { locale::set_time_format(fmt); shell_println!("Time: {}", fmt.label()); } else { shell_println!("Time: {} (12/24)", locale::config().time_format.label()); } }
+        "firstday" => { if let Some(d) = parts.get(1).and_then(|s| locale::FirstDay::from_str(s)) { locale::set_first_day(d); shell_println!("First day: {}", d.label()); } else { shell_println!("First day: {} (sun/mon/sat)", locale::config().first_day.label()); } }
+        "measure" => { if let Some(m) = parts.get(1).and_then(|s| locale::MeasurementSystem::from_str(s)) { locale::set_measurement(m); shell_println!("Measurement: {}", m.label()); } else { shell_println!("Measurement: {} (metric/imperial)", locale::config().measurement.label()); } }
+        "tz" | "timezone" => { let id = parts.get(1).copied().unwrap_or(""); if id.is_empty() { let cfg = locale::config(); shell_println!("Timezone: {} (UTC{:+})", cfg.timezone, locale::timezone_offset_minutes() as f32 / 60.0); } else { match locale::set_timezone(id) { Ok(()) => shell_println!("Timezone: {} (UTC{:+})", id, locale::timezone_offset_minutes() as f32 / 60.0), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "paper" => { match parts.get(1).copied().unwrap_or("") { "a4" | "A4" => { locale::set_paper_a4(true); shell_println!("Paper: A4"); } "letter" | "Letter" => { locale::set_paper_a4(false); shell_println!("Paper: Letter"); } _ => { shell_println!("Paper: {} (a4/letter)", if locale::config().paper_a4 {"A4"} else {"Letter"}); } } }
+        "langs" | "languages" => { let langs = locale::list_languages(); if langs.is_empty() { shell_println!("No languages"); } else { for l in &langs { shell_println!("  {} — {} ({})", l.tag, l.native_name, l.english_name); } } }
+        "tzlist" | "timezones" => { let tzs = locale::list_timezones(); if tzs.is_empty() { shell_println!("No timezones"); } else { for t in &tzs { shell_println!("  {} — {} UTC{:+}{}", t.id, t.display_name, t.utc_offset_min as f32 / 60.0, if t.observes_dst {" (DST)"} else {""}); } } }
+        "show" | "config" => { let cfg = locale::config(); shell_println!("Lang:{} Region:{} Num:{} Date:{}{} Time:{} Day1:{} Measure:{} TZ:{} Paper:{} Currency:{}", cfg.language, cfg.region_format, cfg.number_format.label(), cfg.date_order.label(), cfg.date_separator.label(), cfg.time_format.label(), cfg.first_day.label(), cfg.measurement.label(), cfg.timezone, if cfg.paper_a4 {"A4"} else {"Letter"}, cfg.currency_symbol); }
+        "init" => { locale::init_defaults(); shell_println!("Default locale settings initialized"); }
+        "test" => { match locale::self_test() { Ok(()) => shell_println!("All locale tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (lc, tc, changes) = locale::stats(); shell_println!("Languages:{} Timezones:{} Changes:{}", lc, tc, changes); }
+        "reset" => { locale::clear_all(); locale::reset_stats(); shell_println!("Locale settings reset"); }
+        _ => { shell_println!("locale: lang/fallback/region/number/currency/date/datesep/time/firstday/measure/tz/paper/langs/tzlist/show/init/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27691,7 +27721,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

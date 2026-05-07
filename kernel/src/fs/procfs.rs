@@ -189,6 +189,7 @@ const ROOT_FILES: &[&str] = &[
     "kbsettings",
     "detailcols",
     "partmgr",
+    "locale",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3770,6 +3771,34 @@ fn gen_partmgr() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_locale() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let cfg = super::locale::config();
+    let (lang_count, tz_count, changes) = super::locale::stats();
+
+    out.push_str("Locale Settings\n");
+    out.push_str("===============\n\n");
+    out.push_str(&format!("Language:      {}\n", cfg.language));
+    out.push_str(&format!("Fallback:      {}\n", cfg.fallback_language));
+    out.push_str(&format!("Region format: {}\n", cfg.region_format));
+    out.push_str(&format!("Numbers:       {}\n", cfg.number_format.label()));
+    out.push_str(&format!("Currency:      {}{}\n", cfg.currency_symbol,
+        if cfg.currency_before { " (before)" } else { " (after)" }));
+    out.push_str(&format!("Date:          {} ({})\n", cfg.date_order.label(), cfg.date_separator.label()));
+    out.push_str(&format!("Time:          {}\n", cfg.time_format.label()));
+    out.push_str(&format!("First day:     {}\n", cfg.first_day.label()));
+    out.push_str(&format!("Measurement:   {}\n", cfg.measurement.label()));
+    out.push_str(&format!("Timezone:      {} (UTC{:+})\n", cfg.timezone, super::locale::timezone_offset_minutes() as f32 / 60.0));
+    out.push_str(&format!("Paper:         {}\n", if cfg.paper_a4 { "A4" } else { "Letter" }));
+    out.push_str(&format!("Languages:     {}\n", lang_count));
+    out.push_str(&format!("Timezones:     {}\n", tz_count));
+    out.push_str(&format!("Changes:       {}\n", changes));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4124,6 +4153,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kbsettings" => Ok(gen_kbsettings()),
         "detailcols" => Ok(gen_detailcols()),
         "partmgr" => Ok(gen_partmgr()),
+        "locale" => Ok(gen_locale()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

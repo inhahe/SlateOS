@@ -134,9 +134,9 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   or (b) adding refcounted handle wrappers to the fd table.  Shell pipelines
   (cmd1 | cmd2) will need this eventually.
 
-- posix_spawn/execve use a static 512 KiB buffer for ELF loading.  Binaries
-  larger than 512 KiB will fail.  Fix: use mmap to allocate a dynamic buffer,
-  or add a kernel spawn-from-path syscall that reads the ELF internally.
+- (FIXED) posix_spawn/execve now use mmap for dynamic ELF buffer allocation.
+  stat() gets file size, mmap allocates exactly that, munmap frees after
+  spawn/exec.  No longer limited to 512 KiB.
 
 ## Cross-Zone Bug Reports
 

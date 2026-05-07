@@ -8,38 +8,21 @@
 //! Our kernel's `SYS_PROCESS_SPAWN` and `SYS_PROCESS_EXEC` take raw
 //! ELF data in memory, not file paths.  This module bridges the gap:
 //!
-//! 1. Read the ELF binary from the filesystem via `SYS_FS_READ_FILE`
-//! 2. Pass the raw bytes to `SYS_PROCESS_SPAWN` or `SYS_PROCESS_EXEC`
+//! 1. Stat the file to determine its size
+//! 2. Allocate a buffer via mmap
+//! 3. Read the ELF binary from the filesystem via `SYS_FS_READ_FILE`
+//! 4. Pass the raw bytes to `SYS_PROCESS_SPAWN` or `SYS_PROCESS_EXEC`
+//! 5. Free the buffer via munmap
 //!
 //! ## Limitations
 //!
-//! - Maximum ELF binary size is 512 KiB (static buffer, no heap).
 //! - `posix_spawn` file_actions and attrp are ignored (not yet implemented).
 //! - `argv` and `envp` are not yet passed to the child process.
 
 use crate::errno;
+use crate::mman;
 use crate::syscall::*;
 use crate::types::*;
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Maximum ELF binary size we can load (512 KiB).
-///
-/// This is a static buffer limitation.  Larger binaries would need
-/// mmap-based loading, which requires the mmap syscall to be functional.
-const MAX_ELF_SIZE: usize = 512 * 1024;
-
-// ---------------------------------------------------------------------------
-// Static ELF buffer
-// ---------------------------------------------------------------------------
-
-/// Static buffer for reading ELF binaries from the filesystem.
-///
-/// Shared between `posix_spawn` and `execve`.  Not thread-safe —
-/// requires synchronization when threading is added.
-static mut ELF_BUF: [u8; MAX_ELF_SIZE] = [0u8; MAX_ELF_SIZE];
 
 // ---------------------------------------------------------------------------
 // posix_spawn
@@ -77,47 +60,31 @@ pub extern "C" fn posix_spawn(
 
     let path_len = unsafe { crate::file::c_strlen_pub(path) };
 
-    // Read the ELF binary into our static buffer.
-    let elf_len = unsafe {
-        let buf_ptr = core::ptr::addr_of_mut!(ELF_BUF);
-        let ret = syscall4(
-            SYS_FS_READ_FILE,
-            path as u64,
-            path_len as u64,
-            (*buf_ptr).as_mut_ptr() as u64,
-            MAX_ELF_SIZE as u64,
-        );
-
-        if ret < 0 {
-            // Translate native error to POSIX errno value.
-            return native_to_posix_err(ret);
-        }
-        ret as usize
+    // Load the ELF binary.
+    let (buf_ptr, elf_len) = match load_elf(path, path_len) {
+        Ok(result) => result,
+        Err(err) => return err,
     };
 
-    if elf_len == 0 {
-        return errno::ENOEXEC;
+    // Spawn the process with the ELF data.
+    let ret = syscall4(
+        SYS_PROCESS_SPAWN,
+        buf_ptr as u64,
+        elf_len as u64,
+        path as u64,      // Use path as the process name.
+        path_len as u64,
+    );
+
+    // Free the ELF buffer.
+    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), elf_len);
+
+    if ret < 0 {
+        return native_to_posix_err(ret);
     }
 
-    // Spawn the process with the ELF data.
-    unsafe {
-        let buf_ptr = core::ptr::addr_of_mut!(ELF_BUF);
-        let ret = syscall4(
-            SYS_PROCESS_SPAWN,
-            (*buf_ptr).as_ptr() as u64,
-            elf_len as u64,
-            path as u64,      // Use path as the process name.
-            path_len as u64,
-        );
-
-        if ret < 0 {
-            return native_to_posix_err(ret);
-        }
-
-        // Store child PID if requested.
-        if !pid.is_null() {
-            *pid = ret as PidT;
-        }
+    // Store child PID if requested.
+    if !pid.is_null() {
+        unsafe { *pid = ret as PidT; }
     }
 
     0
@@ -163,48 +130,93 @@ pub extern "C" fn execve(
 
     let path_len = unsafe { crate::file::c_strlen_pub(path) };
 
-    // Read the ELF binary into our static buffer.
-    let elf_len = unsafe {
-        let buf_ptr = core::ptr::addr_of_mut!(ELF_BUF);
-        let ret = syscall4(
-            SYS_FS_READ_FILE,
-            path as u64,
-            path_len as u64,
-            (*buf_ptr).as_mut_ptr() as u64,
-            MAX_ELF_SIZE as u64,
-        );
-
-        if ret < 0 {
-            let _ = errno::translate(ret);
+    // Load the ELF binary.
+    let (buf_ptr, elf_len) = match load_elf(path, path_len) {
+        Ok(result) => result,
+        Err(err) => {
+            errno::set_errno(err);
             return -1;
         }
-        ret as usize
     };
 
-    if elf_len == 0 {
-        errno::set_errno(errno::ENOEXEC);
-        return -1;
-    }
-
     // Replace the current process image.
-    unsafe {
-        let buf_ptr = core::ptr::addr_of_mut!(ELF_BUF);
-        let ret = syscall2(
-            SYS_PROCESS_EXEC,
-            (*buf_ptr).as_ptr() as u64,
-            elf_len as u64,
-        );
+    let ret = syscall2(
+        SYS_PROCESS_EXEC,
+        buf_ptr as u64,
+        elf_len as u64,
+    );
 
-        // If we get here, exec failed.
-        let _ = errno::translate(ret);
-    }
-
+    // If we get here, exec failed.  Free the buffer.
+    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), elf_len);
+    let _ = errno::translate(ret);
     -1
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Load an ELF binary from the filesystem into an mmap'd buffer.
+///
+/// Returns `(buffer_ptr, file_size)` on success, or a POSIX error
+/// number on failure.
+fn load_elf(path: *const u8, path_len: usize) -> Result<(*mut u8, usize), i32> {
+    // Stat the file to get its size.
+    let mut stat_buf = crate::stat::Stat::zeroed();
+    let stat_ret = syscall3(
+        SYS_FS_STAT,
+        path as u64,
+        path_len as u64,
+        (&raw mut stat_buf) as u64,
+    );
+
+    if stat_ret < 0 {
+        return Err(native_to_posix_err(stat_ret));
+    }
+
+    let file_size = stat_buf.st_size as usize;
+    if file_size == 0 {
+        return Err(errno::ENOEXEC);
+    }
+
+    // Allocate a buffer via mmap.
+    let buf = mman::mmap(
+        core::ptr::null_mut(),
+        file_size,
+        mman::PROT_READ | mman::PROT_WRITE,
+        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+
+    if buf == mman::MAP_FAILED {
+        return Err(errno::ENOMEM);
+    }
+
+    let buf_ptr = buf.cast::<u8>();
+
+    // Read the ELF binary into the buffer.
+    let read_ret = syscall4(
+        SYS_FS_READ_FILE,
+        path as u64,
+        path_len as u64,
+        buf_ptr as u64,
+        file_size as u64,
+    );
+
+    if read_ret < 0 {
+        let _ = mman::munmap(buf, file_size);
+        return Err(native_to_posix_err(read_ret));
+    }
+
+    let bytes_read = read_ret as usize;
+    if bytes_read == 0 {
+        let _ = mman::munmap(buf, file_size);
+        return Err(errno::ENOEXEC);
+    }
+
+    Ok((buf_ptr, bytes_read))
+}
 
 /// Convert a native kernel error code to a POSIX errno value.
 ///

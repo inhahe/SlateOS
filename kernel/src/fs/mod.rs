@@ -100,6 +100,7 @@ pub mod locale;
 pub mod lz4;
 pub mod memfs;
 pub mod mime;
+pub mod mmtune;
 pub mod mount_ns;
 pub mod netindicator;
 pub mod notifcenter;

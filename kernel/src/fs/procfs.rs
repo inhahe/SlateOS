@@ -203,6 +203,7 @@ const ROOT_FILES: &[&str] = &[
     "timezone",
     "autostart",
     "schedtune",
+    "mmtune",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4358,6 +4359,48 @@ fn gen_schedtune() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_mmtune() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, active_count, tradeoff_count, ops) = super::mmtune::stats();
+
+    out.push_str("Memory Management Tuning\n");
+    out.push_str("========================\n\n");
+    out.push_str(&format!("Profiles:      {}\n", total));
+    out.push_str(&format!("Active:        {}\n", active_count));
+    out.push_str(&format!("Tradeoffs:     {}\n", tradeoff_count));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    if let Ok(a) = super::mmtune::active_profile() {
+        out.push_str(&format!("\nActive: {} ({:?})\n", a.name, a.workload));
+        out.push_str(&format!("  Allocator:   {:?}\n", a.alloc_model));
+        out.push_str(&format!("  Reclaim:     {:?}\n", a.reclaim));
+        out.push_str(&format!("  Overcommit:  {:?} ({}%)\n", a.overcommit, a.overcommit_ratio));
+        out.push_str(&format!("  Huge pages:  {:?}\n", a.huge_pages));
+        out.push_str(&format!("  Compaction:  {:?}\n", a.compact_level));
+        out.push_str(&format!("  Swappiness:  {}\n", a.swappiness));
+        out.push_str(&format!("  Dirty ratio: {}/{}\n", a.dirty_ratio, a.dirty_bg_ratio));
+        out.push_str(&format!("  ZRAM:        {}\n", a.zram_enabled));
+    }
+
+    let profiles = super::mmtune::list_profiles();
+    if !profiles.is_empty() {
+        out.push_str(&format!("\n{:<4} {:<25} {:<12} {:<12} {:<12} {}\n",
+            "ID", "NAME", "WORKLOAD", "ALLOCATOR", "RECLAIM", "ACTIVE"));
+        for p in &profiles {
+            out.push_str(&format!("{:<4} {:<25} {:<12} {:<12} {:<12} {}\n",
+                p.id, p.name,
+                format!("{:?}", p.workload),
+                format!("{:?}", p.alloc_model),
+                format!("{:?}", p.reclaim),
+                p.active));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4726,6 +4769,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "timezone" => Ok(gen_timezone()),
         "autostart" => Ok(gen_autostart()),
         "schedtune" => Ok(gen_schedtune()),
+        "mmtune" => Ok(gen_mmtune()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

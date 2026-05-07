@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4807,6 +4807,7 @@ fn dispatch(line: &str) {
         "timezone" | "tz" => cmd_timezone(args),
         "autostart" | "astart" => cmd_autostart(args),
         "schedtune" | "stune" => cmd_schedtune(args),
+        "mmtune" | "mtune" => cmd_mmtune(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -21771,6 +21772,396 @@ fn cmd_schedtune(args: &str) {
     }
 }
 
+/// `mmtune` / `mtune` — memory management tuning settings.
+fn cmd_mmtune(args: &str) {
+    use crate::fs::mmtune;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "init" => {
+            mmtune::init_defaults();
+            shell_println!("Initialised default memory profiles.");
+        }
+        "list" | "ls" => {
+            let profiles = mmtune::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No memory profiles configured.");
+                return;
+            }
+            shell_println!("{:<4} {:<25} {:<12} {:<12} {:<12} {}",
+                "ID", "NAME", "WORKLOAD", "ALLOCATOR", "RECLAIM", "ACTIVE");
+            for p in &profiles {
+                shell_println!("{:<4} {:<25} {:<12} {:<12} {:<12} {}",
+                    p.id, p.name,
+                    format!("{:?}", p.workload),
+                    format!("{:?}", p.alloc_model),
+                    format!("{:?}", p.reclaim),
+                    p.active);
+            }
+        }
+        "active" | "show" => {
+            match mmtune::active_profile() {
+                Ok(a) => {
+                    shell_println!("Active: {} (id={})", a.name, a.id);
+                    shell_println!("  Workload:       {:?}", a.workload);
+                    shell_println!("  Allocator:      {:?}", a.alloc_model);
+                    shell_println!("  Reclaim:        {:?}", a.reclaim);
+                    shell_println!("  Overcommit:     {:?} ({}%)", a.overcommit, a.overcommit_ratio);
+                    shell_println!("  Huge pages:     {:?}", a.huge_pages);
+                    shell_println!("  Huge reserve:   {}", a.huge_page_reserve);
+                    shell_println!("  Compaction:     {:?}", a.compact_level);
+                    shell_println!("  Swappiness:     {}", a.swappiness);
+                    shell_println!("  Dirty ratio:    {}/{}", a.dirty_ratio, a.dirty_bg_ratio);
+                    shell_println!("  Dirty expire:   {} cs", a.dirty_expire_cs);
+                    shell_println!("  Cache pressure: {}", a.vfs_cache_pressure);
+                    shell_println!("  Min free:       {} KiB", a.min_free_kib);
+                    shell_println!("  ZRAM:           {} ({}%)", a.zram_enabled, a.zram_max_pct);
+                    shell_println!("  Zero on free:   {}", a.zero_on_free);
+                    shell_println!("  Per-CPU pages:  {}", a.per_cpu_pages);
+                    shell_println!("  NUMA interleave:{}", a.numa_interleave);
+                    shell_println!("  Stack pages:    {}", a.kernel_stack_pages);
+                    if a.requires_recompile {
+                        shell_println!("  ⚠ Requires recompile");
+                    }
+                    if a.requires_reboot {
+                        shell_println!("  ⚠ Requires reboot");
+                    }
+                }
+                Err(_) => shell_println!("No active profile."),
+            }
+        }
+        "get" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: mmtune get <id>"); return; }
+            };
+            match mmtune::get_profile(id) {
+                Ok(p) => {
+                    shell_println!("ID:            {}", p.id);
+                    shell_println!("Name:          {}", p.name);
+                    shell_println!("Workload:      {:?}", p.workload);
+                    shell_println!("Allocator:     {:?}", p.alloc_model);
+                    shell_println!("Reclaim:       {:?}", p.reclaim);
+                    shell_println!("Overcommit:    {:?} ({}%)", p.overcommit, p.overcommit_ratio);
+                    shell_println!("Huge pages:    {:?}", p.huge_pages);
+                    shell_println!("Compaction:    {:?}", p.compact_level);
+                    shell_println!("Swappiness:    {}", p.swappiness);
+                    shell_println!("Dirty:         {}/{}", p.dirty_ratio, p.dirty_bg_ratio);
+                    shell_println!("Cache press:   {}", p.vfs_cache_pressure);
+                    shell_println!("Min free:      {} KiB", p.min_free_kib);
+                    shell_println!("ZRAM:          {} ({}%)", p.zram_enabled, p.zram_max_pct);
+                    shell_println!("Zero free:     {}", p.zero_on_free);
+                    shell_println!("NUMA:          {}", p.numa_interleave);
+                    shell_println!("Built-in:      {}", p.builtin);
+                    shell_println!("Active:        {}", p.active);
+                    shell_println!("Recompile:     {}", p.requires_recompile);
+                    shell_println!("Reboot:        {}", p.requires_reboot);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "create" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: mmtune create <name> <workload> <allocator>");
+                shell_println!("Workloads: desktop, server, gaming, dev, lowmem, vmhost");
+                shell_println!("Allocators: buddy, slabbuddy, bitmap, zonebased");
+                return;
+            }
+            let name = parts[1];
+            let workload = match parts[2] {
+                "desktop" => mmtune::WorkloadType::Desktop,
+                "server" => mmtune::WorkloadType::Server,
+                "gaming" => mmtune::WorkloadType::Gaming,
+                "dev" | "development" => mmtune::WorkloadType::Development,
+                "lowmem" | "embedded" => mmtune::WorkloadType::LowMemory,
+                "vmhost" | "vm" => mmtune::WorkloadType::VmHost,
+                _ => { shell_println!("Unknown workload."); return; }
+            };
+            let alloc = match parts[3] {
+                "buddy" => mmtune::AllocModel::Buddy,
+                "slabbuddy" | "slab" => mmtune::AllocModel::SlabBuddy,
+                "bitmap" => mmtune::AllocModel::Bitmap,
+                "zonebased" | "zone" => mmtune::AllocModel::ZoneBased,
+                _ => { shell_println!("Unknown allocator."); return; }
+            };
+            match mmtune::create_profile(name, workload, alloc) {
+                Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: mmtune remove <id>"); return; }
+            };
+            match mmtune::remove_profile(id) {
+                Ok(()) => shell_println!("Removed profile {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "apply" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: mmtune apply <id>"); return; }
+            };
+            match mmtune::apply_profile(id) {
+                Ok(()) => shell_println!("Applied profile {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "overcommit" | "oc" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune overcommit <id> <never|heuristic|always>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let mode = match parts[2] {
+                "never" => mmtune::OvercommitMode::Never,
+                "heuristic" | "heur" => mmtune::OvercommitMode::Heuristic,
+                "always" => mmtune::OvercommitMode::Always,
+                _ => { shell_println!("Unknown mode."); return; }
+            };
+            match mmtune::set_overcommit(id, mode) {
+                Ok(()) => shell_println!("Set overcommit mode."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "hugepages" | "hp" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune hugepages <id> <off|madvise|transparent|always>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let mode = match parts[2] {
+                "off" | "disabled" => mmtune::HugePageMode::Disabled,
+                "madvise" => mmtune::HugePageMode::MadviseOnly,
+                "transparent" | "thp" => mmtune::HugePageMode::Transparent,
+                "always" => mmtune::HugePageMode::Always,
+                _ => { shell_println!("Unknown mode."); return; }
+            };
+            match mmtune::set_huge_pages(id, mode) {
+                Ok(()) => shell_println!("Set huge page mode."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "compact" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune compact <id> <off|light|background|aggressive>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let lvl = match parts[2] {
+                "off" => mmtune::CompactLevel::Off,
+                "light" => mmtune::CompactLevel::Light,
+                "background" | "bg" => mmtune::CompactLevel::Background,
+                "aggressive" | "agg" => mmtune::CompactLevel::Aggressive,
+                _ => { shell_println!("Unknown level."); return; }
+            };
+            match mmtune::set_compact_level(id, lvl) {
+                Ok(()) => shell_println!("Set compaction level."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "swappiness" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune swappiness <id> <0-200>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let val: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid value."); return; }
+            };
+            match mmtune::set_swappiness(id, val) {
+                Ok(()) => shell_println!("Set swappiness to {}.", val),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "dirty" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: mmtune dirty <id> <ratio> <bg_ratio>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let ratio: u8 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid ratio."); return; }
+            };
+            let bg: u8 = match parts.get(3).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid bg ratio."); return; }
+            };
+            if let Err(e) = mmtune::set_dirty_ratio(id, ratio) {
+                shell_println!("Error: {:?}", e);
+                return;
+            }
+            match mmtune::set_dirty_bg_ratio(id, bg) {
+                Ok(()) => shell_println!("Set dirty ratios to {}/{}.", ratio, bg),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cache" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune cache <id> <pressure 0-1000>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let val: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid value."); return; }
+            };
+            match mmtune::set_cache_pressure(id, val) {
+                Ok(()) => shell_println!("Set VFS cache pressure to {}.", val),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "zram" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune zram <id> <on|off>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let on = parts[2] == "on" || parts[2] == "true";
+            match mmtune::set_zram_enabled(id, on) {
+                Ok(()) => shell_println!("Set ZRAM {}.", if on { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "zerofree" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune zerofree <id> <on|off>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let on = parts[2] == "on" || parts[2] == "true";
+            match mmtune::set_zero_on_free(id, on) {
+                Ok(()) => shell_println!("Set zero-on-free {}.", if on { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reclaim" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: mmtune reclaim <id> <lru|clock|mglru|workingset>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let rs = match parts[2] {
+                "lru" => mmtune::ReclaimStrategy::Lru,
+                "clock" => mmtune::ReclaimStrategy::Clock,
+                "mglru" | "multigen" => mmtune::ReclaimStrategy::MultiGenLru,
+                "workingset" | "ws" => mmtune::ReclaimStrategy::WorkingSet,
+                _ => { shell_println!("Unknown strategy."); return; }
+            };
+            match mmtune::set_reclaim(id, rs) {
+                Ok(()) => shell_println!("Set reclaim strategy."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "tradeoffs" | "pros" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: mmtune tradeoffs <id>"); return; }
+            };
+            match mmtune::tradeoffs(id) {
+                Ok(info) => {
+                    shell_println!("{}", info.label);
+                    shell_println!();
+                    shell_println!("Advantages:");
+                    for a in &info.advantages {
+                        shell_println!("  + {}", a);
+                    }
+                    shell_println!();
+                    shell_println!("Disadvantages:");
+                    for d in &info.disadvantages {
+                        shell_println!("  - {}", d);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, active, tradeoffs, ops) = mmtune::stats();
+            shell_println!("Profiles:    {}", total);
+            shell_println!("Active:      {}", active);
+            shell_println!("Tradeoffs:   {}", tradeoffs);
+            shell_println!("Operations:  {}", ops);
+        }
+        "clear" => {
+            mmtune::clear_all();
+            shell_println!("Cleared all memory profiles.");
+        }
+        "test" => {
+            match mmtune::self_test() {
+                Ok(()) => shell_println!("mmtune: all tests passed."),
+                Err(e) => shell_println!("mmtune: test failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("mmtune — memory management tuning parameters");
+            shell_println!();
+            shell_println!("Subcommands:");
+            shell_println!("  init                          Load default profiles");
+            shell_println!("  list / ls                     List all profiles");
+            shell_println!("  active / show                 Show active profile details");
+            shell_println!("  get <id>                      Show profile details");
+            shell_println!("  create <name> <wl> <alloc>    Create custom profile");
+            shell_println!("  remove / rm <id>              Remove custom profile");
+            shell_println!("  apply <id>                    Activate a profile");
+            shell_println!("  overcommit <id> <mode>        Set overcommit mode");
+            shell_println!("  hugepages <id> <mode>         Set huge page mode");
+            shell_println!("  compact <id> <level>          Set compaction level");
+            shell_println!("  swappiness <id> <0-200>       Set swappiness");
+            shell_println!("  dirty <id> <ratio> <bg>       Set dirty ratios");
+            shell_println!("  cache <id> <pressure>         Set VFS cache pressure");
+            shell_println!("  zram <id> <on|off>            Toggle ZRAM");
+            shell_println!("  zerofree <id> <on|off>        Toggle zero-on-free");
+            shell_println!("  reclaim <id> <strategy>       Set reclaim strategy");
+            shell_println!("  tradeoffs <id>                Show pros/cons");
+            shell_println!("  stats                         Show statistics");
+            shell_println!("  clear                         Clear all profiles");
+            shell_println!("  test                          Run self-tests");
+            shell_println!();
+            shell_println!("Workloads: desktop, server, gaming, dev, lowmem, vmhost");
+            shell_println!("Allocators: buddy, slabbuddy, bitmap, zonebased");
+            shell_println!("Overcommit: never, heuristic, always");
+            shell_println!("Huge pages: off, madvise, transparent, always");
+            shell_println!("Compaction: off, light, background, aggressive");
+            shell_println!("Reclaim: lru, clock, mglru, workingset");
+            shell_println!("Alias: mtune");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27104,6 +27495,19 @@ fn cmd_cgroup(args: &str) {
             });
             crate::console_println!("  Memory usage:     {} frames", s.mem_usage);
             crate::console_println!("  Memory peak:      {} frames", s.mem_peak);
+            crate::console_println!("  I/O ops limit:    {}", if s.io_ops_limit == 0 {
+                alloc::format!("unlimited")
+            } else {
+                alloc::format!("{} ops/period", s.io_ops_limit)
+            });
+            crate::console_println!("  I/O bytes limit:  {}", if s.io_bytes_limit == 0 {
+                alloc::format!("unlimited")
+            } else {
+                alloc::format!("{} frames/period", s.io_bytes_limit)
+            });
+            crate::console_println!("  I/O ops used:     {} (this period)", s.io_ops_used);
+            crate::console_println!("  I/O bytes used:   {} frames (this period)", s.io_bytes_used);
+            crate::console_println!("  I/O throttles:    {}", s.io_throttle_count);
             crate::console_println!("  Eff. CPU quota:   {}", {
                 let eff = cgroup::effective_cpu_quota(id);
                 if eff == 0 { alloc::format!("unlimited") }
@@ -27114,17 +27518,63 @@ fn cmd_cgroup(args: &str) {
                 if eff == 0 { alloc::format!("unlimited") }
                 else { alloc::format!("{} frames", eff) }
             });
+            crate::console_println!("  Eff. I/O ops:     {}", {
+                let eff = cgroup::effective_io_ops_limit(id);
+                if eff == 0 { alloc::format!("unlimited") }
+                else { alloc::format!("{} ops", eff) }
+            });
+            crate::console_println!("  Eff. I/O bytes:   {}", {
+                let eff = cgroup::effective_io_bytes_limit(id);
+                if eff == 0 { alloc::format!("unlimited") }
+                else { alloc::format!("{} frames", eff) }
+            });
+        }
+        "io" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
+                return;
+            };
+            let Some(ops_str) = parts.get(2) else {
+                crate::console_println!("Usage: cgroup io <id> <ops_max> [bytes_max]");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid cgroup ID");
+                return;
+            };
+            let Ok(ops) = ops_str.parse::<u64>() else {
+                crate::console_println!("Invalid ops count");
+                return;
+            };
+            let bytes = parts.get(3)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let limit = cgroup::IoLimit::new(ops, bytes);
+            match cgroup::set_io_limit(id, limit) {
+                Ok(()) => {
+                    let ops_str = if ops == 0 { alloc::format!("unlimited") }
+                                  else { alloc::format!("{} ops/period", ops) };
+                    let bytes_str = if bytes == 0 { alloc::format!("unlimited") }
+                                    else { alloc::format!("{} frames/period", bytes) };
+                    crate::console_println!(
+                        "Cgroup {}: I/O limit set — ops: {}, bytes: {}",
+                        id, ops_str, bytes_str
+                    );
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
         }
         "test" => {
             cgroup::self_test();
         }
         _ => {
-            crate::console_println!("Usage: cgroup [list|create|delete|cpu|mem|stats|test]");
+            crate::console_println!("Usage: cgroup [list|create|delete|cpu|mem|io|stats|test]");
             crate::console_println!("  cgroup              — list active cgroups");
             crate::console_println!("  cgroup create [P]   — create under parent P (default: root)");
             crate::console_println!("  cgroup delete ID    — delete empty cgroup");
             crate::console_println!("  cgroup cpu ID PCT   — set CPU limit (0=unlimited)");
             crate::console_println!("  cgroup mem ID N     — set memory limit in frames (0=unlimited)");
+            crate::console_println!("  cgroup io ID OPS [BYTES] — set I/O limit (0=unlimited)");
             crate::console_println!("  cgroup stats ID     — detailed stats");
             crate::console_println!("  cgroup test         — run self-test");
         }
@@ -29490,7 +29940,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

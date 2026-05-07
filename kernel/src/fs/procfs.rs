@@ -141,6 +141,7 @@ const ROOT_FILES: &[&str] = &[
     "freeze",
     "sealing",
     "recent",
+    "fileinfo",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -2463,6 +2464,31 @@ fn gen_recent() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fileinfo() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (extractions, fields, errors) = super::fileinfo::stats();
+
+    out.push_str("File Info Metadata Extraction\n");
+    out.push_str("=============================\n\n");
+    out.push_str(&format!("Extractions: {}\n", extractions));
+    out.push_str(&format!("Fields:      {}\n", fields));
+    out.push_str(&format!("Errors:      {}\n\n", errors));
+
+    out.push_str("Supported formats:\n");
+    out.push_str("  audio/mpeg    — MP3 (ID3v1, ID3v2, MPEG frame)\n");
+    out.push_str("  audio/wav     — WAV (RIFF/PCM headers)\n");
+    out.push_str("  image/jpeg    — JPEG (EXIF, SOF dimensions)\n");
+    out.push_str("  image/png     — PNG (IHDR, tEXt chunks)\n");
+    out.push_str("  image/gif     — GIF (dimensions, version)\n");
+    out.push_str("  image/bmp     — BMP (dimensions, bit depth)\n");
+    out.push_str("  application/pdf — PDF (version, linearized)\n");
+    out.push_str("  application/x-elf — ELF (class, machine, type)\n");
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2545,6 +2571,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "freeze" => Ok(gen_freeze()),
         "sealing" => Ok(gen_sealing()),
         "recent" => Ok(gen_recent()),
+        "fileinfo" => Ok(gen_fileinfo()),
         _ => Err(KernelError::NotFound),
     }
 }

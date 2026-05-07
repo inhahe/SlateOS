@@ -3086,7 +3086,7 @@ const COMMANDS: &[&str] = &[
     "ar", "backup", "base64", "batch", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "find", "finfo", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
@@ -4371,6 +4371,7 @@ fn dispatch(line: &str) {
         "fsfreeze" => cmd_fsfreeze(args),
         "seal" => cmd_seal(args),
         "recent" => cmd_recent(args),
+        "fileinfo" | "finfo" => cmd_fileinfo(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -14524,6 +14525,70 @@ fn cmd_recent(args: &str) {
     }
 }
 
+fn cmd_fileinfo(args: &str) {
+    use crate::fs::fileinfo;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "stats" => {
+            let (extractions, fields, errors) = fileinfo::stats();
+            shell_println!("File Info Statistics");
+            shell_println!("  Extractions: {}", extractions);
+            shell_println!("  Fields:      {}", fields);
+            shell_println!("  Errors:      {}", errors);
+        }
+        "reset" => {
+            fileinfo::reset_stats();
+            shell_println!("File info statistics reset.");
+        }
+        "fields" => {
+            // Show known fields for a MIME type.
+            if parts.len() < 2 {
+                shell_println!("Usage: fileinfo fields <mime-type>");
+                shell_println!("  Example: fileinfo fields audio/mpeg");
+                return;
+            }
+            let fields = fileinfo::fields_for_mime(parts[1]);
+            if fields.is_empty() {
+                shell_println!("No known fields for: {}", parts[1]);
+            } else {
+                shell_println!("Fields for {}:", parts[1]);
+                for (name, label) in &fields {
+                    shell_println!("  {:30} {}", name, label);
+                }
+            }
+        }
+        "" => {
+            shell_println!("Usage: fileinfo <path> | fileinfo <command>");
+            shell_println!("  <path>                       Extract metadata from file");
+            shell_println!("  fields <mime-type>           List known fields for MIME type");
+            shell_println!("  stats                        Show statistics");
+            shell_println!("  reset                        Reset counters");
+        }
+        _ => {
+            // Treat as file path.
+            let path = resolve_path(sub);
+            match fileinfo::extract(&path) {
+                Ok(info) => {
+                    shell_println!("File:   {}", info.path);
+                    shell_println!("MIME:   {}", info.mime);
+                    shell_println!("Format: {}", info.format_desc);
+                    if info.fields.is_empty() {
+                        shell_println!("\nNo metadata fields extracted.");
+                    } else {
+                        shell_println!("\n{:30} {}", "FIELD", "VALUE");
+                        shell_println!("{}", "-".repeat(60));
+                        for field in &info.fields {
+                            shell_println!("{:30} {}", field.label, field.value.display());
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -19970,7 +20035,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

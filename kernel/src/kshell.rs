@@ -3116,6 +3116,7 @@ const COMMANDS: &[&str] = &[
     "diskuse",
     "fshealth",
     "fswatch",
+    "undelete",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4352,6 +4353,7 @@ fn dispatch(line: &str) {
         "fswatch" => cmd_fswatch(args),
         "dirsync" => cmd_dirsync(args),
         "backup" => cmd_backup(args),
+        "undelete" => cmd_undelete(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -12561,6 +12563,121 @@ fn cmd_backup(args: &str) {
     }
 }
 
+/// `undelete` — advanced file recovery.
+fn cmd_undelete(args: &str) {
+    use crate::fs::undelete;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "scan" | "list" | "ls" => {
+            let mut filter = undelete::ScanFilter::new();
+            let mut i = 1;
+            while i < parts.len() {
+                match parts[i] {
+                    "--prefix" | "-p" => {
+                        if i + 1 < parts.len() {
+                            filter = filter.with_prefix(parts[i + 1]);
+                            i += 1;
+                        }
+                    }
+                    "--name" | "-n" => {
+                        if i + 1 < parts.len() {
+                            filter = filter.with_name(parts[i + 1]);
+                            i += 1;
+                        }
+                    }
+                    "--limit" | "-l" => {
+                        if i + 1 < parts.len() {
+                            if let Ok(n) = parts[i + 1].parse::<usize>() {
+                                filter = filter.with_limit(n);
+                            }
+                            i += 1;
+                        }
+                    }
+                    other => {
+                        // First positional arg is a path prefix shortcut.
+                        if !other.starts_with('-') {
+                            filter = filter.with_prefix(other);
+                        }
+                    }
+                }
+                i += 1;
+            }
+            match undelete::scan(&filter) {
+                Ok(results) => {
+                    if results.is_empty() {
+                        shell_println!("No recoverable files found.");
+                    } else {
+                        shell_println!("Recoverable files ({}):", results.len());
+                        for r in &results {
+                            let size_str = r.size.map_or_else(
+                                || String::from("?"),
+                                |s| alloc::format!("{}", s),
+                            );
+                            let sources: Vec<&str> = r.sources.iter().map(|s| s.label()).collect();
+                            shell_println!(
+                                "  {} ({} bytes) [{}]",
+                                r.path, size_str, sources.join(", "),
+                            );
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "recover" | "restore" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: undelete recover <path> [dest]");
+                return;
+            }
+            let path = parts[1];
+            let dest = parts.get(2).copied();
+            match undelete::recover(path, dest) {
+                Ok(result) => {
+                    shell_println!("Recovered: {} -> {}", path, result.recovered_path);
+                    shell_println!("  Source: {}", result.source.label());
+                    shell_println!("  Bytes:  {}", result.bytes);
+                    if let Some(verified) = result.verified {
+                        shell_println!("  Verified: {}", if verified { "OK" } else { "FAILED" });
+                    }
+                }
+                Err(crate::error::KernelError::NotFound) => {
+                    shell_println!("No recoverable data found for: {}", path);
+                    shell_println!("Tip: use `undelete scan` to see what's available.");
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (scans, recoveries, bytes) = undelete::stats();
+            shell_println!("Scans performed: {}", scans);
+            shell_println!("Recoveries:      {}", recoveries);
+            shell_println!("Bytes recovered: {}", bytes);
+        }
+        _ => {
+            shell_println!("Usage: undelete <command> [args]");
+            shell_println!();
+            shell_println!("Commands:");
+            shell_println!("  scan [opts]             Scan for recoverable files");
+            shell_println!("  recover <path> [dest]   Recover a deleted file");
+            shell_println!("  stats                   Show recovery statistics");
+            shell_println!();
+            shell_println!("Scan options:");
+            shell_println!("  --prefix, -p <path>    Only files under this path");
+            shell_println!("  --name, -n <substr>    Only files with name containing substr");
+            shell_println!("  --limit, -l <N>        Maximum results (default 1000)");
+            shell_println!();
+            shell_println!("Sources (searched in priority order):");
+            shell_println!("  1. Trash (full content)");
+            shell_println!("  2. File history/CAS (versioned content)");
+            shell_println!("  3. Integrity baseline (hash only)");
+            shell_println!("  4. Journal (deletion record only)");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -17842,7 +17959,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

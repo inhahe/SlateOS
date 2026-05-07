@@ -77,6 +77,7 @@ pub mod tar;
 pub mod tmpwatch;
 pub mod transaction;
 pub mod trash;
+pub mod undelete;
 pub mod usage;
 pub mod vfs;
 #[allow(dead_code)]

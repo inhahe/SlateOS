@@ -1034,7 +1034,11 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [x] Per-process filesystem namespaces for sandboxing (fs::mount_ns)
 - [x] Interceptor hooks (synchronous, capability-gated) (fs::intercept)
 - [x] Async notification hooks / tracing subsystem (ktrace: 23 tracepoints across 6 categories)
-- [ ] Profiling mode for high-frequency events (alloc/dealloc tracing)
+- [x] Profiling mode for high-frequency events (alloc/dealloc tracing)
+  - [x] alloc_trace ring buffer wired to alloc_order/free_order (frame-level tracing)
+  - [x] Zero-cost disabled path (single atomic load ~1ns), default disabled
+  - [x] mm.alloc_trace sysctl parameter for runtime enable/disable
+  - [x] Frame allocator OOM path tries memory compaction before OOM kill
 
 ### 5.5 Container support
 - [ ] Namespace primitives (PID, network, mount, user)

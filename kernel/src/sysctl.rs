@@ -142,6 +142,18 @@ pub const PARAM_SCHED_INTERACTIVE_BOOST: u16 = 11;
 /// Default: 200.
 pub const PARAM_SCHED_STARVATION_THRESHOLD: u16 = 12;
 
+/// Scheduler backend algorithm.
+///
+/// 0 = PriorityRoundRobin (default, O(1) bitmap pick_next)
+/// 1 = EEVDF (virtual-runtime fairness + virtual deadlines)
+/// 2 = Deadline (EDF, admission control, budget throttling)
+///
+/// Requires reboot to take effect.  The current value is the *desired*
+/// backend; the actual running backend may differ if changed since boot.
+///
+/// Default: 0 (PriorityRoundRobin).
+pub const PARAM_SCHED_BACKEND: u16 = 13;
+
 // --- Filesystem / Buffer Cache (20-29) ---
 
 /// Buffer cache read-ahead maximum window (sectors).
@@ -411,6 +423,14 @@ pub fn init() {
         1000,   // 10 seconds max
     );
 
+    reg.register(
+        PARAM_SCHED_BACKEND,
+        "sched.backend",
+        0,  // PriorityRoundRobin (default)
+        0,  // min: PriorityRR
+        2,  // max: Deadline
+    );
+
     // Filesystem / buffer cache parameters.
     reg.register(
         PARAM_FS_READAHEAD_MAX,
@@ -498,6 +518,13 @@ fn notify_subsystem(id: u16, value: u64) {
         PARAM_MM_ZERO_ON_ALLOC => {
             // value 0 = zero-on-alloc (default), 1 = zero-on-free.
             crate::mm::frame::set_zero_on_free_mode(value == 1);
+        }
+        PARAM_SCHED_BACKEND => {
+            // Update the desired scheduler backend.  Takes effect on
+            // next reboot (next PerCpuScheduler::init() call).
+            #[allow(clippy::cast_possible_truncation)]
+            let id = value as u8;
+            crate::sched::backend::set_desired_backend(id);
         }
         // Other subsystems will add arms here as they register
         // runtime-tunable parameters.

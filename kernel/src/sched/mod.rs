@@ -46,6 +46,7 @@
 //! safe because no code path ever holds a per-CPU lock and then tries
 //! to acquire `SCHED`.
 
+pub mod backend;
 pub mod barrier;
 pub mod condvar;
 pub mod context;
@@ -778,7 +779,8 @@ pub fn init() {
 
     state.initialized = true;
     serial_println!(
-        "[sched] Scheduler initialized (priority round-robin, {} levels, {} CPU{})",
+        "[sched] Scheduler initialized ({}, {} levels, {} CPU{})",
+        backend::backend_name(backend::active_backend()),
         NUM_PRIORITIES,
         num_cpus,
         if num_cpus > 1 { "s" } else { "" }

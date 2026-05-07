@@ -228,6 +228,12 @@ fn all_suites() -> Vec<TestSuite> {
         category: "sched",
     });
     suites.push(TestSuite {
+        name: "sched_backend",
+        description: "Scheduler backend enum (selectable PriorityRR/EEVDF/Deadline)",
+        run: || { crate::sched::backend::self_test(); true },
+        category: "sched",
+    });
+    suites.push(TestSuite {
         name: "cet",
         description: "Intel CET (shadow stacks + IBT) detection",
         run: || { crate::cet::self_test(); true },

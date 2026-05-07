@@ -1489,6 +1489,9 @@ extern "C" fn kmain() -> ! {
         serial_println!("Deadline scheduler self-test FAILED: {:?}", e);
     }
 
+    // Step 22k9: Scheduler backend enum self-test.
+    sched::backend::self_test();
+
     // Step 22l: Task supervisor self-test.
     sched::supervisor::self_test();
 

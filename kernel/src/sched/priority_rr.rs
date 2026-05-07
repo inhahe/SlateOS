@@ -573,7 +573,12 @@ pub const MAX_CPUS: usize = 16;
 /// per-CPU queue lock:  `RQ[i] < RQ[j] (i < j) < TASK_TABLE`.
 pub struct PerCpuScheduler {
     /// Per-CPU run queues, each with its own lock.
-    queues: [Mutex<PriorityRoundRobin>; MAX_CPUS],
+    ///
+    /// Uses [`SchedulerBackend`](super::backend::SchedulerBackend) enum
+    /// to dispatch to the selected scheduler algorithm (PriorityRR,
+    /// EEVDF, or Deadline).  The backend is chosen at init time based
+    /// on the `sched.backend` sysctl parameter.
+    queues: [Mutex<super::backend::SchedulerBackend>; MAX_CPUS],
     /// Number of online (active) CPUs.  Atomic for lock-free reads.
     num_cpus: AtomicUsize,
 }
@@ -584,23 +589,31 @@ unsafe impl Sync for PerCpuScheduler {}
 
 impl PerCpuScheduler {
     /// Create a new per-CPU scheduler (const-initializable for static use).
+    ///
+    /// Defaults to PriorityRoundRobin backend.  The actual backend is
+    /// selected during `init()` based on the `sched.backend` sysctl.
     #[must_use]
     pub const fn new_const() -> Self {
         Self {
-            queues: [const { Mutex::new(PriorityRoundRobin::new_const()) }; MAX_CPUS],
+            queues: [const { Mutex::new(super::backend::SchedulerBackend::new_const()) }; MAX_CPUS],
             num_cpus: AtomicUsize::new(0),
         }
     }
 
     /// Initialize with a given number of CPUs.
     ///
-    /// Each CPU's queue gets default time slice configuration.
+    /// Each CPU's queue gets the scheduler backend selected by the
+    /// `sched.backend` sysctl parameter (default: PriorityRoundRobin).
     /// Call once during scheduler init.
     pub fn init(&self, num_cpus: usize) {
         let n = num_cpus.min(MAX_CPUS).max(1);
         self.num_cpus.store(n, Ordering::Release);
+
+        let backend_id = super::backend::desired_backend();
+        super::backend::set_active_backend(backend_id);
+
         for i in 0..n {
-            *self.queues[i].lock() = PriorityRoundRobin::new();
+            *self.queues[i].lock() = super::backend::SchedulerBackend::from_id(backend_id);
         }
     }
 
@@ -658,14 +671,14 @@ impl PerCpuScheduler {
     #[allow(dead_code)] // Used by preemption accounting once implemented.
     pub fn current_remaining(&self, cpu: usize) -> u32 {
         self.queues.get(cpu)
-            .map_or(0, |q| q.lock().current_remaining)
+            .map_or(0, |q| q.lock().current_remaining())
     }
 
     /// Set the remaining ticks for the currently running task on a CPU.
     #[allow(dead_code)] // Paired with current_remaining.
     pub fn set_current_remaining(&self, cpu: usize, ticks: u32) {
         if let Some(q) = self.queues.get(cpu) {
-            q.lock().current_remaining = ticks;
+            q.lock().set_current_remaining(ticks);
         }
     }
 

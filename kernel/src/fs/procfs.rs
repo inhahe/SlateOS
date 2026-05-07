@@ -149,6 +149,7 @@ const ROOT_FILES: &[&str] = &[
     "clipboard",
     "dragdrop",
     "fileops",
+    "fileselect",
     "preview",
     "templates",
     "columnview",
@@ -2805,6 +2806,29 @@ fn gen_viewstate() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fileselect() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (selects, deselects, active) = super::fileselect::stats();
+
+    out.push_str("File Selection\n");
+    out.push_str("==============\n\n");
+    out.push_str(&format!("Active sets:     {}\n", active));
+    out.push_str(&format!("Select ops:      {}\n", selects));
+    out.push_str(&format!("Deselect ops:    {}\n", deselects));
+
+    let sets = super::fileselect::list_sets();
+    if !sets.is_empty() {
+        out.push_str("\nSets:\n");
+        for (id, dir, count) in &sets {
+            out.push_str(&format!("  #{}: {} ({} items)\n", id, dir, count));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_properties() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -2909,6 +2933,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "clipboard" => Ok(gen_clipboard()),
         "dragdrop" => Ok(gen_dragdrop()),
         "fileops" => Ok(gen_fileops()),
+        "fileselect" => Ok(gen_fileselect()),
         "preview" => Ok(gen_preview()),
         "templates" => Ok(gen_templates()),
         "columnview" => Ok(gen_columnview()),

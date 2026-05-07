@@ -3086,7 +3086,7 @@ const COMMANDS: &[&str] = &[
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
-    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "find", "findex", "finfo", "fops", "fold", "free",
+    "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "find", "findex", "finfo", "fops", "fsel", "fold", "free",
     "firewall", "flock", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
@@ -4379,6 +4379,7 @@ fn dispatch(line: &str) {
         "clipboard" | "clip" => cmd_clipboard(args),
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
+        "fileselect" | "fsel" => cmd_fileselect(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
@@ -15526,6 +15527,209 @@ fn cmd_fileops(args: &str) {
     }
 }
 
+/// `fileselect` / `fsel` — file selection management.
+fn cmd_fileselect(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "create" => {
+            let dir = if parts.len() > 1 {
+                resolve_path(parts[1])
+            } else {
+                get_cwd()
+            };
+            match crate::fs::fileselect::create(&dir) {
+                Ok(id) => shell_println!("Created selection set #{} for {}", id, dir),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "destroy" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match crate::fs::fileselect::destroy(id) {
+                    Ok(()) => shell_println!("Destroyed selection set #{}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: fileselect destroy <set-id>");
+            }
+        }
+        "select" => {
+            // fileselect select <set-id> <path>
+            if let (Some(id), Some(path)) = (
+                parts.get(1).and_then(|s| s.parse::<u64>().ok()),
+                parts.get(2),
+            ) {
+                let resolved = resolve_path(path);
+                match crate::fs::fileselect::select_single(id, &resolved, 0) {
+                    Ok(()) => shell_println!("Selected: {}", resolved),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: fileselect select <set-id> <path>");
+            }
+        }
+        "toggle" => {
+            if let (Some(id), Some(path)) = (
+                parts.get(1).and_then(|s| s.parse::<u64>().ok()),
+                parts.get(2),
+            ) {
+                let resolved = resolve_path(path);
+                match crate::fs::fileselect::select_toggle(id, &resolved, 0) {
+                    Ok(()) => {
+                        let sel = crate::fs::fileselect::is_selected(id, &resolved).unwrap_or(false);
+                        shell_println!("{}: {}", resolved, if sel { "selected" } else { "deselected" });
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: fileselect toggle <set-id> <path>");
+            }
+        }
+        "clear" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match crate::fs::fileselect::clear(id) {
+                    Ok(()) => shell_println!("Selection cleared"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: fileselect clear <set-id>");
+            }
+        }
+        "list" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match crate::fs::fileselect::selected_paths(id) {
+                    Ok(paths) => {
+                        if paths.is_empty() {
+                            shell_println!("(no items selected)");
+                        } else {
+                            for p in &paths {
+                                shell_println!("  {}", p);
+                            }
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                // List all sets.
+                let sets = crate::fs::fileselect::list_sets();
+                if sets.is_empty() {
+                    shell_println!("(no active selection sets)");
+                } else {
+                    shell_println!("{:<6} {:<30} {}", "ID", "Directory", "Items");
+                    shell_println!("{}", "-".repeat(50));
+                    for (id, dir, count) in &sets {
+                        shell_println!("#{:<5} {:<30} {}", id, dir, count);
+                    }
+                }
+            }
+        }
+        "summary" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match crate::fs::fileselect::summary(id) {
+                    Ok(s) => {
+                        shell_println!("Selection #{}: {} items", id, s.count);
+                        shell_println!("  Files: {}, Dirs: {}", s.files, s.dirs);
+                        shell_println!("  Total size: {}", s.size_display);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: fileselect summary <set-id>");
+            }
+        }
+        "pattern" => {
+            // fileselect pattern <set-id> <glob>
+            if let (Some(id), Some(pat)) = (
+                parts.get(1).and_then(|s| s.parse::<u64>().ok()),
+                parts.get(2).copied(),
+            ) {
+                // Get listing from the set's directory.
+                let sets = crate::fs::fileselect::list_sets();
+                let dir = sets.iter()
+                    .find(|(sid, _, _)| *sid == id)
+                    .map(|(_, d, _)| d.clone());
+                if let Some(dir) = dir {
+                    if let Ok(entries) = crate::fs::vfs::Vfs::readdir(&dir) {
+                        let paths: Vec<String> = entries.iter().map(|e| {
+                            if dir == "/" {
+                                alloc::format!("/{}", e.name)
+                            } else {
+                                alloc::format!("{}/{}", dir, e.name)
+                            }
+                        }).collect();
+                        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+                        match crate::fs::fileselect::select_pattern(id, &refs, pat) {
+                            Ok(()) => {
+                                let count = crate::fs::fileselect::count(id).unwrap_or(0);
+                                shell_println!("Pattern '{}' applied; {} items selected", pat, count);
+                            }
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Cannot read directory for set #{}", id);
+                    }
+                } else {
+                    shell_println!("Set #{} not found", id);
+                }
+            } else {
+                shell_println!("Usage: fileselect pattern <set-id> <glob-pattern>");
+            }
+        }
+        "tree" => {
+            // Build checkbox tree for a directory.
+            let dir = if parts.len() > 1 {
+                resolve_path(parts[1])
+            } else {
+                get_cwd()
+            };
+            match crate::fs::fileselect::build_check_tree(&dir) {
+                Ok(tree) => {
+                    shell_println!("[{}] {} ({})", check_char(tree.state), tree.name,
+                                   if tree.is_dir { "dir" } else { "file" });
+                    for child in &tree.children {
+                        shell_println!("  [{}] {} ({})", check_char(child.state), child.name,
+                                       if child.is_dir { "dir" } else { "file" });
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (selects, deselects, active) = crate::fs::fileselect::stats();
+            shell_println!("Active sets:  {}", active);
+            shell_println!("Select ops:   {}", selects);
+            shell_println!("Deselect ops: {}", deselects);
+        }
+        "reset" => {
+            crate::fs::fileselect::reset_stats();
+            shell_println!("Selection stats reset");
+        }
+        _ => {
+            shell_println!("Usage: fileselect <subcommand>");
+            shell_println!("  create [dir]        Create selection set");
+            shell_println!("  destroy <id>        Destroy selection set");
+            shell_println!("  select <id> <path>  Select single item");
+            shell_println!("  toggle <id> <path>  Toggle item selection");
+            shell_println!("  clear <id>          Clear all selections");
+            shell_println!("  list [id]           List sets or items");
+            shell_println!("  summary <id>        Selection summary");
+            shell_println!("  pattern <id> <glob> Select by pattern");
+            shell_println!("  tree [dir]          Show checkbox tree");
+            shell_println!("  stats               Show statistics");
+            shell_println!("  reset               Reset statistics");
+        }
+    }
+}
+
+/// Helper for checkbox tree display.
+fn check_char(state: crate::fs::fileselect::CheckState) -> char {
+    match state {
+        crate::fs::fileselect::CheckState::Checked => 'X',
+        crate::fs::fileselect::CheckState::Unchecked => ' ',
+        crate::fs::fileselect::CheckState::Partial => '-',
+    }
+}
+
 /// `preview` — file preview/thumbnail generation.
 fn cmd_preview(args: &str) {
     use crate::fs::preview;
@@ -21731,7 +21935,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -125,6 +125,7 @@ const ROOT_FILES: &[&str] = &[
     "backup",
     "undelete",
     "archives",
+    "batch",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1994,6 +1995,23 @@ fn gen_archives() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/batch` — batch operation statistics.
+fn gen_batch() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (renames, copies, moves, deletes) = super::batch::stats();
+
+    out.push_str("Batch Operation Statistics\n");
+    out.push_str("=========================\n\n");
+    out.push_str(&format!("Rename ops: {}\n", renames));
+    out.push_str(&format!("Copy ops:   {}\n", copies));
+    out.push_str(&format!("Move ops:   {}\n", moves));
+    out.push_str(&format!("Delete ops: {}\n", deletes));
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -2060,6 +2078,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "backup" => Ok(gen_backup()),
         "undelete" => Ok(gen_undelete()),
         "archives" => Ok(gen_archives()),
+        "batch" => Ok(gen_batch()),
         _ => Err(KernelError::NotFound),
     }
 }

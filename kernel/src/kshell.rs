@@ -3082,8 +3082,8 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "archive", "assoc", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "ar", "backup", "base64", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
+    "alias", "append", "archive", "assoc", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
+    "ar", "backup", "base64", "batch", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "column", "comm", "command", "copy", "cp", "cpuinfo", "crc32", "crc32sum",
     "cut", "date", "dd", "dedup", "del", "df", "dhcp", "diag", "diff", "dir", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "filehist", "find", "fold", "free",
@@ -3122,7 +3122,7 @@ const COMMANDS: &[&str] = &[
     "xattr", "xzcat",
     "acct", "boottime", "boottiming", "canary", "compact", "counters", "cpuacct", "cpuctl", "cpufreq", "cpuid", "cputime", "defrag", "events", "exceptions", "exclog", "faults", "freq", "healthcheck", "heapwm", "history", "hotplug", "hp", "hugepage", "hugepages", "idle", "irqbal", "irqbalance", "irqoff", "irqrate", "irqstorm", "jitter", "kcounters", "kevent", "kprofile", "kstat", "ksyms", "kwarn", "latency", "lathist", "loadavg", "lockstat", "lockstats", "memacct", "memmap", "mempressure", "mempool", "memtype", "msi", "numa", "pacct", "pgfault", "pools", "poweroff", "pressure", "rcu", "reboot", "sar", "sclat", "sclatency", "shutdown", "stackcheck", "symbols", "syshealth", "sysinfo", "temp", "thermal", "tickjitter", "tlb", "topo", "topology", "vectors", "warnings", "watermark",
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
-    "fpu", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
+    "fpu", "hda", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
     "ktimer", "ktrace", "lockdep", "lz4", "lz4cat", "rng", "supervisor", "sv", "timers", "trace", "unlz4", "xattr", "xxd", "zip", "zstd", "zstdcat",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
@@ -4355,6 +4355,7 @@ fn dispatch(line: &str) {
         "backup" => cmd_backup(args),
         "undelete" => cmd_undelete(args),
         "archive" => cmd_archive(args),
+        "batch" => cmd_batch(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4442,6 +4443,7 @@ fn dispatch(line: &str) {
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
         "mouse" => cmd_mouse(),
+        "audio" | "hda" => cmd_audio(args),
         "gfx" => cmd_gfx(args),
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
@@ -4695,6 +4697,7 @@ fn cmd_help() {
     crate::console_println!("  mkelf     Create test ELF binaries (EXIT.ELF + HELLO.ELF)");
     crate::console_println!("  net       Show network interface info");
     crate::console_println!("  mouse     Show PS/2 mouse status and recent events");
+    crate::console_println!("  audio     Intel HD Audio status/play/stop");
     crate::console_println!("  gfx [sub] Framebuffer graphics (demo/cursor/clear)");
     crate::console_println!("  desktop   Launch graphical desktop compositor demo");
     crate::console_println!("  dhcp      Obtain an IP address via DHCP");
@@ -12868,6 +12871,119 @@ fn cmd_archive(args: &str) {
     }
 }
 
+/// `batch` — bulk file operations with pattern matching.
+fn cmd_batch(args: &str) {
+    use crate::fs::batch;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    let dry_run = parts.iter().any(|f| *f == "--dry-run" || *f == "-n");
+    let conflict = if parts.iter().any(|f| *f == "--overwrite") {
+        batch::ConflictStrategy::Overwrite
+    } else if parts.iter().any(|f| *f == "--rename") {
+        batch::ConflictStrategy::Rename
+    } else {
+        batch::ConflictStrategy::Skip
+    };
+    let opts = batch::BatchOptions { on_conflict: conflict, dry_run };
+    match sub {
+        "rename" | "ren" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: batch rename <dir> <pattern> <replacement>");
+                return;
+            }
+            let dir = resolve_path(parts[1]);
+            if dry_run { shell_println!("(dry run)"); }
+            match batch::rename(&dir, parts[2], parts[3], &opts) {
+                Ok(r) => {
+                    shell_println!("{} renamed, {} failed:", r.succeeded, r.failed);
+                    for item in &r.items {
+                        if item.ok {
+                            shell_println!("  {} -> {}", item.src, item.dst);
+                        } else {
+                            shell_println!("  ! {}: {}", item.src, item.error);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "copy" | "cp" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: batch copy <dest> <file1> [file2...]");
+                return;
+            }
+            let dest = resolve_path(parts[1]);
+            let resolved: Vec<String> = parts[2..].iter()
+                .filter(|f| !f.starts_with('-')).map(|f| resolve_path(f)).collect();
+            let paths: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+            if dry_run { shell_println!("(dry run)"); }
+            match batch::copy(&paths, &dest, &opts) {
+                Ok(r) => shell_println!("{} copied, {} failed, {} bytes", r.succeeded, r.failed, r.bytes),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "move" | "mv" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: batch move <dest> <file1> [file2...]");
+                return;
+            }
+            let dest = resolve_path(parts[1]);
+            let resolved: Vec<String> = parts[2..].iter()
+                .filter(|f| !f.starts_with('-')).map(|f| resolve_path(f)).collect();
+            let paths: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+            if dry_run { shell_println!("(dry run)"); }
+            match batch::move_files(&paths, &dest, &opts) {
+                Ok(r) => shell_println!("{} moved, {} failed", r.succeeded, r.failed),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" | "rm" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: batch delete <file1> [file2...]");
+                return;
+            }
+            let resolved: Vec<String> = parts[1..].iter()
+                .filter(|f| !f.starts_with('-')).map(|f| resolve_path(f)).collect();
+            let paths: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+            if dry_run { shell_println!("(dry run)"); }
+            match batch::delete(&paths, &opts) {
+                Ok(r) => shell_println!("{} deleted, {} failed", r.succeeded, r.failed),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "glob" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: batch glob <dir> <pattern>");
+                return;
+            }
+            let dir = resolve_path(parts[1]);
+            match batch::glob_files(&dir, parts[2]) {
+                Ok(files) => {
+                    for f in &files {
+                        shell_println!("  {}", f);
+                    }
+                    shell_println!("({} matches)", files.len());
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (ren, cp, mv, del) = batch::stats();
+            shell_println!("Renames: {} | Copies: {} | Moves: {} | Deletes: {}", ren, cp, mv, del);
+        }
+        _ => {
+            shell_println!("Usage: batch <command> [args]");
+            shell_println!("  rename <dir> <pat> <repl>  Bulk rename by pattern");
+            shell_println!("  copy <dest> <files...>     Bulk copy");
+            shell_println!("  move <dest> <files...>     Bulk move");
+            shell_println!("  delete <files...>          Bulk delete");
+            shell_println!("  glob <dir> <pattern>       List matching files");
+            shell_println!("  stats                      Counts");
+            shell_println!("Flags: --dry-run/-n  --overwrite  --rename");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -14883,6 +14999,63 @@ fn cmd_mouse() {
     }
     if shown == 0 {
         crate::console_println!("  (no pending events)");
+    }
+}
+
+fn cmd_audio(args: &str) {
+    if !crate::hda::is_initialized() {
+        crate::console_println!("Intel HD Audio: not detected");
+        crate::console_println!("  QEMU: add -device intel-hda -device hda-duplex");
+        return;
+    }
+
+    let sub = args.split_whitespace().next().unwrap_or("status");
+    match sub {
+        "status" => {
+            let codecs = crate::hda::codec_count();
+            let vid = crate::hda::vendor_id().unwrap_or(0);
+            let streams = crate::hda::stream_counts();
+            crate::console_println!("Intel HD Audio:");
+            crate::console_println!("  Codecs:  {}", codecs);
+            if vid != 0 {
+                crate::console_println!("  Vendor:  {:04x}:{:04x}",
+                    (vid >> 16) & 0xFFFF, vid & 0xFFFF);
+            }
+            if let Some((iss, oss, bss)) = streams {
+                crate::console_println!("  Streams: {} input, {} output, {} bidirectional",
+                    iss, oss, bss);
+            }
+        }
+        "play" => {
+            match crate::hda::configure_output() {
+                Ok(()) => {
+                    if let Err(e) = crate::hda::fill_test_tone() {
+                        crate::console_println!("Failed to generate tone: {:?}", e);
+                        return;
+                    }
+                    if let Err(e) = crate::hda::start_playback() {
+                        crate::console_println!("Failed to start playback: {:?}", e);
+                        return;
+                    }
+                    crate::console_println!("Playing 440 Hz test tone...");
+                    crate::console_println!("Use 'audio stop' to stop.");
+                }
+                Err(e) => crate::console_println!("Failed to configure output: {:?}", e),
+            }
+        }
+        "stop" => {
+            if let Err(e) = crate::hda::stop_playback() {
+                crate::console_println!("Failed to stop: {:?}", e);
+            } else {
+                crate::console_println!("Playback stopped.");
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: audio [status|play|stop]");
+            crate::console_println!("  status — show HDA controller info");
+            crate::console_println!("  play   — play 440 Hz test tone");
+            crate::console_println!("  stop   — stop playback");
+        }
     }
 }
 
@@ -18149,14 +18322,14 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mouse" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
         | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

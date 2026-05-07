@@ -517,6 +517,8 @@ struct XhciController {
     devices: Vec<UsbDevice>,
     /// Port status cache.
     ports: Vec<UsbPort>,
+    /// Configured HID interfaces.
+    hid_interfaces: Vec<UsbHidInterface>,
 }
 
 // SAFETY: The controller is only accessed from the BSP during init.
@@ -876,6 +878,7 @@ impl XhciController {
             slot_ep0_rings: [NONE_RING; MAX_SLOTS],
             devices: Vec::new(),
             ports: Vec::new(),
+            hid_interfaces: Vec::new(),
         };
 
         // Scan ports for connected devices.
@@ -1425,6 +1428,338 @@ impl XhciController {
 }
 
 // ---------------------------------------------------------------------------
+// USB HID class support
+// ---------------------------------------------------------------------------
+
+/// USB HID interface class code.
+const USB_CLASS_HID: u8 = 0x03;
+/// HID subclass: boot interface.
+const USB_HID_SUBCLASS_BOOT: u8 = 0x01;
+/// HID protocol: keyboard.
+const USB_HID_PROTOCOL_KEYBOARD: u8 = 0x01;
+/// HID protocol: mouse.
+const USB_HID_PROTOCOL_MOUSE: u8 = 0x02;
+
+/// SET_CONFIGURATION request.
+const USB_REQ_TYPE_HOST_TO_DEVICE: u8 = 0x00;
+/// Class-specific interface request (host to device).
+const USB_REQ_TYPE_CLASS_IFACE_OUT: u8 = 0x21;
+/// HID SET_IDLE request code.
+const USB_HID_SET_IDLE: u8 = 0x0A;
+/// HID SET_PROTOCOL request code.
+const USB_HID_SET_PROTOCOL: u8 = 0x0B;
+
+/// Describes a HID interface found on a USB device.
+#[derive(Debug, Clone)]
+pub struct UsbHidInterface {
+    /// Slot ID of the device.
+    pub slot_id: u8,
+    /// Interface number.
+    pub interface_num: u8,
+    /// HID subclass (0 = none, 1 = boot interface).
+    pub subclass: u8,
+    /// HID protocol (0 = none, 1 = keyboard, 2 = mouse).
+    pub protocol: u8,
+    /// Interrupt IN endpoint number (1-based).
+    pub interrupt_ep: u8,
+    /// Max packet size of the interrupt endpoint.
+    pub interrupt_max_packet: u16,
+    /// Interrupt endpoint interval (polling rate in frames).
+    pub interval: u8,
+}
+
+/// USB Configuration Descriptor header (9 bytes).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+struct UsbConfigDescriptor {
+    b_length: u8,
+    b_descriptor_type: u8,
+    w_total_length: u16,
+    b_num_interfaces: u8,
+    b_configuration_value: u8,
+    i_configuration: u8,
+    bm_attributes: u8,
+    b_max_power: u8,
+}
+
+/// USB Interface Descriptor (9 bytes).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+struct UsbInterfaceDescriptor {
+    b_length: u8,
+    b_descriptor_type: u8,
+    b_interface_number: u8,
+    b_alternate_setting: u8,
+    b_num_endpoints: u8,
+    b_interface_class: u8,
+    b_interface_sub_class: u8,
+    b_interface_protocol: u8,
+    i_interface: u8,
+}
+
+/// USB Endpoint Descriptor (7 bytes).
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+struct UsbEndpointDescriptor {
+    b_length: u8,
+    b_descriptor_type: u8,
+    b_endpoint_address: u8,
+    bm_attributes: u8,
+    w_max_packet_size: u16,
+    b_interval: u8,
+}
+
+/// Boot protocol keyboard input report (8 bytes).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HidKeyboardReport {
+    /// Modifier keys (Ctrl, Shift, Alt, GUI).
+    pub modifiers: u8,
+    /// Reserved byte.
+    pub reserved: u8,
+    /// Up to 6 simultaneous key codes.
+    pub keycodes: [u8; 6],
+}
+
+/// Boot protocol mouse input report (3-4 bytes).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HidMouseReport {
+    /// Button bits (bit 0 = left, bit 1 = right, bit 2 = middle).
+    pub buttons: u8,
+    /// X movement (signed 8-bit).
+    pub x: i8,
+    /// Y movement (signed 8-bit).
+    pub y: i8,
+    /// Scroll wheel (signed 8-bit, optional).
+    pub wheel: i8,
+}
+
+impl XhciController {
+    /// Read the Configuration Descriptor and find HID interfaces.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    fn get_config_descriptor(&mut self, slot_id: u8) -> KernelResult<(u8, Vec<UsbHidInterface>)> {
+        // First, read just the config descriptor header to get total length.
+        let buf_frame = frame::alloc_frame()?;
+        let buf_phys = buf_frame.addr();
+        let buf_virt = buf_phys.wrapping_add(self.hhdm_offset) as *mut u8;
+        // SAFETY: Just allocated.
+        unsafe { core::ptr::write_bytes(buf_virt, 0, 256); }
+
+        // GET_DESCRIPTOR for Configuration (type 2, index 0).
+        let transferred = self.control_transfer(
+            slot_id,
+            0x80, // Device-to-Host, Standard, Device
+            USB_REQ_GET_DESCRIPTOR,
+            (u16::from(USB_DESC_CONFIGURATION) << 8) | 0,
+            0,
+            buf_phys,
+            255, // Read up to 255 bytes
+            true,
+        )?;
+
+        if transferred < 9 {
+            let _ = unsafe { frame::free_frame(buf_frame) };
+            return Err(KernelError::IoError);
+        }
+
+        // Parse config descriptor header.
+        let config_desc = unsafe {
+            core::ptr::read_unaligned(buf_virt as *const UsbConfigDescriptor)
+        };
+        let config_value = config_desc.b_configuration_value;
+        let total_len = { config_desc.w_total_length } as usize;
+        let actual_len = transferred.min(total_len).min(255);
+
+        // Walk the descriptor list looking for HID interfaces.
+        let mut hid_interfaces = Vec::new();
+        let mut offset = 0usize;
+        let mut current_iface: Option<(u8, u8, u8)> = None; // (iface_num, subclass, protocol)
+
+        while offset.wrapping_add(2) <= actual_len {
+            let desc_len = unsafe { *buf_virt.add(offset) } as usize;
+            let desc_type = unsafe { *buf_virt.add(offset.wrapping_add(1)) };
+
+            if desc_len < 2 || offset.wrapping_add(desc_len) > actual_len {
+                break;
+            }
+
+            match desc_type {
+                USB_DESC_INTERFACE => {
+                    if desc_len >= 9 {
+                        let iface = unsafe {
+                            core::ptr::read_unaligned(buf_virt.add(offset) as *const UsbInterfaceDescriptor)
+                        };
+                        if iface.b_interface_class == USB_CLASS_HID {
+                            current_iface = Some((
+                                iface.b_interface_number,
+                                iface.b_interface_sub_class,
+                                iface.b_interface_protocol,
+                            ));
+                        } else {
+                            current_iface = None;
+                        }
+                    }
+                }
+                USB_DESC_ENDPOINT => {
+                    if desc_len >= 7 {
+                        if let Some((iface_num, subclass, protocol)) = current_iface {
+                            let ep = unsafe {
+                                core::ptr::read_unaligned(buf_virt.add(offset) as *const UsbEndpointDescriptor)
+                            };
+                            let ep_addr = ep.b_endpoint_address;
+                            let ep_attrs = ep.bm_attributes;
+                            let max_pkt = { ep.w_max_packet_size };
+                            let interval = ep.b_interval;
+
+                            // Check if this is an Interrupt IN endpoint.
+                            let is_in = (ep_addr & 0x80) != 0;
+                            let is_interrupt = (ep_attrs & 0x03) == 0x03;
+
+                            if is_in && is_interrupt {
+                                hid_interfaces.push(UsbHidInterface {
+                                    slot_id,
+                                    interface_num: iface_num,
+                                    subclass,
+                                    protocol,
+                                    interrupt_ep: ep_addr & 0x0F,
+                                    interrupt_max_packet: max_pkt,
+                                    interval,
+                                });
+                                current_iface = None; // Done with this interface.
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            offset = offset.wrapping_add(desc_len);
+        }
+
+        // Free buffer.
+        let _ = unsafe { frame::free_frame(buf_frame) };
+
+        Ok((config_value, hid_interfaces))
+    }
+
+    /// Set the device configuration (SET_CONFIGURATION).
+    fn set_configuration(&mut self, slot_id: u8, config_value: u8) -> KernelResult<()> {
+        self.control_transfer(
+            slot_id,
+            USB_REQ_TYPE_HOST_TO_DEVICE, // Host-to-Device, Standard, Device
+            USB_REQ_SET_CONFIGURATION,
+            u16::from(config_value),
+            0,
+            0,
+            0,
+            false,
+        )?;
+        Ok(())
+    }
+
+    /// Set HID boot protocol on an interface.
+    fn hid_set_boot_protocol(&mut self, slot_id: u8, interface: u8) -> KernelResult<()> {
+        // SET_PROTOCOL: wValue = 0 (boot protocol), wIndex = interface
+        self.control_transfer(
+            slot_id,
+            USB_REQ_TYPE_CLASS_IFACE_OUT,
+            USB_HID_SET_PROTOCOL,
+            0, // 0 = boot protocol
+            u16::from(interface),
+            0,
+            0,
+            false,
+        )?;
+        Ok(())
+    }
+
+    /// Set HID idle rate (0 = report only on change).
+    fn hid_set_idle(&mut self, slot_id: u8, interface: u8) -> KernelResult<()> {
+        // SET_IDLE: wValue = idle_rate << 8 | report_id, wIndex = interface
+        self.control_transfer(
+            slot_id,
+            USB_REQ_TYPE_CLASS_IFACE_OUT,
+            USB_HID_SET_IDLE,
+            0, // 0 = infinite (only report on change)
+            u16::from(interface),
+            0,
+            0,
+            false,
+        )?;
+        Ok(())
+    }
+
+    /// Configure all detected HID devices for boot protocol.
+    ///
+    /// This sets the configuration, switches to boot protocol, and
+    /// configures idle reporting.  After this, devices are ready for
+    /// interrupt transfers.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn configure_hid_devices(&mut self) -> Vec<UsbHidInterface> {
+        let mut configured = Vec::new();
+
+        // Collect slot IDs to avoid borrow issues.
+        let slot_ids: Vec<u8> = self.devices.iter().map(|d| d.slot_id).collect();
+
+        for slot_id in slot_ids {
+            // Read configuration descriptor.
+            let (config_value, hid_interfaces) = match self.get_config_descriptor(slot_id) {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::serial_println!(
+                        "[xhci] Failed to read config desc for slot {}: {:?}", slot_id, e
+                    );
+                    continue;
+                }
+            };
+
+            if hid_interfaces.is_empty() {
+                continue;
+            }
+
+            // Set configuration.
+            if let Err(e) = self.set_configuration(slot_id, config_value) {
+                crate::serial_println!(
+                    "[xhci] SET_CONFIGURATION failed for slot {}: {:?}", slot_id, e
+                );
+                continue;
+            }
+
+            // Configure each HID interface.
+            for hid in &hid_interfaces {
+                let protocol_name = match hid.protocol {
+                    USB_HID_PROTOCOL_KEYBOARD => "keyboard",
+                    USB_HID_PROTOCOL_MOUSE => "mouse",
+                    _ => "unknown HID",
+                };
+
+                // Set boot protocol (simpler fixed-format reports).
+                if hid.subclass == USB_HID_SUBCLASS_BOOT {
+                    if let Err(e) = self.hid_set_boot_protocol(slot_id, hid.interface_num) {
+                        crate::serial_println!(
+                            "[xhci] SET_PROTOCOL failed for slot {} {}: {:?}",
+                            slot_id, protocol_name, e
+                        );
+                    }
+                }
+
+                // Set idle rate to 0 (report only on change).
+                let _ = self.hid_set_idle(slot_id, hid.interface_num);
+
+                crate::serial_println!(
+                    "[xhci] Configured {} on slot {} (EP{} IN, {} bytes, interval={})",
+                    protocol_name, slot_id, hid.interrupt_ep,
+                    hid.interrupt_max_packet, hid.interval
+                );
+
+                configured.push(hid.clone());
+            }
+        }
+
+        configured
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
 
@@ -1456,11 +1791,16 @@ pub fn init(hhdm_offset: u64) {
             // Enumerate connected devices.
             ctrl.enumerate_devices();
 
+            // Configure HID devices (keyboards, mice) for boot protocol.
+            let hid = ctrl.configure_hid_devices();
+            let n_hid = hid.len();
+            ctrl.hid_interfaces = hid;
+
             let n_devices = ctrl.devices.len();
             let n_ports = ctrl.ports.len();
             crate::serial_println!(
-                "[xhci] Initialization complete: {} ports, {} devices enumerated",
-                n_ports, n_devices
+                "[xhci] Initialization complete: {} ports, {} devices, {} HID interfaces",
+                n_ports, n_devices, n_hid
             );
 
             *XHCI.lock() = Some(ctrl);
@@ -1495,11 +1835,37 @@ pub fn devices() -> Vec<UsbDevice> {
     }
 }
 
+/// Return a list of configured HID interfaces (keyboards, mice).
+pub fn hid_interfaces() -> Vec<UsbHidInterface> {
+    match XHCI.lock().as_ref() {
+        Some(ctrl) => ctrl.hid_interfaces.clone(),
+        None => Vec::new(),
+    }
+}
+
+/// Check if a USB keyboard is available.
+pub fn has_keyboard() -> bool {
+    match XHCI.lock().as_ref() {
+        Some(ctrl) => ctrl.hid_interfaces.iter().any(|h| h.protocol == USB_HID_PROTOCOL_KEYBOARD),
+        None => false,
+    }
+}
+
+/// Check if a USB mouse is available.
+pub fn has_mouse() -> bool {
+    match XHCI.lock().as_ref() {
+        Some(ctrl) => ctrl.hid_interfaces.iter().any(|h| h.protocol == USB_HID_PROTOCOL_MOUSE),
+        None => false,
+    }
+}
+
 /// Re-scan ports for newly connected/disconnected devices.
 pub fn rescan() {
     if let Some(ctrl) = XHCI.lock().as_mut() {
         ctrl.scan_ports();
         ctrl.enumerate_devices();
+        let hid = ctrl.configure_hid_devices();
+        ctrl.hid_interfaces = hid;
     }
 }
 

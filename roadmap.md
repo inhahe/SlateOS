@@ -759,9 +759,10 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Port ssh/sshd
 - [ ] Build custom grep (Rust, with unique features from Python grep)
 - [ ] Port find
-- [ ] Terminal emulator (basic, serial/framebuffer):
+- [-] Terminal emulator (basic, serial/framebuffer):
+  - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [ ] Persistent searchable history, tab completion
-  - [ ] Unicode and ANSI support
+  - [ ] Unicode support (multi-byte character handling)
   - [ ] Configurable colors and font
   - [ ] tmux-like session detach/reattach
   - [ ] Word wrap option, find in backscroll (Ctrl+F)

@@ -81,6 +81,7 @@ pub mod pipe;
 pub mod procfs;
 pub mod policy;
 pub mod prefetch;
+pub mod preview;
 pub mod profile;
 pub mod quota;
 pub mod readdir_plus;

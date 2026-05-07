@@ -3092,7 +3092,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "nproc", "nslookup", "od", "paste", "pci", "ping", "printenv",
-    "prefetch", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
+    "prefetch", "preview", "printf", "profile", "ps", "pwd", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "rmdir", "run", "sa", "schedstat", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sl", "slimit", "sleep", "sockact", "sort", "source",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4379,6 +4379,7 @@ fn dispatch(line: &str) {
         "clipboard" | "clip" => cmd_clipboard(args),
         "dragdrop" => cmd_dragdrop(args),
         "fileops" | "fops" => cmd_fileops(args),
+        "preview" => cmd_preview(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -15520,6 +15521,106 @@ fn cmd_fileops(args: &str) {
     }
 }
 
+/// `preview` — file preview/thumbnail generation.
+fn cmd_preview(args: &str) {
+    use crate::fs::preview;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "generate" | "gen" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: preview generate <path> [small|medium|large]");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            let size = match parts.get(2).copied() {
+                Some("small") | Some("s") => preview::PreviewSize::Small,
+                Some("large") | Some("l") => preview::PreviewSize::Large,
+                _ => preview::PreviewSize::Medium,
+            };
+            match preview::generate(&path, size) {
+                Ok(p) => {
+                    let (w, h) = size.dimensions();
+                    let kind = match p.kind {
+                        preview::PreviewKind::Image => "image",
+                        preview::PreviewKind::Text => "text",
+                        preview::PreviewKind::AlbumArt => "album-art",
+                        preview::PreviewKind::Listing => "listing",
+                        preview::PreviewKind::Icon => "icon",
+                        preview::PreviewKind::Custom => "custom",
+                    };
+                    shell_println!("Generated {} preview: {}x{}, {} bytes, mime={}", kind, w, h, p.data_size(), p.mime);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            let path_arg = parts.get(1).copied().unwrap_or("");
+            if path_arg.is_empty() {
+                shell_println!("Usage: preview check <path>");
+                return;
+            }
+            let path = resolve_path(path_arg);
+            if preview::supports_preview(&path) {
+                shell_println!("{}: preview supported", path);
+            } else {
+                shell_println!("{}: no preview available", path);
+            }
+        }
+        "dir" => {
+            let dir_arg = parts.get(1).copied().unwrap_or(".");
+            let dir = resolve_path(dir_arg);
+            let size = match parts.get(2).copied() {
+                Some("small") | Some("s") => preview::PreviewSize::Small,
+                Some("large") | Some("l") => preview::PreviewSize::Large,
+                _ => preview::PreviewSize::Medium,
+            };
+            match preview::generate_for_directory(&dir, size) {
+                Ok(count) => shell_println!("Generated {} previews for {}", count, dir),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "generators" | "gens" => {
+            let gens = preview::list_generators();
+            if gens.is_empty() {
+                shell_println!("No custom generators registered.");
+            } else {
+                shell_println!("{:6} {:20} {}", "ID", "APP", "MIME TYPES");
+                for g in &gens {
+                    shell_println!("{:6} {:20} {}", g.id, g.app_name,
+                        g.mime_types.join(", "));
+                }
+            }
+        }
+        "stats" | "" => {
+            let (gen_calls, cache_hits, failures, total_bytes) = preview::stats();
+            shell_println!("Preview generation statistics:");
+            shell_println!("  Generate calls: {}", gen_calls);
+            shell_println!("  Cache hits:     {}", cache_hits);
+            shell_println!("  Failures:       {}", failures);
+            shell_println!("  Bytes generated:{}", total_bytes);
+            let gens = preview::list_generators();
+            shell_println!("  Custom gens:    {}", gens.len());
+        }
+        "reset" => {
+            preview::reset_stats();
+            shell_println!("Preview statistics reset.");
+        }
+        _ => {
+            shell_println!("Usage: preview <command>");
+            shell_println!("  generate <path> [size]  Generate preview for file");
+            shell_println!("  check <path>            Check if preview is supported");
+            shell_println!("  dir <path> [size]       Generate previews for directory");
+            shell_println!("  generators              List custom generators");
+            shell_println!("  stats                   Show statistics (default)");
+            shell_println!("  reset                   Reset counters");
+            shell_println!("");
+            shell_println!("Sizes: small (48px), medium (128px), large (256px)");
+        }
+    }
+}
+
 /// Parse a comma-separated event mask string.
 fn parse_event_mask(s: &str) -> crate::fs::notify::FsEventMask {
     use crate::fs::notify::FsEventMask;
@@ -21088,7 +21189,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "fileops" | "fops" | "preview" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

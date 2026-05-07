@@ -815,7 +815,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Software mixer: 8 concurrent streams, per-stream volume/mute, master volume/mute, 48kHz/S16/stereo, 32-bit intermediate summing with i16 clamping, ring buffers (16KB/stream), kshell `mixer` command
 - [x] System notification sounds
   - [x] 7 event types (Error/Warning/Success/Notification/Critical/BootComplete/Shutdown), procedural PCM generation (sweeps, fades, multi-tone sequences), mixer integration with PC speaker fallback, separate notification volume
-- [ ] Sound history (which apps played/are playing sound)
+- [x] Sound history (which apps played/are playing sound)
+  - [x] Circular log (64 entries): stream name, open/close TSC timestamps, bytes played, volume, duration; is_playing()/active_count() real-time queries, recent(n) history API, stats()
 
 ### 3.7 File type associations
 - [x] Extension → default app mapping (fs::associations registry with MIME→app priority system, extension override, kshell `assoc` command)

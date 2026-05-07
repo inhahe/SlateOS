@@ -199,6 +199,7 @@ const ROOT_FILES: &[&str] = &[
     "osreset",
     "bootcfg",
     "swapcfg",
+    "timezone",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4193,6 +4194,42 @@ fn gen_swapcfg() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Generate `/proc/timezone` — timezone and NTP status.
+fn gen_timezone() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (tz_count, ntp_count, ntp_on, ops) = super::timezone::stats();
+    let current = super::timezone::current_timezone();
+    let (tf, df, ws, sec, date) = super::timezone::format_settings();
+    let ntp_st = super::timezone::ntp_status();
+
+    out.push_str("Timezone & Clock\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Current:       {}\n", current));
+    out.push_str(&format!("Time format:   {:?}\n", tf));
+    out.push_str(&format!("Date format:   {:?}\n", df));
+    out.push_str(&format!("Week start:    {:?}\n", ws));
+    out.push_str(&format!("Show seconds:  {}\n", sec));
+    out.push_str(&format!("Show date:     {}\n", date));
+    out.push_str(&format!("NTP enabled:   {}\n", ntp_on));
+    out.push_str(&format!("NTP status:    {:?}\n", ntp_st));
+    out.push_str(&format!("NTP servers:   {}\n", ntp_count));
+    out.push_str(&format!("Timezones:     {}\n", tz_count));
+    out.push_str(&format!("Operations:    {}\n", ops));
+
+    let servers = super::timezone::list_ntp_servers();
+    if !servers.is_empty() {
+        out.push_str(&format!("\n{:<30} {:<6} {:<10} {}\n", "SERVER", "PORT", "ENABLED", "OFFSET_US"));
+        for s in &servers {
+            out.push_str(&format!("{:<30} {:<6} {:<10} {}\n",
+                s.hostname, s.port, s.enabled, s.offset_us));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4557,6 +4594,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "osreset" => Ok(gen_osreset()),
         "bootcfg" => Ok(gen_bootcfg()),
         "swapcfg" => Ok(gen_swapcfg()),
+        "timezone" => Ok(gen_timezone()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

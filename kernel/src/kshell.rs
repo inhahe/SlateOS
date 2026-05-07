@@ -3458,7 +3458,7 @@ const COMMANDS: &[&str] = &[
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "template", "test",
-    "then", "thumbcache", "throttle", "time", "toolbar", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
+    "then", "thumbcache", "throttle", "time", "timezone", "tz", "toolbar", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "ulimit",
     "overlay",
     "mkfifo", "lspipe", "pipes",
@@ -4803,6 +4803,7 @@ fn dispatch(line: &str) {
         "swapcfg" | "swap" => cmd_swapcfg(args),
         "certmgr" | "cert" => cmd_certmgr(args),
         "installer" => cmd_installer(args),
+        "timezone" | "tz" => cmd_timezone(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -20898,6 +20899,105 @@ fn cmd_installer(args: &str) {
     }
 }
 
+/// `timezone` / `tz` — timezone and system clock settings.
+fn cmd_timezone(args: &str) {
+    use crate::fs::timezone;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let tz = timezone::current_timezone();
+            let (tf, df, ws, sec, date) = timezone::format_settings();
+            let ntp = timezone::ntp_status();
+            shell_println!("Timezone:     {}", tz);
+            shell_println!("Time format:  {:?}", tf);
+            shell_println!("Date format:  {:?}", df);
+            shell_println!("Week start:   {:?}", ws);
+            shell_println!("Show seconds: {}", sec);
+            shell_println!("Show date:    {}", date);
+            shell_println!("NTP status:   {:?}", ntp);
+        }
+        "set" => {
+            let name = parts.get(1).copied().unwrap_or("UTC");
+            match timezone::set_timezone(name) { Ok(()) => shell_println!("Timezone: {}", name), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "list" => {
+            let region = parts.get(1).copied().unwrap_or("");
+            let tzs = timezone::list_timezones(region);
+            if tzs.is_empty() { shell_println!("No timezones{}", if region.is_empty() { "" } else { " in region" }); return; }
+            shell_println!("{:<28} {:<8} {:<6} {}", "NAME", "OFFSET", "ABBR", "DISPLAY");
+            for t in &tzs {
+                let sign = if t.std_offset_min >= 0 { "+" } else { "" };
+                let h = t.std_offset_min / 60;
+                let m = (t.std_offset_min % 60).unsigned_abs();
+                shell_println!("{:<28} {}{:02}:{:02}  {:<6} {}", t.name, sign, h, m, t.std_abbrev, t.display_name);
+            }
+        }
+        "regions" => {
+            let regions = timezone::list_regions();
+            for r in &regions { shell_println!("{}", r); }
+        }
+        "detect" => {
+            let lat: f32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let lon: f32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            match timezone::detect_from_location(lat, lon) { Ok(tz) => shell_println!("Detected: {}", tz), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "ntp" => {
+            let on = parts.get(1).copied().unwrap_or("on") != "off";
+            match timezone::set_ntp_enabled(on) { Ok(()) => shell_println!("NTP {}", if on { "enabled" } else { "disabled" }), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "servers" => {
+            let servers = timezone::list_ntp_servers();
+            if servers.is_empty() { shell_println!("No NTP servers"); return; }
+            for s in &servers { shell_println!("{} :{} enabled={} offset={}us", s.hostname, s.port, s.enabled, s.offset_us); }
+        }
+        "addntp" => {
+            let host = parts.get(1).copied().unwrap_or("pool.ntp.org");
+            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(123);
+            match timezone::add_ntp_server(host, port) { Ok(()) => shell_println!("Added {}", host), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "rmntp" => {
+            let host = parts.get(1).copied().unwrap_or("");
+            match timezone::remove_ntp_server(host) { Ok(()) => shell_println!("Removed"), Err(e) => shell_println!("Error: {:?}", e) }
+        }
+        "timefmt" => {
+            match parts.get(1).copied().unwrap_or("24") { "12" => timezone::set_time_format(timezone::TimeFormat::H12), _ => timezone::set_time_format(timezone::TimeFormat::H24) };
+            shell_println!("Time format set");
+        }
+        "datefmt" => {
+            match parts.get(1).copied().unwrap_or("iso") {
+                "mdy" | "us" => timezone::set_date_format(timezone::DateFormat::Mdy),
+                "dmy" | "eu" => timezone::set_date_format(timezone::DateFormat::Dmy),
+                "dot" | "de" => timezone::set_date_format(timezone::DateFormat::DmyDot),
+                _ => timezone::set_date_format(timezone::DateFormat::Iso),
+            };
+            shell_println!("Date format set");
+        }
+        "weekstart" => {
+            match parts.get(1).copied().unwrap_or("mon") {
+                "sun" | "sunday" => timezone::set_week_start(timezone::WeekStart::Sunday),
+                "sat" | "saturday" => timezone::set_week_start(timezone::WeekStart::Saturday),
+                _ => timezone::set_week_start(timezone::WeekStart::Monday),
+            };
+            shell_println!("Week start set");
+        }
+        "seconds" => {
+            let on = parts.get(1).copied().unwrap_or("on") != "off";
+            timezone::set_show_seconds(on);
+            shell_println!("Seconds {}", if on { "shown" } else { "hidden" });
+        }
+        "showdate" => {
+            let on = parts.get(1).copied().unwrap_or("on") != "off";
+            timezone::set_show_date(on);
+            shell_println!("Date {}", if on { "shown" } else { "hidden" });
+        }
+        "stats" => { let (tzs, ntps, ntp_on, ops) = timezone::stats(); shell_println!("Timezones: {}  NTP servers: {}  NTP on: {}  Ops: {}", tzs, ntps, ntp_on, ops); }
+        "init" => { timezone::init_defaults(); shell_println!("Defaults initialised"); }
+        "test" => { match timezone::self_test() { Ok(()) => shell_println!("All tests passed"), Err(e) => shell_println!("Test failed: {:?}", e) } }
+        _ => shell_println!("Usage: timezone <show|set|list|regions|detect|ntp|servers|addntp|rmntp|timefmt|datefmt|weekstart|seconds|showdate|stats|init|test>"),
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -28427,7 +28527,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

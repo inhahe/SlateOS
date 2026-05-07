@@ -145,6 +145,7 @@ pub mod tar;
 pub mod taskbar;
 pub mod templates;
 pub mod theme;
+pub mod timezone;
 pub mod toolbar;
 pub mod thumbcache;
 pub mod tmpwatch;

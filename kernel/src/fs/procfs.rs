@@ -113,6 +113,7 @@ const ROOT_FILES: &[&str] = &[
     "snapshots",
     "reclaim",
     "transactions",
+    "changetrack",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1707,6 +1708,25 @@ fn gen_transactions() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_changetrack() -> Vec<u8> {
+    use crate::fs::changetrack;
+    let cursors = changetrack::list();
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!("Change tracking cursors: {}\n\n", cursors.len()));
+
+    if cursors.is_empty() {
+        out.push_str("(no cursors registered)\n");
+    } else {
+        out.push_str(&format!("{:<20} {:<10} {:<10}\n", "NAME", "LAST_SEQ", "ADVANCES"));
+        for c in &cursors {
+            out.push_str(&format!("{:<20} {:<10} {:<10}\n", c.name, c.last_seq, c.advance_count));
+        }
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1761,6 +1781,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "snapshots" => Ok(gen_snapshots()),
         "reclaim" => Ok(gen_reclaim()),
         "transactions" => Ok(gen_transactions()),
+        "changetrack" => Ok(gen_changetrack()),
         _ => Err(KernelError::NotFound),
     }
 }

@@ -3108,6 +3108,7 @@ const COMMANDS: &[&str] = &[
     "fssnapshot", "fssnap",
     "reclaim",
     "fstx",
+    "changetrack", "ct",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4334,6 +4335,7 @@ fn dispatch(line: &str) {
         "fssnapshot" | "fssnap" => cmd_fssnapshot(args),
         "reclaim" => cmd_reclaim(args),
         "fstx" => cmd_fstx(args),
+        "changetrack" | "ct" => cmd_changetrack(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -10995,6 +10997,159 @@ fn cmd_fstx(args: &str) {
     }
 }
 
+/// `changetrack` / `ct` — persistent filesystem change tracking.
+///
+/// Subcommands:
+///   ct register NAME          - register a new change cursor
+///   ct unregister NAME        - remove a cursor
+///   ct changes NAME [PATH]    - show changes since last check (advances cursor)
+///   ct peek NAME [PATH]       - show changes without advancing cursor
+///   ct reset NAME             - skip all pending changes
+///   ct info NAME              - show cursor details
+///   ct list / ct status       - list all cursors
+///   ct flush                  - persist cursors to disk
+fn cmd_changetrack(args: &str) {
+    use crate::fs::changetrack;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.first().copied().unwrap_or("list") {
+        "register" | "reg" | "add" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ct register NAME");
+                return;
+            }
+            match changetrack::register(parts[1]) {
+                Ok(()) => shell_println!("Cursor '{}' registered.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unregister" | "unreg" | "rm" | "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ct unregister NAME");
+                return;
+            }
+            match changetrack::unregister(parts[1]) {
+                Ok(()) => shell_println!("Cursor '{}' removed.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "changes" | "since" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ct changes NAME [PATH_PREFIX]");
+                return;
+            }
+            let mut filter = changetrack::ChangeFilter::default();
+            if parts.len() >= 3 {
+                filter.path_prefixes = alloc::vec![alloc::string::String::from(resolve_path(parts[2]).as_str())];
+            }
+            match changetrack::changes(parts[1], &filter) {
+                Ok(result) => {
+                    if result.gap_detected {
+                        shell_println!("WARNING: Some entries may have been lost (journal eviction).");
+                    }
+                    if result.changes.is_empty() {
+                        shell_println!("No changes since last check.");
+                    } else {
+                        shell_println!("{} change(s):", result.changes.len());
+                        for c in &result.changes {
+                            let etype = match c.event_type {
+                                crate::fs::journal::JournalEventType::Created => "CREATE",
+                                crate::fs::journal::JournalEventType::Modified => "MODIFY",
+                                crate::fs::journal::JournalEventType::Deleted => "DELETE",
+                                crate::fs::journal::JournalEventType::Renamed => "RENAME",
+                            };
+                            if c.old_path.is_empty() {
+                                shell_println!("  [{}] seq={} {}", etype, c.seq, c.path);
+                            } else {
+                                shell_println!("  [{}] seq={} {} -> {}", etype, c.seq, c.old_path, c.path);
+                            }
+                        }
+                    }
+                    shell_println!("Cursor advanced to seq {}.", result.new_seq);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "peek" | "preview" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ct peek NAME [PATH_PREFIX]");
+                return;
+            }
+            let mut filter = changetrack::ChangeFilter::default();
+            if parts.len() >= 3 {
+                filter.path_prefixes = alloc::vec![alloc::string::String::from(resolve_path(parts[2]).as_str())];
+            }
+            match changetrack::peek(parts[1], &filter) {
+                Ok(result) => {
+                    if result.changes.is_empty() {
+                        shell_println!("No pending changes.");
+                    } else {
+                        shell_println!("{} pending change(s) (cursor NOT advanced):", result.changes.len());
+                        for c in &result.changes {
+                            let etype = match c.event_type {
+                                crate::fs::journal::JournalEventType::Created => "CREATE",
+                                crate::fs::journal::JournalEventType::Modified => "MODIFY",
+                                crate::fs::journal::JournalEventType::Deleted => "DELETE",
+                                crate::fs::journal::JournalEventType::Renamed => "RENAME",
+                            };
+                            if c.old_path.is_empty() {
+                                shell_println!("  [{}] seq={} {}", etype, c.seq, c.path);
+                            } else {
+                                shell_println!("  [{}] seq={} {} -> {}", etype, c.seq, c.old_path, c.path);
+                            }
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reset" | "skip" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ct reset NAME");
+                return;
+            }
+            match changetrack::reset(parts[1]) {
+                Ok(()) => shell_println!("Cursor '{}' reset to current position.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" | "show" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ct info NAME");
+                return;
+            }
+            match changetrack::info(parts[1]) {
+                Ok(i) => {
+                    shell_println!("Cursor '{}':", i.name);
+                    shell_println!("  Last seq:     {}", i.last_seq);
+                    shell_println!("  Advances:     {}", i.advance_count);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "ls" | "status" => {
+            let cursors = changetrack::list();
+            if cursors.is_empty() {
+                shell_println!("No change tracking cursors registered.");
+            } else {
+                shell_println!("{:<20} {:<10} {:<10}", "NAME", "LAST_SEQ", "ADVANCES");
+                for c in &cursors {
+                    shell_println!("{:<20} {:<10} {:<10}", c.name, c.last_seq, c.advance_count);
+                }
+            }
+        }
+        "flush" | "save" => {
+            match changetrack::flush() {
+                Ok(()) => shell_println!("Cursors persisted to disk."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Usage: ct <register|unregister|changes|peek|reset|info|list|flush> [args...]");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -16247,7 +16402,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -3098,7 +3098,7 @@ const COMMANDS: &[&str] = &[
     "sparse", "splice", "strings", "tac", "tr",
     "do", "done", "elif", "else", "expr", "fi", "if",
     "slabinfo", "heapaudit", "fraginfo", "leakcheck", "memtest", "split", "stack", "stat", "symlink", "sync", "sysctl", "tail", "tar", "tasks", "taskset", "tcache", "tee", "template", "test",
-    "then", "thumbcache", "throttle", "time", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
+    "then", "thumbcache", "throttle", "time", "toolbar", "top", "touch", "trash", "tree", "true", "truncate", "type", "umount",
     "ulimit",
     "overlay",
     "mkfifo", "lspipe", "pipes",
@@ -4398,6 +4398,7 @@ fn dispatch(line: &str) {
         "openw" => cmd_openwith(args),
         "sidebar" => cmd_sidebar(args),
         "statusbar" => cmd_statusbar(args),
+        "toolbar" => cmd_toolbar(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
         "columnview" | "colview" => cmd_columnview(args),
@@ -16402,6 +16403,148 @@ fn cmd_statusbar(args: &str) {
     }
 }
 
+/// `toolbar` — file explorer toolbar / command bar.
+fn cmd_toolbar(args: &str) {
+    use crate::fs::toolbar;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            // Build toolbar with optional flags.
+            let mut ctx = toolbar::ToolbarContext::default();
+            for &flag in parts.iter().skip(1) {
+                match flag {
+                    "--selected" | "-s" => { ctx.has_selection = true; ctx.selection_count = 1; }
+                    "--multi" | "-m" => { ctx.has_selection = true; ctx.selection_count = 3; }
+                    "--trash" | "-t" => ctx.is_trash = true,
+                    "--readonly" | "-r" => ctx.read_only = true,
+                    "--paste" | "-p" => ctx.can_paste = true,
+                    "--back" => ctx.can_go_back = true,
+                    "--forward" => ctx.can_go_forward = true,
+                    "--search" => ctx.is_searching = true,
+                    "--hidden" => ctx.show_hidden = true,
+                    _ => {}
+                }
+            }
+            let layout = toolbar::build(&ctx);
+            shell_println!("Toolbar ({} buttons):", layout.buttons.len());
+            shell_println!("{:16} {:12} {:8} {:8} {}", "ACTION", "SECTION", "ENABLED", "TOGGLE", "LABEL");
+            for btn in &layout.buttons {
+                let sec = match btn.section {
+                    toolbar::ToolbarSection::Navigation => "Navigation",
+                    toolbar::ToolbarSection::Actions => "Actions",
+                    toolbar::ToolbarSection::View => "View",
+                    toolbar::ToolbarSection::New => "New",
+                    toolbar::ToolbarSection::Search => "Search",
+                };
+                let en = if btn.enabled { "yes" } else { "no" };
+                let tg = if btn.toggled { "ON" } else { "-" };
+                shell_println!("{:16} {:12} {:8} {:8} {}", btn.action, sec, en, tg, btn.label);
+                if btn.has_dropdown {
+                    for item in &btn.dropdown {
+                        let chk = if item.checked { "*" } else { " " };
+                        shell_println!("  {} [{}] {}", chk, item.action, item.label);
+                    }
+                }
+            }
+        }
+        "section" => {
+            let sec_name = parts.get(1).copied().unwrap_or("");
+            let section = match sec_name {
+                "nav" | "navigation" => Some(toolbar::ToolbarSection::Navigation),
+                "actions" | "act" => Some(toolbar::ToolbarSection::Actions),
+                "view" => Some(toolbar::ToolbarSection::View),
+                "new" => Some(toolbar::ToolbarSection::New),
+                "search" => Some(toolbar::ToolbarSection::Search),
+                _ => None,
+            };
+            match section {
+                Some(sec) => {
+                    let ctx = toolbar::ToolbarContext::default();
+                    let layout = toolbar::build(&ctx);
+                    let btns = toolbar::section_buttons(&layout, sec);
+                    shell_println!("{} buttons in {:?} section:", btns.len(), sec);
+                    for btn in &btns {
+                        let en = if btn.enabled { "enabled" } else { "disabled" };
+                        shell_println!("  {} ({}){}", btn.action, en,
+                            if btn.label.is_empty() { String::new() } else { alloc::format!(" - {}", btn.label) });
+                    }
+                }
+                None => {
+                    shell_println!("Usage: toolbar section <nav|actions|view|new|search>");
+                }
+            }
+        }
+        "check" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            if action.is_empty() {
+                shell_println!("Usage: toolbar check <action>");
+                return;
+            }
+            let ctx = toolbar::ToolbarContext {
+                has_selection: true,
+                selection_count: 1,
+                can_paste: true,
+                can_go_back: true,
+                can_go_forward: true,
+                ..Default::default()
+            };
+            let layout = toolbar::build(&ctx);
+            let enabled = toolbar::is_action_enabled(&layout, action);
+            shell_println!("Action '{}': {}", action, if enabled { "enabled" } else { "disabled" });
+        }
+        "trash" => {
+            let ctx = toolbar::ToolbarContext {
+                has_selection: true,
+                selection_count: 1,
+                is_trash: true,
+                ..Default::default()
+            };
+            let layout = toolbar::build(&ctx);
+            shell_println!("Trash toolbar ({} buttons):", layout.buttons.len());
+            for btn in &layout.buttons {
+                if btn.section == toolbar::ToolbarSection::Actions {
+                    let en = if btn.enabled { "enabled" } else { "disabled" };
+                    shell_println!("  {} - {} ({})", btn.action, btn.label, en);
+                }
+            }
+        }
+        "test" => {
+            match toolbar::self_test() {
+                Ok(()) => shell_println!("All toolbar self-tests passed"),
+                Err(e) => shell_println!("Toolbar self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (builds, actions) = toolbar::stats();
+            shell_println!("Builds:  {}", builds);
+            shell_println!("Actions: {}", actions);
+        }
+        "reset" => {
+            toolbar::reset_stats();
+            shell_println!("Toolbar stats reset");
+        }
+        _ => {
+            shell_println!("Usage: toolbar <subcommand>");
+            shell_println!("  show [flags]        Show toolbar layout");
+            shell_println!("    -s/--selected     Simulate item selected");
+            shell_println!("    -m/--multi        Simulate multi-selection");
+            shell_println!("    -t/--trash        Simulate trash directory");
+            shell_println!("    -r/--readonly     Simulate read-only dir");
+            shell_println!("    -p/--paste        Simulate clipboard content");
+            shell_println!("    --back/--forward  Enable nav buttons");
+            shell_println!("    --search          Simulate search active");
+            shell_println!("    --hidden          Simulate hidden shown");
+            shell_println!("  section <name>      Show section buttons");
+            shell_println!("  check <action>      Check if action enabled");
+            shell_println!("  trash               Show trash-mode toolbar");
+            shell_println!("  test                Run self-tests");
+            shell_println!("  stats               Show statistics");
+            shell_println!("  reset               Reset statistics");
+        }
+    }
+}
+
 /// `preview` — file preview/thumbnail generation.
 fn cmd_preview(args: &str) {
     use crate::fs::preview;
@@ -22718,7 +22861,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

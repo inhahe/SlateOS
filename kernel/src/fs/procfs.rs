@@ -158,6 +158,7 @@ const ROOT_FILES: &[&str] = &[
     "sidebar",
     "statusbar",
     "templates",
+    "toolbar",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2738,6 +2739,32 @@ fn gen_templates() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_toolbar() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (build_count, action_count) = super::toolbar::stats();
+
+    out.push_str("File Explorer Toolbar\n");
+    out.push_str("=====================\n\n");
+    out.push_str(&format!("Builds:      {}\n", build_count));
+    out.push_str(&format!("Actions:     {}\n\n", action_count));
+
+    // Show default toolbar layout.
+    let ctx = super::toolbar::ToolbarContext::default();
+    let layout = super::toolbar::build(&ctx);
+    out.push_str(&format!("Default buttons: {}\n\n", layout.buttons.len()));
+    out.push_str(&format!("{:16} {:12} {:8} {:8} {}\n",
+        "ACTION", "SECTION", "ENABLED", "TOGGLE", "LABEL"));
+    for btn in &layout.buttons {
+        let sec = format!("{:?}", btn.section);
+        out.push_str(&format!("{:16} {:12} {:8} {:8} {}\n",
+            btn.action, sec, btn.enabled, btn.toggled, btn.label));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3061,6 +3088,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sidebar" => Ok(gen_sidebar()),
         "statusbar" => Ok(gen_statusbar()),
         "templates" => Ok(gen_templates()),
+        "toolbar" => Ok(gen_toolbar()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

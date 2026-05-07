@@ -110,6 +110,7 @@ pub mod sysfs;
 pub mod tags;
 pub mod tar;
 pub mod templates;
+pub mod toolbar;
 pub mod thumbcache;
 pub mod tmpwatch;
 pub mod transaction;

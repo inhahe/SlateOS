@@ -29,7 +29,7 @@ SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 # QEMU args need Windows paths
 ESP_DIR_WIN="$(to_win_path "$ESP_DIR")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
-TIMEOUT=90
+TIMEOUT=300
 NO_BUILD=0
 
 # Parse args

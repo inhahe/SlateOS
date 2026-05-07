@@ -1074,7 +1074,14 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] 18 self-tests: lifecycle, alloc/free, translation, visibility, init, separate spaces
   - [ ] Network namespace: separate routing tables, interface assignments
   - [ ] Mount namespace: separate mount point trees
-  - [ ] User namespace: UID/GID remapping
+  - [x] User namespace: UID/GID remapping for rootless containers
+    - [x] IdMapping ranges (up to 16 per namespace) translate inner ↔ outer IDs
+    - [x] Hierarchical namespace tree with parent/child tracking
+    - [x] uid_to_host() walks full hierarchy for permission checks
+    - [x] Process attach/detach tracking per namespace
+    - [x] Overflow ID (65534) for unmapped UIDs (Linux convention)
+    - [x] kshell `userns` command: list/create/delete/uidmap/gidmap/stats/test
+    - [x] 15 self-tests including nested two-level UID translation
 - [-] Resource control groups (CPU, memory, I/O limits per group)
   - [x] cgroup.rs: hierarchical group tree (max 256 groups, root always exists)
   - [x] CPU controller: per-group quota/period (quota_ticks per period_ticks), cpu_charge() hot-path check, cpu_period_reset() for BSP timer

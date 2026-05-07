@@ -3342,7 +3342,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4681,6 +4681,7 @@ fn dispatch(line: &str) {
         "credentials" | "cred" => cmd_credentials(args),
         "power" => cmd_power(args),
         "display" => cmd_display(args),
+        "vdesktop" | "vd" => cmd_vdesktop(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -19618,6 +19619,41 @@ fn cmd_display(args: &str) {
     }
 }
 
+/// `vdesktop` / `vd` — virtual desktops (workspaces).
+fn cmd_vdesktop(args: &str) {
+    use crate::fs::vdesktop;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "create" | "new" => { let name = if parts.len() > 1 { parts[1..].join(" ") } else { String::from("Desktop") }; match vdesktop::create(&name) { Ok(id) => shell_println!("Created desktop #{}: {}", id, name), Err(e) => shell_println!("Error: {:?}", e), } }
+        "remove" | "rm" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); if id == 0 { shell_println!("Usage: vd remove <id>"); } else { match vdesktop::remove(id) { Ok(()) => shell_println!("Removed desktop #{}", id), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "rename" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let name = if parts.len() > 2 { parts[2..].join(" ") } else { String::new() }; if id == 0 || name.is_empty() { shell_println!("Usage: vd rename <id> <name>"); } else { match vdesktop::rename(id, &name) { Ok(()) => shell_println!("Renamed #{} → {}", id, name), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "get" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); if let Some(d) = vdesktop::get(id) { shell_println!("Desktop #{}: {} ({} windows){}{}", d.id, d.name, d.windows.len(), if d.active {" [active]"} else {""}, if d.wallpaper.is_empty() {String::new()} else {alloc::format!(" wp={}", d.wallpaper)}); for w in &d.windows { shell_println!("  window {}", w); } } else { shell_println!("Desktop #{} not found", id); } }
+        "list" | "ls" => { let desktops = vdesktop::list(); if desktops.is_empty() { shell_println!("No desktops"); } else { for d in &desktops { shell_println!("{}{}: {} ({} windows){}", if d.active {"*"} else {" "}, d.id, d.name, d.windows.len(), if d.wallpaper.is_empty() {String::new()} else {alloc::format!(" wp={}", d.wallpaper)}); } } }
+        "switch" | "sw" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); if id == 0 { shell_println!("Usage: vd switch <id>"); } else { match vdesktop::switch(id) { Ok(()) => shell_println!("Switched to #{}", id), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "next" => { match vdesktop::next() { Ok(()) => shell_println!("Now on #{}", vdesktop::current()), Err(e) => shell_println!("Error: {:?}", e), } }
+        "prev" => { match vdesktop::previous() { Ok(()) => shell_println!("Now on #{}", vdesktop::current()), Err(e) => shell_println!("Error: {:?}", e), } }
+        "current" => { shell_println!("Current: #{}", vdesktop::current()); }
+        "addwin" => { let did = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let wid = parts.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); if did == 0 || wid == 0 { shell_println!("Usage: vd addwin <desktop_id> <window_id>"); } else { match vdesktop::add_window(did, wid) { Ok(()) => shell_println!("Added window {} to desktop #{}", wid, did), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "rmwin" => { let did = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let wid = parts.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); if did == 0 || wid == 0 { shell_println!("Usage: vd rmwin <desktop_id> <window_id>"); } else { match vdesktop::remove_window(did, wid) { Ok(()) => shell_println!("Removed window {} from desktop #{}", wid, did), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "movewin" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); let from = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let to = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); if wid == 0 || from == 0 || to == 0 { shell_println!("Usage: vd movewin <window_id> <from_desktop> <to_desktop>"); } else { match vdesktop::move_window(wid, from, to) { Ok(()) => shell_println!("Moved window {} from #{} to #{}", wid, from, to), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "where" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); if wid == 0 { shell_println!("Usage: vd where <window_id>"); } else { match vdesktop::desktop_of(wid) { Some(did) => shell_println!("Window {} on desktop #{}", wid, did), None => shell_println!("Window {} not found", wid), } } }
+        "visible" => { let did = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(vdesktop::current()); let wins = vdesktop::visible_windows(did); shell_println!("Desktop #{}: {} visible windows", did, wins.len()); for w in &wins { shell_println!("  {}{}", w, if vdesktop::is_pinned(*w) {" (pinned)"} else {""}); } }
+        "pin" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); if wid == 0 { shell_println!("Usage: vd pin <window_id>"); } else { match vdesktop::pin(wid) { Ok(()) => shell_println!("Pinned window {}", wid), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "unpin" => { let wid = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0); vdesktop::unpin(wid); shell_println!("Unpinned window {}", wid); }
+        "pinned" => { let pins = vdesktop::pinned_windows(); if pins.is_empty() { shell_println!("No pinned windows"); } else { for w in &pins { shell_println!("  window {}", w); } } }
+        "wallpaper" | "wp" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let path = parts.get(2).copied().unwrap_or(""); if id == 0 { shell_println!("Usage: vd wp <id> [path|clear]"); } else if path == "clear" { match vdesktop::clear_wallpaper(id) { Ok(()) => shell_println!("Cleared wallpaper for #{}", id), Err(e) => shell_println!("Error: {:?}", e), } } else if !path.is_empty() { match vdesktop::set_wallpaper(id, path) { Ok(()) => shell_println!("Set wallpaper for #{}: {}", id, path), Err(e) => shell_println!("Error: {:?}", e), } } else { if let Some(d) = vdesktop::get(id) { shell_println!("Wallpaper: {}", if d.wallpaper.is_empty() {"(global)"} else {&d.wallpaper}); } } }
+        "anim" | "animation" => { if let Some(a) = parts.get(1).and_then(|s| vdesktop::SwitchAnimation::from_str(s)) { vdesktop::set_animation(a); shell_println!("Animation: {}", a.label()); } else { shell_println!("Animation: {} (none/slide/fade/overview)", vdesktop::animation().label()); } }
+        "wrap" => { match parts.get(1).copied().unwrap_or("") { "on"|"true" => { vdesktop::set_wrap(true); shell_println!("Wrap: on"); } "off"|"false" => { vdesktop::set_wrap(false); shell_println!("Wrap: off"); } _ => { shell_println!("Wrap: {}", vdesktop::wrap_around()); } } }
+        "init" => { match vdesktop::init_defaults() { Ok(()) => shell_println!("Initialized default desktops"), Err(e) => shell_println!("Error: {:?}", e), } }
+        "reorder" => { let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0); let pos = parts.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0); if id == 0 { shell_println!("Usage: vd reorder <id> <position>"); } else { match vdesktop::reorder(id, pos) { Ok(()) => shell_println!("Reordered #{} to position {}", id, pos), Err(e) => shell_println!("Error: {:?}", e), } } }
+        "test" => { match vdesktop::self_test() { Ok(()) => shell_println!("All vdesktop tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
+        "stats" => { let (dc, wc, pc, sw, mv) = vdesktop::stats(); shell_println!("Desktops:{} Windows:{} Pinned:{} Switches:{} Moves:{}", dc, wc, pc, sw, mv); }
+        "reset" => { vdesktop::clear_all(); vdesktop::reset_stats(); shell_println!("Virtual desktops reset"); }
+        _ => { shell_println!("vdesktop: create/remove/rename/get/list/switch/next/prev/current/addwin/rmwin/movewin/where/visible/pin/unpin/pinned/wp/anim/wrap/init/reorder/test/stats/reset"); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -27147,7 +27183,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -177,6 +177,7 @@ const ROOT_FILES: &[&str] = &[
     "credentials",
     "power",
     "display",
+    "vdesktop",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3392,6 +3393,35 @@ fn gen_display() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_vdesktop() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (dc, wc, pc, switches, moves) = super::vdesktop::stats();
+
+    out.push_str("Virtual Desktops\n");
+    out.push_str("================\n\n");
+    out.push_str(&format!("Desktops:   {}\n", dc));
+    out.push_str(&format!("Windows:    {}\n", wc));
+    out.push_str(&format!("Pinned:     {}\n", pc));
+    out.push_str(&format!("Switches:   {}\n", switches));
+    out.push_str(&format!("Moves:      {}\n", moves));
+    out.push_str(&format!("Current:    {}\n", super::vdesktop::current()));
+    out.push_str(&format!("Animation:  {}\n", super::vdesktop::animation().label()));
+    out.push_str(&format!("Wrap:       {}\n\n", super::vdesktop::wrap_around()));
+
+    let desktops = super::vdesktop::list();
+    for d in &desktops {
+        out.push_str(&format!("{}{}: {} ({} windows){}\n",
+            if d.active { "*" } else { " " },
+            d.id, d.name, d.windows.len(),
+            if d.wallpaper.is_empty() { String::new() }
+            else { format!(" wp={}", d.wallpaper) }));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3734,6 +3764,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "credentials" => Ok(gen_credentials()),
         "power" => Ok(gen_power()),
         "display" => Ok(gen_display()),
+        "vdesktop" => Ok(gen_vdesktop()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

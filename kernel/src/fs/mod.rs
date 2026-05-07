@@ -133,6 +133,7 @@ pub mod transaction;
 pub mod trash;
 pub mod undelete;
 pub mod usage;
+pub mod vdesktop;
 pub mod vfs;
 pub mod viewstate;
 pub mod wallpaper;

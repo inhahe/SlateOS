@@ -149,6 +149,7 @@ pub mod rar;
 pub mod rlimit;
 pub mod symlink_security;
 pub mod sysfs;
+pub mod sysinfo;
 pub mod systray;
 pub mod tags;
 pub mod tar;

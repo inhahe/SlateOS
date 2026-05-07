@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4578,7 +4578,7 @@ fn dispatch(line: &str) {
         "diag" | "health" => cmd_diag(),
         "exceptions" | "vectors" => cmd_exceptions(),
         "exclog" => cmd_exclog(),
-        "sysinfo" | "cpuid" => cmd_sysinfo(),
+        "cpuid" => cmd_cpuid(),
         "boottime" | "boottiming" => cmd_boottime(),
         "canary" | "stackcheck" => cmd_canary(),
         "tlb" => cmd_tlb(),
@@ -4816,6 +4816,7 @@ fn dispatch(line: &str) {
         "kernelbuild" | "kbuild" => cmd_kernelbuild(args),
         "wakesensor" | "wsensor" => cmd_wakesensor(args),
         "netsettings" | "netcfg" => cmd_netsettings(args),
+        "sysinfo" | "hwinfo" => cmd_sysinfo(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -24337,6 +24338,179 @@ fn cmd_netsettings(args: &str) {
     }
 }
 
+/// `sysinfo` / `hwinfo` — system information explorer.
+fn cmd_sysinfo(args: &str) {
+    use crate::fs::sysinfo;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "" | "summary" => {
+            let os = sysinfo::os_info();
+            let cpu = sysinfo::cpu_info();
+            let mem = sysinfo::memory_info();
+            let kp = sysinfo::kernel_params();
+            shell_println!("=== {} {} ({}) ===", os.name, os.version, os.codename);
+            shell_println!("Arch:       {}", os.arch);
+            shell_println!("Kernel:     {}", os.kernel_version);
+            if !os.website.is_empty() { shell_println!("Website:    {}", os.website); }
+            shell_println!("");
+            shell_println!("CPU:        {}", cpu.model);
+            shell_println!("  Cores:    {} / {} threads", cpu.cores, cpu.threads);
+            shell_println!("  Freq:     {} - {} MHz", cpu.base_freq_mhz, cpu.max_freq_mhz);
+            shell_println!("  Cache:    L1d={}K L1i={}K L2={}K L3={}K",
+                cpu.l1d_cache_kib, cpu.l1i_cache_kib, cpu.l2_cache_kib, cpu.l3_cache_kib);
+            shell_println!("");
+            let total_gib = mem.total_bytes / (1024 * 1024 * 1024);
+            let used_gib = mem.used_bytes / (1024 * 1024 * 1024);
+            shell_println!("Memory:     {} GiB total, {} GiB used", total_gib, used_gib);
+            shell_println!("  Type:     {} {} @ {} MT/s ({} DIMMs)",
+                mem.mem_type, "", mem.speed_mts, mem.dimm_count);
+            shell_println!("");
+            shell_println!("Kernel params:");
+            shell_println!("  Page size:   {} B", kp.page_size);
+            shell_println!("  Scheduler:   {}", kp.sched_model);
+            shell_println!("  Preempt:     {}", kp.preempt_model);
+            shell_println!("  Allocator:   {}", kp.alloc_model);
+            shell_println!("  Overcommit:  {}", kp.overcommit_mode);
+            shell_println!("  Max CPUs:    {}", kp.max_cpus);
+            shell_println!("  Root FS:     {}", kp.root_fs);
+        }
+        "os" => {
+            let os = sysinfo::os_info();
+            shell_println!("Name:       {}", os.name);
+            shell_println!("Version:    {}", os.version);
+            shell_println!("Build:      {} ({})", os.build_number, os.build_date);
+            shell_println!("Codename:   {}", os.codename);
+            shell_println!("Arch:       {}", os.arch);
+            shell_println!("Kernel:     {}", os.kernel_version);
+            shell_println!("Website:    {}", os.website);
+            shell_println!("Uptime:     {} s", os.uptime_secs);
+        }
+        "cpu" => {
+            let cpu = sysinfo::cpu_info();
+            shell_println!("Model:      {}", cpu.model);
+            shell_println!("Vendor:     {}", cpu.vendor);
+            shell_println!("Family:     {} Model: {} Stepping: {}", cpu.family, cpu.model_num, cpu.stepping);
+            shell_println!("Cores:      {} physical, {} logical", cpu.cores, cpu.threads);
+            shell_println!("Freq:       {} MHz base, {} MHz boost", cpu.base_freq_mhz, cpu.max_freq_mhz);
+            shell_println!("L1d cache:  {} KiB", cpu.l1d_cache_kib);
+            shell_println!("L1i cache:  {} KiB", cpu.l1i_cache_kib);
+            shell_println!("L2 cache:   {} KiB", cpu.l2_cache_kib);
+            shell_println!("L3 cache:   {} KiB", cpu.l3_cache_kib);
+            if !cpu.features.is_empty() {
+                shell_println!("Features:   {}", cpu.features.join(", "));
+            }
+        }
+        "memory" | "mem" => {
+            let mem = sysinfo::memory_info();
+            let total_gib = mem.total_bytes / (1024 * 1024 * 1024);
+            let used_gib = mem.used_bytes / (1024 * 1024 * 1024);
+            let avail_gib = mem.available_bytes / (1024 * 1024 * 1024);
+            shell_println!("Total:      {} GiB ({} bytes)", total_gib, mem.total_bytes);
+            shell_println!("Used:       {} GiB ({} bytes)", used_gib, mem.used_bytes);
+            shell_println!("Available:  {} GiB ({} bytes)", avail_gib, mem.available_bytes);
+            shell_println!("Swap:       {} / {} bytes", mem.swap_used, mem.swap_total);
+            shell_println!("Type:       {}", mem.mem_type);
+            shell_println!("Speed:      {} MT/s", mem.speed_mts);
+            shell_println!("DIMMs:      {}", mem.dimm_count);
+        }
+        "storage" | "disk" | "disks" => {
+            let devs = sysinfo::storage_info();
+            if devs.is_empty() {
+                shell_println!("No storage devices");
+            } else {
+                for d in &devs {
+                    let cap_gib = d.capacity_bytes / (1024 * 1024 * 1024);
+                    let free_gib = d.free_bytes / (1024 * 1024 * 1024);
+                    let used_pct = if d.capacity_bytes > 0 {
+                        ((d.capacity_bytes - d.free_bytes) * 100 / d.capacity_bytes) as u32
+                    } else { 0 };
+                    let flags = if d.network { " [network]" } else if d.removable { " [removable]" } else { "" };
+                    shell_println!("{} on {} ({}) {} GiB / {} GiB ({}% used) [{}]{}",
+                        d.device, d.mount_point, d.fs_type,
+                        cap_gib - free_gib, cap_gib, used_pct,
+                        d.interface, flags);
+                }
+            }
+        }
+        "gpu" | "gpus" => {
+            let gpus = sysinfo::gpu_info();
+            if gpus.is_empty() {
+                shell_println!("No GPUs detected");
+            } else {
+                for (i, g) in gpus.iter().enumerate() {
+                    shell_println!("GPU {}:  {} ({})", i, g.name, g.vendor);
+                    shell_println!("  VRAM:    {} MiB", g.vram_mib);
+                    shell_println!("  Driver:  {}", g.driver_version);
+                    shell_println!("  Display: {} @ {} Hz", g.resolution, g.refresh_hz);
+                    if !g.api_support.is_empty() {
+                        shell_println!("  APIs:    {}", g.api_support.join(", "));
+                    }
+                }
+            }
+        }
+        "net" | "network" => {
+            let ifaces = sysinfo::network_info();
+            if ifaces.is_empty() {
+                shell_println!("No network interfaces");
+            } else {
+                shell_println!("{:<8} {:<10} {:<16} {:<18} {:<8} {}", "Name", "Type", "IP", "MAC", "Speed", "Status");
+                for i in &ifaces {
+                    let speed = if i.speed_mbps > 0 { alloc::format!("{}M", i.speed_mbps) } else { String::from("-") };
+                    shell_println!("{:<8} {:<10} {:<16} {:<18} {:<8} {}",
+                        i.name, i.iface_type, i.ip_address, i.mac_address,
+                        speed, if i.connected { "up" } else { "down" });
+                }
+            }
+        }
+        "kernel" | "kparams" => {
+            let kp = sysinfo::kernel_params();
+            shell_println!("Page size:       {} bytes", kp.page_size);
+            shell_println!("Scheduler:       {}", kp.sched_model);
+            shell_println!("Preemption:      {}", kp.preempt_model);
+            shell_println!("Allocator:       {}", kp.alloc_model);
+            shell_println!("Overcommit:      {}", kp.overcommit_mode);
+            shell_println!("Max CPUs:        {}", kp.max_cpus);
+            shell_println!("Root FS:         {}", kp.root_fs);
+            shell_println!("Debug asserts:   {}", kp.debug_assertions);
+        }
+        "init" => {
+            sysinfo::init_defaults();
+            shell_println!("Initialised system information defaults");
+        }
+        "stats" => {
+            let (storage, gpus, nets, ops) = sysinfo::stats();
+            shell_println!("Storage devs: {}", storage);
+            shell_println!("GPUs:         {}", gpus);
+            shell_println!("Net ifaces:   {}", nets);
+            shell_println!("Operations:   {}", ops);
+        }
+        "test" => {
+            match sysinfo::self_test() {
+                Ok(()) => shell_println!("sysinfo: all tests passed"),
+                Err(e) => shell_println!("sysinfo: test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("sysinfo — system information explorer");
+            shell_println!("Usage: sysinfo <subcommand>");
+            shell_println!("  (no args)         Full summary");
+            shell_println!("  os                OS information");
+            shell_println!("  cpu               CPU details");
+            shell_println!("  memory            RAM details");
+            shell_println!("  storage           Storage devices and partitions");
+            shell_println!("  gpu               GPU information");
+            shell_println!("  net               Network interfaces");
+            shell_println!("  kernel            Kernel compile-time parameters");
+            shell_println!("  init              Load defaults");
+            shell_println!("  stats             Show statistics");
+            shell_println!("  test              Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -32115,7 +32289,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
@@ -34107,7 +34281,7 @@ fn cmd_canary() {
     }
 }
 
-fn cmd_sysinfo() {
+fn cmd_cpuid() {
     use crate::cpu;
 
     shell_println!("=== CPU Information ===");

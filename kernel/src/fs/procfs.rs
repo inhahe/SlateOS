@@ -212,6 +212,7 @@ const ROOT_FILES: &[&str] = &[
     "kernelbuild",
     "wakesensor",
     "netsettings",
+    "sysinfo",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4632,6 +4633,30 @@ fn gen_netsettings() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sysinfo() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let os = super::sysinfo::os_info();
+    let cpu = super::sysinfo::cpu_info();
+    let mem = super::sysinfo::memory_info();
+    let kp = super::sysinfo::kernel_params();
+
+    out.push_str("System Information\n");
+    out.push_str("==================\n\n");
+    out.push_str(&format!("OS:         {} {} ({})\n", os.name, os.version, os.codename));
+    out.push_str(&format!("Arch:       {}\n", os.arch));
+    out.push_str(&format!("Kernel:     {}\n", os.kernel_version));
+    out.push_str(&format!("CPU:        {} ({} cores / {} threads)\n", cpu.model, cpu.cores, cpu.threads));
+    out.push_str(&format!("Memory:     {} {} @ {} MT/s\n", mem.mem_type, mem.dimm_count, mem.speed_mts));
+    out.push_str(&format!("Page size:  {} B\n", kp.page_size));
+    out.push_str(&format!("Scheduler:  {}\n", kp.sched_model));
+    out.push_str(&format!("Storage:    {} devices\n", super::sysinfo::storage_info().len()));
+    out.push_str(&format!("GPUs:       {}\n", super::sysinfo::gpu_info().len()));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5009,6 +5034,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kernelbuild" => Ok(gen_kernelbuild()),
         "wakesensor" => Ok(gen_wakesensor()),
         "netsettings" => Ok(gen_netsettings()),
+        "sysinfo" => Ok(gen_sysinfo()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -3082,7 +3082,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
-    "alias", "append", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
+    "alias", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4404,6 +4404,7 @@ fn dispatch(line: &str) {
         "fcomment" => cmd_fcomment(args),
         "rundialog" | "rund" => cmd_rundialog(args),
         "notifcenter" | "notif" => cmd_notifcenter(args),
+        "appregistry" | "appreg" => cmd_appregistry(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -17347,6 +17348,229 @@ fn cmd_notifcenter(args: &str) {
     }
 }
 
+/// `appregistry` / `appreg` — application registry for start menu, file associations, search.
+fn cmd_appregistry(args: &str) {
+    use crate::fs::appregistry;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "register" | "reg" => {
+            // appreg register <id> <name> <exec_path> [category]
+            let id = parts.get(1).copied().unwrap_or("");
+            let name = parts.get(2).copied().unwrap_or("");
+            let exec_path = parts.get(3).copied().unwrap_or("");
+            if id.is_empty() || name.is_empty() || exec_path.is_empty() {
+                shell_println!("Usage: appreg register <id> <name> <exec_path> [category]");
+                shell_println!("  Categories: system, office, graphics, multimedia, internet,");
+                shell_println!("              games, development, education, science, accessories,");
+                shell_println!("              terminal, filemanager, settings, other");
+                return;
+            }
+            let cat = parts.get(4).and_then(|s| appregistry::AppCategory::from_str(s));
+            let categories = match cat {
+                Some(c) => alloc::vec![c],
+                None => alloc::vec![appregistry::AppCategory::Other],
+            };
+            let now = crate::timekeeping::clock_monotonic();
+            match appregistry::register(appregistry::AppInfo {
+                id: String::from(id),
+                name: String::from(name),
+                description: String::new(),
+                exec_path: String::from(exec_path),
+                icon: String::new(),
+                categories,
+                mime_types: Vec::new(),
+                keywords: Vec::new(),
+                show_in_menu: true,
+                tray_icon: false,
+                start_hidden: false,
+                version: String::from("1.0"),
+                installed_ns: now,
+            }) {
+                Ok(()) => shell_println!("Registered: {} ({})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unregister" | "unreg" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() {
+                shell_println!("Usage: appreg unregister <app-id>");
+                return;
+            }
+            match appregistry::unregister(id) {
+                Ok(()) => shell_println!("Unregistered: {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" | "info" => {
+            let id = parts.get(1).copied().unwrap_or("");
+            if id.is_empty() {
+                shell_println!("Usage: appreg get <app-id>");
+                return;
+            }
+            match appregistry::get(id) {
+                Some(app) => {
+                    shell_println!("ID:          {}", app.id);
+                    shell_println!("Name:        {}", app.name);
+                    shell_println!("Description: {}", app.description);
+                    shell_println!("Exec:        {}", app.exec_path);
+                    shell_println!("Icon:        {}", app.icon);
+                    shell_println!("Version:     {}", app.version);
+                    shell_println!("Menu:        {}", if app.show_in_menu { "yes" } else { "no" });
+                    shell_println!("Tray:        {}", if app.tray_icon { "yes" } else { "no" });
+                    if !app.categories.is_empty() {
+                        let cats: Vec<&str> = app.categories.iter().map(|c| c.label()).collect();
+                        shell_println!("Categories:  {}", cats.join(", "));
+                    }
+                    if !app.mime_types.is_empty() {
+                        shell_println!("MIME types:  {}", app.mime_types.join(", "));
+                    }
+                    if !app.keywords.is_empty() {
+                        shell_println!("Keywords:    {}", app.keywords.join(", "));
+                    }
+                }
+                None => shell_println!("App not found: {}", id),
+            }
+        }
+        "list" | "" => {
+            let apps = appregistry::list_all();
+            if apps.is_empty() {
+                shell_println!("No registered applications");
+            } else {
+                shell_println!("{} applications:", apps.len());
+                shell_println!("{:32} {:20} {}", "ID", "NAME", "EXEC");
+                for app in &apps {
+                    shell_println!("{:32} {:20} {}", app.id, app.name, app.exec_path);
+                }
+            }
+        }
+        "category" | "cat" => {
+            let cat_name = parts.get(1).copied().unwrap_or("");
+            if cat_name.is_empty() {
+                // List all categories with counts.
+                for &cat in appregistry::AppCategory::all() {
+                    let apps = appregistry::by_category(cat);
+                    if !apps.is_empty() {
+                        shell_println!("  {:16} {} apps", cat.label(), apps.len());
+                    }
+                }
+                return;
+            }
+            match appregistry::AppCategory::from_str(cat_name) {
+                Some(cat) => {
+                    let apps = appregistry::by_category(cat);
+                    if apps.is_empty() {
+                        shell_println!("No apps in category: {}", cat.label());
+                    } else {
+                        shell_println!("{} — {} apps:", cat.label(), apps.len());
+                        for app in &apps {
+                            shell_println!("  {} — {}", app.name, app.exec_path);
+                        }
+                    }
+                }
+                None => shell_println!("Unknown category: {}", cat_name),
+            }
+        }
+        "mime" => {
+            let mime = parts.get(1).copied().unwrap_or("");
+            if mime.is_empty() {
+                shell_println!("Usage: appreg mime <mime-type>");
+                return;
+            }
+            let handlers = appregistry::handlers_for_mime(mime);
+            if handlers.is_empty() {
+                shell_println!("No handlers for: {}", mime);
+            } else {
+                shell_println!("{} handlers for {}:", handlers.len(), mime);
+                for app in &handlers {
+                    shell_println!("  {} ({}) — {}", app.name, app.id, app.exec_path);
+                }
+            }
+        }
+        "menu" => {
+            let tree = appregistry::menu_tree();
+            if tree.is_empty() {
+                shell_println!("No menu entries");
+            } else {
+                for (cat, entries) in &tree {
+                    shell_println!("[{}]", cat.label());
+                    for entry in entries {
+                        shell_println!("  {} — {}", entry.name, entry.exec_path);
+                    }
+                }
+            }
+        }
+        "search" => {
+            let query = parts.get(1).copied().unwrap_or("");
+            if query.is_empty() {
+                shell_println!("Usage: appreg search <query>");
+                return;
+            }
+            let results = appregistry::search(query);
+            if results.is_empty() {
+                shell_println!("No matches for: {}", query);
+            } else {
+                shell_println!("{} matches:", results.len());
+                for app in &results {
+                    shell_println!("  {} ({}) — {}", app.name, app.id, app.description);
+                }
+            }
+        }
+        "tray" => {
+            let apps = appregistry::tray_apps();
+            if apps.is_empty() {
+                shell_println!("No tray applications");
+            } else {
+                shell_println!("{} tray apps:", apps.len());
+                for app in &apps {
+                    let hidden = if app.start_hidden { " (start hidden)" } else { "" };
+                    shell_println!("  {} — {}{}", app.name, app.exec_path, hidden);
+                }
+            }
+        }
+        "init" => {
+            match appregistry::register_builtins() {
+                Ok(()) => shell_println!("Registered built-in applications ({} total)", appregistry::app_count()),
+                Err(e) => shell_println!("Error registering builtins: {:?}", e),
+            }
+        }
+        "test" => {
+            match appregistry::self_test() {
+                Ok(()) => shell_println!("All app registry self-tests passed"),
+                Err(e) => shell_println!("App registry self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (apps, mimes, reg_ops, lookup_ops) = appregistry::stats();
+            shell_println!("Apps:         {}", apps);
+            shell_println!("MIME types:   {}", mimes);
+            shell_println!("Register ops: {}", reg_ops);
+            shell_println!("Lookup ops:   {}", lookup_ops);
+        }
+        "reset" => {
+            appregistry::clear_all();
+            appregistry::reset_stats();
+            shell_println!("App registry cleared and stats reset");
+        }
+        _ => {
+            shell_println!("Usage: appreg <subcommand>");
+            shell_println!("  register <id> <name> <path> [cat]  Register an application");
+            shell_println!("  unregister <id>                    Remove an application");
+            shell_println!("  get <id>                           Show app details");
+            shell_println!("  list                               List all apps");
+            shell_println!("  category [cat]                     List by category");
+            shell_println!("  mime <mime-type>                   Find handlers for type");
+            shell_println!("  menu                               Show start menu tree");
+            shell_println!("  search <query>                     Search apps");
+            shell_println!("  tray                               List tray apps");
+            shell_println!("  init                               Register built-in apps");
+            shell_println!("  test                               Run self-tests");
+            shell_println!("  stats                              Show statistics");
+            shell_println!("  reset                              Clear all data and stats");
+        }
+    }
+}
+
 /// `fflags` — immutable / append-only / file protection flags.
 fn cmd_fflags(args: &str) {
     use crate::fs::immutable;
@@ -23816,7 +24040,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

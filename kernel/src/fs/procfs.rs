@@ -164,6 +164,7 @@ const ROOT_FILES: &[&str] = &[
     "fcomment",
     "rundialog",
     "notifcenter",
+    "appregistry",
     "columnview",
     "pathbar",
     "viewstate",
@@ -2919,6 +2920,32 @@ fn gen_notifcenter() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_appregistry() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (app_count, mime_count, register_ops, lookup_ops) = super::appregistry::stats();
+
+    out.push_str("Application Registry\n");
+    out.push_str("====================\n\n");
+    out.push_str(&format!("Apps:         {}/{}\n", app_count, 4096));
+    out.push_str(&format!("MIME types:   {}\n", mime_count));
+    out.push_str(&format!("Register ops: {}\n", register_ops));
+    out.push_str(&format!("Lookup ops:   {}\n\n", lookup_ops));
+
+    let tree = super::appregistry::menu_tree();
+    if !tree.is_empty() {
+        for (cat, entries) in &tree {
+            out.push_str(&format!("[{}]\n", cat.label()));
+            for entry in entries {
+                out.push_str(&format!("  {} ({})\n", entry.name, entry.exec_path));
+            }
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3248,6 +3275,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fcomment" => Ok(gen_fcomment()),
         "rundialog" => Ok(gen_rundialog()),
         "notifcenter" => Ok(gen_notifcenter()),
+        "appregistry" => Ok(gen_appregistry()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

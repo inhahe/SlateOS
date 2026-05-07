@@ -31,6 +31,7 @@ pub mod ar;
 pub mod atime;
 pub mod archive;
 pub mod audit;
+pub mod appregistry;
 pub mod associations;
 pub mod backup;
 pub mod bookmarks;

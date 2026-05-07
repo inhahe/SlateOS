@@ -3441,8 +3441,8 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap",
-    "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart",
+    "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
@@ -4805,6 +4805,7 @@ fn dispatch(line: &str) {
         "certmgr" | "cert" => cmd_certmgr(args),
         "installer" => cmd_installer(args),
         "timezone" | "tz" => cmd_timezone(args),
+        "autostart" | "astart" => cmd_autostart(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -4916,6 +4917,7 @@ fn dispatch(line: &str) {
         "sockact" | "sa" => cmd_socket_activation(args),
         "slimit" | "sl" => cmd_service_limits(args),
         "iommu" => cmd_iommu(),
+        "cgroup" => cmd_cgroup(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
@@ -21110,6 +21112,327 @@ fn cmd_fontmgr(args: &str) {
     }
 }
 
+/// `autostart` / `astart` — manage startup items.
+fn cmd_autostart(args: &str) {
+    use crate::fs::autostart;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "init" => {
+            autostart::init_defaults();
+            shell_println!("Initialised default system startup items.");
+        }
+        "list" | "ls" => {
+            let items = autostart::list_items();
+            if items.is_empty() {
+                shell_println!("No autostart items configured.");
+                return;
+            }
+            shell_println!("{:<4} {:<20} {:<16} {:<12} {:<8} {:<6} {}",
+                "ID", "NAME", "PHASE", "CONDITION", "ON", "ORDER", "COMMAND");
+            for it in &items {
+                shell_println!("{:<4} {:<20} {:<16} {:<12} {:<8} {:<6} {}",
+                    it.id, it.name,
+                    format!("{:?}", it.phase),
+                    format!("{:?}", it.condition),
+                    it.enabled, it.order, it.command);
+            }
+        }
+        "user" => {
+            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: autostart user <uid>"); return; }
+            };
+            let items = autostart::items_for_user(uid);
+            if items.is_empty() {
+                shell_println!("No autostart items for user {}.", uid);
+                return;
+            }
+            shell_println!("{:<4} {:<20} {:<16} {:<6} {:<8} {}",
+                "ID", "NAME", "PHASE", "ORDER", "DELAY", "COMMAND");
+            for it in &items {
+                shell_println!("{:<4} {:<20} {:<16} {:<6} {:<8} {}",
+                    it.id, it.name,
+                    format!("{:?}", it.phase),
+                    it.order, it.delay_ms, it.command);
+            }
+        }
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: autostart add <name> <command> <phase> [uid]");
+                shell_println!("Phases: system, desktop, login, deferred");
+                return;
+            }
+            let name = parts[1];
+            let cmd = parts[2];
+            let phase = match parts[3] {
+                "system" => autostart::StartPhase::SystemService,
+                "desktop" => autostart::StartPhase::DesktopReady,
+                "login" => autostart::StartPhase::UserLogin,
+                "deferred" => autostart::StartPhase::Deferred,
+                _ => { shell_println!("Unknown phase: {}. Use system/desktop/login/deferred", parts[3]); return; }
+            };
+            let uid: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match autostart::add_item(name, cmd, phase, uid) {
+                Ok(id) => shell_println!("Added autostart item {} (id={}).", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: autostart remove <id>"); return; }
+            };
+            match autostart::remove_item(id) {
+                Ok(()) => shell_println!("Removed autostart item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: autostart get <id>"); return; }
+            };
+            match autostart::get_item(id) {
+                Ok(it) => {
+                    shell_println!("ID:          {}", it.id);
+                    shell_println!("Name:        {}", it.name);
+                    shell_println!("Command:     {}", it.command);
+                    shell_println!("Arguments:   {}", it.arguments);
+                    shell_println!("Phase:       {:?}", it.phase);
+                    shell_println!("Condition:   {:?}", it.condition);
+                    shell_println!("Delay:       {} ms", it.delay_ms);
+                    shell_println!("Order:       {}", it.order);
+                    shell_println!("Enabled:     {}", it.enabled);
+                    shell_println!("System:      {}", it.system);
+                    shell_println!("Impact:      {:?}", it.impact);
+                    shell_println!("UID:         {}", it.uid);
+                    shell_println!("Description: {}", it.description);
+                    shell_println!("Launches:    {}", it.launch_count);
+                    shell_println!("Avg launch:  {} ms", it.avg_duration_ms);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: autostart enable <id>"); return; }
+            };
+            match autostart::set_enabled(id, true) {
+                Ok(()) => shell_println!("Enabled item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: autostart disable <id>"); return; }
+            };
+            match autostart::set_enabled(id, false) {
+                Ok(()) => shell_println!("Disabled item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delay" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart delay <id> <ms>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let ms: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid delay."); return; }
+            };
+            match autostart::set_delay(id, ms) {
+                Ok(()) => shell_println!("Set delay for item {} to {} ms.", id, ms),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "order" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart order <id> <order>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let ord: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid order."); return; }
+            };
+            match autostart::set_order(id, ord) {
+                Ok(()) => shell_println!("Set order for item {} to {}.", id, ord),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "phase" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart phase <id> <system|desktop|login|deferred>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let phase = match parts[2] {
+                "system" => autostart::StartPhase::SystemService,
+                "desktop" => autostart::StartPhase::DesktopReady,
+                "login" => autostart::StartPhase::UserLogin,
+                "deferred" => autostart::StartPhase::Deferred,
+                _ => { shell_println!("Unknown phase. Use system/desktop/login/deferred"); return; }
+            };
+            match autostart::set_phase(id, phase) {
+                Ok(()) => shell_println!("Set phase for item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "condition" | "cond" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart condition <id> <always|ac|network|firstlogin>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let cond = match parts[2] {
+                "always" => autostart::StartCondition::Always,
+                "ac" => autostart::StartCondition::AcPower,
+                "network" => autostart::StartCondition::NetworkAvailable,
+                "firstlogin" => autostart::StartCondition::FirstLoginOnly,
+                _ => { shell_println!("Unknown condition. Use always/ac/network/firstlogin"); return; }
+            };
+            match autostart::set_condition(id, cond) {
+                Ok(()) => shell_println!("Set condition for item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "args" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart args <id> <arguments...>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let arg_str = parts[2..].join(" ");
+            match autostart::set_arguments(id, &arg_str) {
+                Ok(()) => shell_println!("Set arguments for item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "desc" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart desc <id> <description...>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let desc_str = parts[2..].join(" ");
+            match autostart::set_description(id, &desc_str) {
+                Ok(()) => shell_println!("Set description for item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "impact" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart impact <id> <low|medium|high|unknown>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let imp = match parts[2] {
+                "low" => autostart::Impact::Low,
+                "medium" | "med" => autostart::Impact::Medium,
+                "high" => autostart::Impact::High,
+                "unknown" => autostart::Impact::Unknown,
+                _ => { shell_println!("Unknown impact. Use low/medium/high/unknown"); return; }
+            };
+            match autostart::set_impact(id, imp) {
+                Ok(()) => shell_println!("Set impact for item {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "launch" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: autostart launch <id> <duration_ms>");
+                return;
+            }
+            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid id."); return; }
+            };
+            let dur: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Invalid duration."); return; }
+            };
+            match autostart::record_launch(id, dur) {
+                Ok(()) => shell_println!("Recorded launch for item {} ({} ms).", id, dur),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, enabled, system, ops) = autostart::stats();
+            shell_println!("Total items:   {}", total);
+            shell_println!("Enabled:       {}", enabled);
+            shell_println!("System:        {}", system);
+            shell_println!("Operations:    {}", ops);
+        }
+        "clear" => {
+            autostart::clear_all();
+            shell_println!("Cleared all autostart items.");
+        }
+        "test" => {
+            match autostart::self_test() {
+                Ok(()) => shell_println!("autostart: all tests passed."),
+                Err(e) => shell_println!("autostart: test failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("autostart — manage startup items");
+            shell_println!();
+            shell_println!("Subcommands:");
+            shell_println!("  init                          Initialise default system items");
+            shell_println!("  list / ls                     List all items");
+            shell_println!("  user <uid>                    Items for specific user (sorted)");
+            shell_println!("  add <name> <cmd> <phase> [uid]  Add item");
+            shell_println!("  remove / rm <id>              Remove item (non-system)");
+            shell_println!("  get <id>                      Show item details");
+            shell_println!("  enable <id>                   Enable item");
+            shell_println!("  disable <id>                  Disable item");
+            shell_println!("  delay <id> <ms>               Set startup delay");
+            shell_println!("  order <id> <order>            Set order (lower=earlier)");
+            shell_println!("  phase <id> <phase>            Set phase");
+            shell_println!("  condition <id> <cond>         Set start condition");
+            shell_println!("  args <id> <args...>           Set arguments");
+            shell_println!("  desc <id> <text...>           Set description");
+            shell_println!("  impact <id> <level>           Set impact level");
+            shell_println!("  launch <id> <dur_ms>          Record a launch event");
+            shell_println!("  stats                         Show statistics");
+            shell_println!("  clear                         Clear all items");
+            shell_println!("  test                          Run self-tests");
+            shell_println!();
+            shell_println!("Phases: system, desktop, login, deferred");
+            shell_println!("Conditions: always, ac, network, firstlogin");
+            shell_println!("Impact: low, medium, high, unknown");
+            shell_println!("Alias: astart");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -26280,6 +26603,196 @@ fn cmd_iommu() {
     crate::console_println!("  DMA faults:      {}", remap.total_faults);
 }
 
+/// `cgroup` — manage resource control groups.
+///
+/// Usage:
+///   cgroup              — list all active cgroups
+///   cgroup create [P]   — create child of parent P (default: 0/root)
+///   cgroup delete ID    — delete an empty cgroup
+///   cgroup cpu ID PCT   — set CPU limit (percent, 0=unlimited)
+///   cgroup mem ID N     — set memory limit (frames, 0=unlimited)
+///   cgroup stats ID     — show detailed stats
+///   cgroup test         — run self-test
+fn cmd_cgroup(args: &str) {
+    use crate::cgroup;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let count = cgroup::active_count();
+            crate::console_println!("=== Resource Control Groups ({} active) ===", count);
+            crate::console_println!(
+                "{:<5} {:<7} {:<7} {:<8} {:<12} {:<12} {:<12}",
+                "ID", "Parent", "Tasks", "Children", "CPU quota", "CPU used", "Mem(frames)"
+            );
+            for id in 0..cgroup::MAX_CGROUPS as u32 {
+                if let Some(s) = cgroup::stats(id) {
+                    let cpu_q = if s.cpu_quota == 0 {
+                        alloc::format!("unlimited")
+                    } else {
+                        alloc::format!("{}/{}", s.cpu_quota, s.cpu_period)
+                    };
+                    let mem = if s.mem_limit == 0 {
+                        alloc::format!("unlimited")
+                    } else {
+                        alloc::format!("{}/{}", s.mem_usage, s.mem_limit)
+                    };
+                    let parent = if s.parent == u32::MAX {
+                        alloc::format!("-")
+                    } else {
+                        alloc::format!("{}", s.parent)
+                    };
+                    crate::console_println!(
+                        "{:<5} {:<7} {:<7} {:<8} {:<12} {:<12} {:<12}",
+                        id, parent, s.nr_tasks, s.nr_children,
+                        cpu_q, s.cpu_used, mem
+                    );
+                }
+            }
+        }
+        "create" => {
+            let parent: u32 = parts.get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            match cgroup::create(parent) {
+                Ok(id) => crate::console_println!("Created cgroup {} (parent: {})", id, parent),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" | "rm" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: cgroup delete <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid cgroup ID");
+                return;
+            };
+            match cgroup::delete(id) {
+                Ok(()) => crate::console_println!("Deleted cgroup {}", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "cpu" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: cgroup cpu <id> <percent>");
+                return;
+            };
+            let Some(pct_str) = parts.get(2) else {
+                crate::console_println!("Usage: cgroup cpu <id> <percent>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid cgroup ID");
+                return;
+            };
+            let Ok(pct) = pct_str.parse::<u64>() else {
+                crate::console_println!("Invalid percentage");
+                return;
+            };
+            let limit = cgroup::CpuLimit::from_percent(pct);
+            match cgroup::set_cpu_limit(id, limit) {
+                Ok(()) => {
+                    if pct == 0 {
+                        crate::console_println!("Cgroup {}: CPU limit removed (unlimited)", id);
+                    } else {
+                        crate::console_println!("Cgroup {}: CPU limit set to {}%", id, pct);
+                    }
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "mem" | "memory" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: cgroup mem <id> <frames>");
+                return;
+            };
+            let Some(frames_str) = parts.get(2) else {
+                crate::console_println!("Usage: cgroup mem <id> <frames>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid cgroup ID");
+                return;
+            };
+            let Ok(frames) = frames_str.parse::<u64>() else {
+                crate::console_println!("Invalid frame count");
+                return;
+            };
+            let limit = cgroup::MemLimit::frames(frames);
+            match cgroup::set_mem_limit(id, limit) {
+                Ok(()) => {
+                    if frames == 0 {
+                        crate::console_println!("Cgroup {}: memory limit removed (unlimited)", id);
+                    } else {
+                        crate::console_println!("Cgroup {}: memory limit set to {} frames", id, frames);
+                    }
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "stats" | "info" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: cgroup stats <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid cgroup ID");
+                return;
+            };
+            let Some(s) = cgroup::stats(id) else {
+                crate::console_println!("Cgroup {} not found", id);
+                return;
+            };
+            crate::console_println!("=== Cgroup {} ===", id);
+            let parent = if s.parent == u32::MAX { alloc::format!("none (root)") }
+                         else { alloc::format!("{}", s.parent) };
+            crate::console_println!("  Parent:           {}", parent);
+            crate::console_println!("  Tasks:            {}", s.nr_tasks);
+            crate::console_println!("  Children:         {}", s.nr_children);
+            crate::console_println!("  CPU quota:        {}", if s.cpu_quota == 0 {
+                alloc::format!("unlimited")
+            } else {
+                alloc::format!("{} ticks / {} period", s.cpu_quota, s.cpu_period)
+            });
+            crate::console_println!("  CPU used:         {} ticks (this period)", s.cpu_used);
+            crate::console_println!("  CPU throttles:    {}", s.cpu_throttle_count);
+            crate::console_println!("  Memory limit:     {}", if s.mem_limit == 0 {
+                alloc::format!("unlimited")
+            } else {
+                alloc::format!("{} frames", s.mem_limit)
+            });
+            crate::console_println!("  Memory usage:     {} frames", s.mem_usage);
+            crate::console_println!("  Memory peak:      {} frames", s.mem_peak);
+            crate::console_println!("  Eff. CPU quota:   {}", {
+                let eff = cgroup::effective_cpu_quota(id);
+                if eff == 0 { alloc::format!("unlimited") }
+                else { alloc::format!("{} ticks", eff) }
+            });
+            crate::console_println!("  Eff. mem limit:   {}", {
+                let eff = cgroup::effective_mem_limit(id);
+                if eff == 0 { alloc::format!("unlimited") }
+                else { alloc::format!("{} frames", eff) }
+            });
+        }
+        "test" => {
+            cgroup::self_test();
+        }
+        _ => {
+            crate::console_println!("Usage: cgroup [list|create|delete|cpu|mem|stats|test]");
+            crate::console_println!("  cgroup              — list active cgroups");
+            crate::console_println!("  cgroup create [P]   — create under parent P (default: root)");
+            crate::console_println!("  cgroup delete ID    — delete empty cgroup");
+            crate::console_println!("  cgroup cpu ID PCT   — set CPU limit (0=unlimited)");
+            crate::console_println!("  cgroup mem ID N     — set memory limit in frames (0=unlimited)");
+            crate::console_println!("  cgroup stats ID     — detailed stats");
+            crate::console_println!("  cgroup test         — run self-test");
+        }
+    }
+}
+
 /// `capreq` — manage capability requests.
 ///
 /// Usage:
@@ -28639,7 +29152,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
@@ -28647,7 +29160,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

@@ -63,6 +63,7 @@ mod cap;
 mod cet;
 mod cgroup;
 mod compositor;
+mod container;
 mod console;
 mod cpu;
 mod cpu_hotplug;
@@ -1285,6 +1286,12 @@ extern "C" fn kmain() -> ! {
     // process tracking.
     netns::init();
     netns::self_test();
+
+    // Step 22e⅞++++p9: Container lifecycle manager init + self-test.
+    // Unified container abstraction tying PID/user/network namespaces + cgroup
+    // into a single lifecycle with create/start/stop/delete state machine.
+    container::init();
+    container::self_test();
 
     // Step 22e⅞++++q: Self-test runner infrastructure test.
     // Verifies the centralized test runner can enumerate suites.

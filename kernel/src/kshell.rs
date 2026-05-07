@@ -4935,6 +4935,7 @@ fn dispatch(line: &str) {
         "pidns" => cmd_pidns(args),
         "userns" => cmd_userns(args),
         "netns" => cmd_netns(args),
+        "container" | "ct" => cmd_container(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
         "uname" => cmd_uname(args),
@@ -31184,6 +31185,169 @@ fn cmd_netns(args: &str) {
     }
 }
 
+fn cmd_container(args: &str) {
+    use crate::container;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "" | "list" | "ls" => {
+            let all = container::list();
+            if all.is_empty() {
+                crate::console_println!("No containers.");
+                return;
+            }
+            crate::console_println!("=== Containers ({}) ===", all.len());
+            crate::console_println!(
+                "{:<5} {:<20} {:<10}",
+                "ID", "Name", "State"
+            );
+            for (id, name, state) in &all {
+                crate::console_println!("{:<5} {:<20} {:<10}", id, name, state);
+            }
+        }
+        "create" => {
+            // container create <name> [cpu%] [mem_frames] [uid_inner:uid_outer:count]
+            let name = parts.get(1).unwrap_or(&"unnamed");
+            let mut cfg = container::ContainerConfig::new(name);
+
+            // Optional CPU limit.
+            if let Some(cpu_str) = parts.get(2) {
+                if let Ok(cpu) = cpu_str.parse::<u64>() {
+                    cfg.cpu_quota = cpu;
+                }
+            }
+            // Optional memory limit.
+            if let Some(mem_str) = parts.get(3) {
+                if let Ok(mem) = mem_str.parse::<u64>() {
+                    cfg.mem_limit = mem;
+                }
+            }
+            // Optional UID mapping (inner:outer:count).
+            if let Some(uid_str) = parts.get(4) {
+                let uid_parts: alloc::vec::Vec<&str> = uid_str.split(':').collect();
+                if uid_parts.len() == 3 {
+                    if let (Ok(inner), Ok(outer), Ok(count)) = (
+                        uid_parts[0].parse::<u32>(),
+                        uid_parts[1].parse::<u32>(),
+                        uid_parts[2].parse::<u32>(),
+                    ) {
+                        cfg = cfg.uid_map(inner, outer, count);
+                    }
+                }
+            }
+
+            match container::create(&cfg) {
+                Ok(id) => crate::console_println!(
+                    "Created container '{}' (id={})", name, id
+                ),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" | "rm" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container delete <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::delete(id) {
+                Ok(()) => crate::console_println!("Deleted container {}", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "start" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container start <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::start(id) {
+                Ok(()) => crate::console_println!("Container {} started", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "stop" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container stop <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            match container::stop(id) {
+                Ok(()) => crate::console_println!("Container {} stopped", id),
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "info" | "inspect" => {
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container info <id>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            let Some(ci) = container::info(id) else {
+                crate::console_println!("Container {} not found", id);
+                return;
+            };
+            crate::console_println!("=== Container {} ===", id);
+            crate::console_println!("  Name:       {}", ci.name);
+            crate::console_println!("  State:      {}", ci.state);
+            crate::console_println!("  Processes:  {}", ci.nr_procs);
+            crate::console_println!("  PID NS:     {}", ci.pid_ns);
+            crate::console_println!("  User NS:    {}", ci.user_ns);
+            crate::console_println!("  Net NS:     {}", ci.net_ns);
+            crate::console_println!("  Cgroup:     {}", ci.cgroup_id);
+            // Show sub-resource details.
+            if let Some(s) = crate::userns::stats(ci.user_ns) {
+                crate::console_println!("  UID maps:   {}", s.uid_map_count);
+                crate::console_println!("  GID maps:   {}", s.gid_map_count);
+            }
+            if let Some(s) = crate::netns::stats(ci.net_ns) {
+                if s.iface_up {
+                    crate::console_println!("  Net IP:     {}", s.ip);
+                } else {
+                    crate::console_println!("  Net IP:     (not configured)");
+                }
+                crate::console_println!("  Routes:     {}", s.route_count);
+            }
+            if let Some(s) = crate::cgroup::stats(ci.cgroup_id) {
+                if s.cpu_quota > 0 {
+                    crate::console_println!("  CPU quota:  {} ticks/period", s.cpu_quota);
+                }
+                if s.mem_limit > 0 {
+                    crate::console_println!("  Mem limit:  {} frames", s.mem_limit);
+                }
+            }
+        }
+        "test" => {
+            container::self_test();
+        }
+        _ => {
+            crate::console_println!("Usage: container [list|create|delete|start|stop|info|test]");
+            crate::console_println!("  container                                — list containers");
+            crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
+            crate::console_println!("  container delete ID                      — delete stopped container");
+            crate::console_println!("  container start ID                       — mark as running");
+            crate::console_println!("  container stop ID                        — mark as stopped");
+            crate::console_println!("  container info ID                        — detailed inspection");
+            crate::console_println!("  container test                           — run self-test");
+            crate::console_println!();
+            crate::console_println!("Aliases: ct");
+        }
+    }
+}
+
 ///   capreq approve ID     — approve a pending request
 ///   capreq deny ID        — deny a pending request
 ///   capreq test           — submit a test request
@@ -33546,7 +33710,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "captags" | "ct" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

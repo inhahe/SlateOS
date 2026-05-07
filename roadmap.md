@@ -781,10 +781,16 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Directory: opendir, readdir, closedir (static Dir pool, 8 concurrent)
   - [x] Misc: getcwd, chdir, isatty, getuid/geteuid/getgid/getegid, sysconf, abort
   - [x] Fcntl: O_* flags, SEEK_*, access mode flags, S_IF* file type bits
-  - [ ] pipe, dup3, fcntl, ioctl
+  - [x] Fd table: userspace fd→handle mapping (File/Pipe/Console), 256 entries, fds 0/1/2 pre-initialized
+  - [x] pipe/pipe2 via SYS_PIPE_CREATE with fd table integration
+  - [x] posix_spawn/posix_spawnp via SYS_FS_READ_FILE + SYS_PROCESS_SPAWN
+  - [x] execve via SYS_FS_READ_FILE + SYS_PROCESS_EXEC (real implementation, not stub)
+  - [x] fcntl: F_GETFD/F_SETFD/F_GETFL/F_SETFL/F_DUPFD/F_DUPFD_CLOEXEC
+  - [x] read/write/close dispatch by handle type (File→SYS_FS_*, Pipe→SYS_PIPE_*, Console→SYS_CONSOLE_*)
+  - [ ] dup/dup2 for pipe handles (needs SYS_PIPE_DUP or fd-level refcounting)
+  - [ ] ioctl
   - [ ] select/poll/epoll equivalents
   - [ ] signal handling shim (POSIX signals → native IPC)
-  - [ ] posix_spawn (via native SYS_PROCESS_SPAWN)
   - [ ] socket API shim
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)

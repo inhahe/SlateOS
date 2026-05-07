@@ -24,6 +24,11 @@
 //! - **Memory**: Limits total physical frames allocated to the group.
 //!   Similar to Linux's `memory.max`.  When a group reaches its limit,
 //!   new allocations from member tasks fail with `OutOfMemory`.
+//! - **I/O**: Limits I/O operations and bytes per period.  Similar to
+//!   Linux's `io.max`.  Two independent limits: `io_ops_limit` caps the
+//!   total number of I/O operations, and `io_bytes_limit` caps the total
+//!   bytes (measured in 16 KiB frames).  Whichever is hit first triggers
+//!   throttling until the next period reset.
 //!
 //! ## Integration Points
 //!
@@ -74,6 +79,12 @@ pub const ROOT_CGROUP: CgroupId = 0;
 /// At 100 Hz timer, 100 ticks = 1 second.  This matches the per-task
 /// bandwidth period in the scheduler.
 const DEFAULT_CPU_PERIOD: u64 = 100;
+
+/// Runtime-tunable default CPU period for newly-created cgroups.
+///
+/// Modified via the sysctl `cgroup.cpu_period` parameter.  Existing
+/// cgroups keep their configured period; this only affects new groups.
+static DEFAULT_CPU_PERIOD_TUNABLE: AtomicU64 = AtomicU64::new(DEFAULT_CPU_PERIOD);
 
 /// Sentinel value meaning "no parent" (root cgroup).
 const NO_PARENT: u32 = u32::MAX;
@@ -174,7 +185,7 @@ pub struct CgroupStats {
     pub cpu_period: u64,
     /// CPU ticks used in the current period.
     pub cpu_used: u64,
-    /// Number of times the group was throttled.
+    /// Number of times the group was CPU-throttled.
     pub cpu_throttle_count: u64,
     /// Memory limit (frames, 0 = unlimited).
     pub mem_limit: u64,
@@ -182,6 +193,16 @@ pub struct CgroupStats {
     pub mem_usage: u64,
     /// Peak memory usage (high-water mark, frames).
     pub mem_peak: u64,
+    /// I/O operations limit per period (0 = unlimited).
+    pub io_ops_limit: u64,
+    /// I/O bytes limit per period, in frames (0 = unlimited).
+    pub io_bytes_limit: u64,
+    /// I/O operations consumed in the current period.
+    pub io_ops_used: u64,
+    /// I/O bytes consumed in the current period (frames).
+    pub io_bytes_used: u64,
+    /// Number of times the group was I/O-throttled.
+    pub io_throttle_count: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +242,18 @@ struct CgroupNode {
     mem_usage: AtomicU64,
     /// Peak memory usage (high-water mark, frames).
     mem_peak: AtomicU64,
+
+    // --- I/O controller ---
+    /// Maximum I/O operations per period (0 = unlimited).
+    io_ops_limit: u64,
+    /// Maximum I/O bytes per period, in frames (0 = unlimited).
+    io_bytes_limit: u64,
+    /// I/O operations consumed in the current period.
+    io_ops_used: AtomicU64,
+    /// I/O bytes consumed in the current period (in frames).
+    io_bytes_used: AtomicU64,
+    /// Number of times the group was I/O-throttled.
+    io_throttle_count: AtomicU64,
 }
 
 impl CgroupNode {
@@ -239,6 +272,11 @@ impl CgroupNode {
             mem_limit: 0,
             mem_usage: AtomicU64::new(0),
             mem_peak: AtomicU64::new(0),
+            io_ops_limit: 0,
+            io_bytes_limit: 0,
+            io_ops_used: AtomicU64::new(0),
+            io_bytes_used: AtomicU64::new(0),
+            io_throttle_count: AtomicU64::new(0),
         }
     }
 
@@ -249,13 +287,18 @@ impl CgroupNode {
         self.nr_tasks.store(0, Ordering::Relaxed);
         self.nr_children.store(0, Ordering::Relaxed);
         self.cpu_quota = 0;
-        self.cpu_period = DEFAULT_CPU_PERIOD;
+        self.cpu_period = DEFAULT_CPU_PERIOD_TUNABLE.load(Ordering::Relaxed);
         self.cpu_used.store(0, Ordering::Relaxed);
         self.cpu_throttled = false;
         self.cpu_throttle_count.store(0, Ordering::Relaxed);
         self.mem_limit = 0;
         self.mem_usage.store(0, Ordering::Relaxed);
         self.mem_peak.store(0, Ordering::Relaxed);
+        self.io_ops_limit = 0;
+        self.io_bytes_limit = 0;
+        self.io_ops_used.store(0, Ordering::Relaxed);
+        self.io_bytes_used.store(0, Ordering::Relaxed);
+        self.io_throttle_count.store(0, Ordering::Relaxed);
     }
 }
 
@@ -555,6 +598,21 @@ pub fn cpu_period_reset() {
     }
 }
 
+/// Set the default CPU period for newly-created cgroups.
+///
+/// Called by sysctl when `cgroup.cpu_period` is modified.  Does not
+/// affect existing cgroups — they keep their configured period.
+pub fn set_default_cpu_period(ticks: u64) {
+    DEFAULT_CPU_PERIOD_TUNABLE.store(ticks, Ordering::Relaxed);
+}
+
+/// Get the current default CPU period (for new cgroups).
+#[must_use]
+#[allow(dead_code)] // Public API for diagnostics and sysctl integration.
+pub fn default_cpu_period() -> u64 {
+    DEFAULT_CPU_PERIOD_TUNABLE.load(Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Public API: memory controller
 // ---------------------------------------------------------------------------
@@ -660,6 +718,226 @@ fn update_mem_peak(node: &CgroupNode, new_val: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Public API: I/O controller
+// ---------------------------------------------------------------------------
+
+/// I/O controller limits for a cgroup.
+///
+/// The I/O controller throttles disk I/O per period:
+/// - `ops_max`: Maximum I/O operations (reads + writes) per period.
+/// - `bytes_max`: Maximum I/O bytes per period (measured in 16 KiB frames).
+///
+/// Both limits are independent — whichever is hit first triggers throttling.
+/// A value of 0 for either means "unlimited" (no limit on that dimension).
+#[derive(Debug, Clone, Copy)]
+pub struct IoLimit {
+    /// Maximum I/O operations per period (0 = unlimited).
+    pub ops_max: u64,
+    /// Maximum I/O bytes per period, in frames (0 = unlimited).
+    pub bytes_max: u64,
+}
+
+impl IoLimit {
+    /// No I/O limit (unlimited ops and bytes).
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self { ops_max: 0, bytes_max: 0 }
+    }
+
+    /// I/O limit with specified ops and bytes per period.
+    #[must_use]
+    pub const fn new(ops_max: u64, bytes_max: u64) -> Self {
+        Self { ops_max, bytes_max }
+    }
+}
+
+/// Set the I/O limit for a cgroup.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `cgroup_id` doesn't exist.
+pub fn set_io_limit(cgroup_id: CgroupId, limit: IoLimit) -> KernelResult<()> {
+    let mut table = TABLE.lock();
+    let idx = cgroup_id as usize;
+
+    if idx >= MAX_CGROUPS || !table.nodes[idx].active {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    table.nodes[idx].io_ops_limit = limit.ops_max;
+    table.nodes[idx].io_bytes_limit = limit.bytes_max;
+
+    Ok(())
+}
+
+/// Charge one I/O operation and `frames` worth of bytes to a cgroup.
+///
+/// Called by the I/O path (virtio-blk, AHCI, NVMe) before submitting
+/// a request.  Returns `true` if the group's I/O quota has been exceeded
+/// and the request should be throttled (deferred until next period).
+///
+/// This is the hot path for I/O throttling.  Uses atomics for the
+/// counters but does hold the table lock briefly to validate the node.
+///
+/// # Arguments
+///
+/// - `cgroup_id`: The cgroup of the task issuing I/O.
+/// - `frames`: Number of frames (16 KiB pages) in this I/O request.
+///   For sector-based devices, convert: `frames = ceil(sectors * 512 / 16384)`.
+///   Minimum 1 for any non-zero I/O.
+///
+/// # Returns
+///
+/// `true` if the I/O should be throttled (limit exceeded), `false` if allowed.
+pub fn io_charge(cgroup_id: CgroupId, frames: u64) -> bool {
+    let table = TABLE.lock();
+    let idx = cgroup_id as usize;
+
+    if idx >= MAX_CGROUPS || !table.nodes[idx].active {
+        return false; // Invalid — don't throttle.
+    }
+
+    let node = &table.nodes[idx];
+
+    // Check ops limit.
+    let ops_exceeded = if node.io_ops_limit > 0 {
+        let used = node.io_ops_used.fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        used > node.io_ops_limit
+    } else {
+        node.io_ops_used.fetch_add(1, Ordering::Relaxed);
+        false
+    };
+
+    // Check bytes limit.
+    let bytes_exceeded = if node.io_bytes_limit > 0 {
+        let used = node.io_bytes_used.fetch_add(frames, Ordering::Relaxed)
+            .saturating_add(frames);
+        used > node.io_bytes_limit
+    } else {
+        node.io_bytes_used.fetch_add(frames, Ordering::Relaxed);
+        false
+    };
+
+    if ops_exceeded || bytes_exceeded {
+        node.io_throttle_count.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+/// Check if a cgroup's I/O would be throttled without charging.
+///
+/// Useful for pre-checking before queuing I/O to avoid submitting
+/// requests that will be rejected.
+#[must_use]
+#[allow(dead_code)] // Public API for I/O scheduler pre-check.
+pub fn io_would_throttle(cgroup_id: CgroupId, frames: u64) -> bool {
+    let table = TABLE.lock();
+    let idx = cgroup_id as usize;
+
+    if idx >= MAX_CGROUPS || !table.nodes[idx].active {
+        return false;
+    }
+
+    let node = &table.nodes[idx];
+
+    let ops_over = node.io_ops_limit > 0
+        && node.io_ops_used.load(Ordering::Relaxed).saturating_add(1) > node.io_ops_limit;
+
+    let bytes_over = node.io_bytes_limit > 0
+        && node.io_bytes_used.load(Ordering::Relaxed).saturating_add(frames) > node.io_bytes_limit;
+
+    ops_over || bytes_over
+}
+
+/// Reset I/O period counters for all active cgroups.
+///
+/// Called alongside [`cpu_period_reset`] by the BSP timer at the end
+/// of each period.  Clears `io_ops_used` and `io_bytes_used` so groups
+/// can issue I/O again in the new period.
+pub fn io_period_reset() {
+    let table = TABLE.lock();
+    for node in &table.nodes {
+        if node.active {
+            node.io_ops_used.store(0, Ordering::Relaxed);
+            node.io_bytes_used.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Get the effective I/O ops limit for a cgroup, considering hierarchy.
+///
+/// Walks up the parent chain and returns the tightest (minimum non-zero)
+/// I/O ops limit.  Returns 0 if no group in the chain has an ops limit.
+#[must_use]
+#[allow(dead_code)] // Public API for I/O scheduler hierarchy enforcement.
+pub fn effective_io_ops_limit(id: CgroupId) -> u64 {
+    let table = TABLE.lock();
+    let mut min_limit: u64 = 0;
+    let mut current = id as usize;
+
+    for _ in 0..MAX_CGROUPS {
+        if current >= MAX_CGROUPS || !table.nodes[current].active {
+            break;
+        }
+        let limit = table.nodes[current].io_ops_limit;
+        if limit > 0 {
+            min_limit = if min_limit == 0 { limit } else { min_limit.min(limit) };
+        }
+        let parent = table.nodes[current].parent;
+        if parent == NO_PARENT || parent as usize == current {
+            break;
+        }
+        current = parent as usize;
+    }
+
+    min_limit
+}
+
+/// Get the effective I/O bytes limit for a cgroup, considering hierarchy.
+///
+/// Walks up the parent chain and returns the tightest (minimum non-zero)
+/// I/O bytes limit (in frames).  Returns 0 if no group has a bytes limit.
+#[must_use]
+#[allow(dead_code)] // Public API for I/O scheduler hierarchy enforcement.
+pub fn effective_io_bytes_limit(id: CgroupId) -> u64 {
+    let table = TABLE.lock();
+    let mut min_limit: u64 = 0;
+    let mut current = id as usize;
+
+    for _ in 0..MAX_CGROUPS {
+        if current >= MAX_CGROUPS || !table.nodes[current].active {
+            break;
+        }
+        let limit = table.nodes[current].io_bytes_limit;
+        if limit > 0 {
+            min_limit = if min_limit == 0 { limit } else { min_limit.min(limit) };
+        }
+        let parent = table.nodes[current].parent;
+        if parent == NO_PARENT || parent as usize == current {
+            break;
+        }
+        current = parent as usize;
+    }
+
+    min_limit
+}
+
+/// Charge I/O to the current task's cgroup.
+///
+/// Convenience wrapper for driver/fs code that doesn't have the cgroup
+/// ID handy.  Looks up the running task's cgroup and charges the I/O.
+///
+/// Returns `true` if the I/O should be throttled.
+#[allow(dead_code)] // Public API for block device drivers.
+pub fn try_charge_current_io(frames: u64) -> bool {
+    let cgroup_id = current_task_cgroup();
+    io_charge(cgroup_id, frames)
+}
+
+// ---------------------------------------------------------------------------
 // Public API: current-task helpers (scheduler integration)
 // ---------------------------------------------------------------------------
 
@@ -740,6 +1018,11 @@ pub fn stats(id: CgroupId) -> Option<CgroupStats> {
         mem_limit: node.mem_limit,
         mem_usage: node.mem_usage.load(Ordering::Relaxed),
         mem_peak: node.mem_peak.load(Ordering::Relaxed),
+        io_ops_limit: node.io_ops_limit,
+        io_bytes_limit: node.io_bytes_limit,
+        io_ops_used: node.io_ops_used.load(Ordering::Relaxed),
+        io_bytes_used: node.io_bytes_used.load(Ordering::Relaxed),
+        io_throttle_count: node.io_throttle_count.load(Ordering::Relaxed),
     })
 }
 
@@ -994,13 +1277,100 @@ pub fn self_test() {
     assert!(stats(250).is_none(), "stats for non-existent should be None");
     serial_println!("[cgroup]   Stats non-existent: OK");
 
+    // Test 19: I/O controller — set limit and charge ops.
+    set_io_limit(child2, IoLimit::new(10, 0)).expect("set io ops limit");
+    for _ in 0..9 {
+        let throttle = io_charge(child2, 1);
+        assert!(!throttle, "should not throttle under io ops limit");
+    }
+    // 10th op — still within limit (10 ops max, used 10).
+    let throttle = io_charge(child2, 1);
+    assert!(!throttle, "should not throttle at exactly ops limit");
+    // 11th op — over limit.
+    let throttle = io_charge(child2, 1);
+    assert!(throttle, "should throttle over io ops limit");
+    let s = stats(child2).unwrap();
+    assert_eq!(s.io_ops_used, 11);
+    assert!(s.io_throttle_count >= 1);
+    serial_println!("[cgroup]   I/O controller ops charge/throttle: OK");
+
+    // Test 20: I/O period reset clears usage.
+    io_period_reset();
+    let s = stats(child2).unwrap();
+    assert_eq!(s.io_ops_used, 0, "io period reset should clear ops");
+    assert_eq!(s.io_bytes_used, 0, "io period reset should clear bytes");
+    serial_println!("[cgroup]   I/O period reset: OK");
+
+    // Test 21: I/O bytes limit.
+    set_io_limit(child2, IoLimit::new(0, 100)).expect("set io bytes limit");
+    let throttle = io_charge(child2, 50);
+    assert!(!throttle, "50 frames under 100-frame limit");
+    let throttle = io_charge(child2, 40);
+    assert!(!throttle, "90 frames under 100-frame limit");
+    let throttle = io_charge(child2, 20);
+    assert!(throttle, "110 frames exceeds 100-frame limit");
+    let s = stats(child2).unwrap();
+    assert_eq!(s.io_bytes_used, 110);
+    serial_println!("[cgroup]   I/O controller bytes charge/throttle: OK");
+
+    io_period_reset();
+
+    // Test 22: Unlimited I/O (both 0) never throttles.
+    set_io_limit(child1, IoLimit::unlimited()).expect("set unlimited io");
+    for _ in 0..1000 {
+        let throttle = io_charge(child1, 100);
+        assert!(!throttle, "unlimited io should never throttle");
+    }
+    io_period_reset();
+    serial_println!("[cgroup]   I/O unlimited: OK");
+
+    // Test 23: Effective I/O limits with hierarchy.
+    set_io_limit(child2, IoLimit::new(200, 500)).expect("parent io limit");
+    set_io_limit(inner, IoLimit::new(100, 300)).expect("child io limit");
+
+    let eff_ops = effective_io_ops_limit(inner);
+    assert_eq!(eff_ops, 100, "effective io ops = tightest");
+    let eff_bytes = effective_io_bytes_limit(inner);
+    assert_eq!(eff_bytes, 300, "effective io bytes = tightest");
+
+    // Tighter parent.
+    set_io_limit(child2, IoLimit::new(50, 200)).expect("tighter parent io");
+    let eff_ops = effective_io_ops_limit(inner);
+    assert_eq!(eff_ops, 50, "effective io ops follows parent");
+    let eff_bytes = effective_io_bytes_limit(inner);
+    assert_eq!(eff_bytes, 200, "effective io bytes follows parent");
+    serial_println!("[cgroup]   Effective I/O limits: OK");
+
+    // Test 24: io_would_throttle pre-check.
+    io_period_reset();
+    set_io_limit(child2, IoLimit::new(5, 0)).expect("small ops limit");
+    assert!(!io_would_throttle(child2, 1), "should not throttle initially");
+    for _ in 0..5 {
+        io_charge(child2, 1);
+    }
+    assert!(io_would_throttle(child2, 1), "should throttle after limit reached");
+    io_period_reset();
+    serial_println!("[cgroup]   I/O would_throttle pre-check: OK");
+
+    // Test 25: Default CPU period tunable.
+    let old_period = default_cpu_period();
+    set_default_cpu_period(200);
+    assert_eq!(default_cpu_period(), 200);
+    // New cgroups should pick up the new default.
+    let test_cg = create(ROOT_CGROUP).expect("create test cgroup");
+    let s = stats(test_cg).unwrap();
+    assert_eq!(s.cpu_period, 200, "new cgroup should use tuned period");
+    delete(test_cg).expect("delete test cgroup");
+    // Restore.
+    set_default_cpu_period(old_period);
+    serial_println!("[cgroup]   Default CPU period tunable: OK");
+
     // Cleanup: delete inner, child1, child2.
     delete(inner).expect("delete inner");
     delete(child1).expect("delete child1");
-    // child2 still has a mem limit set but no tasks/children.
     delete(child2).expect("delete child2");
     assert_eq!(active_count(), 1, "only root remains");
     serial_println!("[cgroup]   Cleanup: OK");
 
-    serial_println!("[cgroup] Self-test PASSED (18 tests)");
+    serial_println!("[cgroup] Self-test PASSED (25 tests)");
 }

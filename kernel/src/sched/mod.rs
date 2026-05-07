@@ -1461,8 +1461,9 @@ pub fn timer_tick() -> bool {
         if tick > 0 && tick % BANDWIDTH_PERIOD_TICKS == 0 {
             unthrottle_expired();
             update_load_average();
-            // Reset cgroup CPU period counters alongside per-task resets.
+            // Reset cgroup CPU and I/O period counters alongside per-task resets.
             crate::cgroup::cpu_period_reset();
+            crate::cgroup::io_period_reset();
         }
         // Anti-starvation check: every STARVATION_CHECK_INTERVAL ticks.
         #[allow(clippy::arithmetic_side_effects)]

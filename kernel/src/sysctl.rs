@@ -191,6 +191,36 @@ pub const PARAM_FS_DIRTY_EXPIRE_SECS: u16 = 22;
 pub const PARAM_MM_ALLOC_TRACE: u16 = 7;
 
 // ---------------------------------------------------------------------------
+// Parameter IDs — cgroup subsystem (30-39)
+// ---------------------------------------------------------------------------
+
+/// Default CPU period for new cgroups (in timer ticks).
+///
+/// At 100 Hz, 100 ticks = 1 second.  This controls how frequently
+/// CPU quota accounting resets.  Shorter periods give finer-grained
+/// enforcement but more overhead.
+///
+/// Default: 100 (1 second at 100 Hz).
+pub const PARAM_CGROUP_CPU_PERIOD: u16 = 30;
+
+/// Maximum number of I/O operations per period for the I/O controller.
+///
+/// Controls the default `io_ops_max` for newly-created cgroups when
+/// the I/O controller is configured.  0 = unlimited.
+///
+/// Default: 0 (unlimited — must be explicitly set per-group).
+pub const PARAM_CGROUP_IO_OPS_MAX: u16 = 31;
+
+/// Maximum I/O bytes per period for the I/O controller.
+///
+/// Controls the default `io_bytes_max` for newly-created cgroups.
+/// Measured in 16 KiB frames (one frame = one I/O unit).
+/// 0 = unlimited.
+///
+/// Default: 0 (unlimited — must be explicitly set per-group).
+pub const PARAM_CGROUP_IO_BYTES_MAX: u16 = 32;
+
+// ---------------------------------------------------------------------------
 // Parameter definition
 // ---------------------------------------------------------------------------
 
@@ -474,6 +504,31 @@ pub fn init() {
         60,     // 60 seconds maximum
     );
 
+    // Cgroup parameters.
+    reg.register(
+        PARAM_CGROUP_CPU_PERIOD,
+        "cgroup.cpu_period",
+        100,    // 1 second at 100 Hz timer
+        10,     // 100 ms minimum (10 ticks)
+        1000,   // 10 seconds maximum
+    );
+
+    reg.register(
+        PARAM_CGROUP_IO_OPS_MAX,
+        "cgroup.io_ops_max_default",
+        0,      // Unlimited — explicitly set per-group
+        0,
+        1_000_000,
+    );
+
+    reg.register(
+        PARAM_CGROUP_IO_BYTES_MAX,
+        "cgroup.io_bytes_max_default",
+        0,      // Unlimited — explicitly set per-group (in frames)
+        0,
+        u64::MAX,
+    );
+
     let count = reg.count;
     drop(reg);
 
@@ -552,6 +607,14 @@ fn notify_subsystem(id: u16, value: u64) {
             let id = value as u8;
             crate::sched::backend::set_desired_backend(id);
         }
+        PARAM_CGROUP_CPU_PERIOD => {
+            // Update the default CPU period for new cgroups.
+            crate::cgroup::set_default_cpu_period(value);
+        }
+        // Cgroup io_ops_max and io_bytes_max are informational defaults;
+        // actual limits are set per-group via the cgroup API.  No
+        // subsystem notification needed.
+        PARAM_CGROUP_IO_OPS_MAX | PARAM_CGROUP_IO_BYTES_MAX => {}
         // Other subsystems will add arms here as they register
         // runtime-tunable parameters.
         _ => {}

@@ -1065,7 +1065,17 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] 18 self-tests: root exists, create/delete, hierarchy, attach/detach, CPU charge/throttle/reset/unlimited, memory charge/limit/uncharge/underflow, effective hierarchical limits, stats queries
   - [x] Scheduler timer_tick integration: charges task's cgroup on each tick, throttles when group quota exceeded, BSP period reset drives cgroup::cpu_period_reset()
   - [ ] Frame allocator integration (check cgroup memory limit on alloc)
-  - [ ] I/O controller (bandwidth limits per group)
+  - [x] I/O controller (bandwidth limits per group)
+    - [x] IoLimit struct: ops_max + bytes_max per period (0 = unlimited)
+    - [x] set_io_limit(), io_charge(), io_period_reset() API
+    - [x] Dual-limit enforcement: whichever dimension hit first triggers throttle
+    - [x] io_would_throttle() pre-check for I/O scheduler
+    - [x] effective_io_ops_limit/effective_io_bytes_limit hierarchy queries
+    - [x] try_charge_current_io() convenience wrapper for drivers
+    - [x] BSP timer integration: io_period_reset alongside cpu_period_reset
+    - [x] Sysctl parameters: cgroup.cpu_period, cgroup.io_ops_max_default, cgroup.io_bytes_max_default
+    - [x] Kshell `cgroup io` command for interactive limit management
+    - [x] 7 new self-tests (25 total): ops throttle, period reset, bytes throttle, unlimited, effective limits, would_throttle, cpu_period tunable
 - [ ] Port Docker (or equivalent container runtime)
 
 ### 5.6 Additional software

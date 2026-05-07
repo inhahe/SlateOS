@@ -3083,7 +3083,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "cg", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4411,6 +4411,7 @@ fn dispatch(line: &str) {
         "taskbar" => cmd_taskbar(args),
         "startmenu" | "smenu" => cmd_startmenu(args),
         "filepicker" | "fpick" => cmd_filepicker(args),
+        "theme" => cmd_theme(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -17631,6 +17632,200 @@ fn cmd_appregistry(args: &str) {
     }
 }
 
+/// `theme` — desktop color scheme and visual style management.
+fn cmd_theme(args: &str) {
+    use crate::fs::theme;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "mode" => {
+            let mode_str = parts.get(1).copied().unwrap_or("");
+            if mode_str.is_empty() {
+                shell_println!("Current mode: {}", theme::mode().label());
+                return;
+            }
+            match theme::ThemeMode::from_str(mode_str) {
+                Some(m) => {
+                    theme::set_mode(m);
+                    shell_println!("Mode set: {}", m.label());
+                }
+                None => shell_println!("Unknown mode: {} (use: light, dark, highcontrast)", mode_str),
+            }
+        }
+        "accent" => {
+            let hex = parts.get(1).copied().unwrap_or("");
+            if hex.is_empty() {
+                shell_println!("Accent: {}", theme::accent().to_hex());
+                return;
+            }
+            if hex == "clear" || hex == "reset" {
+                theme::clear_accent();
+                shell_println!("Accent reset to default");
+                return;
+            }
+            match theme::Color::from_hex(hex) {
+                Some(c) => {
+                    theme::set_accent(c);
+                    shell_println!("Accent set: {}", c.to_hex());
+                }
+                None => shell_println!("Invalid hex color: {}", hex),
+            }
+        }
+        "color" | "get" => {
+            let role_str = parts.get(1).copied().unwrap_or("");
+            if role_str.is_empty() {
+                // List all colors.
+                for &role in theme::ColorRole::all() {
+                    let c = theme::color(role);
+                    shell_println!("  {:20} {}", role.label(), c.to_hex());
+                }
+                return;
+            }
+            match theme::ColorRole::from_str(role_str) {
+                Some(role) => {
+                    let c = theme::color(role);
+                    shell_println!("{}: {}", role.label(), c.to_hex());
+                }
+                None => shell_println!("Unknown role: {}", role_str),
+            }
+        }
+        "set" => {
+            let role_str = parts.get(1).copied().unwrap_or("");
+            let hex = parts.get(2).copied().unwrap_or("");
+            if role_str.is_empty() || hex.is_empty() {
+                shell_println!("Usage: theme set <role> <#hex>");
+                return;
+            }
+            let role = match theme::ColorRole::from_str(role_str) {
+                Some(r) => r,
+                None => { shell_println!("Unknown role: {}", role_str); return; }
+            };
+            let color = match theme::Color::from_hex(hex) {
+                Some(c) => c,
+                None => { shell_println!("Invalid hex color: {}", hex); return; }
+            };
+            theme::set_override(role, color);
+            shell_println!("Override: {} → {}", role.label(), color.to_hex());
+        }
+        "clear" => {
+            let role_str = parts.get(1).copied().unwrap_or("");
+            if role_str.is_empty() || role_str == "all" {
+                theme::clear_all_overrides();
+                shell_println!("All overrides cleared");
+                return;
+            }
+            match theme::ColorRole::from_str(role_str) {
+                Some(role) => {
+                    theme::clear_override(role);
+                    shell_println!("Override cleared: {}", role.label());
+                }
+                None => shell_println!("Unknown role: {}", role_str),
+            }
+        }
+        "overrides" => {
+            let overrides = theme::list_overrides();
+            if overrides.is_empty() {
+                shell_println!("No active overrides");
+            } else {
+                shell_println!("{} overrides:", overrides.len());
+                for (role, color) in &overrides {
+                    shell_println!("  {:20} {}", role.label(), color.to_hex());
+                }
+            }
+        }
+        "save" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: theme save <name>");
+                return;
+            }
+            // Save current overrides as a custom theme.
+            let overrides = theme::list_overrides();
+            let mut map = alloc::collections::BTreeMap::new();
+            for (role, color) in overrides {
+                map.insert(role, color);
+            }
+            let mode = theme::mode();
+            match theme::save_custom(name, mode, map) {
+                Ok(()) => shell_println!("Saved custom theme: {}", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "load" | "apply" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: theme load <name>");
+                return;
+            }
+            match theme::apply_custom(name) {
+                Ok(()) => shell_println!("Applied theme: {}", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "rm" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: theme delete <name>");
+                return;
+            }
+            match theme::delete_custom(name) {
+                Ok(()) => shell_println!("Deleted theme: {}", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" | "" => {
+            shell_println!("Mode: {}", theme::mode().label());
+            shell_println!("Accent: {}", theme::accent().to_hex());
+            let overrides = theme::list_overrides();
+            if !overrides.is_empty() {
+                shell_println!("Overrides: {}", overrides.len());
+            }
+            let custom = theme::list_custom();
+            if !custom.is_empty() {
+                shell_println!("Custom themes:");
+                for name in &custom {
+                    shell_println!("  {}", name);
+                }
+            }
+        }
+        "test" => {
+            match theme::self_test() {
+                Ok(()) => shell_println!("All theme self-tests passed"),
+                Err(e) => shell_println!("Theme self-test failed: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (mode, customs, overrides, queries, changes) = theme::stats();
+            shell_println!("Mode:      {}", mode.label());
+            shell_println!("Customs:   {}", customs);
+            shell_println!("Overrides: {}", overrides);
+            shell_println!("Queries:   {}", queries);
+            shell_println!("Changes:   {}", changes);
+        }
+        "reset" => {
+            theme::clear_all();
+            theme::reset_stats();
+            shell_println!("Theme reset to defaults");
+        }
+        _ => {
+            shell_println!("Usage: theme <subcommand>");
+            shell_println!("  mode [light|dark|hc]       Get/set theme mode");
+            shell_println!("  accent [#hex|clear]        Get/set accent color");
+            shell_println!("  color [role]               Show color(s)");
+            shell_println!("  set <role> <#hex>          Override a color");
+            shell_println!("  clear [role|all]           Clear override(s)");
+            shell_println!("  overrides                  List active overrides");
+            shell_println!("  save <name>                Save custom theme");
+            shell_println!("  load <name>                Apply custom theme");
+            shell_println!("  delete <name>              Delete custom theme");
+            shell_println!("  list                       Show theme status");
+            shell_println!("  test                       Run self-tests");
+            shell_println!("  stats                      Show statistics");
+            shell_println!("  reset                      Reset to defaults");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -25160,7 +25355,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

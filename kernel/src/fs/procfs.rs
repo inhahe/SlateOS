@@ -169,6 +169,7 @@ const ROOT_FILES: &[&str] = &[
     "taskbar",
     "startmenu",
     "filepicker",
+    "theme",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3123,6 +3124,41 @@ fn gen_filepicker() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_theme() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (mode, custom_n, override_n, queries, changes) = super::theme::stats();
+
+    out.push_str("Desktop Theme\n");
+    out.push_str("=============\n\n");
+    out.push_str(&format!("Mode:           {}\n", mode.label()));
+    out.push_str(&format!("Custom themes:  {}/{}\n", custom_n, 64));
+    out.push_str(&format!("Overrides:      {}/{}\n", override_n, 128));
+    out.push_str(&format!("Accent:         {}\n", super::theme::accent().to_hex()));
+    out.push_str(&format!("Query ops:      {}\n", queries));
+    out.push_str(&format!("Change ops:     {}\n\n", changes));
+
+    let overrides = super::theme::list_overrides();
+    if !overrides.is_empty() {
+        out.push_str("Active overrides:\n");
+        for (role, color) in &overrides {
+            out.push_str(&format!("  {:20} {}\n", role.label(), color.to_hex()));
+        }
+        out.push_str("\n");
+    }
+
+    let custom = super::theme::list_custom();
+    if !custom.is_empty() {
+        out.push_str("Custom themes:\n");
+        for name in &custom {
+            out.push_str(&format!("  {}\n", name));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -3457,6 +3493,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "taskbar" => Ok(gen_taskbar()),
         "startmenu" => Ok(gen_startmenu()),
         "filepicker" => Ok(gen_filepicker()),
+        "theme" => Ok(gen_theme()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

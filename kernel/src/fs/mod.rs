@@ -41,6 +41,7 @@ pub mod cpio;
 pub mod devfs;
 pub mod ext4;
 pub mod fat;
+pub mod fcompress;
 pub mod handle;
 pub mod history;
 pub mod index;

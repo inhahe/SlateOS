@@ -114,6 +114,7 @@ const ROOT_FILES: &[&str] = &[
     "reclaim",
     "transactions",
     "changetrack",
+    "fcompress",
 ];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
@@ -1727,6 +1728,35 @@ fn gen_changetrack() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fcompress() -> Vec<u8> {
+    use crate::fs::fcompress;
+    let s = fcompress::stats();
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!("Transparent compression: {}\n", if fcompress::is_enabled() { "enabled" } else { "disabled" }));
+    out.push_str(&format!("  default algorithm: {}\n", fcompress::default_algorithm().name()));
+    out.push_str(&format!("  min file size:     {} bytes\n\n", fcompress::min_size()));
+    out.push_str(&format!("  files compressed:  {}\n", s.files_compressed));
+    out.push_str(&format!("  files decompressed:{}\n", s.files_decompressed));
+    out.push_str(&format!("  files skipped:     {}\n", s.files_skipped));
+    out.push_str(&format!("  bytes original:    {}\n", s.bytes_original));
+    out.push_str(&format!("  bytes stored:      {}\n", s.bytes_stored));
+    out.push_str(&format!("  bytes delivered:   {}\n\n", s.bytes_delivered));
+
+    let rules = fcompress::list_rules();
+    out.push_str(&format!("  rules: {}\n", rules.len()));
+    for r in &rules {
+        let exts = if r.extensions.is_empty() {
+            alloc::string::String::from("*")
+        } else {
+            r.extensions.join(",")
+        };
+        out.push_str(&format!("    {} -> {} (ext: {})\n", r.path_prefix, r.algorithm.name(), exts));
+    }
+
+    out.into_bytes()
+}
+
 /// Check if a task ID currently exists in the scheduler.
 fn task_exists(task_id: u64) -> bool {
     crate::sched::task_list().iter().any(|t| t.id == task_id)
@@ -1782,6 +1812,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "reclaim" => Ok(gen_reclaim()),
         "transactions" => Ok(gen_transactions()),
         "changetrack" => Ok(gen_changetrack()),
+        "fcompress" => Ok(gen_fcompress()),
         _ => Err(KernelError::NotFound),
     }
 }

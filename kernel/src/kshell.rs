@@ -3109,6 +3109,7 @@ const COMMANDS: &[&str] = &[
     "reclaim",
     "fstx",
     "changetrack", "ct",
+    "fcompress", "fc",
     "uname", "un7z", "unalias", "uniq", "unmount", "unrar", "unset", "unxz", "unzip", "unzstd", "updatedb", "uptime", "ver", "version", "vmstat",
     "watch", "watchdog", "wc", "wget", "which", "while", "whoami", "wipe", "workqueue", "wq", "write",
     "xattr", "xzcat",
@@ -4336,6 +4337,7 @@ fn dispatch(line: &str) {
         "reclaim" => cmd_reclaim(args),
         "fstx" => cmd_fstx(args),
         "changetrack" | "ct" => cmd_changetrack(args),
+        "fcompress" | "fc" => cmd_fcompress(args),
         "sync" => cmd_sync(),
         "mount" => cmd_mount(args),
         "umount" | "unmount" => cmd_umount(args),
@@ -4424,6 +4426,7 @@ fn dispatch(line: &str) {
         "net" | "ifconfig" => cmd_net(),
         "mouse" => cmd_mouse(),
         "gfx" => cmd_gfx(args),
+        "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
         "dns" | "nslookup" => cmd_dns(args),
@@ -11150,6 +11153,265 @@ fn cmd_changetrack(args: &str) {
     }
 }
 
+/// `fcompress` / `fc` — transparent filesystem compression.
+///
+/// Subcommands:
+///   fc enable / fc disable         - toggle transparent compression
+///   fc status                      - show stats and rules
+///   fc algo ALGORITHM              - set default algorithm (lz4/gzip/zstd/bzip2/xz)
+///   fc minsize BYTES               - set minimum file size for compression
+///   fc rule add PREFIX [ALGO] [EXT,..] - add a compression rule
+///   fc rule rm PREFIX              - remove rules for a prefix
+///   fc rule list                   - list all rules
+///   fc info PATH                   - show compression info for a file
+///   fc compress PATH [ALGO]        - manually compress a file
+///   fc decompress PATH             - manually decompress a file
+fn cmd_fcompress(args: &str) {
+    use crate::fs::fcompress;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.first().copied().unwrap_or("status") {
+        "enable" | "on" => {
+            fcompress::set_enabled(true);
+            shell_println!("Transparent compression enabled.");
+        }
+        "disable" | "off" => {
+            fcompress::set_enabled(false);
+            shell_println!("Transparent compression disabled.");
+        }
+        "status" | "stats" => {
+            let s = fcompress::stats();
+            let algo = fcompress::default_algorithm();
+            shell_println!("Transparent compression: {}", if fcompress::is_enabled() { "enabled" } else { "disabled" });
+            shell_println!("  Default algorithm: {}", algo.name());
+            shell_println!("  Min file size:     {} bytes", fcompress::min_size());
+            shell_println!("  Files compressed:  {}", s.files_compressed);
+            shell_println!("  Files decompressed:{}", s.files_decompressed);
+            shell_println!("  Files skipped:     {}", s.files_skipped);
+            if s.bytes_original > 0 {
+                let ratio = s.bytes_original as f64 / s.bytes_stored.max(1) as f64;
+                shell_println!("  Original bytes:    {}", s.bytes_original);
+                shell_println!("  Stored bytes:      {}", s.bytes_stored);
+                shell_println!("  Ratio:             {:.2}:1", ratio);
+            }
+
+            let rules = fcompress::list_rules();
+            if rules.is_empty() {
+                shell_println!("  Rules:             (none)");
+            } else {
+                shell_println!("  Rules:");
+                for r in &rules {
+                    let exts = if r.extensions.is_empty() {
+                        alloc::string::String::from("*")
+                    } else {
+                        r.extensions.join(",")
+                    };
+                    shell_println!("    {} -> {} (ext: {})", r.path_prefix, r.algorithm.name(), exts);
+                }
+            }
+        }
+        "algo" | "algorithm" => {
+            if parts.len() < 2 {
+                shell_println!("Current: {}", fcompress::default_algorithm().name());
+                shell_println!("Usage: fc algo <lz4|gzip|zstd|bzip2|xz>");
+                return;
+            }
+            match fcompress::Algorithm::from_name(parts[1]) {
+                Some(a) => {
+                    fcompress::set_default_algorithm(a);
+                    shell_println!("Default algorithm set to {}.", a.name());
+                }
+                None => shell_println!("Unknown algorithm: {}", parts[1]),
+            }
+        }
+        "minsize" | "min" => {
+            if parts.len() < 2 {
+                shell_println!("Current: {} bytes", fcompress::min_size());
+                return;
+            }
+            match parts[1].parse::<u64>() {
+                Ok(n) => {
+                    fcompress::set_min_size(n);
+                    shell_println!("Min size set to {} bytes.", n);
+                }
+                Err(_) => shell_println!("Invalid number: {}", parts[1]),
+            }
+        }
+        "rule" => {
+            match parts.get(1).copied().unwrap_or("list") {
+                "add" => {
+                    if parts.len() < 3 {
+                        shell_println!("Usage: fc rule add PREFIX [ALGO] [EXT1,EXT2,...]");
+                        return;
+                    }
+                    let prefix = alloc::string::String::from(parts[2]);
+                    let algo = if parts.len() > 3 {
+                        fcompress::Algorithm::from_name(parts[3]).unwrap_or(fcompress::default_algorithm())
+                    } else {
+                        fcompress::default_algorithm()
+                    };
+                    let extensions: Vec<alloc::string::String> = if parts.len() > 4 {
+                        parts[4].split(',').map(|s| alloc::string::String::from(s)).collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    match fcompress::add_rule(fcompress::CompressionRule {
+                        path_prefix: prefix.clone(),
+                        extensions,
+                        algorithm: algo,
+                    }) {
+                        Ok(()) => shell_println!("Rule added: {} -> {}", prefix, algo.name()),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "rm" | "remove" | "del" => {
+                    if parts.len() < 3 {
+                        shell_println!("Usage: fc rule rm PREFIX");
+                        return;
+                    }
+                    let n = fcompress::remove_rules(parts[2]);
+                    shell_println!("Removed {} rule(s).", n);
+                }
+                "list" | "ls" => {
+                    let rules = fcompress::list_rules();
+                    if rules.is_empty() {
+                        shell_println!("No compression rules.");
+                    } else {
+                        shell_println!("{:<30} {:<8} {}", "PREFIX", "ALGO", "EXTENSIONS");
+                        for r in &rules {
+                            let exts = if r.extensions.is_empty() {
+                                alloc::string::String::from("*")
+                            } else {
+                                r.extensions.join(",")
+                            };
+                            shell_println!("{:<30} {:<8} {}", r.path_prefix, r.algorithm.name(), exts);
+                        }
+                    }
+                }
+                "clear" => {
+                    fcompress::clear_rules();
+                    shell_println!("All rules cleared.");
+                }
+                _ => shell_println!("Usage: fc rule <add|rm|list|clear>"),
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fc info PATH");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    let info = fcompress::file_info(&data);
+                    if info.compressed {
+                        shell_println!("File: {} (COMPRESSED)", path);
+                        shell_println!("  Algorithm:   {}", info.algorithm.name());
+                        shell_println!("  Original:    {} bytes", info.original_size);
+                        shell_println!("  Stored:      {} bytes", info.stored_size);
+                        shell_println!("  Ratio:       {:.2}:1", info.ratio);
+                    } else {
+                        shell_println!("File: {} (not compressed)", path);
+                        shell_println!("  Size: {} bytes", info.stored_size);
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "compress" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fc compress PATH [ALGO]");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            let algo = if parts.len() > 2 {
+                match fcompress::Algorithm::from_name(parts[2]) {
+                    Some(a) => a,
+                    None => {
+                        shell_println!("Unknown algorithm: {}", parts[2]);
+                        return;
+                    }
+                }
+            } else {
+                fcompress::default_algorithm()
+            };
+
+            // Read, compress, write back.
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    if fcompress::is_compressed(&data) {
+                        shell_println!("File is already compressed.");
+                        return;
+                    }
+                    // Temporarily enable and add a rule to compress.
+                    let was_enabled = fcompress::is_enabled();
+                    let old_min = fcompress::min_size();
+                    fcompress::set_enabled(true);
+                    fcompress::set_min_size(0);
+                    fcompress::add_rule(fcompress::CompressionRule {
+                        path_prefix: path.clone(),
+                        extensions: Vec::new(),
+                        algorithm: algo,
+                    }).expect("add temp rule");
+
+                    match fcompress::compress_for_write(&path, &data) {
+                        Some(compressed) => {
+                            let saved = data.len().saturating_sub(compressed.len());
+                            if let Err(e) = crate::fs::Vfs::write_file(&path, &compressed) {
+                                shell_println!("Error writing: {:?}", e);
+                            } else {
+                                shell_println!(
+                                    "Compressed {} ({} -> {} bytes, saved {})",
+                                    path, data.len(), compressed.len(), saved
+                                );
+                            }
+                        }
+                        None => shell_println!("File could not be compressed (incompressible or too small)."),
+                    }
+
+                    fcompress::remove_rules(&path);
+                    fcompress::set_min_size(old_min);
+                    fcompress::set_enabled(was_enabled);
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        "decompress" | "expand" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fc decompress PATH");
+                return;
+            }
+            let path = resolve_path(parts[1]);
+            match crate::fs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    if !fcompress::is_compressed(&data) {
+                        shell_println!("File is not compressed (no FCMP header).");
+                        return;
+                    }
+                    match fcompress::decompress_for_read(&data) {
+                        Some(decompressed) => {
+                            if let Err(e) = crate::fs::Vfs::write_file(&path, &decompressed) {
+                                shell_println!("Error writing: {:?}", e);
+                            } else {
+                                shell_println!(
+                                    "Decompressed {} ({} -> {} bytes)",
+                                    path, data.len(), decompressed.len()
+                                );
+                            }
+                        }
+                        None => shell_println!("Decompression failed."),
+                    }
+                }
+                Err(e) => shell_println!("Error reading {}: {:?}", path, e),
+            }
+        }
+        _ => {
+            shell_println!("Usage: fc <enable|disable|status|algo|minsize|rule|info|compress|decompress>");
+        }
+    }
+}
+
 /// `getfacl PATH` — display ACL for a file.
 fn cmd_getfacl(args: &str) {
     use crate::fs::acl;
@@ -16404,7 +16666,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

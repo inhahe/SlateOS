@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4814,6 +4814,7 @@ fn dispatch(line: &str) {
         "loginscreen" | "logscr" => cmd_loginscreen(args),
         "appnotify" | "anotify" => cmd_appnotify(args),
         "kernelbuild" | "kbuild" => cmd_kernelbuild(args),
+        "wakesensor" | "wsensor" => cmd_wakesensor(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -23780,6 +23781,257 @@ fn cmd_kernelbuild(args: &str) {
     }
 }
 
+/// `wakesensor` / `wsensor` — webcam/mic-based screen wake settings.
+fn cmd_wakesensor(args: &str) {
+    use crate::fs::wakesensor;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "config" => {
+            let cfg = wakesensor::config();
+            shell_println!("Global enabled:  {}", cfg.globally_enabled);
+            shell_println!("Battery policy:  {}", if cfg.disable_on_battery { "disable on battery" } else { "always" });
+            shell_println!("Cooldown:        {} s", cfg.cooldown_secs);
+            shell_println!("Log events:      {}", cfg.log_events);
+            shell_println!("\nCamera:");
+            shell_println!("  Enabled:       {}", cfg.camera.enabled);
+            shell_println!("  Consent:       {:?}", cfg.camera.consent);
+            shell_println!("  Sensitivity:   {:?} (threshold: {})", cfg.camera.sensitivity, cfg.camera.effective_threshold);
+            shell_println!("  Power draw:    {} mW", cfg.camera.power_draw_mw);
+            shell_println!("  LED indicator: {}", cfg.camera.show_indicator);
+            shell_println!("  Wakes:         {} (false pos: {})", cfg.camera.wake_count, cfg.camera.false_positive_count);
+            if let (Some(s), Some(e)) = (cfg.camera.active_hours_start, cfg.camera.active_hours_end) {
+                shell_println!("  Active hours:  {}:00 - {}:00", s, e);
+            }
+            shell_println!("\nMicrophone:");
+            shell_println!("  Enabled:       {}", cfg.mic.enabled);
+            shell_println!("  Consent:       {:?}", cfg.mic.consent);
+            shell_println!("  Sensitivity:   {:?} (threshold: {})", cfg.mic.sensitivity, cfg.mic.effective_threshold);
+            shell_println!("  Power draw:    {} mW", cfg.mic.power_draw_mw);
+            shell_println!("  LED indicator: {}", cfg.mic.show_indicator);
+            shell_println!("  Wakes:         {} (false pos: {})", cfg.mic.wake_count, cfg.mic.false_positive_count);
+        }
+        "enable" => {
+            match wakesensor::set_globally_enabled(true) {
+                Ok(()) => shell_println!("Wake sensors globally enabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            match wakesensor::set_globally_enabled(false) {
+                Ok(()) => shell_println!("Wake sensors globally disabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "consent" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: wakesensor consent <camera|mic> <grant|revoke>");
+            } else {
+                let sensor = match parts[1] {
+                    "camera" | "cam" => Some(wakesensor::SensorType::Camera),
+                    "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
+                    _ => { shell_println!("Unknown sensor: {}", parts[1]); None }
+                };
+                if let Some(sensor) = sensor {
+                    let result = match parts[2] {
+                        "grant" | "yes" => {
+                            shell_println!("WARNING: {}", wakesensor::config().privacy_warning);
+                            wakesensor::grant_consent(sensor)
+                        }
+                        "revoke" | "deny" | "no" => wakesensor::revoke_consent(sensor),
+                        _ => { shell_println!("Usage: grant or revoke"); return; }
+                    };
+                    match result {
+                        Ok(()) => shell_println!("Consent updated for {:?}", sensor),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            }
+        }
+        "camera" | "cam" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: wakesensor camera <on|off>");
+            } else {
+                let on = matches!(parts[1], "on" | "yes" | "true" | "enable");
+                match wakesensor::set_sensor_enabled(wakesensor::SensorType::Camera, on) {
+                    Ok(()) => shell_println!("Camera wake {}", if on { "enabled" } else { "disabled" }),
+                    Err(e) => shell_println!("Error: {:?} (consent required?)", e),
+                }
+            }
+        }
+        "mic" | "microphone" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: wakesensor mic <on|off>");
+            } else {
+                let on = matches!(parts[1], "on" | "yes" | "true" | "enable");
+                match wakesensor::set_sensor_enabled(wakesensor::SensorType::Microphone, on) {
+                    Ok(()) => shell_println!("Mic wake {}", if on { "enabled" } else { "disabled" }),
+                    Err(e) => shell_println!("Error: {:?} (consent required?)", e),
+                }
+            }
+        }
+        "sensitivity" | "sens" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: wakesensor sensitivity <camera|mic> <low|medium|high|custom>");
+            } else {
+                let sensor = match parts[1] {
+                    "camera" | "cam" => Some(wakesensor::SensorType::Camera),
+                    "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
+                    _ => { shell_println!("Unknown sensor"); None }
+                };
+                let sens = match parts[2] {
+                    "low" => Some(wakesensor::Sensitivity::Low),
+                    "medium" | "med" => Some(wakesensor::Sensitivity::Medium),
+                    "high" => Some(wakesensor::Sensitivity::High),
+                    "custom" => Some(wakesensor::Sensitivity::Custom),
+                    _ => { shell_println!("Unknown level"); None }
+                };
+                if let (Some(sensor), Some(sens)) = (sensor, sens) {
+                    match wakesensor::set_sensitivity(sensor, sens) {
+                        Ok(()) => shell_println!("Sensitivity set to {:?}", sens),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            }
+        }
+        "threshold" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: wakesensor threshold <camera|mic> <0-100>");
+            } else {
+                let sensor = match parts[1] {
+                    "camera" | "cam" => Some(wakesensor::SensorType::Camera),
+                    "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
+                    _ => { shell_println!("Unknown sensor"); None }
+                };
+                if let Some(sensor) = sensor {
+                    match parts[2].parse::<u32>() {
+                        Ok(v) => match wakesensor::set_custom_threshold(sensor, v) {
+                            Ok(()) => shell_println!("Threshold set to {}", v.min(100)),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid number"),
+                    }
+                }
+            }
+        }
+        "hours" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: wakesensor hours <camera|mic> <start-hour> <end-hour>");
+                shell_println!("  Use 'clear' for start to remove schedule");
+            } else {
+                let sensor = match parts[1] {
+                    "camera" | "cam" => Some(wakesensor::SensorType::Camera),
+                    "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
+                    _ => { shell_println!("Unknown sensor"); None }
+                };
+                if let Some(sensor) = sensor {
+                    if parts[2] == "clear" {
+                        match wakesensor::set_active_hours(sensor, None, None) {
+                            Ok(()) => shell_println!("Schedule cleared"),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        match (parts[2].parse::<u8>(), parts[3].parse::<u8>()) {
+                            (Ok(s), Ok(e)) => match wakesensor::set_active_hours(sensor, Some(s), Some(e)) {
+                                Ok(()) => shell_println!("Active hours: {}:00 - {}:00", s, e),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            },
+                            _ => shell_println!("Invalid hours"),
+                        }
+                    }
+                }
+            }
+        }
+        "cooldown" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: wakesensor cooldown <seconds>");
+            } else {
+                match parts[1].parse::<u32>() {
+                    Ok(v) => match wakesensor::set_cooldown(v) {
+                        Ok(()) => shell_println!("Cooldown set to {} s", v.clamp(1, 300)),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    },
+                    Err(_) => shell_println!("Invalid number"),
+                }
+            }
+        }
+        "battery" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: wakesensor battery <disable-on-battery|always>");
+            } else {
+                let dis = matches!(parts[1], "disable" | "off" | "disable-on-battery");
+                match wakesensor::set_disable_on_battery(dis) {
+                    Ok(()) => shell_println!("Battery policy: {}", if dis { "disable on battery" } else { "always active" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "events" => {
+            let events = wakesensor::wake_events();
+            if events.is_empty() {
+                shell_println!("No wake events");
+            } else {
+                shell_println!("{:<6} {:<10} {:<6} {:<6} {}", "ID", "Sensor", "Level", "Thr", "FP");
+                for e in &events {
+                    let sensor = match e.sensor {
+                        wakesensor::SensorType::Camera => "Camera",
+                        wakesensor::SensorType::Microphone => "Mic",
+                    };
+                    let fp = if e.false_positive { "yes" } else { "" };
+                    shell_println!("{:<6} {:<10} {:<6} {:<6} {}", e.id, sensor, e.level, e.threshold, fp);
+                }
+            }
+        }
+        "clearevents" => {
+            wakesensor::clear_events();
+            shell_println!("Wake events cleared");
+        }
+        "warning" => {
+            shell_println!("{}", wakesensor::config().privacy_warning);
+        }
+        "init" => {
+            wakesensor::init_defaults();
+            shell_println!("Initialised wake sensor defaults");
+        }
+        "stats" => {
+            let (global, cam, mic, events, ops) = wakesensor::stats();
+            shell_println!("Global:  {}", if global { "on" } else { "off" });
+            shell_println!("Camera:  {}", if cam { "on" } else { "off" });
+            shell_println!("Mic:     {}", if mic { "on" } else { "off" });
+            shell_println!("Events:  {}", events);
+            shell_println!("Ops:     {}", ops);
+        }
+        "test" => {
+            match wakesensor::self_test() {
+                Ok(()) => shell_println!("wakesensor: all tests passed"),
+                Err(e) => shell_println!("wakesensor: test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("wakesensor — webcam/mic-based screen wake (opt-in)");
+            shell_println!("Usage: wakesensor <subcommand>");
+            shell_println!("  show              Show current configuration");
+            shell_println!("  enable/disable    Global enable/disable");
+            shell_println!("  consent <s> <v>   Grant/revoke privacy consent");
+            shell_println!("  camera <on|off>   Enable/disable camera wake");
+            shell_println!("  mic <on|off>      Enable/disable mic wake");
+            shell_println!("  sensitivity <s> <l>  Set sensitivity level");
+            shell_println!("  threshold <s> <n> Set custom threshold (0-100)");
+            shell_println!("  hours <s> <start> <end>  Set active hours");
+            shell_println!("  cooldown <secs>   Set cooldown between wakes");
+            shell_println!("  battery <policy>  Set battery policy");
+            shell_println!("  events            Show wake event log");
+            shell_println!("  clearevents       Clear event log");
+            shell_println!("  warning           Show privacy warning");
+            shell_println!("  init              Load defaults");
+            shell_println!("  stats             Show statistics");
+            shell_println!("  test              Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -31558,7 +31810,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

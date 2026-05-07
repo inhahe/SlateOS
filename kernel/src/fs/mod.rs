@@ -167,6 +167,7 @@ pub mod vdesktop;
 pub mod vfs;
 pub mod viewstate;
 pub mod vpn;
+pub mod wakesensor;
 pub mod wallpaper;
 pub mod widgets;
 pub mod winsnap;

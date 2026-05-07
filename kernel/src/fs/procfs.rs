@@ -210,6 +210,7 @@ const ROOT_FILES: &[&str] = &[
     "loginscreen",
     "appnotify",
     "kernelbuild",
+    "wakesensor",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4582,6 +4583,23 @@ fn gen_kernelbuild() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_wakesensor() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (global, cam, mic, events, ops) = super::wakesensor::stats();
+
+    out.push_str("Wake Sensors\n");
+    out.push_str("============\n\n");
+    out.push_str(&format!("Global enabled: {}\n", global));
+    out.push_str(&format!("Camera:         {}\n", if cam { "on" } else { "off" }));
+    out.push_str(&format!("Microphone:     {}\n", if mic { "on" } else { "off" }));
+    out.push_str(&format!("Wake events:    {}\n", events));
+    out.push_str(&format!("Operations:     {}\n", ops));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4957,6 +4975,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "loginscreen" => Ok(gen_loginscreen()),
         "appnotify" => Ok(gen_appnotify()),
         "kernelbuild" => Ok(gen_kernelbuild()),
+        "wakesensor" => Ok(gen_wakesensor()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

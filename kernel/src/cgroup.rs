@@ -57,10 +57,23 @@
 //! - Design spec: "set resource limits at process launch, let the
 //!   kernel enforce them" (line 594)
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+
+/// Global flag: `true` when any non-root cgroup has a memory limit set.
+///
+/// The frame allocator checks this on every allocation.  When `false`
+/// (the common case — no container memory limits configured), the
+/// allocator skips the cgroup charge entirely — zero overhead.
+///
+/// Set to `true` by [`set_mem_limit`] when a non-root cgroup receives a
+/// non-zero limit.  Never cleared automatically (a conservative choice —
+/// removing a limit doesn't retroactively un-charge already-allocated
+/// frames, so the allocator must keep checking until all containers are
+/// gone).
+pub static CGROUP_MEM_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -631,6 +644,14 @@ pub fn set_mem_limit(cgroup_id: CgroupId, limit: MemLimit) -> KernelResult<()> {
     }
 
     table.nodes[idx].mem_limit = limit.max_frames;
+
+    // Signal the frame allocator that cgroup memory limits exist.
+    // Once set, never cleared — conservative but simple.  The
+    // allocator uses this as a zero-cost fast-exit when no
+    // containers have memory limits.
+    if limit.max_frames > 0 && cgroup_id != ROOT_CGROUP {
+        CGROUP_MEM_ACTIVE.store(true, Ordering::Release);
+    }
 
     Ok(())
 }

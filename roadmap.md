@@ -1096,7 +1096,14 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
   - [x] Task integration: cgroup_id field in Task struct (default ROOT_CGROUP), attach_task/detach_task API
   - [x] 18 self-tests: root exists, create/delete, hierarchy, attach/detach, CPU charge/throttle/reset/unlimited, memory charge/limit/uncharge/underflow, effective hierarchical limits, stats queries
   - [x] Scheduler timer_tick integration: charges task's cgroup on each tick, throttles when group quota exceeded, BSP period reset drives cgroup::cpu_period_reset()
-  - [ ] Frame allocator integration (check cgroup memory limit on alloc)
+  - [x] Frame allocator integration (check cgroup memory limit on alloc)
+    - [x] Per-frame cgroup owner array (65536-entry u8, records which cgroup was charged)
+    - [x] CGROUP_MEM_ACTIVE AtomicBool fast-exit (zero overhead when no limits configured)
+    - [x] charge_cgroup_alloc in alloc_frame (per-CPU cache path) and alloc_order/alloc_order_constrained
+    - [x] uncharge_cgroup_free in free_frame and free_order (uses stored cgroup, correct even when different task frees)
+    - [x] alloc_order/alloc_order_constrained refactored to charge after releasing allocator lock (clean lock ordering)
+    - [x] Rollback on cgroup OOM: frame freed back via free_order_inner (no double-uncharge)
+    - [x] 4 self-tests: fast-exit disabled path, per-frame tracking round-trip, charge/uncharge, limit enforcement
   - [x] I/O controller (bandwidth limits per group)
     - [x] IoLimit struct: ops_max + bytes_max per period (0 = unlimited)
     - [x] set_io_limit(), io_charge(), io_period_reset() API

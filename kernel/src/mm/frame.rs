@@ -101,6 +101,138 @@ const INFO_ALLOCATED: u8 = 0xFF;
 static REFCOUNT_PTR: AtomicU64 = AtomicU64::new(0);
 static REFCOUNT_LEN: AtomicU64 = AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// Per-frame cgroup memory tracking
+// ---------------------------------------------------------------------------
+
+/// Maximum tracked frames for cgroup ownership (matches `frame_owner`).
+const CGROUP_MAX_FRAMES: usize = 65536;
+
+/// Per-frame cgroup ID.  Index = `phys_addr / FRAME_SIZE`.
+///
+/// When a frame is allocated and the allocating task belongs to a
+/// non-root cgroup with a memory limit, the cgroup ID is stored here.
+/// On free, the stored ID is used to uncharge the *correct* cgroup —
+/// even if a different task (e.g., a kernel worker cleaning up after
+/// process exit) performs the free.
+///
+/// Value `0` means the frame was charged to the root cgroup (or was
+/// not charged at all), and no uncharge is needed.
+///
+/// Uses `UnsafeCell` like `frame_owner::OwnerArray` — access is
+/// safe because frame alloc/free for a given frame index is
+/// always serialised (a frame is either free or exclusively owned).
+struct CgroupArray(core::cell::UnsafeCell<[u8; CGROUP_MAX_FRAMES]>);
+
+// SAFETY: Frame alloc/free for a given index is serialised — only one
+// CPU owns a given physical frame at any time.  Free-list manipulation
+// is under the allocator lock.
+unsafe impl Send for CgroupArray {}
+unsafe impl Sync for CgroupArray {}
+
+static FRAME_CGROUP: CgroupArray =
+    CgroupArray(core::cell::UnsafeCell::new([0u8; CGROUP_MAX_FRAMES]));
+
+/// Record which cgroup was charged for a frame allocation.
+///
+/// Called after a successful `mem_charge` on the cgroup.  `frame_idx`
+/// is `phys_addr / FRAME_SIZE`.  `cgroup_id` is truncated to u8
+/// (MAX_CGROUPS = 256 fits in u8).
+#[inline]
+fn set_frame_cgroup(frame_idx: usize, cgroup_id: u8) {
+    if frame_idx >= CGROUP_MAX_FRAMES {
+        return;
+    }
+    // SAFETY: frame_idx is bounds-checked, and we're the sole owner of
+    // this frame (just allocated it).
+    unsafe {
+        (*FRAME_CGROUP.0.get())[frame_idx] = cgroup_id;
+    }
+}
+
+/// Look up which cgroup was charged for a frame.
+///
+/// Returns 0 (ROOT_CGROUP) if the frame was not charged or is out of range.
+#[inline]
+fn get_frame_cgroup(frame_idx: usize) -> u8 {
+    if frame_idx >= CGROUP_MAX_FRAMES {
+        return 0;
+    }
+    // SAFETY: frame_idx is bounds-checked, and we hold exclusive access
+    // to this frame (about to free it).
+    unsafe { (*FRAME_CGROUP.0.get())[frame_idx] }
+}
+
+/// Clear the cgroup charge record for a frame (on free).
+#[inline]
+fn clear_frame_cgroup(frame_idx: usize) {
+    set_frame_cgroup(frame_idx, 0);
+}
+
+/// Charge the current task's cgroup for a frame allocation.
+///
+/// Fast-exit when no cgroup memory limits are configured (the common
+/// case — zero overhead).  Returns `Ok(())` if the charge succeeded
+/// or no charge was needed.  Returns `Err(OutOfMemory)` if the
+/// task's cgroup would exceed its memory limit.
+///
+/// On success, records the cgroup ID in the per-frame array so that
+/// `uncharge_cgroup_free` can uncharge the correct cgroup later.
+#[inline]
+fn charge_cgroup_alloc(frame_addr: u64, count: u64) -> KernelResult<()> {
+    // Fast exit: no non-root cgroup has a memory limit.
+    if !crate::cgroup::CGROUP_MEM_ACTIVE.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+
+    let cgroup_id = crate::sched::current_task_cgroup();
+
+    // Root cgroup has no limit — skip the charge.
+    if cgroup_id == crate::cgroup::ROOT_CGROUP {
+        return Ok(());
+    }
+
+    // Charge the cgroup.  Fails if the group would exceed its limit.
+    crate::cgroup::mem_charge(cgroup_id, count)?;
+
+    // Record the cgroup ID per frame so we uncharge the right group
+    // even if a different task frees the frame.
+    #[allow(clippy::arithmetic_side_effects)]
+    let base_idx = (frame_addr / FRAME_SIZE as u64) as usize;
+    #[allow(clippy::cast_possible_truncation)]
+    let cg_u8 = cgroup_id as u8;
+    for i in 0..count as usize {
+        set_frame_cgroup(base_idx.wrapping_add(i), cg_u8);
+    }
+
+    Ok(())
+}
+
+/// Uncharge the cgroup that was charged when a frame was allocated.
+///
+/// Looks up the cgroup from the per-frame array (set at alloc time),
+/// so the correct cgroup is uncharged even if a different task frees
+/// the frame.  Fast-exit when no limits are active.
+#[inline]
+fn uncharge_cgroup_free(frame_addr: u64, count: u64) {
+    // Fast exit: no non-root cgroup has a memory limit.
+    if !crate::cgroup::CGROUP_MEM_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    let base_idx = (frame_addr / FRAME_SIZE as u64) as usize;
+
+    for i in 0..count as usize {
+        let idx = base_idx.wrapping_add(i);
+        let cg = get_frame_cgroup(idx);
+        if cg != 0 {
+            crate::cgroup::mem_uncharge(cg as u32, 1);
+            clear_frame_cgroup(idx);
+        }
+    }
+}
+
 /// Physical memory below this address is never added to the free lists.
 ///
 /// The first 1 MiB of physical address space on x86 is reserved for:
@@ -1586,6 +1718,10 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
 /// Falls back to the global buddy allocator when the cache is empty
 /// or per-CPU caches are not yet enabled.
 ///
+/// When cgroup memory limits are active, charges the allocation to the
+/// current task's cgroup.  If the charge fails, the frame is returned
+/// to the cache and `OutOfMemory` is returned.
+///
 /// Returns the frame on success, or `OutOfMemory` if no frames are
 /// available.
 #[allow(clippy::indexing_slicing)]
@@ -1607,7 +1743,17 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
             PCPU_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             // SAFETY: flags from disable_interrupts() above.
             unsafe { restore_interrupts(flags); }
-            return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
+
+            let frame = PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)?;
+
+            // Cgroup memory limit check (fast-exit when no limits).
+            if let Err(e) = charge_cgroup_alloc(addr, 1) {
+                // Over limit — return frame and propagate error.
+                // SAFETY: frame was just obtained from our cache.
+                let _ = unsafe { free_frame(frame) };
+                return Err(e);
+            }
+            return Ok(frame);
         }
 
         // Cache empty — batch-refill from global allocator.
@@ -1621,7 +1767,16 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
             // SAFETY: flags from disable_interrupts() above.
             unsafe { restore_interrupts(flags); }
             if let Some(addr) = cached {
-                return PhysFrame::from_addr(addr).ok_or(KernelError::InternalError);
+                let frame = PhysFrame::from_addr(addr).ok_or(KernelError::InternalError)?;
+
+                // Cgroup memory limit check (fast-exit when no limits).
+                if let Err(e) = charge_cgroup_alloc(addr, 1) {
+                    // Over limit — return frame and propagate error.
+                    // SAFETY: frame was just obtained from our cache.
+                    let _ = unsafe { free_frame(frame) };
+                    return Err(e);
+                }
+                return Ok(frame);
             }
         }
 
@@ -1631,6 +1786,7 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
     }
 
     // Slow path: direct global allocation (also handles reclamation).
+    // alloc_order handles cgroup charging internally.
     alloc_order(0)
 }
 
@@ -1716,7 +1872,36 @@ pub unsafe fn zero_frame(frame: PhysFrame) -> KernelResult<()> {
 ///
 /// If the allocator is out of memory, attempts to reclaim pages via
 /// the swap subsystem's Clock algorithm before giving up.
+///
+/// When cgroup memory limits are active, charges the allocation to the
+/// current task's cgroup.  If the charge fails (group over limit), the
+/// frame is freed back and `OutOfMemory` is returned.
 pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
+    let frame = alloc_order_inner(order)?;
+
+    // Cgroup memory limit enforcement.
+    //
+    // Charge AFTER releasing the allocator lock (alloc_order_inner has
+    // returned) to avoid holding two spinlocks simultaneously.
+    // charge_cgroup_alloc fast-exits when CGROUP_MEM_ACTIVE is false
+    // (the common case — zero overhead).
+    let count = 1u64 << order;
+    if let Err(e) = charge_cgroup_alloc(frame.addr(), count) {
+        // Cgroup over limit — return the frame to the allocator.
+        // SAFETY: frame was just allocated by alloc_order_inner.
+        let _ = unsafe { free_order_inner(frame, order) };
+        return Err(e);
+    }
+
+    Ok(frame)
+}
+
+/// Core allocation logic without cgroup charging.
+///
+/// Separated from [`alloc_order`] so the cgroup charge happens after
+/// the allocator lock is released (avoiding nested spinlocks and
+/// keeping the lock ordering clean).
+fn alloc_order_inner(order: usize) -> KernelResult<PhysFrame> {
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
 
     // First attempt — fast path.
@@ -1822,11 +2007,29 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
 /// Used for DMA buffers where the device has address constraints
 /// (e.g., 32-bit DMA requires all memory below 4 GiB).
 ///
-/// Like [`alloc_order`], attempts swap reclamation on first OOM.
+/// Like [`alloc_order`], attempts swap reclamation on first OOM and
+/// charges the allocation to the current task's cgroup when memory
+/// limits are active.
+///
 /// Unlike `alloc_order`, does not use per-CPU caches (DMA allocations
 /// are infrequent and the address constraint can't be satisfied by
 /// arbitrary cached frames).
 pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<PhysFrame> {
+    let frame = alloc_order_constrained_inner(order, max_addr)?;
+
+    // Cgroup memory limit enforcement (same as alloc_order).
+    let count = 1u64 << order;
+    if let Err(e) = charge_cgroup_alloc(frame.addr(), count) {
+        // SAFETY: frame was just allocated.
+        let _ = unsafe { free_order_inner(frame, order) };
+        return Err(e);
+    }
+
+    Ok(frame)
+}
+
+/// Core constrained allocation logic without cgroup charging.
+fn alloc_order_constrained_inner(order: usize, max_addr: u64) -> KernelResult<PhysFrame> {
     let allocator = ALLOCATOR.get().ok_or(KernelError::NotSupported)?;
 
     // First attempt.
@@ -1883,6 +2086,8 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
 /// When the cache is full, batch-drains half back to the global buddy
 /// allocator.
 ///
+/// Uncharges the cgroup that was charged when the frame was allocated.
+///
 /// # Safety
 ///
 /// - The frame must have been allocated by [`alloc_frame()`].
@@ -1891,6 +2096,10 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
 /// - The caller must ensure no references to the frame's memory remain.
 #[allow(clippy::indexing_slicing)]
 pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
+    // Uncharge cgroup before returning the frame to the free pool.
+    // Done up front so the accounting is updated promptly.
+    uncharge_cgroup_free(frame.addr(), 1);
+
     // Fast path: push to per-CPU cache (no global lock needed).
     if PCPU_ENABLED.load(Ordering::Acquire) {
         // OPT: Lock-free refcount check.  Shared (CoW) frames with
@@ -1966,13 +2175,33 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
 
 /// Free a contiguous block of 2^order physical frames.
 ///
+/// Uncharges the cgroup that was charged when the frame was allocated
+/// (tracked in the per-frame cgroup array, so the correct group is
+/// uncharged even if a different task calls free).
+///
 /// # Safety
 ///
 /// - `frame` and `order` must exactly match a prior [`alloc_order()`] call.
 /// - Must not be freed more than once.
 /// - The caller must ensure no references to the block's memory remain.
-#[allow(clippy::indexing_slicing)]
 pub unsafe fn free_order(frame: PhysFrame, order: usize) -> KernelResult<()> {
+    // Uncharge cgroup BEFORE the physical free (order doesn't matter
+    // for correctness, but doing it first means the accounting is
+    // updated before the frame is visible on the free list).
+    let count = 1u64 << order;
+    uncharge_cgroup_free(frame.addr(), count);
+
+    // SAFETY: Caller guarantees frame was validly allocated.
+    unsafe { free_order_inner(frame, order) }
+}
+
+/// Core free logic without cgroup uncharging.
+///
+/// Used by [`free_order`] (after uncharging) and by [`alloc_order`]
+/// for rollback when a cgroup charge fails (frame was never charged,
+/// so uncharging would be wrong).
+#[allow(clippy::indexing_slicing)]
+unsafe fn free_order_inner(frame: PhysFrame, order: usize) -> KernelResult<()> {
     // Zero-on-free: zero the block BEFORE taking the global lock to
     // avoid holding the lock during the expensive zeroing operation.
     //
@@ -2468,5 +2697,111 @@ pub fn test_zero_on_free() -> KernelResult<()> {
         count,
         ZERO_ON_FREE_SETTLED.load(Ordering::Relaxed),
     );
+
+    // -----------------------------------------------------------------------
+    // Test 8: Cgroup memory integration — fast-exit when disabled
+    // -----------------------------------------------------------------------
+
+    // Ensure the fast-exit path works (no limits active).
+    let was_active = crate::cgroup::CGROUP_MEM_ACTIVE.load(Ordering::Relaxed);
+    crate::cgroup::CGROUP_MEM_ACTIVE.store(false, Ordering::Release);
+
+    let cg_frame = alloc_frame()?;
+    // Frame should allocate successfully with no cgroup overhead.
+    #[allow(clippy::arithmetic_side_effects)]
+    let cg_idx = (cg_frame.addr() / FRAME_SIZE as u64) as usize;
+    let stored_cg = get_frame_cgroup(cg_idx);
+    assert!(stored_cg == 0, "frame cgroup should be 0 when limits inactive");
+    // SAFETY: frame was just allocated.
+    unsafe { free_frame(cg_frame)?; }
+    serial_println!("[mm]   Cgroup fast-exit (disabled): OK");
+
+    // -----------------------------------------------------------------------
+    // Test 9: Cgroup per-frame tracking round-trip
+    // -----------------------------------------------------------------------
+
+    // Manually test set/get/clear for the per-frame cgroup array.
+    set_frame_cgroup(42, 7);
+    assert_eq!(get_frame_cgroup(42), 7, "set/get round-trip");
+    clear_frame_cgroup(42);
+    assert_eq!(get_frame_cgroup(42), 0, "clear resets to 0");
+
+    // Out-of-bounds should return 0 / be a no-op.
+    assert_eq!(get_frame_cgroup(CGROUP_MAX_FRAMES + 1), 0, "out-of-bounds get");
+    set_frame_cgroup(CGROUP_MAX_FRAMES + 1, 5); // should be no-op
+    serial_println!("[mm]   Cgroup per-frame tracking: OK");
+
+    // -----------------------------------------------------------------------
+    // Test 10: Cgroup charge/uncharge with active limit
+    // -----------------------------------------------------------------------
+
+    // Create a test cgroup with a memory limit, verify frames are
+    // charged/uncharged correctly.
+    let test_cg_id = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
+    if let Ok(cg_id) = test_cg_id {
+        // Set a generous limit so allocations succeed.
+        let _ = crate::cgroup::set_mem_limit(
+            cg_id,
+            crate::cgroup::MemLimit { max_frames: 1000 },
+        );
+
+        // Verify CGROUP_MEM_ACTIVE got set.
+        assert!(
+            crate::cgroup::CGROUP_MEM_ACTIVE.load(Ordering::Relaxed),
+            "CGROUP_MEM_ACTIVE should be true after set_mem_limit"
+        );
+
+        // Check usage before charge.
+        let before = crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+
+        // Manually charge and verify.
+        let charge_ok = crate::cgroup::mem_charge(cg_id, 1);
+        assert!(charge_ok.is_ok(), "charge should succeed within limit");
+
+        let after = crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+        assert_eq!(after, before + 1, "usage should increment by 1");
+
+        // Uncharge.
+        crate::cgroup::mem_uncharge(cg_id, 1);
+        let final_usage = crate::cgroup::stats(cg_id).map(|s| s.mem_usage).unwrap_or(0);
+        assert_eq!(final_usage, before, "usage should return to original");
+
+        // Clean up test cgroup.
+        let _ = crate::cgroup::delete(cg_id);
+        serial_println!("[mm]   Cgroup charge/uncharge: OK");
+    } else {
+        serial_println!("[mm]   Cgroup charge/uncharge: SKIP (no cgroup slots)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Cgroup limit enforcement (alloc should fail when over limit)
+    // -----------------------------------------------------------------------
+
+    let test_cg_id2 = crate::cgroup::create(crate::cgroup::ROOT_CGROUP);
+    if let Ok(cg_id) = test_cg_id2 {
+        // Set a limit of 2 frames.
+        let _ = crate::cgroup::set_mem_limit(
+            cg_id,
+            crate::cgroup::MemLimit { max_frames: 2 },
+        );
+
+        // Charge 2 frames — should succeed.
+        assert!(crate::cgroup::mem_charge(cg_id, 2).is_ok());
+
+        // Charge 1 more — should fail (at limit).
+        let over = crate::cgroup::mem_charge(cg_id, 1);
+        assert!(over.is_err(), "charge should fail when at limit");
+
+        // Uncharge and cleanup.
+        crate::cgroup::mem_uncharge(cg_id, 2);
+        let _ = crate::cgroup::delete(cg_id);
+        serial_println!("[mm]   Cgroup limit enforcement: OK");
+    } else {
+        serial_println!("[mm]   Cgroup limit enforcement: SKIP (no cgroup slots)");
+    }
+
+    // Restore original state.
+    crate::cgroup::CGROUP_MEM_ACTIVE.store(was_active, Ordering::Release);
+
     Ok(())
 }

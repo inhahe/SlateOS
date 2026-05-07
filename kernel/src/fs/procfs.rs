@@ -192,6 +192,7 @@ const ROOT_FILES: &[&str] = &[
     "locale",
     "useracct",
     "progmgr",
+    "scriptlang",
     "columnview",
     "pathbar",
     "viewstate",
@@ -3885,6 +3886,48 @@ fn gen_progmgr() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_scriptlang() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (engine_count, ctx_count, evals, _changes) = super::scriptlang::stats();
+
+    out.push_str("Scripting Languages\n");
+    out.push_str("===================\n\n");
+    out.push_str(&format!("Engines:  {}\n", engine_count));
+    out.push_str(&format!("Contexts: {}\n", ctx_count));
+    out.push_str(&format!("Evals:    {}\n", evals));
+
+    let engines = super::scriptlang::list_engines();
+    if !engines.is_empty() {
+        out.push_str("\nEngines:\n");
+        for e in &engines {
+            let etype = match e.engine_type {
+                super::scriptlang::EngineType::Interpreted => "interp",
+                super::scriptlang::EngineType::Jit => "jit",
+                super::scriptlang::EngineType::Wasm => "wasm",
+                super::scriptlang::EngineType::Shell => "shell",
+                super::scriptlang::EngineType::Dsl => "dsl",
+                super::scriptlang::EngineType::Compiled => "compiled",
+            };
+            let sandbox = match e.sandbox {
+                super::scriptlang::SandboxLevel::None => "none",
+                super::scriptlang::SandboxLevel::Basic => "basic",
+                super::scriptlang::SandboxLevel::Strict => "strict",
+                super::scriptlang::SandboxLevel::Capability => "caps",
+            };
+            let status = if e.enabled { "on" } else { "off" };
+            out.push_str(&format!(
+                "  {} v{} [{}] type={} sandbox={} exts={}\n",
+                e.name, e.version, status, etype, sandbox,
+                e.extensions.len()
+            ));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -4242,6 +4285,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "locale" => Ok(gen_locale()),
         "useracct" => Ok(gen_useracct()),
         "progmgr" => Ok(gen_progmgr()),
+        "scriptlang" => Ok(gen_scriptlang()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

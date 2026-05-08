@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4821,6 +4821,7 @@ fn dispatch(line: &str) {
         "focusassist" | "dnd" => cmd_focusassist(args),
         "storageclean" | "sclean" => cmd_storageclean(args),
         "sysdiag" | "diag" => cmd_sysdiag(args),
+        "nightlight" | "nlight" => cmd_nightlight(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -25437,6 +25438,266 @@ fn parse_diag_category(name: &str) -> Option<crate::fs::sysdiag::DiagCategory> {
     }
 }
 
+/// `nightlight` / `nlight` — blue light filter / night mode.
+fn cmd_nightlight(args: &str) {
+    use crate::fs::nightlight;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (enabled, temp, toggle_count, check_count, _) = nightlight::stats();
+            let state = nightlight::current_state();
+            shell_println!("Night Light: {} ({})", if enabled { "ON" } else { "OFF" }, state.label());
+            shell_println!("  Temperature: {}", nightlight::format_temp(temp));
+            if let Ok(cfg) = nightlight::config() {
+                shell_println!("  Night temp:  {}K", cfg.night_temp);
+                shell_println!("  Day temp:    {}K", cfg.day_temp);
+                shell_println!("  Schedule:    {}", cfg.schedule_mode.label());
+                shell_println!("  Start time:  {:02}:{:02}", cfg.start_time.hour, cfg.start_time.minute);
+                shell_println!("  End time:    {:02}:{:02}", cfg.end_time.hour, cfg.end_time.minute);
+                shell_println!("  Transition:  {} min", cfg.transition_minutes);
+                if let Some(loc) = &cfg.location {
+                    shell_println!("  Location:    lat={}, lon={}", loc.latitude, loc.longitude);
+                }
+                shell_println!("  On battery:  {}", if cfg.disable_on_battery { "disable" } else { "keep" });
+                if cfg.manual_override {
+                    shell_println!("  Override:    ACTIVE");
+                }
+            }
+            shell_println!("  Toggles:     {}", toggle_count);
+            shell_println!("  Checks:      {}", check_count);
+        }
+        "on" => match nightlight::set_enabled(true) {
+            Ok(()) => shell_println!("Night light enabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "off" => match nightlight::set_enabled(false) {
+            Ok(()) => shell_println!("Night light disabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "toggle" => match nightlight::toggle() {
+            Ok(on) => shell_println!("Night light {}.", if on { "enabled" } else { "disabled" }),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "temp" => {
+            if let Some(val) = parts.get(1) {
+                if let Ok(t) = val.parse::<u32>() {
+                    match nightlight::set_night_temp(t) {
+                        Ok(()) => shell_println!("Night temperature set to {}", nightlight::format_temp(t)),
+                        Err(e) => shell_println!("Error: {:?} (range: 1000-6500)", e),
+                    }
+                } else {
+                    shell_println!("Invalid temperature: {}", val);
+                }
+            } else {
+                shell_println!("Usage: nlight temp <kelvin>");
+                shell_println!("Range: 1000 (very warm) to 6500 (neutral)");
+                shell_println!("Common: 3000=warm  4000=soft  4500=default  5500=cool");
+            }
+        }
+        "daytemp" => {
+            if let Some(val) = parts.get(1) {
+                if let Ok(t) = val.parse::<u32>() {
+                    match nightlight::set_day_temp(t) {
+                        Ok(()) => shell_println!("Day temperature set to {}K", t),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid temperature: {}", val);
+                }
+            } else {
+                shell_println!("Usage: nlight daytemp <kelvin>");
+            }
+        }
+        "schedule" => {
+            if let Some(mode) = parts.get(1) {
+                match *mode {
+                    "manual" => {
+                        match nightlight::set_schedule_mode(nightlight::ScheduleMode::Manual) {
+                            Ok(()) => shell_println!("Schedule mode: Manual"),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    }
+                    "scheduled" | "fixed" => {
+                        match nightlight::set_schedule_mode(nightlight::ScheduleMode::Scheduled) {
+                            Ok(()) => shell_println!("Schedule mode: Scheduled"),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    }
+                    "sunset" | "sun" | "auto" => {
+                        match nightlight::set_schedule_mode(nightlight::ScheduleMode::SunsetSunrise) {
+                            Ok(()) => shell_println!("Schedule mode: Sunset/Sunrise"),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    }
+                    _ => {
+                        shell_println!("Unknown mode: {}. Options: manual, scheduled, sunset", mode);
+                    }
+                }
+            } else {
+                shell_println!("Usage: nlight schedule <manual|scheduled|sunset>");
+            }
+        }
+        "start" => {
+            if let Some(time_str) = parts.get(1) {
+                if let Some((h, m)) = parse_time_hhmm(time_str) {
+                    match nightlight::set_start_time(h, m) {
+                        Ok(()) => shell_println!("Start time set to {:02}:{:02}", h, m),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid time. Use HH:MM format (e.g., 21:00)");
+                }
+            } else {
+                shell_println!("Usage: nlight start <HH:MM>");
+            }
+        }
+        "end" => {
+            if let Some(time_str) = parts.get(1) {
+                if let Some((h, m)) = parse_time_hhmm(time_str) {
+                    match nightlight::set_end_time(h, m) {
+                        Ok(()) => shell_println!("End time set to {:02}:{:02}", h, m),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid time. Use HH:MM format (e.g., 07:00)");
+                }
+            } else {
+                shell_println!("Usage: nlight end <HH:MM>");
+            }
+        }
+        "location" | "loc" => {
+            if let (Some(lat_str), Some(lon_str)) = (parts.get(1), parts.get(2)) {
+                if let (Ok(lat), Ok(lon)) = (lat_str.parse::<i32>(), lon_str.parse::<i32>()) {
+                    match nightlight::set_location(lat, lon) {
+                        Ok(()) => shell_println!("Location set to lat={}, lon={}", lat, lon),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid coordinates.");
+                }
+            } else {
+                shell_println!("Usage: nlight location <latitude> <longitude>");
+                shell_println!("Example: nlight location 40 -74  (New York)");
+            }
+        }
+        "transition" => {
+            if let Some(val) = parts.get(1) {
+                if let Ok(mins) = val.parse::<u32>() {
+                    match nightlight::set_transition_minutes(mins) {
+                        Ok(()) => shell_println!("Transition duration set to {} minutes", mins),
+                        Err(e) => shell_println!("Error: {:?} (max 120)", e),
+                    }
+                } else {
+                    shell_println!("Invalid value: {}", val);
+                }
+            } else {
+                shell_println!("Usage: nlight transition <minutes>");
+            }
+        }
+        "battery" => {
+            if let Some(val) = parts.get(1) {
+                let disable = match *val {
+                    "on" | "true" | "yes" | "disable" => true,
+                    "off" | "false" | "no" | "keep" => false,
+                    _ => {
+                        shell_println!("Usage: nlight battery <on|off>");
+                        return;
+                    }
+                };
+                match nightlight::set_disable_on_battery(disable) {
+                    Ok(()) => shell_println!("Disable on battery: {}", if disable { "yes" } else { "no" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: nlight battery <on|off>");
+            }
+        }
+        "override" => {
+            let active = parts.get(1).copied().unwrap_or("on");
+            let active = matches!(active, "on" | "true" | "yes");
+            match nightlight::set_manual_override(active) {
+                Ok(()) => shell_println!("Manual override: {}", if active { "ON" } else { "OFF" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            if let (Some(h_str), Some(m_str)) = (parts.get(1), parts.get(2)) {
+                if let (Ok(h), Ok(m)) = (h_str.parse::<u8>(), m_str.parse::<u8>()) {
+                    let temp = nightlight::check_schedule(h, m);
+                    shell_println!("At {:02}:{:02}: {} ({})", h, m,
+                        nightlight::format_temp(temp),
+                        nightlight::current_state().label());
+                } else {
+                    shell_println!("Invalid time.");
+                }
+            } else {
+                shell_println!("Usage: nlight check <hour> <minute>");
+            }
+        }
+        "rgb" => {
+            let temp = if let Some(val) = parts.get(1) {
+                val.parse::<u32>().unwrap_or(6500)
+            } else {
+                nightlight::current_temperature()
+            };
+            shell_println!("{}", nightlight::format_temp(temp));
+        }
+        "stats" => {
+            let (enabled, temp, toggles, checks, ops) = nightlight::stats();
+            shell_println!("Enabled:      {}", enabled);
+            shell_println!("Temperature:  {}K", temp);
+            shell_println!("Toggles:      {}", toggles);
+            shell_println!("Checks:       {}", checks);
+            shell_println!("Operations:   {}", ops);
+        }
+        "test" => {
+            nightlight::self_test();
+            shell_println!("[nightlight] All self-tests passed.");
+        }
+        "init" => {
+            nightlight::init_defaults();
+            shell_println!("Night light subsystem initialized.");
+        }
+        _ => {
+            shell_println!("nightlight — blue light filter / night mode");
+            shell_println!("Usage: nightlight|nlight <subcommand>");
+            shell_println!("");
+            shell_println!("Subcommands:");
+            shell_println!("  show               Show current status (default)");
+            shell_println!("  on / off / toggle   Enable/disable/toggle");
+            shell_println!("  temp <kelvin>      Set night temperature (1000-6500)");
+            shell_println!("  daytemp <kelvin>   Set day temperature");
+            shell_println!("  schedule <mode>    Set schedule: manual|scheduled|sunset");
+            shell_println!("  start <HH:MM>      Set scheduled start time");
+            shell_println!("  end <HH:MM>        Set scheduled end time");
+            shell_println!("  location <lat> <lon> Set location for sunset/sunrise");
+            shell_println!("  transition <min>   Set transition duration (0-120 min)");
+            shell_println!("  battery <on|off>   Disable on battery power");
+            shell_println!("  override [on|off]  Temporary schedule override");
+            shell_println!("  check <H> <M>      Simulate schedule check at time");
+            shell_println!("  rgb [kelvin]       Show RGB values for temperature");
+            shell_println!("  stats              Show subsystem statistics");
+            shell_println!("  init               Initialize subsystem");
+            shell_println!("  test               Run self-tests");
+        }
+    }
+}
+
+/// Parse "HH:MM" time string into (hour, minute).
+fn parse_time_hhmm(s: &str) -> Option<(u8, u8)> {
+    let mut parts = s.split(':');
+    let h_str = parts.next()?;
+    let m_str = parts.next()?;
+    let h = h_str.parse::<u8>().ok()?;
+    let m = m_str.parse::<u8>().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some((h, m))
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -34033,7 +34294,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -217,6 +217,7 @@ const ROOT_FILES: &[&str] = &[
     "focusassist",
     "storageclean",
     "sysdiag",
+    "nightlight",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4811,6 +4812,42 @@ fn gen_sysdiag() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_nightlight() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (enabled, current_temp, toggle_count, check_count, ops) =
+        super::nightlight::stats();
+
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("current_temp: {}K\n", current_temp));
+    out.push_str(&format!("state: {}\n", super::nightlight::current_state().label()));
+    out.push_str(&format!("toggle_count: {}\n", toggle_count));
+    out.push_str(&format!("check_count: {}\n", check_count));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Ok(cfg) = super::nightlight::config() {
+        out.push_str(&format!("schedule_mode: {}\n", cfg.schedule_mode.label()));
+        out.push_str(&format!("night_temp: {}K\n", cfg.night_temp));
+        out.push_str(&format!("day_temp: {}K\n", cfg.day_temp));
+        out.push_str(&format!("start_time: {:02}:{:02}\n",
+            cfg.start_time.hour, cfg.start_time.minute));
+        out.push_str(&format!("end_time: {:02}:{:02}\n",
+            cfg.end_time.hour, cfg.end_time.minute));
+        out.push_str(&format!("transition_minutes: {}\n", cfg.transition_minutes));
+        out.push_str(&format!("disable_on_battery: {}\n", cfg.disable_on_battery));
+        if let Some(loc) = &cfg.location {
+            out.push_str(&format!("location: lat={} lon={}\n",
+                loc.latitude, loc.longitude));
+        }
+    }
+
+    let (r, g, b) = super::nightlight::temp_to_rgb(current_temp);
+    out.push_str(&format!("rgb: {},{},{}\n", r, g, b));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5193,6 +5230,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "focusassist" => Ok(gen_focusassist()),
         "storageclean" => Ok(gen_storageclean()),
         "sysdiag" => Ok(gen_sysdiag()),
+        "nightlight" => Ok(gen_nightlight()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

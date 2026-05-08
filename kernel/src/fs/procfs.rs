@@ -221,6 +221,7 @@ const ROOT_FILES: &[&str] = &[
     "tasksched",
     "envvars",
     "bluetooth",
+    "printmgr",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4928,6 +4929,32 @@ fn gen_bluetooth() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_printmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (printer_count, pending, total_pages, hist_count, ops) = super::printmgr::stats();
+    out.push_str(&format!("printers: {}\n", printer_count));
+    out.push_str(&format!("pending_jobs: {}\n", pending));
+    out.push_str(&format!("total_pages: {}\n", total_pages));
+    out.push_str(&format!("history: {}\n", hist_count));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Some(def) = super::printmgr::default_printer() {
+        out.push_str(&format!("default: {} ({})\n", def.name, def.model));
+    }
+
+    let printers = super::printmgr::list_printers();
+    for p in &printers {
+        let def = if p.is_default { " *" } else { "" };
+        out.push_str(&format!("{}: {} [{}] {} jobs={} pages={}{}\n",
+            p.id, p.name, p.printer_type.label(),
+            p.status.label(), p.total_jobs, p.total_pages, def));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5314,6 +5341,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "tasksched" => Ok(gen_tasksched()),
         "envvars" => Ok(gen_envvars()),
         "bluetooth" => Ok(gen_bluetooth()),
+        "printmgr" => Ok(gen_printmgr()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

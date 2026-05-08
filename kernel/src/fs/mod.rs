@@ -127,6 +127,7 @@ pub mod policy;
 pub mod power;
 pub mod prefetch;
 pub mod preview;
+pub mod printmgr;
 pub mod profile;
 pub mod progmgr;
 pub mod properties;

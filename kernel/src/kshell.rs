@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4825,6 +4825,7 @@ fn dispatch(line: &str) {
         "tasksched" | "schtask" => cmd_tasksched(args),
         "envvars" | "envmgr" => cmd_envvars(args),
         "bluetooth" | "bt" => cmd_bluetooth(args),
+        "printmgr" | "lp" => cmd_printmgr(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -26495,6 +26496,218 @@ fn cmd_bluetooth(args: &str) {
     }
 }
 
+/// `printmgr` / `lp` — print management.
+fn cmd_printmgr(args: &str) {
+    use crate::fs::printmgr;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" | "list" => {
+            let printers = printmgr::list_printers();
+            if printers.is_empty() {
+                shell_println!("No printers configured.");
+            } else {
+                shell_println!("{} printer(s):", printers.len());
+                for p in &printers {
+                    let def = if p.is_default { " [default]" } else { "" };
+                    shell_println!("  #{} {} ({}) [{}] {}{}", p.id, p.name, p.model,
+                        p.printer_type.label(), p.status.label(), def);
+                    shell_println!("       URI: {}  Jobs: {}  Pages: {}",
+                        p.uri, p.total_jobs, p.total_pages);
+                }
+            }
+        }
+        "info" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match printmgr::get_printer(id) {
+                        Ok(p) => {
+                            shell_println!("Printer #{}: {}", p.id, p.name);
+                            shell_println!("  Model:     {}", p.model);
+                            shell_println!("  Type:      {}", p.printer_type.label());
+                            shell_println!("  URI:       {}", p.uri);
+                            shell_println!("  Status:    {}", p.status.label());
+                            shell_println!("  Default:   {}", p.is_default);
+                            shell_println!("  Location:  {}", p.location);
+                            shell_println!("  Color:     {}", p.supports_color);
+                            shell_println!("  Duplex:    {}", p.supports_duplex);
+                            shell_println!("  Paper:     {}", p.default_paper.label());
+                            shell_println!("  Quality:   {}", p.default_quality.label());
+                            shell_println!("  Jobs:      {}", p.total_jobs);
+                            shell_println!("  Pages:     {}", p.total_pages);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid printer ID.");
+                }
+            } else {
+                shell_println!("Usage: lp info <id>");
+            }
+        }
+        "add" => {
+            if let (Some(name), Some(uri)) = (parts.get(1), parts.get(2)) {
+                let ptype = match parts.get(3).copied().unwrap_or("network") {
+                    "local" | "usb" => printmgr::PrinterType::Local,
+                    "network" | "net" | "ipp" => printmgr::PrinterType::Network,
+                    "virtual" | "pdf" => printmgr::PrinterType::Virtual,
+                    "bluetooth" | "bt" => printmgr::PrinterType::Bluetooth,
+                    _ => printmgr::PrinterType::Network,
+                };
+                match printmgr::add_printer(name, name, ptype, uri) {
+                    Ok(id) => shell_println!("Added printer #{}: {}", id, name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: lp add <name> <uri> [local|network|virtual|bluetooth]");
+            }
+        }
+        "remove" | "rm" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match printmgr::remove_printer(id) {
+                        Ok(()) => shell_println!("Printer #{} removed.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid printer ID.");
+                }
+            } else {
+                shell_println!("Usage: lp remove <id>");
+            }
+        }
+        "default" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match printmgr::set_default(id) {
+                        Ok(()) => shell_println!("Default printer set to #{}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid printer ID.");
+                }
+            } else if let Some(def) = printmgr::default_printer() {
+                shell_println!("Default: #{} {}", def.id, def.name);
+            } else {
+                shell_println!("No default printer set.");
+            }
+        }
+        "print" => {
+            // lp print <document> [pages] [copies]
+            if let Some(doc) = parts.get(1) {
+                let pages = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                let copies = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                if let Some(def) = printmgr::default_printer() {
+                    match printmgr::submit_job(def.id, doc, pages, copies, 0) {
+                        Ok(job_id) => shell_println!("Job #{} submitted to {} ({} pages, {} copies)",
+                            job_id, def.name, pages, copies),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("No default printer. Use 'lp default <id>' first.");
+                }
+            } else {
+                shell_println!("Usage: lp print <document> [pages] [copies]");
+            }
+        }
+        "jobs" => {
+            let jobs = printmgr::list_jobs();
+            if jobs.is_empty() {
+                shell_println!("No pending jobs.");
+            } else {
+                shell_println!("{} job(s):", jobs.len());
+                for j in &jobs {
+                    shell_println!("  #{} {} [{}] {} pages, {} copies → printer #{}",
+                        j.id, j.document_name, j.status.label(),
+                        j.pages, j.copies, j.printer_id);
+                }
+            }
+        }
+        "cancel" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match printmgr::cancel_job(id) {
+                        Ok(()) => shell_println!("Job #{} cancelled.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid job ID.");
+                }
+            } else {
+                shell_println!("Usage: lp cancel <job-id>");
+            }
+        }
+        "complete" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    let success = parts.get(2).copied().unwrap_or("ok") != "fail";
+                    match printmgr::complete_job(id, success) {
+                        Ok(()) => shell_println!("Job #{} completed (success={}).", id, success),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid job ID.");
+                }
+            } else {
+                shell_println!("Usage: lp complete <job-id> [ok|fail]");
+            }
+        }
+        "history" => {
+            let history = printmgr::job_history();
+            if history.is_empty() {
+                shell_println!("No print history.");
+            } else {
+                shell_println!("{} historical job(s):", history.len());
+                for j in history.iter().rev().take(20) {
+                    shell_println!("  #{} {} [{}] {} pages",
+                        j.id, j.document_name, j.status.label(), j.pages_printed);
+                }
+            }
+        }
+        "clear" => match printmgr::clear_completed() {
+            Ok(n) => shell_println!("Cleared {} completed/cancelled jobs.", n),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (printers, pending, pages, hist, ops) = printmgr::stats();
+            shell_println!("Printers:      {}", printers);
+            shell_println!("Pending jobs:  {}", pending);
+            shell_println!("Total pages:   {}", pages);
+            shell_println!("History:       {}", hist);
+            shell_println!("Operations:    {}", ops);
+        }
+        "test" => {
+            printmgr::self_test();
+            shell_println!("[printmgr] All self-tests passed.");
+        }
+        "init" => {
+            printmgr::init_defaults();
+            shell_println!("Print manager initialized.");
+        }
+        _ => {
+            shell_println!("printmgr — print management");
+            shell_println!("Usage: printmgr|lp <subcommand>");
+            shell_println!("");
+            shell_println!("Subcommands:");
+            shell_println!("  list               List printers (default)");
+            shell_println!("  info <id>          Show printer details");
+            shell_println!("  add <name> <uri> [type]  Add printer");
+            shell_println!("  remove <id>        Remove printer");
+            shell_println!("  default [id]       Get/set default printer");
+            shell_println!("  print <doc> [pages] [copies]  Submit print job");
+            shell_println!("  jobs               List pending jobs");
+            shell_println!("  cancel <job-id>    Cancel a job");
+            shell_println!("  complete <job-id>  Mark job done");
+            shell_println!("  history            Show print history");
+            shell_println!("  clear              Clear completed jobs");
+            shell_println!("  stats              Show statistics");
+            shell_println!("  init               Initialize print manager");
+            shell_println!("  test               Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -35091,7 +35304,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

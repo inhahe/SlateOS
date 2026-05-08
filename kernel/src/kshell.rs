@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4823,6 +4823,7 @@ fn dispatch(line: &str) {
         "sysdiag" | "diag" => cmd_sysdiag(args),
         "nightlight" | "nlight" => cmd_nightlight(args),
         "tasksched" | "schtask" => cmd_tasksched(args),
+        "envvars" | "envmgr" => cmd_envvars(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -26037,6 +26038,231 @@ fn cmd_tasksched(args: &str) {
     }
 }
 
+/// `envvars` / `envmgr` — environment variable management.
+fn cmd_envvars(args: &str) {
+    use crate::fs::envvars;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" | "list" => {
+            let sys = envvars::list_system();
+            shell_println!("System variables ({}):", sys.len());
+            for v in &sys {
+                let ro = if v.read_only { " [ro]" } else { "" };
+                let desc = if v.description.is_empty() {
+                    String::new()
+                } else {
+                    format!("  # {}", v.description)
+                };
+                shell_println!("  {}={}{}{}", v.name, v.value, ro, desc);
+            }
+        }
+        "get" => {
+            if let Some(name) = parts.get(1) {
+                match envvars::get_system(name) {
+                    Ok(val) => shell_println!("{}={}", name, val),
+                    Err(_) => shell_println!("{}: not set", name),
+                }
+            } else {
+                shell_println!("Usage: envvars get <NAME>");
+            }
+        }
+        "set" => {
+            if let (Some(name), Some(value)) = (parts.get(1), parts.get(2)) {
+                let full_value = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+                match envvars::set_system(name, &full_value) {
+                    Ok(()) => shell_println!("{}={}", name, full_value),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: envvars set <NAME> <value...>");
+            }
+        }
+        "rm" | "unset" => {
+            if let Some(name) = parts.get(1) {
+                match envvars::remove_system(name) {
+                    Ok(()) => shell_println!("{} removed.", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: envvars rm <NAME>");
+            }
+        }
+        "user" => {
+            // envvars user <uid> [set <NAME> <val> | get <NAME> | list | rm <NAME>]
+            if let Some(uid_str) = parts.get(1) {
+                if let Ok(uid) = uid_str.parse::<u32>() {
+                    let ucmd = parts.get(2).copied().unwrap_or("list");
+                    match ucmd {
+                        "list" | "" => {
+                            let vars = envvars::list_user(uid);
+                            if vars.is_empty() {
+                                shell_println!("No user variables for uid {}.", uid);
+                            } else {
+                                shell_println!("User {} variables ({}):", uid, vars.len());
+                                for v in &vars {
+                                    shell_println!("  {}={}", v.name, v.value);
+                                }
+                            }
+                        }
+                        "set" => {
+                            if let (Some(name), Some(_)) = (parts.get(3), parts.get(4)) {
+                                let val = parts.get(4..).map(|p| p.join(" ")).unwrap_or_default();
+                                match envvars::set_user(uid, name, &val) {
+                                    Ok(()) => shell_println!("[uid {}] {}={}", uid, name, val),
+                                    Err(e) => shell_println!("Error: {:?}", e),
+                                }
+                            } else {
+                                shell_println!("Usage: envvars user <uid> set <NAME> <value>");
+                            }
+                        }
+                        "get" => {
+                            if let Some(name) = parts.get(3) {
+                                match envvars::get_user(uid, name) {
+                                    Ok(val) => shell_println!("[uid {}] {}={}", uid, name, val),
+                                    Err(_) => shell_println!("{}: not set for uid {}", name, uid),
+                                }
+                            } else {
+                                shell_println!("Usage: envvars user <uid> get <NAME>");
+                            }
+                        }
+                        "rm" => {
+                            if let Some(name) = parts.get(3) {
+                                match envvars::remove_user(uid, name) {
+                                    Ok(()) => shell_println!("[uid {}] {} removed.", uid, name),
+                                    Err(e) => shell_println!("Error: {:?}", e),
+                                }
+                            } else {
+                                shell_println!("Usage: envvars user <uid> rm <NAME>");
+                            }
+                        }
+                        _ => {
+                            shell_println!("Usage: envvars user <uid> <list|set|get|rm>");
+                        }
+                    }
+                } else {
+                    shell_println!("Invalid UID: {}", uid_str);
+                }
+            } else {
+                shell_println!("Usage: envvars user <uid> <command>");
+            }
+        }
+        "resolve" => {
+            let uid = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let env = envvars::resolve_env(uid);
+            shell_println!("Resolved environment for uid {} ({} vars):", uid, env.vars.len());
+            for (name, val) in &env.vars {
+                shell_println!("  {}={}", name, val);
+            }
+        }
+        "expand" => {
+            let uid = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let input = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+            if input.is_empty() {
+                shell_println!("Usage: envvars expand <uid> <string with $VAR>");
+            } else {
+                let result = envvars::expand(uid, &input);
+                shell_println!("{}", result);
+            }
+        }
+        "path" => {
+            let pcmd = parts.get(1).copied().unwrap_or("list");
+            match pcmd {
+                "list" | "" => {
+                    let dirs = envvars::path_list();
+                    shell_println!("PATH ({} entries):", dirs.len());
+                    for (i, d) in dirs.iter().enumerate() {
+                        shell_println!("  {}: {}", i + 1, d);
+                    }
+                }
+                "append" => {
+                    if let Some(dir) = parts.get(2) {
+                        match envvars::path_append(dir) {
+                            Ok(()) => shell_println!("Appended {} to PATH", dir),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: envvars path append <dir>");
+                    }
+                }
+                "prepend" => {
+                    if let Some(dir) = parts.get(2) {
+                        match envvars::path_prepend(dir) {
+                            Ok(()) => shell_println!("Prepended {} to PATH", dir),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: envvars path prepend <dir>");
+                    }
+                }
+                "rm" => {
+                    if let Some(dir) = parts.get(2) {
+                        match envvars::path_remove(dir) {
+                            Ok(()) => shell_println!("Removed {} from PATH", dir),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: envvars path rm <dir>");
+                    }
+                }
+                _ => {
+                    shell_println!("Usage: envvars path <list|append|prepend|rm>");
+                }
+            }
+        }
+        "search" => {
+            if let Some(query) = parts.get(1) {
+                let results = envvars::search(query);
+                if results.is_empty() {
+                    shell_println!("No variables matching '{}'.", query);
+                } else {
+                    shell_println!("{} match(es):", results.len());
+                    for v in &results {
+                        shell_println!("  [{}] {}={}", v.scope.label(), v.name, v.value);
+                    }
+                }
+            } else {
+                shell_println!("Usage: envvars search <query>");
+            }
+        }
+        "stats" => {
+            let (sys, users, total_uv, ops) = envvars::stats();
+            shell_println!("System vars:    {}", sys);
+            shell_println!("Users:          {}", users);
+            shell_println!("Total user vars: {}", total_uv);
+            shell_println!("Operations:     {}", ops);
+        }
+        "test" => {
+            envvars::self_test();
+            shell_println!("[envvars] All self-tests passed.");
+        }
+        "init" => {
+            envvars::init_defaults();
+            shell_println!("Environment variables initialized.");
+        }
+        _ => {
+            shell_println!("envvars — environment variable management");
+            shell_println!("Usage: envvars|envmgr <subcommand>");
+            shell_println!("");
+            shell_println!("Subcommands:");
+            shell_println!("  list               List system variables (default)");
+            shell_println!("  get <NAME>         Get a system variable");
+            shell_println!("  set <NAME> <val>   Set a system variable");
+            shell_println!("  rm <NAME>          Remove a system variable");
+            shell_println!("  user <uid> <cmd>   Manage per-user variables");
+            shell_println!("    list/set/get/rm   User variable commands");
+            shell_println!("  resolve [uid]      Show resolved env for user");
+            shell_println!("  expand <uid> <str> Expand $VAR references");
+            shell_println!("  path <cmd>         PATH management (list/append/prepend/rm)");
+            shell_println!("  search <query>     Search variables");
+            shell_println!("  stats              Show statistics");
+            shell_println!("  init               Initialize subsystem");
+            shell_println!("  test               Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -34633,7 +34859,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

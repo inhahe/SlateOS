@@ -67,6 +67,7 @@ pub mod dirsync;
 pub mod dragdrop;
 pub mod dyndns;
 pub mod encrypt;
+pub mod envvars;
 pub mod ext4;
 pub mod fat;
 pub mod focusassist;

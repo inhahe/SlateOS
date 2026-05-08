@@ -219,6 +219,7 @@ const ROOT_FILES: &[&str] = &[
     "sysdiag",
     "nightlight",
     "tasksched",
+    "envvars",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4877,6 +4878,25 @@ fn gen_tasksched() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_envvars() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (sys_count, user_count, total_uv, ops) = super::envvars::stats();
+    out.push_str(&format!("system_vars: {}\n", sys_count));
+    out.push_str(&format!("user_count: {}\n", user_count));
+    out.push_str(&format!("total_user_vars: {}\n", total_uv));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let sys_vars = super::envvars::list_system();
+    for v in &sys_vars {
+        let ro = if v.read_only { " [ro]" } else { "" };
+        out.push_str(&format!("{}={}{}\n", v.name, v.value, ro));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5261,6 +5281,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sysdiag" => Ok(gen_sysdiag()),
         "nightlight" => Ok(gen_nightlight()),
         "tasksched" => Ok(gen_tasksched()),
+        "envvars" => Ok(gen_envvars()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

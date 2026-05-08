@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4822,6 +4822,7 @@ fn dispatch(line: &str) {
         "storageclean" | "sclean" => cmd_storageclean(args),
         "sysdiag" | "diag" => cmd_sysdiag(args),
         "nightlight" | "nlight" => cmd_nightlight(args),
+        "tasksched" | "schtask" => cmd_tasksched(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -25698,6 +25699,344 @@ fn parse_time_hhmm(s: &str) -> Option<(u8, u8)> {
     Some((h, m))
 }
 
+/// `tasksched` / `schtask` — scheduled task management.
+fn cmd_tasksched(args: &str) {
+    use crate::fs::tasksched;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" | "list" => {
+            let tasks = tasksched::list_tasks();
+            if tasks.is_empty() {
+                shell_println!("No scheduled tasks.");
+            } else {
+                shell_println!("{} scheduled task(s):", tasks.len());
+                for t in &tasks {
+                    let sys = if t.system { " [system]" } else { "" };
+                    shell_println!("  #{} {} [{}] {:02}:{:02} — {} {}{}",
+                        t.id, t.name, t.schedule_type.label(),
+                        t.hour, t.minute, t.status.label(),
+                        t.command, sys);
+                    if !t.arguments.is_empty() {
+                        shell_println!("       args: {}", t.arguments);
+                    }
+                    if t.run_count > 0 {
+                        shell_println!("       runs: {}, last: {}",
+                            t.run_count,
+                            if t.last_success { "OK" } else { "FAILED" });
+                    }
+                }
+            }
+        }
+        "info" | "get" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match tasksched::get_task(id) {
+                        Ok(t) => {
+                            shell_println!("Task #{}: {}", t.id, t.name);
+                            shell_println!("  Command:     {} {}", t.command, t.arguments);
+                            shell_println!("  Schedule:    {}", t.schedule_type.label());
+                            shell_println!("  Time:        {:02}:{:02}", t.hour, t.minute);
+                            if t.schedule_type == tasksched::ScheduleType::Weekly {
+                                let days: Vec<&str> = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]
+                                    .iter().enumerate()
+                                    .filter(|(i, _)| t.weekdays[*i])
+                                    .map(|(_, d)| *d)
+                                    .collect();
+                                shell_println!("  Days:        {}", days.join(", "));
+                            }
+                            if t.schedule_type == tasksched::ScheduleType::Interval {
+                                shell_println!("  Interval:    {} min", t.interval_minutes);
+                            }
+                            shell_println!("  Priority:    {}", t.priority.label());
+                            shell_println!("  Status:      {}", t.status.label());
+                            shell_println!("  System:      {}", t.system);
+                            shell_println!("  Runs:        {}", t.run_count);
+                            if t.run_count > 0 {
+                                shell_println!("  Last run:    {} ({})",
+                                    if t.last_success { "OK" } else { "FAILED" },
+                                    t.last_duration_us);
+                            }
+                            if !t.description.is_empty() {
+                                shell_println!("  Description: {}", t.description);
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid task ID: {}", id_str);
+                }
+            } else {
+                shell_println!("Usage: schtask info <id>");
+            }
+        }
+        "create" | "add" => {
+            // schtask create <name> <command> [daily|weekly|once|interval|boot|login]
+            if let (Some(name), Some(cmd)) = (parts.get(1), parts.get(2)) {
+                let sched_type = match parts.get(3).copied().unwrap_or("daily") {
+                    "daily" => tasksched::ScheduleType::Daily,
+                    "weekly" => tasksched::ScheduleType::Weekly,
+                    "once" => tasksched::ScheduleType::Once,
+                    "interval" => tasksched::ScheduleType::Interval,
+                    "boot" => tasksched::ScheduleType::Boot,
+                    "login" => tasksched::ScheduleType::Login,
+                    other => {
+                        shell_println!("Unknown schedule type: {}", other);
+                        return;
+                    }
+                };
+                match tasksched::create_task(name, cmd, sched_type) {
+                    Ok(id) => shell_println!("Created task #{}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: schtask create <name> <command> [daily|weekly|once|interval|boot|login]");
+            }
+        }
+        "remove" | "rm" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match tasksched::remove_task(id) {
+                        Ok(()) => shell_println!("Task #{} removed.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask remove <id>");
+            }
+        }
+        "time" => {
+            if let (Some(id_str), Some(time_str)) = (parts.get(1), parts.get(2)) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    if let Some((h, m)) = parse_time_hhmm(time_str) {
+                        match tasksched::set_time(id, h, m) {
+                            Ok(()) => shell_println!("Task #{} time set to {:02}:{:02}", id, h, m),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid time format. Use HH:MM");
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask time <id> <HH:MM>");
+            }
+        }
+        "day" => {
+            if let (Some(id_str), Some(day_str), Some(val)) =
+                (parts.get(1), parts.get(2), parts.get(3))
+            {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    let day_num = match *day_str {
+                        "sun" | "0" => Some(0usize),
+                        "mon" | "1" => Some(1),
+                        "tue" | "2" => Some(2),
+                        "wed" | "3" => Some(3),
+                        "thu" | "4" => Some(4),
+                        "fri" | "5" => Some(5),
+                        "sat" | "6" => Some(6),
+                        _ => None,
+                    };
+                    if let Some(d) = day_num {
+                        let enabled = matches!(*val, "on" | "true" | "yes" | "1");
+                        match tasksched::set_weekday(id, d, enabled) {
+                            Ok(()) => shell_println!("Task #{} weekday {} = {}", id, day_str, enabled),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Unknown day: {}. Use sun/mon/tue/wed/thu/fri/sat", day_str);
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask day <id> <sun|mon|tue|wed|thu|fri|sat> <on|off>");
+            }
+        }
+        "interval" => {
+            if let (Some(id_str), Some(min_str)) = (parts.get(1), parts.get(2)) {
+                if let (Ok(id), Ok(mins)) = (id_str.parse::<u64>(), min_str.parse::<u32>()) {
+                    match tasksched::set_interval(id, mins) {
+                        Ok(()) => shell_println!("Task #{} interval set to {} min", id, mins),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid arguments.");
+                }
+            } else {
+                shell_println!("Usage: schtask interval <id> <minutes>");
+            }
+        }
+        "args" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    let task_args = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+                    match tasksched::set_arguments(id, &task_args) {
+                        Ok(()) => shell_println!("Task #{} arguments set.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask args <id> <arguments...>");
+            }
+        }
+        "desc" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    let desc = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+                    match tasksched::set_description(id, &desc) {
+                        Ok(()) => shell_println!("Task #{} description set.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask desc <id> <description...>");
+            }
+        }
+        "enable" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match tasksched::enable_task(id) {
+                        Ok(()) => shell_println!("Task #{} enabled.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask enable <id>");
+            }
+        }
+        "disable" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match tasksched::disable_task(id) {
+                        Ok(()) => shell_println!("Task #{} disabled.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask disable <id>");
+            }
+        }
+        "due" => {
+            if let (Some(h_str), Some(m_str)) = (parts.get(1), parts.get(2)) {
+                if let (Ok(h), Ok(m)) = (h_str.parse::<u8>(), m_str.parse::<u8>()) {
+                    let wd = parts.get(3).and_then(|d| d.parse::<u8>().ok()).unwrap_or(0);
+                    let due = tasksched::check_due(h, m, wd);
+                    if due.is_empty() {
+                        shell_println!("No tasks due at {:02}:{:02}", h, m);
+                    } else {
+                        shell_println!("{} task(s) due:", due.len());
+                        for id in &due {
+                            if let Ok(t) = tasksched::get_task(*id) {
+                                shell_println!("  #{} {}", id, t.name);
+                            }
+                        }
+                    }
+                } else {
+                    shell_println!("Invalid time.");
+                }
+            } else {
+                shell_println!("Usage: schtask due <hour> <minute> [weekday 0-6]");
+            }
+        }
+        "run" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match tasksched::record_start(id) {
+                        Ok(()) => {
+                            shell_println!("Task #{} started.", id);
+                            // Simulate immediate completion.
+                            let _ = tasksched::record_complete(id, true, 0);
+                            shell_println!("Task #{} completed.", id);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid task ID.");
+                }
+            } else {
+                shell_println!("Usage: schtask run <id>");
+            }
+        }
+        "history" | "hist" => {
+            let id_filter = parts.get(1).and_then(|s| s.parse::<u64>().ok());
+            let history = if let Some(id) = id_filter {
+                tasksched::task_history(id)
+            } else {
+                tasksched::all_history()
+            };
+            if history.is_empty() {
+                shell_println!("No execution history.");
+            } else {
+                shell_println!("{} execution(s):", history.len());
+                for h in history.iter().rev().take(20) {
+                    let status = if h.success { "OK" } else { "FAIL" };
+                    shell_println!("  #{} {} [{}] exit={} duration={}us",
+                        h.task_id, h.task_name, status, h.exit_code, h.duration_us);
+                }
+            }
+        }
+        "next" => {
+            if let Some((id, name, h, m)) = tasksched::next_due() {
+                shell_println!("Next due: #{} {} at {:02}:{:02}", id, name, h, m);
+            } else {
+                shell_println!("No tasks scheduled.");
+            }
+        }
+        "stats" => {
+            let (count, runs, failures, hist, ops) = tasksched::stats();
+            shell_println!("Tasks:       {}", count);
+            shell_println!("Total runs:  {}", runs);
+            shell_println!("Failures:    {}", failures);
+            shell_println!("History:     {}", hist);
+            shell_println!("Operations:  {}", ops);
+        }
+        "test" => {
+            tasksched::self_test();
+            shell_println!("[tasksched] All self-tests passed.");
+        }
+        "init" => {
+            tasksched::init_defaults();
+            shell_println!("Task scheduler initialized.");
+        }
+        _ => {
+            shell_println!("tasksched — scheduled task management");
+            shell_println!("Usage: tasksched|schtask <subcommand>");
+            shell_println!("");
+            shell_println!("Subcommands:");
+            shell_println!("  list               List all tasks (default)");
+            shell_println!("  info <id>          Show task details");
+            shell_println!("  create <n> <cmd> [type]  Create task (daily/weekly/once/interval/boot/login)");
+            shell_println!("  remove <id>        Remove a task");
+            shell_println!("  time <id> <HH:MM>  Set task run time");
+            shell_println!("  day <id> <d> <on|off>  Set weekday (sun-sat)");
+            shell_println!("  interval <id> <min>  Set interval minutes");
+            shell_println!("  args <id> <args>   Set task arguments");
+            shell_println!("  desc <id> <text>   Set description");
+            shell_println!("  enable/disable <id>  Enable/disable task");
+            shell_println!("  due <H> <M> [wd]   Check due tasks at time");
+            shell_println!("  run <id>           Run a task now");
+            shell_println!("  history [id]       Show execution history");
+            shell_println!("  next               Show next due task");
+            shell_println!("  stats              Show statistics");
+            shell_println!("  init               Initialize scheduler");
+            shell_println!("  test               Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -34294,7 +34633,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -159,6 +159,7 @@ pub mod systray;
 pub mod tags;
 pub mod tar;
 pub mod taskbar;
+pub mod tasksched;
 pub mod templates;
 pub mod theme;
 pub mod timezone;

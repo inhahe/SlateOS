@@ -218,6 +218,7 @@ const ROOT_FILES: &[&str] = &[
     "storageclean",
     "sysdiag",
     "nightlight",
+    "tasksched",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4848,6 +4849,34 @@ fn gen_nightlight() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_tasksched() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (task_count, total_runs, total_failures, hist_count, ops) =
+        super::tasksched::stats();
+
+    out.push_str(&format!("task_count: {}\n", task_count));
+    out.push_str(&format!("total_runs: {}\n", total_runs));
+    out.push_str(&format!("total_failures: {}\n", total_failures));
+    out.push_str(&format!("history_entries: {}\n", hist_count));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let tasks = super::tasksched::list_tasks();
+    for task in &tasks {
+        out.push_str(&format!("task {}: {} [{}] {} {:02}:{:02} runs={} {}\n",
+            task.id, task.name, task.schedule_type.label(),
+            task.status.label(), task.hour, task.minute,
+            task.run_count, task.command));
+    }
+
+    if let Some((id, name, h, m)) = super::tasksched::next_due() {
+        out.push_str(&format!("next_due: {} ({}) at {:02}:{:02}\n", name, id, h, m));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5231,6 +5260,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "storageclean" => Ok(gen_storageclean()),
         "sysdiag" => Ok(gen_sysdiag()),
         "nightlight" => Ok(gen_nightlight()),
+        "tasksched" => Ok(gen_tasksched()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

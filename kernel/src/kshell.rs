@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4826,6 +4826,7 @@ fn dispatch(line: &str) {
         "envvars" | "envmgr" => cmd_envvars(args),
         "bluetooth" | "bt" => cmd_bluetooth(args),
         "printmgr" | "lp" => cmd_printmgr(args),
+        "screenrec" | "srec" => cmd_screenrec(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -26708,6 +26709,264 @@ fn cmd_printmgr(args: &str) {
     }
 }
 
+/// `screenrec` / `srec` — screen recording management.
+fn cmd_screenrec(args: &str) {
+    use crate::fs::screenrec;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (count, active, total, total_sec, total_bytes, _) = screenrec::stats();
+            let recording = screenrec::is_recording();
+            shell_println!("Screen Recording: {}", if recording { "RECORDING" } else { "idle" });
+            if let Ok(cfg) = screenrec::get_config() {
+                shell_println!("  Format:    {}", cfg.format.label());
+                shell_println!("  Audio:     {}", cfg.audio.label());
+                shell_println!("  Quality:   {}", cfg.quality.label());
+                shell_println!("  FPS:       {}", cfg.fps);
+                shell_println!("  Area:      {}", cfg.area.label());
+                shell_println!("  Cursor:    {}", if cfg.show_cursor { "shown" } else { "hidden" });
+                shell_println!("  Countdown: {}s", cfg.countdown_seconds);
+                shell_println!("  Output:    {}", cfg.output_dir);
+            }
+            shell_println!("  Recordings: {} ({} active)", count, active);
+            shell_println!("  Total:      {} recordings, {}",
+                total, screenrec::format_duration(total_sec as u32));
+        }
+        "start" | "rec" => match screenrec::start_recording() {
+            Ok(id) => {
+                let rec = screenrec::get_recording(id).unwrap();
+                shell_println!("Recording #{} started ({}).", id, rec.state.label());
+                shell_println!("  File: {}", rec.file_path);
+                if rec.state == screenrec::RecordingState::Countdown {
+                    let _ = screenrec::begin_capture(id);
+                    shell_println!("  Capture begun.");
+                }
+            }
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stop" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u64>() {
+                    match screenrec::stop_recording(id) {
+                        Ok(rec) => {
+                            shell_println!("Recording #{} stopped.", id);
+                            shell_println!("  Duration: {}", screenrec::format_duration(rec.duration_seconds));
+                            shell_println!("  Frames:   {}", rec.frame_count);
+                            shell_println!("  File:     {}", rec.file_path);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid ID.");
+                }
+            } else {
+                // Stop most recent active recording.
+                let active = screenrec::active_recordings();
+                if let Some(rec) = active.last() {
+                    match screenrec::stop_recording(rec.id) {
+                        Ok(r) => shell_println!("Recording #{} stopped ({}).",
+                            r.id, screenrec::format_duration(r.duration_seconds)),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("No active recording.");
+                }
+            }
+        }
+        "pause" => {
+            let active = screenrec::active_recordings();
+            if let Some(rec) = active.last() {
+                match screenrec::pause_recording(rec.id) {
+                    Ok(()) => shell_println!("Recording #{} paused.", rec.id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("No active recording.");
+            }
+        }
+        "resume" => {
+            let active = screenrec::active_recordings();
+            if let Some(rec) = active.last() {
+                match screenrec::resume_recording(rec.id) {
+                    Ok(()) => shell_println!("Recording #{} resumed.", rec.id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("No paused recording.");
+            }
+        }
+        "list" => {
+            let recs = screenrec::list_recordings();
+            if recs.is_empty() {
+                shell_println!("No recordings.");
+            } else {
+                shell_println!("{} recording(s):", recs.len());
+                for r in &recs {
+                    shell_println!("  #{} [{}] {} — {} frames, {}",
+                        r.id, r.state.label(), r.file_path,
+                        r.frame_count, screenrec::format_duration(r.duration_seconds));
+                }
+            }
+        }
+        "format" => {
+            if let Some(fmt) = parts.get(1) {
+                let f = match *fmt {
+                    "webm" => screenrec::OutputFormat::WebM,
+                    "mp4" => screenrec::OutputFormat::Mp4,
+                    "gif" => screenrec::OutputFormat::Gif,
+                    _ => {
+                        shell_println!("Unknown format. Options: webm, mp4, gif");
+                        return;
+                    }
+                };
+                match screenrec::set_format(f) {
+                    Ok(()) => shell_println!("Format set to: {}", f.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: srec format <webm|mp4|gif>");
+            }
+        }
+        "audio" => {
+            if let Some(mode) = parts.get(1) {
+                let m = match *mode {
+                    "none" | "off" => screenrec::AudioMode::None,
+                    "system" | "sys" => screenrec::AudioMode::System,
+                    "mic" | "microphone" => screenrec::AudioMode::Microphone,
+                    "both" | "all" => screenrec::AudioMode::Both,
+                    _ => {
+                        shell_println!("Unknown mode. Options: none, system, mic, both");
+                        return;
+                    }
+                };
+                match screenrec::set_audio(m) {
+                    Ok(()) => shell_println!("Audio mode: {}", m.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: srec audio <none|system|mic|both>");
+            }
+        }
+        "quality" => {
+            if let Some(q) = parts.get(1) {
+                let preset = match *q {
+                    "low" => screenrec::QualityPreset::Low,
+                    "medium" | "med" => screenrec::QualityPreset::Medium,
+                    "high" => screenrec::QualityPreset::High,
+                    "lossless" => screenrec::QualityPreset::Lossless,
+                    _ => {
+                        shell_println!("Unknown quality. Options: low, medium, high, lossless");
+                        return;
+                    }
+                };
+                match screenrec::set_quality(preset) {
+                    Ok(()) => shell_println!("Quality: {}", preset.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: srec quality <low|medium|high|lossless>");
+            }
+        }
+        "fps" => {
+            if let Some(val) = parts.get(1) {
+                if let Ok(fps) = val.parse::<u32>() {
+                    match screenrec::set_fps(fps) {
+                        Ok(()) => shell_println!("FPS set to {}", fps),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid FPS.");
+                }
+            } else {
+                shell_println!("Usage: srec fps <value>");
+            }
+        }
+        "cursor" => {
+            let on = parts.get(1).copied().unwrap_or("on") != "off";
+            let _ = screenrec::set_show_cursor(on);
+            shell_println!("Cursor: {}", if on { "shown" } else { "hidden" });
+        }
+        "countdown" => {
+            if let Some(val) = parts.get(1) {
+                if let Ok(s) = val.parse::<u8>() {
+                    match screenrec::set_countdown(s) {
+                        Ok(()) => shell_println!("Countdown: {}s", s),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid value.");
+                }
+            } else {
+                shell_println!("Usage: srec countdown <0-10>");
+            }
+        }
+        "outdir" => {
+            if let Some(dir) = parts.get(1) {
+                match screenrec::set_output_dir(dir) {
+                    Ok(()) => shell_println!("Output directory: {}", dir),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: srec outdir <path>");
+            }
+        }
+        "stats" => {
+            let (count, active, total, total_sec, total_bytes, ops) = screenrec::stats();
+            shell_println!("Recordings:  {}", count);
+            shell_println!("Active:      {}", active);
+            shell_println!("Total:       {}", total);
+            shell_println!("Duration:    {}", screenrec::format_duration(total_sec as u32));
+            shell_println!("Data:        {}", format_size_helper(total_bytes));
+            shell_println!("Operations:  {}", ops);
+        }
+        "test" => {
+            screenrec::self_test();
+            shell_println!("[screenrec] All self-tests passed.");
+        }
+        "init" => {
+            screenrec::init_defaults();
+            shell_println!("Screen recording initialized.");
+        }
+        _ => {
+            shell_println!("screenrec — screen recording");
+            shell_println!("Usage: screenrec|srec <subcommand>");
+            shell_println!("");
+            shell_println!("Subcommands:");
+            shell_println!("  show               Show status (default)");
+            shell_println!("  start              Start recording");
+            shell_println!("  stop [id]          Stop recording");
+            shell_println!("  pause              Pause active recording");
+            shell_println!("  resume             Resume paused recording");
+            shell_println!("  list               List all recordings");
+            shell_println!("  format <fmt>       Set format: webm, mp4, gif");
+            shell_println!("  audio <mode>       Audio: none, system, mic, both");
+            shell_println!("  quality <q>        Quality: low, medium, high, lossless");
+            shell_println!("  fps <n>            Set frames per second");
+            shell_println!("  cursor [on|off]    Show/hide cursor");
+            shell_println!("  countdown <s>      Pre-record countdown (0-10s)");
+            shell_println!("  outdir <path>      Set output directory");
+            shell_println!("  stats              Show statistics");
+            shell_println!("  init               Initialize subsystem");
+            shell_println!("  test               Run self-tests");
+        }
+    }
+}
+
+fn format_size_helper(bytes: u64) -> alloc::string::String {
+    use alloc::format;
+    if bytes >= 1_073_741_824 {
+        format!("{}.{} GB", bytes / 1_073_741_824, (bytes % 1_073_741_824) / 107_374_182)
+    } else if bytes >= 1_048_576 {
+        format!("{}.{} MB", bytes / 1_048_576, (bytes % 1_048_576) / 104_857)
+    } else if bytes >= 1024 {
+        format!("{}.{} KB", bytes / 1024, (bytes % 1024) / 102)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -35304,7 +35563,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

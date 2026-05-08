@@ -139,6 +139,7 @@ pub mod reclaim;
 pub mod rundialog;
 pub mod schedtune;
 pub mod screenshot;
+pub mod screenrec;
 pub mod scriptlang;
 pub mod search;
 pub mod sealing;

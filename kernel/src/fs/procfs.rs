@@ -222,6 +222,7 @@ const ROOT_FILES: &[&str] = &[
     "envvars",
     "bluetooth",
     "printmgr",
+    "screenrec",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4955,6 +4956,31 @@ fn gen_printmgr() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_screenrec() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (count, active, total, total_sec, total_bytes, ops) = super::screenrec::stats();
+    out.push_str(&format!("recordings: {}\n", count));
+    out.push_str(&format!("active: {}\n", active));
+    out.push_str(&format!("is_recording: {}\n", super::screenrec::is_recording()));
+    out.push_str(&format!("total_recordings: {}\n", total));
+    out.push_str(&format!("total_seconds: {}\n", total_sec));
+    out.push_str(&format!("total_bytes: {}\n", total_bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Ok(cfg) = super::screenrec::get_config() {
+        out.push_str(&format!("format: {}\n", cfg.format.label()));
+        out.push_str(&format!("audio: {}\n", cfg.audio.label()));
+        out.push_str(&format!("quality: {}\n", cfg.quality.label()));
+        out.push_str(&format!("fps: {}\n", cfg.fps));
+        out.push_str(&format!("cursor: {}\n", cfg.show_cursor));
+        out.push_str(&format!("output_dir: {}\n", cfg.output_dir));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5342,6 +5368,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "envvars" => Ok(gen_envvars()),
         "bluetooth" => Ok(gen_bluetooth()),
         "printmgr" => Ok(gen_printmgr()),
+        "screenrec" => Ok(gen_screenrec()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

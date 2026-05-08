@@ -139,6 +139,8 @@ pub unsafe extern "C" fn sigaddset(set: *mut u64, signum: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // SAFETY: set is non-null (checked above). signum is in [1, NSIG),
+    // so signum-1 is in [0, 63], which is a valid u64 shift amount.
     unsafe { *set |= 1u64 << (signum.wrapping_sub(1) as u32); }
     0
 }
@@ -150,6 +152,7 @@ pub unsafe extern "C" fn sigdelset(set: *mut u64, signum: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // SAFETY: set is non-null; shift amount is [0, 63] per range check.
     unsafe { *set &= !(1u64 << (signum.wrapping_sub(1) as u32)); }
     0
 }
@@ -161,6 +164,7 @@ pub unsafe extern "C" fn sigismember(set: *const u64, signum: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // SAFETY: set is non-null; shift amount is [0, 63] per range check.
     let val = unsafe { *set };
     i32::from(val & (1u64 << (signum.wrapping_sub(1) as u32)) != 0)
 }

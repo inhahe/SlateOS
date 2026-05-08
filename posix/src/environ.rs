@@ -64,6 +64,8 @@ pub unsafe extern "C" fn getenv(name: *const u8) -> *const u8 {
         // Check if this entry starts with "name=".
         if entry_matches_name(entry, name, name_len) {
             // Return pointer to the value (after '=').
+            // SAFETY: entry_matches_name verified entry[name_len] == '=',
+            // so name_len + 1 is within the MAX_ENTRY_LEN buffer.
             return unsafe { entry.as_ptr().add(name_len.wrapping_add(1)) };
         }
     }
@@ -210,6 +212,9 @@ fn entry_matches_name(entry: &[u8; MAX_ENTRY_LEN], name: *const u8, name_len: us
 }
 
 /// Write `name=value\0` into an entry buffer.
+///
+/// Caller must ensure `name_len + 1 + value_len + 1 <= MAX_ENTRY_LEN`.
+/// The setenv function validates this before calling write_entry.
 fn write_entry(
     entry: &mut [u8; MAX_ENTRY_LEN],
     name: *const u8,

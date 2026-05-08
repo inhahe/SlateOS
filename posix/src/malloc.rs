@@ -70,6 +70,9 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
     unsafe { ptr.cast::<u64>().write_unaligned(total as u64); }
 
     // Return pointer past the header.
+    // SAFETY: ptr is a valid mmap return (at least `total` bytes),
+    // and total >= HEADER_SIZE (checked_add above), so ptr + HEADER_SIZE
+    // is within the mapped region.
     unsafe { ptr.cast::<u8>().add(HEADER_SIZE) }
 }
 

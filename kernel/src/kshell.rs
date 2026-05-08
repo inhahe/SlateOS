@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4820,6 +4820,7 @@ fn dispatch(line: &str) {
         "perfmon" | "resmon" => cmd_perfmon(args),
         "focusassist" | "dnd" => cmd_focusassist(args),
         "storageclean" | "sclean" => cmd_storageclean(args),
+        "sysdiag" | "diag" => cmd_sysdiag(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -25246,6 +25247,196 @@ fn parse_size_arg(s: &str) -> u64 {
     num_part.parse::<u64>().unwrap_or(0).saturating_mul(suffix)
 }
 
+/// `sysdiag` / `diag` — system diagnostics and troubleshooting.
+fn cmd_sysdiag(args: &str) {
+    use crate::fs::sysdiag;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let issues = sysdiag::quick_check();
+            if issues.is_empty() {
+                shell_println!("System health: OK — no issues detected");
+            } else {
+                shell_println!("System health: {} issue(s)", issues.len());
+                for issue in &issues {
+                    let sev = issue.severity.label();
+                    shell_println!("  [{}] {}: {}", sev, issue.category.label(), issue.title);
+                    shell_println!("         {}", issue.detail);
+                    shell_println!("    Fix: {}", issue.suggestion);
+                }
+            }
+            let (_, total_runs, _, _, _) = sysdiag::stats();
+            shell_println!("Total diagnostic runs: {}", total_runs);
+        }
+        "run" => {
+            let cat_filter = parts.get(1).copied();
+            if let Some(cname) = cat_filter {
+                if let Some(cat) = parse_diag_category(cname) {
+                    shell_println!("Running {} diagnostics...", cat.label());
+                    match sysdiag::run_category(cat) {
+                        Ok(report) => {
+                            shell_println!("{}: {}/{} tests passed ({} us)",
+                                report.category.label(),
+                                report.tests_passed, report.tests_run,
+                                report.duration_us);
+                            for issue in &report.issues {
+                                shell_println!("  [{}] {}", issue.severity.label(), issue.title);
+                                shell_println!("         {}", issue.detail);
+                                shell_println!("    Fix: {}", issue.suggestion);
+                            }
+                            if report.issues.is_empty() {
+                                shell_println!("  All tests passed.");
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Unknown category: {}", cname);
+                    shell_println!("Categories: network, storage, memory, services, boot, security");
+                }
+            } else {
+                shell_println!("Running full system diagnostics...");
+                match sysdiag::run_all() {
+                    Ok(report) => {
+                        shell_println!("Results: {}/{} tests passed, {} issue(s) ({} us)",
+                            report.total_passed, report.total_tests,
+                            report.total_issues, report.duration_us);
+                        shell_println!("Worst severity: {}", report.worst_severity.label());
+                        shell_println!("");
+                        for cat_report in &report.categories {
+                            let status = if cat_report.issues.is_empty() { "OK" } else { "ISSUES" };
+                            shell_println!("  {} [{}]: {}/{} passed",
+                                cat_report.category.label(), status,
+                                cat_report.tests_passed, cat_report.tests_run);
+                            for issue in &cat_report.issues {
+                                shell_println!("    [{}] {}", issue.severity.label(), issue.title);
+                                shell_println!("           {}", issue.detail);
+                                shell_println!("      Fix: {}", issue.suggestion);
+                            }
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "issues" => {
+            let filter_sev = parts.get(1).copied();
+            let issues = if let Some(sev_str) = filter_sev {
+                match sev_str {
+                    "info" => sysdiag::issues_by_severity(sysdiag::Severity::Info),
+                    "warning" | "warn" => sysdiag::issues_by_severity(sysdiag::Severity::Warning),
+                    "error" | "err" => sysdiag::issues_by_severity(sysdiag::Severity::Error),
+                    "critical" | "crit" => sysdiag::issues_by_severity(sysdiag::Severity::Critical),
+                    _ => {
+                        shell_println!("Unknown severity: {}", sev_str);
+                        shell_println!("Severities: info, warning, error, critical");
+                        return;
+                    }
+                }
+            } else {
+                sysdiag::current_issues()
+            };
+            if issues.is_empty() {
+                shell_println!("No issues found. Run 'diag run' first.");
+            } else {
+                shell_println!("{} issue(s):", issues.len());
+                for issue in &issues {
+                    shell_println!("  #{} [{}] {}: {}",
+                        issue.id, issue.severity.label(),
+                        issue.category.label(), issue.title);
+                    shell_println!("       {}", issue.detail);
+                    shell_println!("  Fix: {}", issue.suggestion);
+                }
+            }
+        }
+        "category" | "cat" => {
+            if let Some(cname) = parts.get(1).copied() {
+                if let Some(cat) = parse_diag_category(cname) {
+                    let issues = sysdiag::issues_for_category(cat);
+                    if issues.is_empty() {
+                        shell_println!("{}: no issues (run 'diag run {}' first)",
+                            cat.label(), cname);
+                    } else {
+                        shell_println!("{}: {} issue(s)", cat.label(), issues.len());
+                        for issue in &issues {
+                            shell_println!("  [{}] {}", issue.severity.label(), issue.title);
+                            shell_println!("       {}", issue.detail);
+                            shell_println!("  Fix: {}", issue.suggestion);
+                        }
+                    }
+                } else {
+                    shell_println!("Unknown category: {}", cname);
+                    shell_println!("Categories: network, storage, memory, services, boot, security");
+                }
+            } else {
+                shell_println!("Usage: diag category <name>");
+                shell_println!("Categories: network, storage, memory, services, boot, security");
+            }
+        }
+        "history" | "hist" => {
+            let hist = sysdiag::history();
+            if hist.is_empty() {
+                shell_println!("No diagnostic history. Run 'diag run' first.");
+            } else {
+                shell_println!("{} previous run(s):", hist.len());
+                for (i, (ts, tests, passed, issues)) in hist.iter().enumerate() {
+                    let status = if *issues == 0 { "OK" } else { "ISSUES" };
+                    shell_println!("  #{}: ts={} tests={}/{} issues={} [{}]",
+                        i + 1, ts, passed, tests, issues, status);
+                }
+            }
+        }
+        "stats" => {
+            let (issue_count, total_runs, total_found, hist_count, ops) = sysdiag::stats();
+            shell_println!("Current issues:      {}", issue_count);
+            shell_println!("Total runs:          {}", total_runs);
+            shell_println!("Total issues found:  {}", total_found);
+            shell_println!("History entries:      {}", hist_count);
+            shell_println!("Operations:          {}", ops);
+        }
+        "test" => {
+            sysdiag::self_test();
+            shell_println!("[sysdiag] All self-tests passed.");
+        }
+        "init" => {
+            sysdiag::init_defaults();
+            shell_println!("Diagnostics subsystem initialized.");
+        }
+        _ => {
+            shell_println!("sysdiag — system diagnostics and troubleshooting");
+            shell_println!("Usage: sysdiag|diag <subcommand>");
+            shell_println!("");
+            shell_println!("Subcommands:");
+            shell_println!("  show               Show current health status (default)");
+            shell_println!("  run [category]     Run full or category-specific diagnostics");
+            shell_println!("  issues [severity]  List current issues, optionally filtered");
+            shell_println!("  category <name>    Show issues for a specific category");
+            shell_println!("  history            Show diagnostic run history");
+            shell_println!("  stats              Show subsystem statistics");
+            shell_println!("  init               Initialize diagnostics subsystem");
+            shell_println!("  test               Run self-tests");
+            shell_println!("");
+            shell_println!("Categories: network, storage, memory, services, boot, security");
+            shell_println!("Severities: info, warning, error, critical");
+        }
+    }
+}
+
+fn parse_diag_category(name: &str) -> Option<crate::fs::sysdiag::DiagCategory> {
+    use crate::fs::sysdiag::DiagCategory;
+    match name {
+        "network" | "net" => Some(DiagCategory::Network),
+        "storage" | "disk" => Some(DiagCategory::Storage),
+        "memory" | "mem" => Some(DiagCategory::Memory),
+        "services" | "svc" => Some(DiagCategory::Services),
+        "boot" => Some(DiagCategory::Boot),
+        "security" | "sec" => Some(DiagCategory::Security),
+        _ => None,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -33842,7 +34033,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

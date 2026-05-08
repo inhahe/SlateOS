@@ -216,6 +216,7 @@ const ROOT_FILES: &[&str] = &[
     "perfmon",
     "focusassist",
     "storageclean",
+    "sysdiag",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4768,6 +4769,48 @@ fn gen_storageclean() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sysdiag() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (issue_count, total_runs, total_issues_found, history_count, ops) =
+        super::sysdiag::stats();
+
+    out.push_str(&format!("issue_count: {}\n", issue_count));
+    out.push_str(&format!("total_runs: {}\n", total_runs));
+    out.push_str(&format!("total_issues_found: {}\n", total_issues_found));
+    out.push_str(&format!("history_count: {}\n", history_count));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    // Show quick check results
+    let issues = super::sysdiag::quick_check();
+    if issues.is_empty() {
+        out.push_str("status: healthy\n");
+    } else {
+        out.push_str(&format!("status: {} issue(s)\n", issues.len()));
+        for issue in &issues {
+            out.push_str(&format!(
+                "  [{:?}] {}: {}\n",
+                issue.severity, issue.category.label(), issue.title
+            ));
+        }
+    }
+
+    // Show recent history
+    let hist = super::sysdiag::history();
+    if !hist.is_empty() {
+        out.push_str("history:\n");
+        for (ts, cats, issues_n, sev) in hist.iter().take(8) {
+            out.push_str(&format!(
+                "  ts={} categories={} issues={} max_severity={}\n",
+                ts, cats, issues_n, sev
+            ));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5149,6 +5192,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "perfmon" => Ok(gen_perfmon()),
         "focusassist" => Ok(gen_focusassist()),
         "storageclean" => Ok(gen_storageclean()),
+        "sysdiag" => Ok(gen_sysdiag()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

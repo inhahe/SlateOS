@@ -151,6 +151,7 @@ pub mod swapcfg;
 pub mod rar;
 pub mod rlimit;
 pub mod symlink_security;
+pub mod sysdiag;
 pub mod sysfs;
 pub mod sysinfo;
 pub mod systray;

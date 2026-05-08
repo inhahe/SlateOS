@@ -691,16 +691,118 @@ pub unsafe fn c_strlen_pub(s: *const u8) -> usize {
     unsafe { c_strlen(s) }
 }
 
+// ---------------------------------------------------------------------------
+// access
+// ---------------------------------------------------------------------------
+
+/// Check file accessibility.
+///
+/// Tests whether the calling process can access the file at `path`
+/// using the mode flags:
+/// - `F_OK` (0): check existence only.
+/// - `R_OK` (4): check read permission.
+/// - `W_OK` (2): check write permission.
+/// - `X_OK` (1): check execute permission.
+///
+/// Since our OS doesn't have a permission system yet, we check only
+/// existence (via `SYS_FS_STAT`) and report all modes as accessible
+/// if the file exists.
+///
+/// Returns 0 on success, -1 on error (errno set).
+#[unsafe(no_mangle)]
+pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Use stat to check if the file exists.
+    let path_len = unsafe { c_strlen(path) };
+    let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
+    let ret = syscall3(
+        SYS_FS_STAT,
+        path as u64,
+        path_len as u64,
+        stat_buf.as_mut_ptr() as u64,
+    );
+
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+
+    // File exists.  Since we don't have permissions, all modes succeed.
+    0
+}
+
+/// Check file accessibility relative to a directory fd.
+///
+/// `faccessat(AT_FDCWD, path, mode, 0)` is equivalent to `access(path, mode)`.
+/// Other `dirfd` values are not yet supported.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32) -> i32 {
+    // AT_FDCWD (-100): use current working directory.
+    if dirfd != -100 {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    access(path, mode)
+}
+
+// ---------------------------------------------------------------------------
+// chmod / fchmod / chown / fchown (stubs)
+// ---------------------------------------------------------------------------
+
+/// Change file mode bits.
+///
+/// Stub: our OS doesn't have file permissions yet.  Accepts silently.
+///
+/// Returns 0 (always succeeds).
+#[unsafe(no_mangle)]
+pub extern "C" fn chmod(_path: *const u8, _mode: ModeT) -> i32 {
+    // No permission system yet — accept silently.
+    0
+}
+
+/// Change file mode bits (by fd).
+///
+/// Stub: accepts silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn fchmod(_fd: Fd, _mode: ModeT) -> i32 {
+    0
+}
+
+/// Change file owner and group.
+///
+/// Stub: our OS doesn't have multi-user support.  Accepts silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn chown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+    0
+}
+
+/// Change file owner and group (by fd).
+///
+/// Stub: accepts silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn fchown(_fd: Fd, _owner: UidT, _group: GidT) -> i32 {
+    0
+}
+
+/// Set file mode creation mask.
+///
+/// Stub: returns 0o022 (previous mask) and ignores the new mask.
+#[unsafe(no_mangle)]
+pub extern "C" fn umask(_cmask: ModeT) -> ModeT {
+    // No permission system yet — return a typical default mask.
+    0o022
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
 /// Translate POSIX open flags to our native flag word.
-///
-/// Our kernel open flags are a subset of Linux flags:
-/// - Bits 0-1: access mode (O_RDONLY=0, O_WRONLY=1, O_RDWR=2)
-/// - Bit 6: O_CREAT
-/// - Bit 9: O_TRUNC
-/// - Bit 10: O_APPEND
-///
-/// We pass them through with minimal translation since our kernel
-/// uses a Linux-compatible flag encoding.
 fn translate_open_flags(posix_flags: i32) -> u64 {
     let mut native: u64 = 0;
 

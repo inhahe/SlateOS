@@ -1249,6 +1249,262 @@ pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
 }
 
 // ---------------------------------------------------------------------------
+// getaddrinfo() / freeaddrinfo() — modern DNS resolution
+// ---------------------------------------------------------------------------
+
+/// Hints and results for `getaddrinfo()`.
+#[repr(C)]
+pub struct Addrinfo {
+    /// AI_PASSIVE, AI_CANONNAME, etc.
+    pub ai_flags: i32,
+    /// Address family (AF_INET, etc.).
+    pub ai_family: i32,
+    /// Socket type (SOCK_STREAM, SOCK_DGRAM).
+    pub ai_socktype: i32,
+    /// Protocol (IPPROTO_TCP, IPPROTO_UDP).
+    pub ai_protocol: i32,
+    /// Length of ai_addr.
+    pub ai_addrlen: SocklenT,
+    /// Canonical hostname (may be null).
+    pub ai_canonname: *mut u8,
+    /// Socket address.
+    pub ai_addr: *mut Sockaddr,
+    /// Next result in linked list.
+    pub ai_next: *mut Addrinfo,
+}
+
+// getaddrinfo flag constants.
+/// Socket address is intended for bind().
+pub const AI_PASSIVE: i32 = 0x0001;
+/// Request canonical name.
+pub const AI_CANONNAME: i32 = 0x0002;
+/// Numeric host address string.
+pub const AI_NUMERICHOST: i32 = 0x0004;
+/// Numeric service string.
+pub const AI_NUMERICSERV: i32 = 0x0400;
+
+// getaddrinfo error codes.
+/// Address family not supported.
+pub const EAI_ADDRFAMILY: i32 = 1;
+/// Temporary failure in name resolution.
+pub const EAI_AGAIN: i32 = 2;
+/// Invalid flags.
+pub const EAI_BADFLAGS: i32 = 3;
+/// Non-recoverable failure in name resolution.
+pub const EAI_FAIL: i32 = 4;
+/// Address family not supported.
+pub const EAI_FAMILY: i32 = 5;
+/// Memory allocation failure.
+pub const EAI_MEMORY: i32 = 6;
+/// No address associated with hostname.
+pub const EAI_NODATA: i32 = 7;
+/// Name or service not known.
+pub const EAI_NONAME: i32 = 8;
+/// Service not supported for socket type.
+pub const EAI_SERVICE: i32 = 9;
+/// Socket type not supported.
+pub const EAI_SOCKTYPE: i32 = 10;
+/// System error.
+pub const EAI_SYSTEM: i32 = 11;
+
+/// Static storage for a single getaddrinfo result.
+///
+/// We only return one result (the first resolved IPv4 address).
+/// This avoids heap allocation in our no_std environment.
+static mut GAI_RESULT: Addrinfo = Addrinfo {
+    ai_flags: 0,
+    ai_family: 0,
+    ai_socktype: 0,
+    ai_protocol: 0,
+    ai_addrlen: 0,
+    ai_canonname: core::ptr::null_mut(),
+    ai_addr: core::ptr::null_mut(),
+    ai_next: core::ptr::null_mut(),
+};
+
+/// Static storage for the sockaddr_in in the getaddrinfo result.
+static mut GAI_ADDR: SockaddrIn = SockaddrIn {
+    sin_family: 0,
+    sin_port: 0,
+    sin_addr: InAddr { s_addr: 0 },
+    sin_zero: [0u8; 8],
+};
+
+/// Resolve a hostname and/or service to a list of socket addresses.
+///
+/// This is the modern replacement for `gethostbyname()`.  We support
+/// only IPv4 (`AF_INET`) resolution and return at most one result.
+///
+/// Returns 0 on success, non-zero EAI_* error code on failure.
+///
+/// # Safety
+///
+/// - `node` and `service` must be valid null-terminated strings (or null).
+/// - `res` must be a valid pointer to a `*mut Addrinfo`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getaddrinfo(
+    node: *const u8,
+    service: *const u8,
+    hints: *const Addrinfo,
+    res: *mut *mut Addrinfo,
+) -> i32 {
+    if res.is_null() {
+        return EAI_SYSTEM;
+    }
+
+    // SAFETY: res is non-null.
+    unsafe { *res = core::ptr::null_mut(); }
+
+    // Parse hints if provided.
+    let (want_family, want_socktype, want_passive) = if hints.is_null() {
+        (0, 0, false) // Accept any family/socktype.
+    } else {
+        // SAFETY: hints is non-null.
+        let h = unsafe { &*hints };
+        // We only support AF_INET (or AF_UNSPEC=0 which means "any").
+        if h.ai_family != 0 && h.ai_family != AF_INET {
+            return EAI_FAMILY;
+        }
+        (h.ai_family, h.ai_socktype, h.ai_flags & AI_PASSIVE != 0)
+    };
+
+    // We need at least a node or a service.
+    if node.is_null() && service.is_null() {
+        return EAI_NONAME;
+    }
+
+    // Resolve the IP address.
+    let ip: u32 = if node.is_null() {
+        // No node: if AI_PASSIVE, use INADDR_ANY; otherwise loopback.
+        if want_passive {
+            htonl(INADDR_ANY)
+        } else {
+            htonl(INADDR_LOOPBACK)
+        }
+    } else {
+        // Try numeric parse first.
+        let numeric = unsafe { inet_addr(node) };
+        if numeric == 0xFFFF_FFFF {
+            // Not numeric — do DNS resolution.
+            let he = unsafe { gethostbyname(node) };
+            if he.is_null() {
+                return EAI_NONAME;
+            }
+            // SAFETY: gethostbyname returned a valid hostent.
+            unsafe {
+                let addr_list = (*he).h_addr_list;
+                if addr_list.is_null() || (*addr_list).is_null() {
+                    return EAI_NODATA;
+                }
+                // Read the 4-byte IPv4 address.
+                core::ptr::read_unaligned((*addr_list).cast::<u32>())
+            }
+        } else {
+            numeric
+        }
+    };
+
+    // Parse the port from the service string.
+    let port: u16 = if service.is_null() {
+        0
+    } else {
+        parse_port_string(service)
+    };
+
+    // Determine socket type and protocol.
+    let socktype = if want_socktype != 0 {
+        want_socktype
+    } else {
+        SOCK_STREAM // Default to TCP.
+    };
+    let protocol = match socktype {
+        SOCK_STREAM => IPPROTO_TCP,
+        SOCK_DGRAM => IPPROTO_UDP,
+        _ => 0,
+    };
+
+    // Fill in the static result.
+    // SAFETY: Single-threaded access; getaddrinfo is not re-entrant (per POSIX).
+    unsafe {
+        let addr = core::ptr::addr_of_mut!(GAI_ADDR);
+        (*addr).sin_family = AF_INET as u16;
+        (*addr).sin_port = htons(port);
+        (*addr).sin_addr.s_addr = ip;
+        (*addr).sin_zero = [0u8; 8];
+
+        let result = core::ptr::addr_of_mut!(GAI_RESULT);
+        (*result).ai_flags = 0;
+        (*result).ai_family = if want_family != 0 { want_family } else { AF_INET };
+        (*result).ai_socktype = socktype;
+        (*result).ai_protocol = protocol;
+        (*result).ai_addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+        (*result).ai_canonname = core::ptr::null_mut();
+        (*result).ai_addr = addr.cast::<Sockaddr>();
+        (*result).ai_next = core::ptr::null_mut();
+
+        *res = result;
+    }
+
+    0 // Success.
+}
+
+/// Free an addrinfo result list.
+///
+/// Since our getaddrinfo uses static storage (not heap allocation),
+/// this is a no-op.  Programs must still call it for POSIX compliance.
+#[unsafe(no_mangle)]
+pub extern "C" fn freeaddrinfo(_res: *mut Addrinfo) {
+    // No-op: we use static storage, not heap allocation.
+}
+
+/// Return a string describing a getaddrinfo error code.
+#[unsafe(no_mangle)]
+pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
+    match errcode {
+        0 => c"Success".as_ptr().cast::<u8>(),
+        EAI_ADDRFAMILY | EAI_FAMILY => c"Address family not supported".as_ptr().cast::<u8>(),
+        EAI_AGAIN => c"Temporary failure in name resolution".as_ptr().cast::<u8>(),
+        EAI_BADFLAGS => c"Invalid flags".as_ptr().cast::<u8>(),
+        EAI_FAIL => c"Non-recoverable failure".as_ptr().cast::<u8>(),
+        EAI_MEMORY => c"Memory allocation failure".as_ptr().cast::<u8>(),
+        EAI_NODATA => c"No address associated with hostname".as_ptr().cast::<u8>(),
+        EAI_NONAME => c"Name or service not known".as_ptr().cast::<u8>(),
+        EAI_SERVICE => c"Service not supported".as_ptr().cast::<u8>(),
+        EAI_SOCKTYPE => c"Socket type not supported".as_ptr().cast::<u8>(),
+        EAI_SYSTEM => c"System error".as_ptr().cast::<u8>(),
+        _ => c"Unknown error".as_ptr().cast::<u8>(),
+    }
+}
+
+/// Parse a numeric port string to u16.
+fn parse_port_string(s: *const u8) -> u16 {
+    if s.is_null() {
+        return 0;
+    }
+    let mut val: u32 = 0;
+    let mut i: usize = 0;
+    loop {
+        // SAFETY: s is a valid null-terminated string.
+        let c = unsafe { *s.add(i) };
+        if c == 0 {
+            break;
+        }
+        if !c.is_ascii_digit() {
+            return 0; // Non-numeric service name — not supported.
+        }
+        #[allow(clippy::arithmetic_side_effects)]
+        {
+            val = val.wrapping_mul(10).wrapping_add(u32::from(c - b'0'));
+        }
+        if val > 65535 {
+            return 0;
+        }
+        i = i.wrapping_add(1);
+    }
+    val as u16
+}
+
+// ---------------------------------------------------------------------------
 // Error translation
 // ---------------------------------------------------------------------------
 

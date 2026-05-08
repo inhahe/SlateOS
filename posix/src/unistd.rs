@@ -75,19 +75,8 @@ pub extern "C" fn chdir(_path: *const u8) -> i32 {
     -1
 }
 
-/// Test whether a file descriptor refers to a terminal.
-///
-/// Returns 1 if `fd` is a terminal, 0 otherwise.
-#[unsafe(no_mangle)]
-pub extern "C" fn isatty(fd: Fd) -> i32 {
-    // Our console (fd 0, 1, 2) is always a terminal.
-    if fd == STDIN_FILENO || fd == STDOUT_FILENO || fd == STDERR_FILENO {
-        1
-    } else {
-        errno::set_errno(errno::ENOTTY);
-        0
-    }
-}
+// isatty() is defined in ioctl.rs — it checks the fd table's HandleKind
+// rather than hardcoding fd numbers, so it works for any Console fd.
 
 /// Get the real user ID of the calling process.
 ///

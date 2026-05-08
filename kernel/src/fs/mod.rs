@@ -145,6 +145,7 @@ pub mod sparse;
 pub mod splice;
 pub mod startmenu;
 pub mod statusbar;
+pub mod storageclean;
 pub mod swapcfg;
 #[allow(dead_code)]
 pub mod rar;

@@ -215,6 +215,7 @@ const ROOT_FILES: &[&str] = &[
     "sysinfo",
     "perfmon",
     "focusassist",
+    "storageclean",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4729,6 +4730,44 @@ fn gen_focusassist() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_storageclean() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::from("=== Storage Cleanup ===\n");
+
+    let (items, freed, scans, cleans, ops) = super::storageclean::stats();
+    out.push_str(&format!("cached_items: {}\n", items));
+    out.push_str(&format!("total_freed: {} ({})\n", freed,
+        super::storageclean::format_size(freed)));
+    out.push_str(&format!("scans: {}\n", scans));
+    out.push_str(&format!("cleanups: {}\n", cleans));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Ok(cfg) = super::storageclean::config() {
+        out.push_str(&format!("\nauto_enabled: {}\n", cfg.auto_enabled));
+        out.push_str(&format!("auto_threshold: {}%\n", cfg.auto_clean_threshold_pct));
+        out.push_str(&format!("large_threshold: {}\n",
+            super::storageclean::format_size(cfg.large_file_threshold)));
+        out.push_str(&format!("old_download_days: {}\n", cfg.old_download_days));
+        out.push_str(&format!("log_retention_days: {}\n", cfg.log_retention_days));
+    }
+
+    if let Some(report) = super::storageclean::last_report() {
+        out.push_str(&format!("\nlast_scan:\n"));
+        out.push_str(&format!("  reclaimable: {} ({})\n",
+            report.total_reclaimable_bytes,
+            super::storageclean::format_size(report.total_reclaimable_bytes)));
+        out.push_str(&format!("  items: {}\n", report.total_items));
+        out.push_str(&format!("  duration: {} us\n", report.scan_duration_us));
+        for cat in &report.categories {
+            out.push_str(&format!("  {}: {} items, {}\n",
+                cat.category.label(), cat.item_count,
+                super::storageclean::format_size(cat.total_bytes)));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5109,6 +5148,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sysinfo" => Ok(gen_sysinfo()),
         "perfmon" => Ok(gen_perfmon()),
         "focusassist" => Ok(gen_focusassist()),
+        "storageclean" => Ok(gen_storageclean()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

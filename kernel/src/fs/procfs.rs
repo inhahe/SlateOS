@@ -220,6 +220,7 @@ const ROOT_FILES: &[&str] = &[
     "nightlight",
     "tasksched",
     "envvars",
+    "bluetooth",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4897,6 +4898,36 @@ fn gen_envvars() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_bluetooth() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (dev_count, connected, scan_count, pair_count, ops) = super::bluetooth::stats();
+    out.push_str(&format!("enabled: {}\n", super::bluetooth::is_enabled()));
+    out.push_str(&format!("devices: {}\n", dev_count));
+    out.push_str(&format!("connected: {}\n", connected));
+    out.push_str(&format!("scans: {}\n", scan_count));
+    out.push_str(&format!("pairs: {}\n", pair_count));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Ok(cfg) = super::bluetooth::config() {
+        out.push_str(&format!("adapter: {} [{}]\n", cfg.adapter_name, cfg.adapter_state.label()));
+        out.push_str(&format!("bt_version: {}\n", cfg.bt_version));
+        out.push_str(&format!("discoverable: {}\n", cfg.discoverable));
+        out.push_str(&format!("auto_connect: {}\n", cfg.auto_connect));
+    }
+
+    let devices = super::bluetooth::list_devices();
+    for dev in &devices {
+        let bat = dev.battery_pct.map_or(String::new(), |b| format!(" bat={}%", b));
+        out.push_str(&format!("{} {} [{}] {} {}{}\n",
+            dev.address, dev.name, dev.device_type.label(),
+            dev.state.label(), dev.device_type.icon(), bat));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5282,6 +5313,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "nightlight" => Ok(gen_nightlight()),
         "tasksched" => Ok(gen_tasksched()),
         "envvars" => Ok(gen_envvars()),
+        "bluetooth" => Ok(gen_bluetooth()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

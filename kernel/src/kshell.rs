@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4824,6 +4824,7 @@ fn dispatch(line: &str) {
         "nightlight" | "nlight" => cmd_nightlight(args),
         "tasksched" | "schtask" => cmd_tasksched(args),
         "envvars" | "envmgr" => cmd_envvars(args),
+        "bluetooth" | "bt" => cmd_bluetooth(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -26263,6 +26264,237 @@ fn cmd_envvars(args: &str) {
     }
 }
 
+/// `bluetooth` / `bt` — Bluetooth device management.
+fn cmd_bluetooth(args: &str) {
+    use crate::fs::bluetooth;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let enabled = bluetooth::is_enabled();
+            shell_println!("Bluetooth: {}", if enabled { "ON" } else { "OFF" });
+            if let Ok(cfg) = bluetooth::config() {
+                shell_println!("  Adapter:       {} [{}]", cfg.adapter_name, cfg.adapter_state.label());
+                shell_println!("  Version:       BT {}", cfg.bt_version);
+                shell_println!("  Discoverable:  {}", cfg.discoverable);
+                shell_println!("  Auto-connect:  {}", cfg.auto_connect);
+            }
+            let devices = bluetooth::list_devices();
+            if devices.is_empty() {
+                shell_println!("  No paired devices.");
+            } else {
+                shell_println!("  Paired devices ({}):", devices.len());
+                for dev in &devices {
+                    let conn = if dev.state == bluetooth::ConnectionState::Connected { " *" } else { "" };
+                    let bat = dev.battery_pct.map_or(String::new(), |b| format!(" ({}%)", b));
+                    shell_println!("    {} {} [{}]{}{}", dev.address, dev.name,
+                        dev.device_type.label(), conn, bat);
+                }
+            }
+        }
+        "on" => match bluetooth::set_enabled(true) {
+            Ok(()) => shell_println!("Bluetooth enabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "off" => match bluetooth::set_enabled(false) {
+            Ok(()) => shell_println!("Bluetooth disabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "scan" => match bluetooth::scan() {
+            Ok(results) => {
+                if results.is_empty() {
+                    shell_println!("No devices found.");
+                } else {
+                    shell_println!("{} device(s) found:", results.len());
+                    for r in &results {
+                        let paired = if r.paired { " [paired]" } else { "" };
+                        shell_println!("  {} {} [{}] RSSI: {}dBm{}",
+                            r.address, r.name, r.device_type.label(), r.rssi, paired);
+                    }
+                }
+            }
+            Err(e) => shell_println!("Error: {:?} (is Bluetooth enabled?)", e),
+        },
+        "pair" => {
+            // bt pair <address> <name> [type]
+            if let (Some(addr), Some(name)) = (parts.get(1), parts.get(2)) {
+                let dt = match parts.get(3).copied().unwrap_or("other") {
+                    "headphones" | "hp" => bluetooth::DeviceType::AudioHeadphones,
+                    "speaker" | "spk" => bluetooth::DeviceType::AudioSpeaker,
+                    "headset" | "hs" => bluetooth::DeviceType::AudioHeadset,
+                    "keyboard" | "kb" => bluetooth::DeviceType::Keyboard,
+                    "mouse" => bluetooth::DeviceType::Mouse,
+                    "gamepad" | "gp" => bluetooth::DeviceType::Gamepad,
+                    "phone" => bluetooth::DeviceType::Phone,
+                    "computer" | "pc" => bluetooth::DeviceType::Computer,
+                    "printer" => bluetooth::DeviceType::Printer,
+                    _ => bluetooth::DeviceType::Other,
+                };
+                match bluetooth::pair(addr, name, dt) {
+                    Ok(()) => shell_println!("Paired with {} ({})", name, addr),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt pair <address> <name> [type]");
+                shell_println!("Types: headphones, speaker, headset, keyboard, mouse, gamepad, phone, computer, printer, other");
+            }
+        }
+        "unpair" | "remove" => {
+            if let Some(addr) = parts.get(1) {
+                match bluetooth::unpair(addr) {
+                    Ok(()) => shell_println!("Unpaired {}.", addr),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt unpair <address>");
+            }
+        }
+        "connect" | "conn" => {
+            if let Some(addr) = parts.get(1) {
+                match bluetooth::connect(addr) {
+                    Ok(()) => shell_println!("Connected to {}.", addr),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt connect <address>");
+            }
+        }
+        "disconnect" | "disc" => {
+            if let Some(addr) = parts.get(1) {
+                match bluetooth::disconnect(addr) {
+                    Ok(()) => shell_println!("Disconnected {}.", addr),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt disconnect <address>");
+            }
+        }
+        "trust" => {
+            if let Some(addr) = parts.get(1) {
+                let on = parts.get(2).copied().unwrap_or("on") != "off";
+                match bluetooth::set_trusted(addr, on) {
+                    Ok(()) => shell_println!("Trust {}: {}", addr, on),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt trust <address> [on|off]");
+            }
+        }
+        "block" => {
+            if let Some(addr) = parts.get(1) {
+                let on = parts.get(2).copied().unwrap_or("on") != "off";
+                match bluetooth::set_blocked(addr, on) {
+                    Ok(()) => shell_println!("Block {}: {}", addr, on),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt block <address> [on|off]");
+            }
+        }
+        "info" => {
+            if let Some(addr) = parts.get(1) {
+                match bluetooth::get_device(addr) {
+                    Ok(dev) => {
+                        shell_println!("Device: {} ({})", dev.name, dev.address);
+                        shell_println!("  Type:       {} {}", dev.device_type.icon(), dev.device_type.label());
+                        shell_println!("  State:      {}", dev.state.label());
+                        shell_println!("  Paired:     {}", dev.paired);
+                        shell_println!("  Trusted:    {}", dev.trusted);
+                        shell_println!("  Blocked:    {}", dev.blocked);
+                        shell_println!("  RSSI:       {} dBm", dev.rssi);
+                        if let Some(bat) = dev.battery_pct {
+                            shell_println!("  Battery:    {}%", bat);
+                        }
+                        let profiles: Vec<&str> = dev.profiles.iter()
+                            .map(|p| p.label())
+                            .collect();
+                        shell_println!("  Profiles:   {}", profiles.join(", "));
+                        shell_println!("  Connects:   {}", dev.connect_count);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt info <address>");
+            }
+        }
+        "name" => {
+            if let Some(new_name) = parts.get(1) {
+                let full = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+                match bluetooth::set_adapter_name(&full) {
+                    Ok(()) => shell_println!("Adapter name set to: {}", full),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt name <adapter name>");
+            }
+        }
+        "discoverable" | "disc-mode" => {
+            let on = parts.get(1).copied().unwrap_or("on") != "off";
+            match bluetooth::set_discoverable(on) {
+                Ok(()) => shell_println!("Discoverable: {}", on),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "addscan" => {
+            if let (Some(addr), Some(name)) = (parts.get(1), parts.get(2)) {
+                let dt = match parts.get(3).copied().unwrap_or("other") {
+                    "headphones" | "hp" => bluetooth::DeviceType::AudioHeadphones,
+                    "speaker" => bluetooth::DeviceType::AudioSpeaker,
+                    "keyboard" => bluetooth::DeviceType::Keyboard,
+                    "mouse" => bluetooth::DeviceType::Mouse,
+                    _ => bluetooth::DeviceType::Other,
+                };
+                let rssi = parts.get(4).and_then(|s| s.parse::<i8>().ok()).unwrap_or(-60);
+                match bluetooth::add_scan_result(addr, name, dt, rssi) {
+                    Ok(()) => shell_println!("Added scan result: {} {}", addr, name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: bt addscan <addr> <name> [type] [rssi]");
+            }
+        }
+        "stats" => {
+            let (total, connected, scans, pairs, ops) = bluetooth::stats();
+            shell_println!("Paired devices:  {}", total);
+            shell_println!("Connected:       {}", connected);
+            shell_println!("Scan count:      {}", scans);
+            shell_println!("Pair count:      {}", pairs);
+            shell_println!("Operations:      {}", ops);
+        }
+        "test" => {
+            bluetooth::self_test();
+            shell_println!("[bluetooth] All self-tests passed.");
+        }
+        "init" => {
+            bluetooth::init_defaults();
+            shell_println!("Bluetooth subsystem initialized.");
+        }
+        _ => {
+            shell_println!("bluetooth — Bluetooth device management");
+            shell_println!("Usage: bluetooth|bt <subcommand>");
+            shell_println!("");
+            shell_println!("Subcommands:");
+            shell_println!("  show               Show status and devices (default)");
+            shell_println!("  on / off           Enable/disable Bluetooth");
+            shell_println!("  scan               Scan for nearby devices");
+            shell_println!("  pair <addr> <name> [type]  Pair with a device");
+            shell_println!("  unpair <addr>      Remove pairing");
+            shell_println!("  connect <addr>     Connect to paired device");
+            shell_println!("  disconnect <addr>  Disconnect device");
+            shell_println!("  trust <addr> [on|off]  Trust for auto-connect");
+            shell_println!("  block <addr> [on|off]  Block device");
+            shell_println!("  info <addr>        Show device details");
+            shell_println!("  name <name>        Set adapter name");
+            shell_println!("  discoverable [on|off]  Set discoverable mode");
+            shell_println!("  addscan <addr> <name> [type] [rssi]  Add scan result");
+            shell_println!("  stats              Show statistics");
+            shell_println!("  init               Initialize subsystem");
+            shell_println!("  test               Run self-tests");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -34859,7 +35091,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

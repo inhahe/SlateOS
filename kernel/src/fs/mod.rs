@@ -41,6 +41,7 @@ pub mod bootcfg;
 pub mod bookmarks;
 pub mod batch;
 pub mod bench;
+pub mod bluetooth;
 #[allow(dead_code)]
 pub mod bzip2;
 pub mod cache;

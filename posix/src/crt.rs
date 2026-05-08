@@ -15,6 +15,7 @@
 //! Registered functions are called in reverse order (LIFO) during
 //! `exit()`.  Maximum 32 handlers.
 
+use core::arch::global_asm;
 use core::ptr::addr_of_mut;
 
 /// Maximum number of atexit handlers.
@@ -119,3 +120,47 @@ pub unsafe extern "C" fn __libc_start_main(
     // Exit with main's return value.
     exit(ret);
 }
+
+// ---------------------------------------------------------------------------
+// _start — the ELF entry point (crt0)
+// ---------------------------------------------------------------------------
+
+// The kernel jumps here with no arguments on the stack (argc/argv not
+// yet supported).  When the kernel adds argument passing, this stub
+// will extract them from the stack per the SysV x86_64 ABI:
+//
+//   [rsp]       = argc
+//   [rsp+8]     = argv[0]
+//   ...
+//   [rsp+8*argc+8] = NULL  (argv terminator)
+//   envp follows argv
+//
+// For now we call main(0, NULL, NULL) since the kernel doesn't provide
+// arguments.  The `weak` linkage lets programs provide their own _start
+// if they prefer raw entry (like the current hello/ticker programs).
+
+global_asm!(
+    // ---------------------------------------------------------------
+    // void _start(void)  — process entry point
+    //
+    // Called by the kernel via IRETQ with no arguments.
+    // Calls main(0, NULL, NULL), then exit(retval).
+    // ---------------------------------------------------------------
+    ".weak _start",
+    ".type _start, @function",
+    "_start:",
+    // Align stack to 16 bytes (should already be, but be safe).
+    "    and rsp, -16",
+    // Clear frame pointer for backtraces.
+    "    xor ebp, ebp",
+    // Call main(argc=0, argv=NULL, envp=NULL).
+    "    xor edi, edi",          // argc = 0
+    "    xor esi, esi",          // argv = NULL
+    "    xor edx, edx",          // envp = NULL
+    "    call main",
+    // main returned in EAX — pass to exit.
+    "    mov edi, eax",
+    "    call exit",
+    // exit should not return, but if it does, halt.
+    "    ud2",
+);

@@ -804,7 +804,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pthread stubs: pthread_create/join/detach (ENOSYS), working mutex ops, pthread_once, TSD (64 keys)
   - [ ] dup/dup2 for pipe handles (needs SYS_PIPE_DUP or fd-level refcounting)
   - [x] ioctl: ioctl() dispatch for TIOCGWINSZ/TIOCSWINSZ, FIONBIO, FIONREAD, TCGETS/TCSETS/TCSETSW/TCSETSF; struct Winsize + struct Termios with full flag constants; isatty(), ttyname(), tcgetattr(), tcsetattr(), cfget/setispeed/ospeed(); default cooked-mode termios for Console fds
-  - [ ] select/poll/epoll equivalents
+  - [x] select/poll: poll() with struct pollfd + POLLIN/POLLOUT/POLLHUP/POLLNVAL/POLLPRI constants, select() with fd_set + FD_ZERO/FD_SET/FD_CLR/FD_ISSET helpers, pselect() with timespec+sigmask (sigmask ignored); readiness reporting by handle kind (Console/File/Pipe always ready, TCP/UDP based on handle state); timeout via SYS_SLEEP; struct Timeval
+  - [ ] epoll (deferred — needs kernel event notification support)
   - [ ] signal handling shim (POSIX signals → native IPC)
   - [x] socket API shim: BSD socket API (socket/connect/bind/listen/accept/send/recv/sendto/recvfrom/shutdown/setsockopt/getsockopt/getpeername/getsockname), byte-order (htons/htonl/ntohs/ntohl), inet_addr/inet_ntoa, gethostbyname (DNS via SYS_DNS_RESOLVE), per-fd socket metadata side table, network error translation; supports AF_INET + SOCK_STREAM (TCP) + SOCK_DGRAM (UDP)
   - [ ] printf/snprintf (needs C variadic support or musl port)

@@ -1,0 +1,471 @@
+//! POSIX poll() and select() — I/O multiplexing.
+//!
+//! ## Current Implementation
+//!
+//! Our kernel has no unified event notification mechanism yet (no epoll,
+//! no kqueue, no completion ports for arbitrary fd readiness).  This
+//! module provides a **minimal but functional** implementation:
+//!
+//! - **Immediate readiness**: all valid fds are reported as ready for
+//!   their requested events.  This is correct for regular files (which
+//!   are always "ready") and console (which can always accept writes).
+//!   For pipes and sockets, this may cause programs to attempt I/O that
+//!   blocks, but that's the documented fallback behavior.
+//!
+//! - **Timeout handling**: `poll(fds, n, 0)` returns immediately.
+//!   `poll(fds, n, timeout)` with `timeout > 0` sleeps via
+//!   `SYS_SLEEP` then rechecks.  `poll(fds, n, -1)` sleeps briefly
+//!   and returns (avoids infinite hang).
+//!
+//! ## Future Work
+//!
+//! When the kernel adds `SYS_POLL` or completion-port-based readiness
+//! notification, this module should delegate to the kernel instead of
+//! doing userspace polling.  The pipe `SYS_PIPE_TRY_READ` could be
+//! used for non-destructive pipe readability checks if a zero-length
+//! read semantic is defined.
+
+use crate::errno;
+use crate::fdtable;
+use crate::syscall::*;
+
+// ---------------------------------------------------------------------------
+// poll() constants
+// ---------------------------------------------------------------------------
+
+/// Data may be read without blocking.
+pub const POLLIN: i16 = 0x0001;
+/// Urgent data may be read without blocking.
+pub const POLLPRI: i16 = 0x0002;
+/// Data may be written without blocking.
+pub const POLLOUT: i16 = 0x0004;
+/// Error condition.
+pub const POLLERR: i16 = 0x0008;
+/// Hang up — peer closed its end.
+pub const POLLHUP: i16 = 0x0010;
+/// Invalid fd.
+pub const POLLNVAL: i16 = 0x0020;
+
+/// Alias for `POLLIN`.
+pub const POLLRDNORM: i16 = 0x0040;
+/// Alias for `POLLOUT`.
+pub const POLLWRNORM: i16 = 0x0100;
+
+// ---------------------------------------------------------------------------
+// select() constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of file descriptors in an `fd_set`.
+pub const FD_SETSIZE: usize = 256;
+
+/// Number of `u64` words needed for `FD_SETSIZE` bits.
+const FD_SET_WORDS: usize = FD_SETSIZE / 64;
+
+// ---------------------------------------------------------------------------
+// Structures
+// ---------------------------------------------------------------------------
+
+/// File descriptor and events for `poll()`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Pollfd {
+    /// File descriptor to poll.
+    pub fd: i32,
+    /// Events to watch for.
+    pub events: i16,
+    /// Events that occurred (filled on return).
+    pub revents: i16,
+}
+
+/// Number of file descriptors type.
+pub type NfdsT = u64;
+
+/// File descriptor set for `select()`.
+///
+/// Bit-packed array: bit N is set if fd N is in the set.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FdSet {
+    /// Bit array — each u64 holds 64 fd bits.
+    pub fds_bits: [u64; FD_SET_WORDS],
+}
+
+/// Time value for `select()` timeout.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Timeval {
+    /// Seconds.
+    pub tv_sec: i64,
+    /// Microseconds.
+    pub tv_usec: i64,
+}
+
+// ---------------------------------------------------------------------------
+// fd_set manipulation macros (as functions)
+// ---------------------------------------------------------------------------
+
+/// Clear all bits in an `fd_set`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fd_set_zero(set: *mut FdSet) {
+    if set.is_null() {
+        return;
+    }
+    // SAFETY: Caller guarantees set is valid.
+    unsafe {
+        core::ptr::write_bytes(set, 0, 1);
+    }
+}
+
+/// Set a bit in an `fd_set`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fd_set_set(fd: i32, set: *mut FdSet) {
+    if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
+        return;
+    }
+    let idx = fd as usize;
+    // SAFETY: bounds checked above.
+    unsafe {
+        let word_idx = idx / 64;
+        let bit_idx = idx % 64;
+        if let Some(word) = (*set).fds_bits.get_mut(word_idx) {
+            *word |= 1u64 << bit_idx;
+        }
+    }
+}
+
+/// Clear a bit in an `fd_set`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fd_set_clr(fd: i32, set: *mut FdSet) {
+    if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
+        return;
+    }
+    let idx = fd as usize;
+    // SAFETY: bounds checked above.
+    unsafe {
+        let word_idx = idx / 64;
+        let bit_idx = idx % 64;
+        if let Some(word) = (*set).fds_bits.get_mut(word_idx) {
+            *word &= !(1u64 << bit_idx);
+        }
+    }
+}
+
+/// Test a bit in an `fd_set`.
+///
+/// Returns non-zero if `fd` is set, 0 if not.
+#[unsafe(no_mangle)]
+pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
+    if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
+        return 0;
+    }
+    let idx = fd as usize;
+    // SAFETY: bounds checked above.
+    unsafe {
+        let word_idx = idx / 64;
+        let bit_idx = idx % 64;
+        if let Some(&word) = (*set).fds_bits.get(word_idx) {
+            i32::from(word & (1u64 << bit_idx) != 0)
+        } else {
+            0
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// poll()
+// ---------------------------------------------------------------------------
+
+/// Wait for events on file descriptors.
+///
+/// Checks each fd in `fds` for the requested events and sets `revents`.
+/// Currently, all valid fds are reported as ready for their requested
+/// events (see module docs for rationale).
+///
+/// - `timeout == 0`: return immediately (non-blocking check).
+/// - `timeout > 0`: sleep for `timeout` milliseconds, then check.
+/// - `timeout == -1`: sleep briefly (10ms) and check — avoids hanging
+///   indefinitely since we can't do kernel-level event waiting yet.
+///
+/// Returns the number of fds with non-zero `revents`, or -1 on error.
+///
+/// # Safety
+///
+/// `fds` must point to an array of at least `nfds` `Pollfd` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i32 {
+    if fds.is_null() && nfds > 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Sleep if a non-zero timeout was requested.
+    if timeout > 0 {
+        // SYS_SLEEP expects nanoseconds.
+        let ns = u64::from(timeout as u32).saturating_mul(1_000_000);
+        let _ = syscall1(SYS_SLEEP, ns);
+    } else if timeout < 0 {
+        // Infinite wait — sleep briefly to avoid busy-spin.
+        // 10ms is a reasonable compromise between responsiveness and CPU usage.
+        let _ = syscall1(SYS_SLEEP, 10_000_000);
+    }
+
+    let mut ready_count: i32 = 0;
+    let mut i: u64 = 0;
+
+    while i < nfds {
+        // SAFETY: fds is valid for nfds entries.
+        let pfd = unsafe { &mut *fds.add(i as usize) };
+        pfd.revents = 0;
+
+        // Negative fd = skip (POSIX says ignore, set revents=0).
+        if pfd.fd < 0 {
+            i = i.wrapping_add(1);
+            continue;
+        }
+
+        let Some(entry) = fdtable::get_fd(pfd.fd) else {
+            pfd.revents = POLLNVAL;
+            ready_count = ready_count.wrapping_add(1);
+            i = i.wrapping_add(1);
+            continue;
+        };
+
+        // Determine readiness based on handle kind.
+        let (readable, writable, hangup) = check_readiness(entry.kind, entry.handle);
+
+        let mut revents: i16 = 0;
+        if readable && (pfd.events & POLLIN != 0) {
+            revents |= POLLIN;
+        }
+        if writable && (pfd.events & POLLOUT != 0) {
+            revents |= POLLOUT;
+        }
+        if hangup {
+            revents |= POLLHUP;
+        }
+
+        pfd.revents = revents;
+        if revents != 0 {
+            ready_count = ready_count.wrapping_add(1);
+        }
+
+        i = i.wrapping_add(1);
+    }
+
+    ready_count
+}
+
+/// Check fd readiness based on handle kind.
+///
+/// Returns `(readable, writable, hangup)`.
+fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool) {
+    use fdtable::HandleKind;
+
+    match kind {
+        // Console: always ready (framebuffer writable, keyboard might have input).
+        // File: always ready (POSIX says regular files are always "ready").
+        // Pipe: assumed ready (can't non-destructively check without peek syscall).
+        HandleKind::Console | HandleKind::File | HandleKind::Pipe => (true, true, false),
+
+        // TCP stream: ready if connected, hangup if handle=0 (closed).
+        HandleKind::TcpStream => {
+            if handle == 0 {
+                (false, false, true)
+            } else {
+                (true, true, false)
+            }
+        }
+
+        // TCP listener: readable means a connection may be pending.
+        HandleKind::TcpListener => {
+            if handle == 0 {
+                (false, false, true)
+            } else {
+                (true, false, false)
+            }
+        }
+
+        // UDP socket: readable/writable if bound.
+        HandleKind::UdpSocket => {
+            if handle == 0 {
+                (false, false, false)
+            } else {
+                (true, true, false)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// select()
+// ---------------------------------------------------------------------------
+
+/// Synchronous I/O multiplexing.
+///
+/// Examines fds 0..`nfds` in the provided fd sets.  On return, each
+/// set contains only the fds that are ready for the corresponding
+/// operation.
+///
+/// - `readfds`: fds to check for readability.
+/// - `writefds`: fds to check for writability.
+/// - `exceptfds`: fds to check for exceptional conditions (always
+///   empty on return — we don't generate OOB/exception events).
+/// - `timeout`: NULL = block indefinitely, {0,0} = non-blocking,
+///   otherwise sleep for the specified duration.
+///
+/// Returns the total number of ready fds across all sets, or -1 on error.
+///
+/// # Safety
+///
+/// All non-null pointers must point to valid `FdSet` / `Timeval` structures.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn select(
+    nfds: i32,
+    readfds: *mut FdSet,
+    writefds: *mut FdSet,
+    exceptfds: *mut FdSet,
+    timeout: *mut Timeval,
+) -> i32 {
+    if nfds < 0 || nfds as usize > FD_SETSIZE {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Handle timeout: convert to milliseconds, then sleep.
+    if timeout.is_null() {
+        // NULL timeout = block indefinitely.  Sleep briefly to avoid busy-spin.
+        let _ = syscall1(SYS_SLEEP, 10_000_000); // 10ms
+    } else {
+        // SAFETY: caller guarantees timeout validity.
+        let tv = unsafe { &*timeout };
+        let ms = tv.tv_sec.saturating_mul(1000)
+            .saturating_add(tv.tv_usec / 1000);
+        if ms > 0 {
+            let ns = (ms as u64).saturating_mul(1_000_000);
+            let _ = syscall1(SYS_SLEEP, ns);
+        }
+        // If timeout is {0,0}, don't sleep (non-blocking select).
+    }
+
+    let mut ready_count: i32 = 0;
+
+    // Prepare result sets: start with empty sets, add ready fds.
+    // We need to read the input sets first, then clear and rebuild them.
+    let read_input = if readfds.is_null() {
+        None
+    } else {
+        // SAFETY: readfds is non-null, caller guarantees validity.
+        Some(unsafe { *readfds })
+    };
+    let write_input = if writefds.is_null() {
+        None
+    } else {
+        // SAFETY: writefds is non-null.
+        Some(unsafe { *writefds })
+    };
+    let except_input = if exceptfds.is_null() {
+        None
+    } else {
+        // SAFETY: exceptfds is non-null.
+        Some(unsafe { *exceptfds })
+    };
+
+    // Clear output sets.
+    if !readfds.is_null() {
+        fd_set_zero(readfds);
+    }
+    if !writefds.is_null() {
+        fd_set_zero(writefds);
+    }
+    if !exceptfds.is_null() {
+        fd_set_zero(exceptfds);
+    }
+
+    // Check each fd.
+    let mut fd: i32 = 0;
+    while fd < nfds {
+        let check_read = read_input.as_ref().is_some_and(|s| is_set_in(fd, s));
+        let check_write = write_input.as_ref().is_some_and(|s| is_set_in(fd, s));
+        let check_except = except_input.as_ref().is_some_and(|s| is_set_in(fd, s));
+
+        if !check_read && !check_write && !check_except {
+            fd = fd.wrapping_add(1);
+            continue;
+        }
+
+        let Some(entry) = fdtable::get_fd(fd) else {
+            // Invalid fd in the set — this is an error per POSIX.
+            errno::set_errno(errno::EBADF);
+            return -1;
+        };
+
+        let (readable, writable, _hangup) = check_readiness(entry.kind, entry.handle);
+
+        if check_read && readable {
+            fd_set_set(fd, readfds);
+            ready_count = ready_count.wrapping_add(1);
+        }
+        if check_write && writable {
+            fd_set_set(fd, writefds);
+            ready_count = ready_count.wrapping_add(1);
+        }
+        // We don't generate exception events, so check_except is always false.
+        let _ = check_except;
+
+        fd = fd.wrapping_add(1);
+    }
+
+    ready_count
+}
+
+/// Test if a fd is set in an `FdSet` (internal helper, takes a reference).
+fn is_set_in(fd: i32, set: &FdSet) -> bool {
+    if fd < 0 || fd as usize >= FD_SETSIZE {
+        return false;
+    }
+    let idx = fd as usize;
+    let word_idx = idx / 64;
+    let bit_idx = idx % 64;
+    if let Some(&word) = set.fds_bits.get(word_idx) {
+        word & (1u64 << bit_idx) != 0
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pselect() stub
+// ---------------------------------------------------------------------------
+
+/// POSIX pselect — select() with nanosecond timeout and signal mask.
+///
+/// Stub: ignores the signal mask and delegates to select() with
+/// converted timeout.
+///
+/// # Safety
+///
+/// Same requirements as `select()`.  `sigmask` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pselect(
+    nfds: i32,
+    readfds: *mut FdSet,
+    writefds: *mut FdSet,
+    exceptfds: *mut FdSet,
+    timeout: *const crate::stat::Timespec,
+    _sigmask: *const u8, // sigset_t* — ignored
+) -> i32 {
+    if timeout.is_null() {
+        // NULL timeout → delegate to select with NULL timeout.
+        return unsafe { select(nfds, readfds, writefds, exceptfds, core::ptr::null_mut()) };
+    }
+
+    // Convert timespec to timeval.
+    // SAFETY: timeout is non-null, caller guarantees validity.
+    let ts = unsafe { &*timeout };
+    let mut tv = Timeval {
+        tv_sec: ts.tv_sec,
+        tv_usec: ts.tv_nsec / 1000,
+    };
+
+    unsafe { select(nfds, readfds, writefds, exceptfds, &raw mut tv) }
+}

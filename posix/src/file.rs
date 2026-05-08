@@ -87,6 +87,20 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
         HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
+        HandleKind::TcpStream => {
+            crate::socket::clear_meta(fd);
+            if entry.handle == 0 { return 0; } // Unconnected socket, nothing to close.
+            syscall1(SYS_TCP_CLOSE, entry.handle)
+        }
+        HandleKind::TcpListener => {
+            crate::socket::clear_meta(fd);
+            syscall1(SYS_TCP_CLOSE_LISTENER, entry.handle)
+        }
+        HandleKind::UdpSocket => {
+            crate::socket::clear_meta(fd);
+            if entry.handle == 0 { return 0; } // Unbound socket, nothing to close.
+            syscall1(SYS_UDP_CLOSE, entry.handle)
+        }
     };
 
     errno::translate(ret) as i32
@@ -133,6 +147,15 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             unsafe { *buf = ch as u8; }
             1
         }
+        HandleKind::TcpStream => {
+            syscall3(SYS_TCP_RECV, entry.handle, buf as u64, count as u64)
+        }
+        HandleKind::TcpListener | HandleKind::UdpSocket => {
+            // Listeners are not readable via read(); use accept().
+            // UDP is not readable via read(); use recvfrom().
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
     };
 
     errno::translate(ret) as SsizeT
@@ -165,6 +188,15 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         HandleKind::Console => {
             syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64)
         }
+        HandleKind::TcpStream => {
+            syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64)
+        }
+        HandleKind::TcpListener | HandleKind::UdpSocket => {
+            // Listeners are not writable via write(); use accept().
+            // UDP is not writable via write(); use sendto().
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
     };
 
     errno::translate(ret) as SsizeT
@@ -190,7 +222,8 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
             let ret = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, whence as u64);
             errno::translate(ret) as OffT
         }
-        HandleKind::Pipe | HandleKind::Console => {
+        HandleKind::Pipe | HandleKind::Console
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -233,9 +266,10 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
-        HandleKind::Pipe => {
-            // No kernel-level pipe dup available.
-            // TODO: Add SYS_PIPE_DUP to kernel, or add refcounting to fd table.
+        HandleKind::Pipe
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+            // No kernel-level dup available for pipes or sockets.
+            // TODO: Add refcounting to fd table or per-kind kernel dup.
             errno::set_errno(errno::ENOSYS);
             -1
         }
@@ -276,7 +310,8 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
             ret as u64
         }
         HandleKind::Console => entry.handle,
-        HandleKind::Pipe => {
+        HandleKind::Pipe
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
             errno::set_errno(errno::ENOSYS);
             return -1;
         }
@@ -365,6 +400,14 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             unsafe {
                 core::ptr::write_bytes(buf, 0, 1);
                 (*buf).st_mode = crate::fcntl::S_IFCHR;
+            }
+            0
+        }
+        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+            // Return minimal stat for a socket.
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 1);
+                (*buf).st_mode = crate::fcntl::S_IFSOCK;
             }
             0
         }
@@ -561,7 +604,8 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
             let ret = syscall2(SYS_FS_FTRUNCATE, entry.handle, length as u64);
             errno::translate(ret) as i32
         }
-        HandleKind::Pipe | HandleKind::Console => {
+        HandleKind::Pipe | HandleKind::Console
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -585,7 +629,8 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
             let ret = syscall0(SYS_FS_SYNC);
             errno::translate(ret) as i32
         }
-        HandleKind::Pipe | HandleKind::Console => 0,
+        HandleKind::Pipe | HandleKind::Console
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => 0,
     }
 }
 
@@ -614,6 +659,9 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
         HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
         HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, handle),
         HandleKind::Console => 0, // Console handles are not closeable.
+        HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),
+        HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, handle),
+        HandleKind::UdpSocket => syscall1(SYS_UDP_CLOSE, handle),
     }
 }
 

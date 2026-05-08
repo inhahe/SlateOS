@@ -45,6 +45,12 @@ pub enum HandleKind {
     Pipe,
     /// Console I/O (stdin/stdout/stderr, uses `SYS_CONSOLE_*`).
     Console,
+    /// A connected TCP socket (uses `SYS_TCP_SEND`/`SYS_TCP_RECV`/`SYS_TCP_CLOSE`).
+    TcpStream,
+    /// A listening TCP socket (uses `SYS_TCP_ACCEPT`/`SYS_TCP_CLOSE_LISTENER`).
+    TcpListener,
+    /// A UDP socket (uses `SYS_UDP_SEND`/`SYS_UDP_RECV`/`SYS_UDP_CLOSE`).
+    UdpSocket,
 }
 
 /// An entry in the file descriptor table.

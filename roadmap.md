@@ -806,7 +806,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [ ] ioctl
   - [ ] select/poll/epoll equivalents
   - [ ] signal handling shim (POSIX signals → native IPC)
-  - [ ] socket API shim
+  - [x] socket API shim: BSD socket API (socket/connect/bind/listen/accept/send/recv/sendto/recvfrom/shutdown/setsockopt/getsockopt/getpeername/getsockname), byte-order (htons/htonl/ntohs/ntohl), inet_addr/inet_ntoa, gethostbyname (DNS via SYS_DNS_RESOLVE), per-fd socket metadata side table, network error translation; supports AF_INET + SOCK_STREAM (TCP) + SOCK_DGRAM (UDP)
   - [ ] printf/snprintf (needs C variadic support or musl port)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)

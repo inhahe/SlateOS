@@ -104,7 +104,10 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
             ret as u64
         }
         fdtable::HandleKind::Console => entry.handle,
-        fdtable::HandleKind::Pipe => {
+        fdtable::HandleKind::Pipe
+        | fdtable::HandleKind::TcpStream
+        | fdtable::HandleKind::TcpListener
+        | fdtable::HandleKind::UdpSocket => {
             errno::set_errno(errno::ENOSYS);
             return -1;
         }

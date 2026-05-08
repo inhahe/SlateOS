@@ -83,6 +83,22 @@ pub const SYS_PIPE_TRY_WRITE: u64 = 223;
 pub const SYS_PIPE_TRY_READ: u64 = 224;
 pub const SYS_PIPE_CLOSE: u64 = 225;
 
+// Networking (800-999)
+pub const SYS_TCP_CONNECT: u64 = 800;
+pub const SYS_TCP_SEND: u64 = 801;
+pub const SYS_TCP_RECV: u64 = 802;
+pub const SYS_TCP_CLOSE: u64 = 803;
+pub const SYS_TCP_BIND: u64 = 804;
+pub const SYS_TCP_ACCEPT: u64 = 805;
+pub const SYS_TCP_CLOSE_LISTENER: u64 = 806;
+
+pub const SYS_UDP_BIND: u64 = 810;
+pub const SYS_UDP_SEND: u64 = 811;
+pub const SYS_UDP_RECV: u64 = 812;
+pub const SYS_UDP_CLOSE: u64 = 813;
+
+pub const SYS_DNS_RESOLVE: u64 = 820;
+
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers
 // ---------------------------------------------------------------------------

@@ -85,6 +85,7 @@ pub mod pthread;
 pub mod process;
 pub mod setjmp;
 pub mod signal;
+pub mod socket;
 pub mod spawn;
 pub mod stat;
 pub mod stdio;

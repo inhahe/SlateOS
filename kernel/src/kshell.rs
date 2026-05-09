@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4885,6 +4885,10 @@ fn dispatch(line: &str) {
         "webcam" | "cam" => cmd_webcam(args),
         "speechio" | "speech" => cmd_speechio(args),
         "mobilelink" | "mlink" => cmd_mobilelink(args),
+        "screenlock" | "slock" => cmd_screenlock(args),
+        "appstore" | "store" => cmd_appstore(args),
+        "wintiling" | "tile" => cmd_wintiling(args),
+        "peninput" | "pen" => cmd_peninput(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -34854,6 +34858,583 @@ fn cmd_mobilelink(args: &str) {
     }
 }
 
+/// `screenlock` / `slock` — screen lock management.
+fn cmd_screenlock(args: &str) {
+    use crate::fs::screenlock;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "status" => {
+            screenlock::init_defaults();
+            let state = screenlock::get_state();
+            shell_println!("Lock state: {}", state.label());
+            if let Some(cfg) = screenlock::get_config() {
+                shell_println!("Timeout: {}s, Method: {}, Max attempts: {}",
+                    cfg.timeout_secs, cfg.primary_method.label(), cfg.max_attempts);
+                shell_println!("Show: clock={}, media={}, notif={}",
+                    cfg.show_clock, cfg.show_media, cfg.show_notifications);
+            }
+        }
+        "lock" => {
+            match screenlock::lock() {
+                Ok(()) => shell_println!("Screen locked."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unlock" => {
+            let credential = parts.get(1).copied().unwrap_or("");
+            match screenlock::authenticate(screenlock::AuthMethod::Password, credential) {
+                Ok(true) => shell_println!("Unlocked."),
+                Ok(false) => shell_println!("Authentication failed."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "force" => {
+            screenlock::force_unlock().ok();
+            shell_println!("Force unlocked.");
+        }
+        "timeout" => {
+            if let Some(s) = parts.get(1) {
+                if let Ok(secs) = s.parse::<u32>() {
+                    screenlock::set_timeout(secs).ok();
+                    shell_println!("Timeout set to {}s.", secs);
+                }
+            } else { shell_println!("Usage: slock timeout <seconds>"); }
+        }
+        "method" => {
+            let m = parts.get(1).copied().unwrap_or("");
+            let method = match m {
+                "password" | "pw" => screenlock::AuthMethod::Password,
+                "pin" => screenlock::AuthMethod::Pin,
+                "fingerprint" | "fp" => screenlock::AuthMethod::Fingerprint,
+                "face" => screenlock::AuthMethod::FaceRecognition,
+                "smartcard" | "sc" => screenlock::AuthMethod::SmartCard,
+                "none" => screenlock::AuthMethod::None,
+                _ => { shell_println!("Methods: password, pin, fingerprint, face, smartcard, none"); return; }
+            };
+            screenlock::set_primary_method(method).ok();
+            shell_println!("Auth method → {}", method.label());
+        }
+        "option" => {
+            let opt = parts.get(1).copied().unwrap_or("");
+            let val = parts.get(2).copied().unwrap_or("on") == "on";
+            match screenlock::set_lock_screen_option(opt, val) {
+                Ok(()) => shell_println!("{} → {}", opt, if val { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?} (options: notifications, media, clock, require_on_wake)", e),
+            }
+        }
+        "events" => {
+            let events = screenlock::list_events();
+            if events.is_empty() {
+                shell_println!("No lock events.");
+            } else {
+                for e in events.iter().rev().take(20) {
+                    shell_println!("[{}] {} via {} — {}", e.id, e.event_type.label(),
+                        e.method.label(), if e.success { "success" } else { "failed" });
+                }
+            }
+        }
+        "stats" => {
+            let (locks, unlocks, failed, lockouts, ops) = screenlock::stats();
+            shell_println!("Locks: {}, Unlocks: {}, Failed: {}, Lockouts: {}",
+                locks, unlocks, failed, lockouts);
+            shell_println!("Ops: {}", ops);
+        }
+        "test" => { screenlock::self_test(); shell_println!("Screen lock self-test complete."); }
+        "init" => { screenlock::init_defaults(); shell_println!("Screen lock initialized."); }
+        _ => {
+            shell_println!("screenlock (slock) — screen lock management");
+            shell_println!("  status / show           Current state");
+            shell_println!("  lock                    Lock screen");
+            shell_println!("  unlock <credential>     Authenticate");
+            shell_println!("  force                   Force unlock");
+            shell_println!("  timeout <seconds>       Set auto-lock");
+            shell_println!("  method <type>           Set auth method");
+            shell_println!("  option <name> [on|off]  Lock screen options");
+            shell_println!("  events                  Recent events");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `appstore` / `store` — application marketplace.
+fn cmd_appstore(args: &str) {
+    use crate::fs::appstore;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            appstore::init_defaults();
+            let apps = appstore::list_apps();
+            if apps.is_empty() {
+                shell_println!("No apps in store.");
+            } else {
+                shell_println!("{:<4} {:<22} {:<14} {:<12} {:<10} {:<8}",
+                    "ID", "Name", "Developer", "Category", "Version", "State");
+                for a in &apps {
+                    shell_println!("{:<4} {:<22} {:<14} {:<12} {:<10} {:<8}",
+                        a.id, a.name, a.developer, a.category.label(),
+                        a.version, a.state.label());
+                }
+            }
+        }
+        "search" => {
+            let query = if parts.len() > 1 { parts[1..].join(" ") } else {
+                shell_println!("Usage: store search <query>");
+                return;
+            };
+            let results = appstore::search(&query);
+            if results.is_empty() {
+                shell_println!("No results for '{}'.", query);
+            } else {
+                for a in &results {
+                    shell_println!("[{}] {} — {} ({})", a.id, a.name, a.description, a.state.label());
+                }
+            }
+        }
+        "install" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match appstore::install(id) {
+                        Ok(()) => shell_println!("Installed app {}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: store install <app_id>"); }
+        }
+        "uninstall" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match appstore::uninstall(id) {
+                        Ok(()) => shell_println!("Uninstalled app {}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: store uninstall <app_id>"); }
+        }
+        "update" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match appstore::update_app(id) {
+                        Ok(()) => shell_println!("Updated app {}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: store update <app_id>"); }
+        }
+        "check" => {
+            match appstore::check_updates() {
+                Ok(ids) => {
+                    if ids.is_empty() { shell_println!("All apps up to date."); }
+                    else { shell_println!("Updates available for: {:?}", ids); }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "installed" => {
+            let installed = appstore::list_installed();
+            if installed.is_empty() {
+                shell_println!("No installed apps.");
+            } else {
+                for a in &installed {
+                    shell_println!("[{}] {} v{} (store: v{})",
+                        a.id, a.name, a.installed_version, a.version);
+                }
+            }
+        }
+        "review" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let rating = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            let comment = if parts.len() > 3 { parts[3..].join(" ") } else { String::new() };
+            if let Ok(id) = id_str.parse::<u32>() {
+                if rating == 0 {
+                    // Show reviews.
+                    let reviews = appstore::list_reviews(id);
+                    if reviews.is_empty() { shell_println!("No reviews."); }
+                    else {
+                        for r in &reviews {
+                            shell_println!("{} — {}/5 — {}", r.user, r.rating, r.comment);
+                        }
+                    }
+                } else {
+                    match appstore::add_review(id, "kshell_user", rating, &comment) {
+                        Ok(rid) => shell_println!("Review {} added ({}/5).", rid, rating),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: store review <app_id> [rating] [comment]"); }
+        }
+        "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let dev = parts.get(2).copied().unwrap_or("Unknown");
+            let cat_str = parts.get(3).copied().unwrap_or("other");
+            let cat = match cat_str {
+                "productivity" => appstore::AppCategory::Productivity,
+                "dev" | "development" => appstore::AppCategory::Development,
+                "graphics" => appstore::AppCategory::Graphics,
+                "multimedia" | "media" => appstore::AppCategory::Multimedia,
+                "games" => appstore::AppCategory::Games,
+                "utilities" | "util" => appstore::AppCategory::Utilities,
+                "system" => appstore::AppCategory::System,
+                "comm" | "communication" => appstore::AppCategory::Communication,
+                "education" | "edu" => appstore::AppCategory::Education,
+                _ => appstore::AppCategory::Other,
+            };
+            if name.is_empty() {
+                shell_println!("Usage: store add <name> [developer] [category]");
+            } else {
+                match appstore::add_app(name, dev, "", cat, "1.0.0", 1024) {
+                    Ok(id) => shell_println!("Added app {} '{}'.", id, name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rm" | "remove" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match appstore::remove_app(id) {
+                        Ok(()) => shell_println!("Removed app {}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: store remove <app_id>"); }
+        }
+        "stats" => {
+            let (apps, installed, installs, updates, ops) = appstore::stats();
+            shell_println!("Catalog: {}, Installed: {}, Total installs: {}", apps, installed, installs);
+            shell_println!("Updates: {}, Ops: {}", updates, ops);
+        }
+        "test" => { appstore::self_test(); shell_println!("App store self-test complete."); }
+        "init" => { appstore::init_defaults(); shell_println!("App store initialized."); }
+        _ => {
+            shell_println!("appstore (store) — application marketplace");
+            shell_println!("  list / show              Browse catalog");
+            shell_println!("  search <query>           Search apps");
+            shell_println!("  install <id>             Install app");
+            shell_println!("  uninstall <id>           Uninstall app");
+            shell_println!("  update <id>              Update app");
+            shell_println!("  check                    Check for updates");
+            shell_println!("  installed                List installed");
+            shell_println!("  review <id> [rating]     View/add review");
+            shell_println!("  add <name> [dev] [cat]   Add to catalog");
+            shell_println!("  remove <id>              Remove from catalog");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `wintiling` / `tile` — window tiling and workspace management.
+fn cmd_wintiling(args: &str) {
+    use crate::fs::wintiling;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "workspaces" => {
+            wintiling::init_defaults();
+            let wss = wintiling::list_workspaces();
+            if wss.is_empty() {
+                shell_println!("No workspaces.");
+            } else {
+                shell_println!("{:<4} {:<15} {:<18} {:<6} {:<6} {:<6}",
+                    "ID", "Name", "Layout", "Gap", "Ratio", "Wins");
+                for ws in &wss {
+                    shell_println!("{:<4} {:<15} {:<18} {:<6} {:<6} {:<6}",
+                        ws.id, ws.name, ws.layout.label(), ws.gap_px,
+                        ws.master_ratio, ws.window_count);
+                }
+            }
+        }
+        "windows" | "wins" => {
+            let ws_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let wins = wintiling::list_windows(ws_id);
+            if wins.is_empty() {
+                shell_println!("No windows.");
+            } else {
+                shell_println!("{:<6} {:<20} {:<4} {:<10} {:<10} {:<8}",
+                    "WinID", "Title", "WS", "Position", "Size", "Float");
+                for w in &wins {
+                    shell_println!("{:<6} {:<20} {:<4} ({},{})     {}x{:<6} {:<8}",
+                        w.window_id, w.title, w.workspace_id,
+                        w.geometry.x, w.geometry.y,
+                        w.geometry.width, w.geometry.height,
+                        if w.is_floating { "Yes" } else { "No" });
+                }
+            }
+        }
+        "create" | "addws" => {
+            let name = parts.get(1).copied().unwrap_or("New");
+            let layout_str = parts.get(2).copied().unwrap_or("master");
+            let layout = match layout_str {
+                "float" | "floating" => wintiling::TilingLayout::Floating,
+                "hsplit" | "horizontal" => wintiling::TilingLayout::HorizontalSplit,
+                "vsplit" | "vertical" => wintiling::TilingLayout::VerticalSplit,
+                "master" | "ms" => wintiling::TilingLayout::MasterStack,
+                "grid" => wintiling::TilingLayout::Grid,
+                "monocle" | "max" => wintiling::TilingLayout::Monocle,
+                "3col" | "three" => wintiling::TilingLayout::ThreeColumn,
+                _ => wintiling::TilingLayout::MasterStack,
+            };
+            match wintiling::create_workspace(name, layout) {
+                Ok(id) => shell_println!("Created workspace {} '{}'.", id, name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmws" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match wintiling::remove_workspace(id) {
+                        Ok(()) => shell_println!("Removed workspace {}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: tile rmws <workspace_id>"); }
+        }
+        "addwin" | "add" => {
+            let wid = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let title = parts.get(2).copied().unwrap_or("Window");
+            let ws = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            if wid == 0 {
+                shell_println!("Usage: tile add <window_id> [title] [workspace]");
+            } else {
+                match wintiling::add_window(wid, title, ws) {
+                    Ok(()) => shell_println!("Added window {} to workspace {}.", wid, ws),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rmwin" | "rm" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match wintiling::remove_window(id) {
+                        Ok(()) => shell_println!("Removed window {}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: tile rm <window_id>"); }
+        }
+        "layout" => {
+            let ws = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let layout_str = parts.get(2).copied().unwrap_or("");
+            let layout = match layout_str {
+                "float" | "floating" => wintiling::TilingLayout::Floating,
+                "hsplit" | "horizontal" => wintiling::TilingLayout::HorizontalSplit,
+                "vsplit" | "vertical" => wintiling::TilingLayout::VerticalSplit,
+                "master" | "ms" => wintiling::TilingLayout::MasterStack,
+                "grid" => wintiling::TilingLayout::Grid,
+                "monocle" | "max" => wintiling::TilingLayout::Monocle,
+                "3col" | "three" => wintiling::TilingLayout::ThreeColumn,
+                _ => { shell_println!("Layouts: float, hsplit, vsplit, master, grid, monocle, 3col"); return; }
+            };
+            match wintiling::set_layout(ws, layout) {
+                Ok(()) => shell_println!("Workspace {} → {}", ws, layout.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "retile" => {
+            let ws = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            match wintiling::retile(ws) {
+                Ok(()) => shell_println!("Retiled workspace {}.", ws),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "gap" => {
+            let ws = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let gap = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            if ws == 0 { shell_println!("Usage: tile gap <workspace> <pixels>"); }
+            else {
+                wintiling::set_gap(ws, gap).ok();
+                shell_println!("Gap → {}px", gap);
+            }
+        }
+        "ratio" => {
+            let ws = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let ratio = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(55);
+            if ws == 0 { shell_println!("Usage: tile ratio <workspace> <percent>"); }
+            else {
+                wintiling::set_master_ratio(ws, ratio).ok();
+                shell_println!("Master ratio → {}%", ratio);
+            }
+        }
+        "float" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match wintiling::toggle_floating(id) {
+                        Ok(f) => shell_println!("Window {} floating: {}", id, f),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: tile float <window_id>"); }
+        }
+        "move" => {
+            let wid = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let ws = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            if wid == 0 || ws == 0 {
+                shell_println!("Usage: tile move <window_id> <workspace>");
+            } else {
+                match wintiling::move_to_workspace(wid, ws) {
+                    Ok(()) => shell_println!("Moved window {} to workspace {}.", wid, ws),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "stats" => {
+            let (ws, wins, tiles, retiles, ops) = wintiling::stats();
+            shell_println!("Workspaces: {}, Windows: {}, Tiles: {}, Retiles: {}",
+                ws, wins, tiles, retiles);
+            shell_println!("Ops: {}", ops);
+        }
+        "test" => { wintiling::self_test(); shell_println!("Window tiling self-test complete."); }
+        "init" => { wintiling::init_defaults(); shell_println!("Window tiling initialized."); }
+        _ => {
+            shell_println!("wintiling (tile) — window tiling");
+            shell_println!("  workspaces              List workspaces");
+            shell_println!("  windows [ws_id]         List windows");
+            shell_println!("  create <name> [layout]  New workspace");
+            shell_println!("  rmws <ws_id>            Remove workspace");
+            shell_println!("  add <wid> [title] [ws]  Add window");
+            shell_println!("  rm <wid>                Remove window");
+            shell_println!("  layout <ws> <type>      Set layout");
+            shell_println!("  retile [ws]             Recalculate");
+            shell_println!("  gap <ws> <px>           Set gap");
+            shell_println!("  ratio <ws> <pct>        Master ratio");
+            shell_println!("  float <wid>             Toggle float");
+            shell_println!("  move <wid> <ws>         Move window");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `peninput` / `pen` — stylus and pen input.
+fn cmd_peninput(args: &str) {
+    use crate::fs::peninput;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            peninput::init_defaults();
+            let pens = peninput::list_pens();
+            if pens.is_empty() {
+                shell_println!("No pen devices.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<10} {:<12} {:<10} {:<8}",
+                    "ID", "Name", "Type", "State", "Pressure", "Tilt");
+                for p in &pens {
+                    shell_println!("{:<4} {:<20} {:<10} {:<12} {:<10} ({},{})",
+                        p.id, p.name, p.pen_type.label(), p.state.label(),
+                        p.pressure, p.tilt_x, p.tilt_y);
+                }
+            }
+        }
+        "register" | "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let type_str = parts.get(2).copied().unwrap_or("stylus");
+            let pen_type = match type_str {
+                "airbrush" => peninput::PenType::AirBrush,
+                "artpen" => peninput::PenType::ArtPen,
+                "eraser" => peninput::PenType::Eraser,
+                "touch" => peninput::PenType::Touch,
+                _ => peninput::PenType::Stylus,
+            };
+            if name.is_empty() {
+                shell_println!("Usage: pen add <name> [stylus|airbrush|artpen|eraser|touch]");
+            } else {
+                let caps = peninput::PenCapabilities {
+                    pressure: true, tilt: true, rotation: false,
+                    eraser_tip: pen_type == peninput::PenType::Eraser, buttons: 2,
+                };
+                match peninput::register_pen(name, pen_type, caps) {
+                    Ok(id) => shell_println!("Registered pen {} '{}'.", id, name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rm" | "unregister" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match peninput::unregister_pen(id) {
+                        Ok(()) => shell_println!("Unregistered pen {}.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: pen rm <id>"); }
+        }
+        "sim" | "simulate" => {
+            let pen_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let action = parts.get(2).copied().unwrap_or("contact");
+            if pen_id == 0 {
+                shell_println!("Usage: pen sim <pen_id> <proxin|proxout|contact|release|move>");
+            } else {
+                match action {
+                    "proxin" => { peninput::proximity_in(pen_id).ok(); shell_println!("Proximity in."); }
+                    "proxout" => { peninput::proximity_out(pen_id).ok(); shell_println!("Proximity out."); }
+                    "contact" => {
+                        let x = parts.get(3).and_then(|s| s.parse::<u16>().ok()).unwrap_or(16000);
+                        let y = parts.get(4).and_then(|s| s.parse::<u16>().ok()).unwrap_or(8000);
+                        let p = parts.get(5).and_then(|s| s.parse::<u16>().ok()).unwrap_or(2048);
+                        peninput::contact(pen_id, x, y, p).ok();
+                        shell_println!("Contact at ({},{}) pressure {}.", x, y, p);
+                    }
+                    "release" => { peninput::release(pen_id).ok(); shell_println!("Released."); }
+                    "move" => {
+                        let x = parts.get(3).and_then(|s| s.parse::<u16>().ok()).unwrap_or(16000);
+                        let y = parts.get(4).and_then(|s| s.parse::<u16>().ok()).unwrap_or(8000);
+                        let p = parts.get(5).and_then(|s| s.parse::<u16>().ok()).unwrap_or(2048);
+                        peninput::report_move(pen_id, x, y, p, 0, 0).ok();
+                        shell_println!("Moved to ({},{}).", x, y);
+                    }
+                    _ => shell_println!("Actions: proxin, proxout, contact, release, move"),
+                }
+            }
+        }
+        "map" => {
+            let pen_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let btn = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            let action = parts.get(3).copied().unwrap_or("");
+            if pen_id == 0 || action.is_empty() {
+                shell_println!("Usage: pen map <pen_id> <button> <action>");
+            } else {
+                match peninput::set_button_mapping(pen_id, btn, action) {
+                    Ok(()) => shell_println!("Button {} → '{}'.", btn, action),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "events" => {
+            let count = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+            let events = peninput::list_events(count);
+            if events.is_empty() {
+                shell_println!("No pen events.");
+            } else {
+                for e in &events {
+                    shell_println!("[{}] pen {} {} at ({},{}) p={}",
+                        e.id, e.pen_id, e.event_type.label(), e.x, e.y, e.pressure);
+                }
+            }
+        }
+        "stats" => {
+            let (pens, events, strokes, ops) = peninput::stats();
+            shell_println!("Pens: {}, Events: {}, Strokes: {}", pens, events, strokes);
+            shell_println!("Ops: {}", ops);
+        }
+        "test" => { peninput::self_test(); shell_println!("Pen input self-test complete."); }
+        "init" => { peninput::init_defaults(); shell_println!("Pen input initialized."); }
+        _ => {
+            shell_println!("peninput (pen) — stylus/pen input");
+            shell_println!("  list / show                   List pens");
+            shell_println!("  add <name> [type]             Register pen");
+            shell_println!("  rm <id>                       Unregister");
+            shell_println!("  sim <id> <action> [x] [y] [p] Simulate input");
+            shell_println!("  map <id> <button> <action>    Map button");
+            shell_println!("  events [count]                Show events");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -43450,7 +44031,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

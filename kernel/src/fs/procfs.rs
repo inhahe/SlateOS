@@ -281,6 +281,10 @@ const ROOT_FILES: &[&str] = &[
     "webcam",
     "speechio",
     "mobilelink",
+    "screenlock",
+    "appstore",
+    "wintiling",
+    "peninput",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6012,6 +6016,53 @@ fn gen_mobilelink() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_screenlock() -> Vec<u8> {
+    use crate::fs::screenlock;
+    let (locks, unlocks, failed, lockouts, ops) = screenlock::stats();
+    let mut out = String::from("total_locks: ");
+    out.push_str(&format!("{}\n", locks));
+    out.push_str(&format!("total_unlocks: {}\n", unlocks));
+    out.push_str(&format!("total_failed: {}\n", failed));
+    out.push_str(&format!("total_lockouts: {}\n", lockouts));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_appstore() -> Vec<u8> {
+    use crate::fs::appstore;
+    let (apps, installed, installs, updates, ops) = appstore::stats();
+    let mut out = String::from("app_count: ");
+    out.push_str(&format!("{}\n", apps));
+    out.push_str(&format!("installed: {}\n", installed));
+    out.push_str(&format!("total_installs: {}\n", installs));
+    out.push_str(&format!("total_updates: {}\n", updates));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_wintiling() -> Vec<u8> {
+    use crate::fs::wintiling;
+    let (ws, wins, tiles, retiles, ops) = wintiling::stats();
+    let mut out = String::from("workspace_count: ");
+    out.push_str(&format!("{}\n", ws));
+    out.push_str(&format!("window_count: {}\n", wins));
+    out.push_str(&format!("total_tiles: {}\n", tiles));
+    out.push_str(&format!("total_retiles: {}\n", retiles));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_peninput() -> Vec<u8> {
+    use crate::fs::peninput;
+    let (pens, events, strokes, ops) = peninput::stats();
+    let mut out = String::from("pen_count: ");
+    out.push_str(&format!("{}\n", pens));
+    out.push_str(&format!("total_events: {}\n", events));
+    out.push_str(&format!("total_strokes: {}\n", strokes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6458,6 +6509,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "webcam" => Ok(gen_webcam()),
         "speechio" => Ok(gen_speechio()),
         "mobilelink" => Ok(gen_mobilelink()),
+        "screenlock" => Ok(gen_screenlock()),
+        "appstore" => Ok(gen_appstore()),
+        "wintiling" => Ok(gen_wintiling()),
+        "peninput" => Ok(gen_peninput()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

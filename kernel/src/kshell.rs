@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4921,6 +4921,10 @@ fn dispatch(line: &str) {
         "pinnedapps" | "pinned" => cmd_pinnedapps(args),
         "inputmethod" | "imf" => cmd_inputmethod(args),
         "storagesense" | "ssense" => cmd_storagesense(args),
+        "autofix" | "afix" => cmd_autofix(args),
+        "recentsearch" | "rsearch" => cmd_recentsearch(args),
+        "sysmaint" | "maint" => cmd_sysmaint(args),
+        "multiclip" | "mclip" => cmd_multiclip(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -39133,6 +39137,437 @@ fn parse_cleanup_category(s: &str) -> Option<crate::fs::storagesense::CleanupCat
     }
 }
 
+/// `autofix` / `afix` — automated problem detection and repair.
+fn cmd_autofix(args: &str) {
+    use crate::fs::autofix;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { autofix::init_defaults(); shell_println!("AutoFix initialised."); }
+        "show" | "" | "list" => {
+            autofix::init_defaults();
+            let issues = autofix::list_issues(None);
+            if issues.is_empty() {
+                shell_println!("No issues detected. Run 'autofix scan' to check.");
+            } else {
+                shell_println!("Issues ({}):", issues.len());
+                for i in &issues {
+                    shell_println!("  [{}] [{}] {} — {} ({})", i.id, i.severity.label(), i.category.label(), i.description, i.status.label());
+                }
+            }
+        }
+        "scan" => match autofix::scan() {
+            Ok(found) => shell_println!("Scan complete: {} issues found.", found),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "fix" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match autofix::fix(i) {
+                    Ok(()) => shell_println!("Issue {} fixed.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: autofix fix <issue_id>"),
+            }
+        }
+        "fixall" => match autofix::fix_all() {
+            Ok(count) => shell_println!("{} issues fixed.", count),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "ignore" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match autofix::ignore(i) {
+                    Ok(()) => shell_println!("Issue {} ignored.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: autofix ignore <issue_id>"),
+            }
+        }
+        "clear" => match autofix::clear_resolved() {
+            Ok(count) => shell_println!("{} resolved issues cleared.", count),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (issues, scans, fixes, ignored, ops) = autofix::stats();
+            shell_println!("AutoFix stats:");
+            shell_println!("  Issues:   {}", issues);
+            shell_println!("  Scans:    {}", scans);
+            shell_println!("  Fixes:    {}", fixes);
+            shell_println!("  Ignored:  {}", ignored);
+            shell_println!("  Ops:      {}", ops);
+        }
+        "test" => autofix::self_test(),
+        _ => {
+            shell_println!("Usage: autofix <subcommand>");
+            shell_println!("  show / list           List issues");
+            shell_println!("  scan                  Run scan");
+            shell_println!("  fix <id>              Fix issue");
+            shell_println!("  fixall                Fix all issues");
+            shell_println!("  ignore <id>           Ignore issue");
+            shell_println!("  clear                 Clear resolved");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `recentsearch` / `rsearch` — search query history and suggestions.
+fn cmd_recentsearch(args: &str) {
+    use crate::fs::recentsearch;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { recentsearch::init_defaults(); shell_println!("Recent search initialised."); }
+        "show" | "" => {
+            recentsearch::init_defaults();
+            let recent = recentsearch::list_recent(20);
+            if recent.is_empty() {
+                shell_println!("No search history.");
+            } else {
+                shell_println!("Recent searches ({}):", recent.len());
+                for e in &recent {
+                    let pin_mark = if e.pinned { " [pinned]" } else { "" };
+                    shell_println!("  '{}' ({}, {} results, used {}x){}",
+                        e.query, e.source.label(), e.result_count, e.use_count, pin_mark);
+                }
+            }
+        }
+        "record" | "add" => {
+            let source_str = parts.get(1).copied().unwrap_or("files");
+            let query = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
+            if query.is_empty() { shell_println!("Usage: recentsearch record <source> <query>"); return; }
+            let source = match source_str {
+                "files" | "file" => recentsearch::SearchSource::FileSearch,
+                "settings" | "set" => recentsearch::SearchSource::Settings,
+                "apps" | "app" => recentsearch::SearchSource::AppLauncher,
+                "run" => recentsearch::SearchSource::RunDialog,
+                "web" => recentsearch::SearchSource::WebSearch,
+                "help" => recentsearch::SearchSource::HelpSearch,
+                _ => { shell_println!("Sources: files, settings, apps, run, web, help"); return; }
+            };
+            match recentsearch::record(&query, source, 0) {
+                Ok(()) => shell_println!("Recorded: '{}'", query),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "suggest" => {
+            let prefix = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if prefix.is_empty() { shell_println!("Usage: recentsearch suggest <prefix>"); return; }
+            let suggestions = recentsearch::suggest(&prefix, 10);
+            if suggestions.is_empty() {
+                shell_println!("No suggestions for '{}'.", prefix);
+            } else {
+                shell_println!("Suggestions for '{}':", prefix);
+                for s in &suggestions {
+                    shell_println!("  '{}' ({}, {}x)", s.query, s.source.label(), s.use_count);
+                }
+            }
+        }
+        "pin" => {
+            let query = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if query.is_empty() { shell_println!("Usage: recentsearch pin <query>"); return; }
+            match recentsearch::pin(&query) {
+                Ok(()) => shell_println!("Pinned: '{}'", query),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unpin" => {
+            let query = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if query.is_empty() { shell_println!("Usage: recentsearch unpin <query>"); return; }
+            match recentsearch::unpin(&query) {
+                Ok(()) => shell_println!("Unpinned: '{}'", query),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clear" => {
+            let source = parts.get(1).copied().unwrap_or("");
+            if source.is_empty() {
+                match recentsearch::clear_history() {
+                    Ok(c) => shell_println!("{} entries cleared.", c),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let src = match source {
+                    "files" => recentsearch::SearchSource::FileSearch,
+                    "settings" => recentsearch::SearchSource::Settings,
+                    "apps" => recentsearch::SearchSource::AppLauncher,
+                    "run" => recentsearch::SearchSource::RunDialog,
+                    "web" => recentsearch::SearchSource::WebSearch,
+                    "help" => recentsearch::SearchSource::HelpSearch,
+                    _ => { shell_println!("Unknown source."); return; }
+                };
+                match recentsearch::clear_source(src) {
+                    Ok(c) => shell_println!("{} {} entries cleared.", c, source),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "enable" => match recentsearch::set_enabled(true) {
+            Ok(()) => shell_println!("Search history enabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "disable" => match recentsearch::set_enabled(false) {
+            Ok(()) => shell_println!("Search history disabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (entries, pinned, searches, suggestions, ops) = recentsearch::stats();
+            shell_println!("Recent search stats:");
+            shell_println!("  Entries:          {}", entries);
+            shell_println!("  Pinned:           {}", pinned);
+            shell_println!("  Total searches:   {}", searches);
+            shell_println!("  Suggestions used: {}", suggestions);
+            shell_println!("  Operations:       {}", ops);
+        }
+        "test" => recentsearch::self_test(),
+        _ => {
+            shell_println!("Usage: recentsearch <subcommand>");
+            shell_println!("  show                  Recent history");
+            shell_println!("  record <src> <query>  Record search");
+            shell_println!("  suggest <prefix>      Get suggestions");
+            shell_println!("  pin/unpin <query>     Pin/unpin entry");
+            shell_println!("  clear [source]        Clear history");
+            shell_println!("  enable / disable      Toggle history");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `sysmaint` / `maint` — system maintenance scheduling.
+fn cmd_sysmaint(args: &str) {
+    use crate::fs::sysmaint;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { sysmaint::init_defaults(); shell_println!("System maintenance initialised."); }
+        "show" | "" | "list" => {
+            sysmaint::init_defaults();
+            let tasks = sysmaint::list_tasks();
+            shell_println!("Maintenance Tasks ({}):", tasks.len());
+            for t in &tasks {
+                let status = if t.enabled { t.status.label() } else { "Disabled" };
+                let idle = if t.idle_only { " (idle only)" } else { "" };
+                shell_println!("  [{}] {:20} every {}h [{}] runs={}{}", t.id, t.task_type.label(), t.interval_hours, status, t.run_count, idle);
+            }
+        }
+        "run" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match sysmaint::run_task(i) {
+                    Ok(()) => shell_println!("Task {} completed.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => match sysmaint::run_pending() {
+                    Ok(count) => shell_println!("{} maintenance tasks completed.", count),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+            }
+        }
+        "due" => match sysmaint::check_schedule() {
+            Ok(due) => {
+                if due.is_empty() {
+                    shell_println!("No tasks due.");
+                } else {
+                    shell_println!("{} tasks due: {:?}", due.len(), due);
+                }
+            }
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "enable" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match sysmaint::set_enabled(i, true) {
+                    Ok(()) => shell_println!("Task {} enabled.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: sysmaint enable <task_id>"),
+            }
+        }
+        "disable" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match sysmaint::set_enabled(i, false) {
+                    Ok(()) => shell_println!("Task {} disabled.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: sysmaint disable <task_id>"),
+            }
+        }
+        "interval" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            let hours = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            match (id, hours) {
+                (Some(i), Some(h)) => match sysmaint::set_interval(i, h) {
+                    Ok(()) => shell_println!("Task {} interval set to {}h.", i, h),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Usage: sysmaint interval <task_id> <hours>"),
+            }
+        }
+        "stats" => {
+            let (tasks, runs, failures, ops) = sysmaint::stats();
+            shell_println!("Maintenance stats:");
+            shell_println!("  Tasks:     {}", tasks);
+            shell_println!("  Runs:      {}", runs);
+            shell_println!("  Failures:  {}", failures);
+            shell_println!("  Ops:       {}", ops);
+        }
+        "test" => sysmaint::self_test(),
+        _ => {
+            shell_println!("Usage: sysmaint <subcommand>");
+            shell_println!("  show / list           All tasks");
+            shell_println!("  run [id]              Run task or all due");
+            shell_println!("  due                   Check due tasks");
+            shell_println!("  enable/disable <id>   Toggle task");
+            shell_println!("  interval <id> <hours> Set interval");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `multiclip` / `mclip` — multi-clipboard with history and slots.
+fn cmd_multiclip(args: &str) {
+    use crate::fs::multiclip;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { multiclip::init_defaults(); shell_println!("Multi-clipboard initialised."); }
+        "show" | "" | "list" => {
+            multiclip::init_defaults();
+            let history = multiclip::list_history(15);
+            if history.is_empty() {
+                shell_println!("Clipboard history empty.");
+            } else {
+                shell_println!("Clipboard History ({} entries):", history.len());
+                for (i, e) in history.iter().enumerate() {
+                    let pin = if e.pinned { " [pinned]" } else { "" };
+                    let slot = if e.slot_name.is_empty() { String::new() } else { format!(" <{}>", e.slot_name) };
+                    let preview = if e.content.len() > 40 {
+                        format!("{}...", &e.content[..40])
+                    } else {
+                        e.content.clone()
+                    };
+                    shell_println!("  [{}] ({}) '{}'{}{} pastes={}", i, e.content_type.label(), preview, pin, slot, e.paste_count);
+                }
+            }
+        }
+        "copy" | "push" => {
+            let text = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if text.is_empty() { shell_println!("Usage: multiclip copy <text>"); return; }
+            match multiclip::push(&text, multiclip::ContentType::PlainText) {
+                Ok(id) => shell_println!("Copied (id={}): '{}'", id, text),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "paste" => {
+            let idx = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            match multiclip::paste(idx) {
+                Ok(entry) => shell_println!("{}", entry.content),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "slot" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                let slots = multiclip::list_slots();
+                if slots.is_empty() {
+                    shell_println!("No named slots.");
+                } else {
+                    for s in &slots {
+                        let preview = if s.content.len() > 40 { format!("{}...", &s.content[..40]) } else { s.content.clone() };
+                        shell_println!("  <{}> '{}'", s.slot_name, preview);
+                    }
+                }
+            } else {
+                match multiclip::paste_slot(name) {
+                    Ok(entry) => shell_println!("{}", entry.content),
+                    Err(e) => shell_println!("Slot '{}': {:?}", name, e),
+                }
+            }
+        }
+        "setslot" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            let name = parts.get(2).copied().unwrap_or("");
+            match id {
+                Some(i) if !name.is_empty() => match multiclip::set_slot(i, name) {
+                    Ok(()) => shell_println!("Slot '{}' assigned to entry {}.", name, i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Usage: multiclip setslot <id> <name>"),
+            }
+        }
+        "pin" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match multiclip::pin(i) {
+                    Ok(()) => shell_println!("Entry {} pinned.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: multiclip pin <id>"),
+            }
+        }
+        "unpin" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match multiclip::unpin(i) {
+                    Ok(()) => shell_println!("Entry {} unpinned.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: multiclip unpin <id>"),
+            }
+        }
+        "remove" | "rm" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match multiclip::remove(i) {
+                    Ok(()) => shell_println!("Entry {} removed.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: multiclip remove <id>"),
+            }
+        }
+        "clear" => match multiclip::clear_history() {
+            Ok(c) => shell_println!("{} entries cleared.", c),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "enable" => match multiclip::set_enabled(true) {
+            Ok(()) => shell_println!("Multi-clipboard enabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "disable" => match multiclip::set_enabled(false) {
+            Ok(()) => shell_println!("Multi-clipboard disabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (entries, pinned, copies, pastes, ops) = multiclip::stats();
+            shell_println!("Multi-clipboard stats:");
+            shell_println!("  Entries:  {}", entries);
+            shell_println!("  Pinned:   {}", pinned);
+            shell_println!("  Copies:   {}", copies);
+            shell_println!("  Pastes:   {}", pastes);
+            shell_println!("  Ops:      {}", ops);
+        }
+        "test" => multiclip::self_test(),
+        _ => {
+            shell_println!("Usage: multiclip <subcommand>");
+            shell_println!("  show / list           Clipboard history");
+            shell_println!("  copy <text>           Copy text");
+            shell_println!("  paste [index]         Paste (0=most recent)");
+            shell_println!("  slot [name]           List/paste named slots");
+            shell_println!("  setslot <id> <name>   Assign named slot");
+            shell_println!("  pin/unpin <id>        Pin/unpin entry");
+            shell_println!("  remove <id>           Remove entry");
+            shell_println!("  clear                 Clear non-pinned");
+            shell_println!("  enable / disable      Toggle history");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -47729,7 +48164,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

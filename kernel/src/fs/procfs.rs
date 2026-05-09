@@ -317,6 +317,10 @@ const ROOT_FILES: &[&str] = &[
     "pinnedapps",
     "inputmethod",
     "storagesense",
+    "autofix",
+    "recentsearch",
+    "sysmaint",
+    "multiclip",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6504,6 +6508,57 @@ fn gen_storagesense() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_autofix() -> Vec<u8> {
+    use alloc::format;
+    use super::autofix;
+    let (issues, scans, fixes, ignored, ops) = autofix::stats();
+    let mut out = String::from("issue_count: ");
+    out.push_str(&format!("{}\n", issues));
+    out.push_str(&format!("total_scans: {}\n", scans));
+    out.push_str(&format!("total_fixes: {}\n", fixes));
+    out.push_str(&format!("total_ignored: {}\n", ignored));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_recentsearch() -> Vec<u8> {
+    use alloc::format;
+    use super::recentsearch;
+    let (entries, pinned, searches, suggestions, ops) = recentsearch::stats();
+    let mut out = String::from("entry_count: ");
+    out.push_str(&format!("{}\n", entries));
+    out.push_str(&format!("pinned_count: {}\n", pinned));
+    out.push_str(&format!("total_searches: {}\n", searches));
+    out.push_str(&format!("suggestions_used: {}\n", suggestions));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_sysmaint() -> Vec<u8> {
+    use alloc::format;
+    use super::sysmaint;
+    let (tasks, runs, failures, ops) = sysmaint::stats();
+    let mut out = String::from("task_count: ");
+    out.push_str(&format!("{}\n", tasks));
+    out.push_str(&format!("total_runs: {}\n", runs));
+    out.push_str(&format!("total_failures: {}\n", failures));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_multiclip() -> Vec<u8> {
+    use alloc::format;
+    use super::multiclip;
+    let (entries, pinned, copies, pastes, ops) = multiclip::stats();
+    let mut out = String::from("entry_count: ");
+    out.push_str(&format!("{}\n", entries));
+    out.push_str(&format!("pinned_count: {}\n", pinned));
+    out.push_str(&format!("total_copies: {}\n", copies));
+    out.push_str(&format!("total_pastes: {}\n", pastes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6986,6 +7041,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "pinnedapps" => Ok(gen_pinnedapps()),
         "inputmethod" => Ok(gen_inputmethod()),
         "storagesense" => Ok(gen_storagesense()),
+        "autofix" => Ok(gen_autofix()),
+        "recentsearch" => Ok(gen_recentsearch()),
+        "sysmaint" => Ok(gen_sysmaint()),
+        "multiclip" => Ok(gen_multiclip()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

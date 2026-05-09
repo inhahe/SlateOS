@@ -3462,6 +3462,7 @@ const COMMANDS: &[&str] = &[
     "secureerase", "serase", "dnssettings", "dns", "backupsched", "bsched", "displaycal", "dcal",
     "vpnprofile", "vpnp", "diskhealth", "dhealth", "recoverypart", "rpart",
     "userprofile", "uprof", "diskclean", "dclean",
+    "cas",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4983,6 +4984,7 @@ fn dispatch(line: &str) {
         "recoverypart" | "rpart" => cmd_recoverypart(args),
         "userprofile" | "uprof" => cmd_userprofile(args),
         "diskclean" | "dclean" => cmd_diskclean(args),
+        "cas" => cmd_cas(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -46213,6 +46215,113 @@ fn parse_clean_category(s: &str) -> crate::fs::diskclean::CleanCategory {
     }
 }
 
+/// `cas` — content-addressed store management.
+fn cmd_cas(args: &str) {
+    use crate::fs::cas;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "stats" | "" => {
+            let s = cas::stats();
+            shell_println!("=== Content-Addressed Store ===");
+            shell_println!("  Blobs:              {}", s.blob_count);
+            shell_println!("  Total bytes:        {}", s.total_bytes);
+            shell_println!("  Max bytes:          {}", s.max_bytes);
+            shell_println!("  Total refs:         {}", s.total_refs);
+            shell_println!("  Dedup hits:         {}", s.dedup_hits);
+            shell_println!("  Integrity failures: {}", s.integrity_failures);
+            shell_println!("  GC collected:       {}", s.gc_collected);
+        }
+        "put" => {
+            let data = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if data.is_empty() {
+                shell_println!("Usage: cas put <data>");
+                return;
+            }
+            match cas::put(data.as_bytes()) {
+                Ok(hash) => {
+                    let hex = cas::hash_to_hex(&hash);
+                    shell_println!("Stored: {}", hex);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" => {
+            if let Some(hex) = parts.get(1) {
+                if let Some(hash) = cas::hex_to_hash(hex) {
+                    match cas::get(&hash) {
+                        Ok(data) => {
+                            if let Ok(s) = core::str::from_utf8(&data) {
+                                shell_println!("{}", s);
+                            } else {
+                                shell_println!("({} bytes, binary)", data.len());
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid hash hex");
+                }
+            } else {
+                shell_println!("Usage: cas get <hash>");
+            }
+        }
+        "has" => {
+            if let Some(hex) = parts.get(1) {
+                if let Some(hash) = cas::hex_to_hash(hex) {
+                    shell_println!("{}", if cas::has(&hash) { "yes" } else { "no" });
+                } else {
+                    shell_println!("Invalid hash hex");
+                }
+            } else {
+                shell_println!("Usage: cas has <hash>");
+            }
+        }
+        "release" => {
+            if let Some(hex) = parts.get(1) {
+                if let Some(hash) = cas::hex_to_hash(hex) {
+                    match cas::release(&hash) {
+                        Ok(()) => shell_println!("Released"),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid hash hex");
+                }
+            } else {
+                shell_println!("Usage: cas release <hash>");
+            }
+        }
+        "gc" => {
+            let (collected, freed) = cas::gc();
+            shell_println!("GC: {} blobs collected, {} bytes freed", collected, freed);
+        }
+        "limit" => {
+            if let Some(val) = parts.get(1) {
+                if let Ok(max) = val.parse::<u64>() {
+                    cas::set_max_bytes(max);
+                    shell_println!("Max bytes set to {}", max);
+                } else {
+                    shell_println!("Invalid number");
+                }
+            } else {
+                let s = cas::stats();
+                shell_println!("Current limit: {} bytes", s.max_bytes);
+            }
+        }
+        _ => {
+            shell_println!("Usage: cas [stats|put|get|has|release|gc|limit]");
+            shell_println!("  stats           — show store statistics");
+            shell_println!("  put <data>      — store data, print hash");
+            shell_println!("  get <hash>      — retrieve data by hash");
+            shell_println!("  has <hash>      — check if hash exists");
+            shell_println!("  release <hash>  — decrement refcount");
+            shell_println!("  gc              — garbage collect zero-ref blobs");
+            shell_println!("  limit [bytes]   — show/set max byte limit");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -54809,7 +54918,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

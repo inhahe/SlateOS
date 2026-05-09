@@ -370,6 +370,8 @@ const ROOT_FILES: &[&str] = &[
     "recoverypart",
     "userprofile",
     "diskclean",
+    "acl",
+    "associations",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7395,6 +7397,29 @@ fn gen_diskclean() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_acl() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Access Control Lists ===\n");
+    let s = crate::fs::acl::stats();
+    out.push_str(&format!("files_with_acls: {}\n", s.files_with_acls));
+    out.push_str(&format!("total_entries: {}\n", s.total_entries));
+    out.push_str(&format!("checks_performed: {}\n", s.checks_performed));
+    out.push_str(&format!("denials: {}\n", s.denials));
+    out.into_bytes()
+}
+
+fn gen_associations() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== File Associations ===\n");
+    let s = crate::fs::associations::stats();
+    out.push_str(&format!("mime_types: {}\n", s.mime_types));
+    out.push_str(&format!("total_entries: {}\n", s.total_entries));
+    out.push_str(&format!("user_entries: {}\n", s.user_entries));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7930,6 +7955,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "recoverypart" => Ok(gen_recoverypart()),
         "userprofile" => Ok(gen_userprofile()),
         "diskclean" => Ok(gen_diskclean()),
+        "acl" => Ok(gen_acl()),
+        "associations" => Ok(gen_associations()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

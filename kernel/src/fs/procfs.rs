@@ -247,6 +247,8 @@ const ROOT_FILES: &[&str] = &[
     "restorepoint",
     "battery",
     "dictation",
+    "screenreader",
+    "langpack",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5530,6 +5532,36 @@ fn gen_dictation() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_screenreader() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (elements, announcements, queue_len, enabled, rate_label, ops) = super::screenreader::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("speech_rate: {}\n", rate_label));
+    out.push_str(&format!("elements: {}\n", elements));
+    out.push_str(&format!("announcements: {}\n", announcements));
+    out.push_str(&format!("queue_len: {}\n", queue_len));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_langpack() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (pack_count, installed_count, system_lang, lookups, misses, ops) = super::langpack::stats();
+    out.push_str(&format!("packs: {}\n", pack_count));
+    out.push_str(&format!("installed: {}\n", installed_count));
+    out.push_str(&format!("system_language: {}\n", system_lang));
+    out.push_str(&format!("lookups: {}\n", lookups));
+    out.push_str(&format!("misses: {}\n", misses));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5942,6 +5974,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "restorepoint" => Ok(gen_restorepoint()),
         "battery" => Ok(gen_battery()),
         "dictation" => Ok(gen_dictation()),
+        "screenreader" => Ok(gen_screenreader()),
+        "langpack" => Ok(gen_langpack()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

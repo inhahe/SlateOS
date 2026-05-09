@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4851,6 +4851,8 @@ fn dispatch(line: &str) {
         "restorepoint" | "rpoint" => cmd_restorepoint(args),
         "battery" | "batt" => cmd_battery(args),
         "dictation" | "dict" => cmd_dictation(args),
+        "screenreader" | "sr" => cmd_screenreader(args),
+        "langpack" | "lpack" => cmd_langpack(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -30974,6 +30976,278 @@ fn cmd_dictation(args: &str) {
     }
 }
 
+/// `screenreader` / `sr` — screen reader / UI narration.
+fn cmd_screenreader(args: &str) {
+    use crate::fs::screenreader;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (elems, announcements, queue, enabled, rate, _) = screenreader::stats();
+            shell_println!("Screen Reader: {}", if enabled { "enabled" } else { "disabled" });
+            shell_println!("  Speech rate:     {}", rate);
+            shell_println!("  Elements:        {}", elems);
+            shell_println!("  Announcements:   {}", announcements);
+            shell_println!("  Speech queue:    {}", queue);
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match screenreader::set_enabled(on) {
+                Ok(()) => shell_println!("Screen reader {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rate" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: sr rate <very-slow|slow|normal|fast|very-fast>");
+                return;
+            }
+            let rate = match parts[1] {
+                "very-slow" | "veryslow" => screenreader::SpeechRate::VerySlow,
+                "slow" => screenreader::SpeechRate::Slow,
+                "normal" => screenreader::SpeechRate::Normal,
+                "fast" => screenreader::SpeechRate::Fast,
+                "very-fast" | "veryfast" => screenreader::SpeechRate::VeryFast,
+                _ => { shell_println!("Unknown rate: {}", parts[1]); return; }
+            };
+            match screenreader::set_speech_rate(rate) {
+                Ok(()) => shell_println!("Speech rate set to {}.", rate.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "volume" | "vol" => {
+            if parts.len() < 2 {
+                let cfg = screenreader::get_config();
+                match cfg {
+                    Ok(c) => shell_println!("Volume: {}%", c.volume),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+                return;
+            }
+            let vol: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid volume."); return; }
+            };
+            match screenreader::set_volume(vol) {
+                Ok(()) => shell_println!("Volume set to {}%.", vol.min(100)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "verbosity" | "verb" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: sr verbosity <low|medium|high>");
+                return;
+            }
+            let v = match parts[1] {
+                "low" => screenreader::Verbosity::Low,
+                "medium" | "med" => screenreader::Verbosity::Medium,
+                "high" => screenreader::Verbosity::High,
+                _ => { shell_println!("Unknown verbosity: {}", parts[1]); return; }
+            };
+            match screenreader::set_verbosity(v) {
+                Ok(()) => shell_println!("Verbosity set to {}.", v.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "announce" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: sr announce <text>");
+                return;
+            }
+            let text = parts[1..].join(" ");
+            match screenreader::announce(&text) {
+                Ok(()) => shell_println!("Announced: \"{}\"", text),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "elements" | "elems" => {
+            let elems = screenreader::list_elements();
+            if elems.is_empty() {
+                shell_println!("No registered elements.");
+            } else {
+                shell_println!("{:<6} {:<16} {:<24} {}", "ID", "Role", "Name", "Focused");
+                for e in &elems {
+                    shell_println!("{:<6} {:<16} {:<24} {}",
+                        e.id, e.role.label(), e.name, if e.focused { "*" } else { "" });
+                }
+            }
+        }
+        "queue" => {
+            let len = screenreader::speech_queue_len();
+            shell_println!("Speech queue: {} items", len);
+            let mut count = 0;
+            while count < 10 {
+                if let Some(item) = screenreader::next_speech() {
+                    shell_println!("  [{}] {}", count + 1, item);
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            if count == 0 {
+                shell_println!("  (empty)");
+            }
+        }
+        "focus" => {
+            match screenreader::focused_element() {
+                Some(e) => shell_println!("Focused: #{} {} \"{}\"", e.id, e.role.label(), e.name),
+                None => shell_println!("No focused element."),
+            }
+        }
+        "stats" => {
+            let (elems, announcements, queue, enabled, rate, ops) = screenreader::stats();
+            shell_println!("Elements: {}  Announcements: {}  Queue: {}  Enabled: {}  Rate: {}  Ops: {}",
+                elems, announcements, queue, enabled, rate, ops);
+        }
+        "test" => { screenreader::self_test(); shell_println!("Screen reader self-test complete."); }
+        "init" => { screenreader::init_defaults(); shell_println!("Screen reader initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("screenreader (sr) — screen reader / UI narration");
+            shell_println!("  show               Overview");
+            shell_println!("  enable/disable      Toggle screen reader");
+            shell_println!("  rate <speed>        Set speech rate");
+            shell_println!("  volume [0-100]      Get/set volume");
+            shell_println!("  verbosity <level>   Set verbosity (low/medium/high)");
+            shell_println!("  announce <text>     Push text to TTS queue");
+            shell_println!("  elements            List registered elements");
+            shell_println!("  queue               Show/drain speech queue");
+            shell_println!("  focus               Show focused element");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'sr help' for usage."); }
+    }
+}
+
+/// `langpack` / `lpack` — language pack and translation management.
+fn cmd_langpack(args: &str) {
+    use crate::fs::langpack;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (total, installed, lang, lookups, misses, _) = langpack::stats();
+            shell_println!("Language Packs");
+            shell_println!("  System language: {}", lang);
+            shell_println!("  Installed:       {}/{}", installed, total);
+            shell_println!("  Lookups:         {} ({} misses)", lookups, misses);
+            shell_println!("  RTL:             {}", if langpack::is_rtl() { "yes" } else { "no" });
+        }
+        "list" => {
+            let packs = langpack::list_packs();
+            if packs.is_empty() {
+                shell_println!("No language packs.");
+            } else {
+                shell_println!("{:<10} {:<20} {:<20} {:<12} {}",
+                    "Code", "Native", "English", "Status", "RTL");
+                for p in &packs {
+                    shell_println!("{:<10} {:<20} {:<20} {:<12} {}",
+                        p.code, p.native_name, p.english_name, p.status.label(),
+                        if p.rtl { "yes" } else { "no" });
+                }
+            }
+        }
+        "install" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: lpack install <code> <native-name> <english-name> [rtl] [keyboard]");
+                return;
+            }
+            let code = parts[1];
+            let native = parts[2];
+            let english = parts[3];
+            let rtl = parts.get(4).copied() == Some("rtl");
+            let kb = parts.get(if rtl { 5 } else { 4 }).copied().unwrap_or(code);
+            match langpack::install(code, native, english, rtl, kb) {
+                Ok(()) => shell_println!("Installed language pack: {} ({})", english, code),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "uninstall" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: lpack remove <code>");
+                return;
+            }
+            match langpack::uninstall(parts[1]) {
+                Ok(()) => shell_println!("Removed language pack: {}", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "set" | "use" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: lpack set <code>");
+                return;
+            }
+            match langpack::set_system_language(parts[1]) {
+                Ok(()) => shell_println!("System language set to {}.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "translate" | "tr" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: lpack translate <key>");
+                return;
+            }
+            let result = langpack::translate(parts[1]);
+            shell_println!("{} → {}", parts[1], result);
+        }
+        "addstr" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: lpack addstr <key> <value...>");
+                return;
+            }
+            let value = parts[2..].join(" ");
+            match langpack::add_translation(parts[1], &value) {
+                Ok(()) => shell_println!("Added: {} = \"{}\"", parts[1], value),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: lpack info <code>");
+                return;
+            }
+            match langpack::get_pack(parts[1]) {
+                Ok(p) => {
+                    shell_println!("Language: {} ({})", p.english_name, p.code);
+                    shell_println!("  Native name:  {}", p.native_name);
+                    shell_println!("  Status:       {}", p.status.label());
+                    shell_println!("  Strings:      {}", p.string_count);
+                    shell_println!("  Completeness: {}%", p.completeness_pct);
+                    shell_println!("  Size:         {} KiB", p.size_bytes / 1024);
+                    shell_println!("  Keyboard:     {}", p.keyboard_layout);
+                    shell_println!("  RTL:          {}", if p.rtl { "yes" } else { "no" });
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rtl" => {
+            shell_println!("Current language RTL: {}", if langpack::is_rtl() { "yes" } else { "no" });
+        }
+        "stats" => {
+            let (total, installed, lang, lookups, misses, ops) = langpack::stats();
+            shell_println!("Packs: {}/{}  Lang: {}  Lookups: {}  Misses: {}  Ops: {}",
+                installed, total, lang, lookups, misses, ops);
+        }
+        "test" => { langpack::self_test(); shell_println!("Language pack self-test complete."); }
+        "init" => { langpack::init_defaults(); shell_println!("Language pack manager initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("langpack (lpack) — language and translation management");
+            shell_println!("  show               Overview");
+            shell_println!("  list               List installed packs");
+            shell_println!("  install <args>      Install a language pack");
+            shell_println!("  remove <code>       Remove a language pack");
+            shell_println!("  set <code>          Set system language");
+            shell_println!("  translate <key>     Translate a string key");
+            shell_println!("  addstr <key> <val>  Add a translation string");
+            shell_println!("  info <code>         Pack details");
+            shell_println!("  rtl                 Check RTL status");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'lpack help' for usage."); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -39570,7 +39844,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

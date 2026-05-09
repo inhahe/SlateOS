@@ -337,6 +337,10 @@ const ROOT_FILES: &[&str] = &[
     "kbmacro",
     "sysresource",
     "faceunlock",
+    "usbpolicy",
+    "applaunch",
+    "sysprofiler",
+    "clipsync",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6908,6 +6912,60 @@ fn gen_faceunlock() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_usbpolicy() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (rule_count, log_size, total_allowed, total_denied, ops) = super::usbpolicy::stats();
+    out.push_str("subsystem: usbpolicy\n");
+    out.push_str(&format!("rule_count: {}\n", rule_count));
+    out.push_str(&format!("log_size: {}\n", log_size));
+    out.push_str(&format!("total_allowed: {}\n", total_allowed));
+    out.push_str(&format!("total_denied: {}\n", total_denied));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_applaunch() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (item_count, total_searches, total_launches, ops) = super::applaunch::stats();
+    out.push_str("subsystem: applaunch\n");
+    out.push_str(&format!("item_count: {}\n", item_count));
+    out.push_str(&format!("total_searches: {}\n", total_searches));
+    out.push_str(&format!("total_launches: {}\n", total_launches));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_sysprofiler() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (section_count, total_queries, total_refreshes, ops) = super::sysprofiler::stats();
+    out.push_str("subsystem: sysprofiler\n");
+    out.push_str(&format!("section_count: {}\n", section_count));
+    out.push_str(&format!("total_queries: {}\n", total_queries));
+    out.push_str(&format!("total_refreshes: {}\n", total_refreshes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_clipsync() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (device_count, total_sent, total_received, total_bytes, ops) = super::clipsync::stats();
+    out.push_str("subsystem: clipsync\n");
+    out.push_str(&format!("device_count: {}\n", device_count));
+    out.push_str(&format!("total_sent: {}\n", total_sent));
+    out.push_str(&format!("total_received: {}\n", total_received));
+    out.push_str(&format!("total_bytes_synced: {}\n", total_bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7410,6 +7468,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kbmacro" => Ok(gen_kbmacro()),
         "sysresource" => Ok(gen_sysresource()),
         "faceunlock" => Ok(gen_faceunlock()),
+        "usbpolicy" => Ok(gen_usbpolicy()),
+        "applaunch" => Ok(gen_applaunch()),
+        "sysprofiler" => Ok(gen_sysprofiler()),
+        "clipsync" => Ok(gen_clipsync()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

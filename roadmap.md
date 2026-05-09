@@ -863,6 +863,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Keyboard Macros (fs::kbmacro): keyboard/mouse macro recording and playback with 7 event types (KeyDown/KeyUp/TypeText/Delay/MouseMove/MouseDown/MouseUp), hotkey triggers, repeat counts, enable/disable; `kbmacro`/`macro` kshell command; /proc/kbmacro; 8 self-tests
   - [x] System Resources (fs::sysresource): resource monitoring dashboard with CPU/memory/swap/disk/network/GPU tracking, alert thresholds with auto-trigger, 300-sample history, average CPU calculation; `sysresource`/`sres` kshell command; /proc/sysresource; 8 self-tests
   - [x] Face Unlock (fs::faceunlock): facial recognition authentication with 4 security levels, liveness detection, attention requirement, multi-user enrollment, verify/match/reject tracking; `faceunlock`/`face` kshell command; /proc/faceunlock; 8 self-tests
+  - [x] USB Policy (fs::usbpolicy): USB device access policies with VID/PID/class matching, allow/deny/ask/readonly decisions, first-match-wins rules, event logging with 500-entry limit, block-unknown mode; `usbpolicy`/`usbpol` kshell command; /proc/usbpolicy; 8 self-tests
+  - [x] App Launcher (fs::applaunch): search-based application launcher with scoring (name/keyword/prefix/usage boost), 7 result types, launch history tracking, top-launched ranking, 500-item limit; `applaunch`/`alaunch` kshell command; /proc/applaunch; 8 self-tests
+  - [x] System Profiler (fs::sysprofiler): detailed hardware/software inventory with 10 section types, key-value entries, text summary generation, section refresh tracking; `sysprofiler`/`sprof` kshell command; /proc/sysprofiler; 8 self-tests
+  - [x] Clipboard Sync (fs::clipsync): cross-device clipboard synchronization with content type filtering, size limits, device pairing with send/receive/bidirectional modes, encrypted transfer, sync queue; `clipsync`/`clsync` kshell command; /proc/clipsync; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

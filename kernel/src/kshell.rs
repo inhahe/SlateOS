@@ -3453,6 +3453,7 @@ const COMMANDS: &[&str] = &[
     "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
+    "usbpolicy", "usbpol", "applaunch", "alaunch", "sysprofiler", "sprof", "clipsync", "clsync",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4941,6 +4942,10 @@ fn dispatch(line: &str) {
         "kbmacro" | "macro" => cmd_kbmacro(args),
         "sysresource" | "sres" => cmd_sysresource(args),
         "faceunlock" | "face" => cmd_faceunlock(args),
+        "usbpolicy" | "usbpol" => cmd_usbpolicy(args),
+        "applaunch" | "alaunch" => cmd_applaunch(args),
+        "sysprofiler" | "sprof" => cmd_sysprofiler(args),
+        "clipsync" | "clsync" => cmd_clipsync(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -41863,6 +41868,573 @@ fn cmd_faceunlock(args: &str) {
     }
 }
 
+/// `usbpolicy` / `usbpol` — USB device access policies.
+fn cmd_usbpolicy(args: &str) {
+    use crate::fs::usbpolicy;
+    use alloc::format;
+    use alloc::string::String;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "check" => {
+            // check <vid> <pid> <class> <name>
+            if parts.len() < 5 {
+                shell_println!("Usage: usbpolicy check <vid_hex> <pid_hex> <class> <name>");
+                return;
+            }
+            let vid = u16::from_str_radix(parts[1].trim_start_matches("0x"), 16).unwrap_or(0);
+            let pid = u16::from_str_radix(parts[2].trim_start_matches("0x"), 16).unwrap_or(0);
+            let class = parse_usb_class(parts[3]);
+            let name = parts[4..].join(" ");
+            match usbpolicy::check_device(vid, pid, class, &name) {
+                Ok(d) => shell_println!("Decision for '{}' (VID={:#06X} PID={:#06X}): {}", name, vid, pid, d.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" => {
+            // add <name> <decision> [class=<class>] [vid=<hex>] [pid=<hex>]
+            if parts.len() < 3 {
+                shell_println!("Usage: usbpolicy add <name> <decision> [class=<class>] [vid=<hex>] [pid=<hex>]");
+                return;
+            }
+            let name = parts[1];
+            let decision = parse_usb_decision(parts[2]);
+            let mut class = None;
+            let mut vid = None;
+            let mut pid = None;
+            for p in &parts[3..] {
+                if let Some(v) = p.strip_prefix("class=") { class = Some(parse_usb_class(v)); }
+                if let Some(v) = p.strip_prefix("vid=") { vid = u16::from_str_radix(v.trim_start_matches("0x"), 16).ok(); }
+                if let Some(v) = p.strip_prefix("pid=") { pid = u16::from_str_radix(v.trim_start_matches("0x"), 16).ok(); }
+            }
+            match usbpolicy::add_rule(name, vid, pid, class, decision) {
+                Ok(id) => shell_println!("Added rule #{}: {} → {}", id, name, decision.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match usbpolicy::remove_rule(id) {
+                        Ok(()) => shell_println!("Removed rule #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid rule ID");
+                }
+            } else {
+                shell_println!("Usage: usbpolicy remove <rule_id>");
+            }
+        }
+        "default" => {
+            if let Some(d) = parts.get(1) {
+                let decision = parse_usb_decision(d);
+                match usbpolicy::set_default(decision) {
+                    Ok(()) => shell_println!("Default decision: {}", decision.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: usbpolicy default <allow|deny|ask|readonly>");
+            }
+        }
+        "block" => {
+            if let Some(v) = parts.get(1) {
+                let block = *v == "on" || *v == "true" || *v == "yes";
+                match usbpolicy::set_block_unknown(block) {
+                    Ok(()) => shell_println!("Block unknown: {}", if block { "ON" } else { "OFF" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: usbpolicy block <on|off>");
+            }
+        }
+        "list" => {
+            let rules = usbpolicy::list_rules();
+            if rules.is_empty() {
+                shell_println!("No policy rules");
+            } else {
+                for r in &rules {
+                    let en = if r.enabled { "ON" } else { "OFF" };
+                    let class_s = r.class.map_or(String::from("any"), |c| String::from(c.label()));
+                    let vid_s = r.vendor_id.map_or(String::from("any"), |v| format!("{:#06X}", v));
+                    shell_println!("  #{}: {} [{}] → {} (VID={} class={} hits={})", r.id, r.name, en, r.decision.label(), vid_s, class_s, r.hit_count);
+                }
+            }
+        }
+        "log" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let log = usbpolicy::get_log(max);
+            if log.is_empty() {
+                shell_println!("No events logged");
+            } else {
+                for e in &log {
+                    shell_println!("  {} (VID={:#06X} PID={:#06X} {}) → {}{}", e.device_name, e.vendor_id, e.product_id, e.class.label(), e.decision.label(), e.rule_id.map_or(String::new(), |id| format!(" rule#{}", id)));
+                }
+            }
+        }
+        "stats" => {
+            let (rules, log_size, allowed, denied, ops) = usbpolicy::stats();
+            shell_println!("USB Policy: {} rules, {} log entries", rules, log_size);
+            shell_println!("  Allowed: {} | Denied: {} | Ops: {}", allowed, denied, ops);
+        }
+        "test" => {
+            usbpolicy::self_test();
+            shell_println!("usbpolicy self-test complete");
+        }
+        "init" => {
+            usbpolicy::init_defaults();
+            shell_println!("usbpolicy initialised");
+        }
+        _ => {
+            shell_println!("usbpolicy — USB device access policies");
+            shell_println!("  check <vid> <pid> <class> <name>  Check device");
+            shell_println!("  add <name> <decision> [opts]      Add rule");
+            shell_println!("  remove <id>                       Remove rule");
+            shell_println!("  default <decision>                Set default");
+            shell_println!("  block <on|off>                    Block unknown");
+            shell_println!("  list                              List rules");
+            shell_println!("  log [n]                           Show event log");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_usb_class(s: &str) -> crate::fs::usbpolicy::UsbClass {
+    use crate::fs::usbpolicy::UsbClass;
+    match s.to_lowercase().as_str() {
+        "storage" | "stor" => UsbClass::Storage,
+        "hid" | "humaninterface" => UsbClass::HumanInterface,
+        "audio" => UsbClass::Audio,
+        "video" => UsbClass::Video,
+        "printer" => UsbClass::Printer,
+        "network" | "net" => UsbClass::Network,
+        "wireless" => UsbClass::Wireless,
+        "smartcard" => UsbClass::SmartCard,
+        "hub" => UsbClass::Hub,
+        _ => UsbClass::Other,
+    }
+}
+
+fn parse_usb_decision(s: &str) -> crate::fs::usbpolicy::Decision {
+    use crate::fs::usbpolicy::Decision;
+    match s.to_lowercase().as_str() {
+        "allow" => Decision::Allow,
+        "deny" | "block" => Decision::Deny,
+        "ask" | "askuser" => Decision::AskUser,
+        "readonly" | "ro" => Decision::ReadOnly,
+        _ => Decision::AskUser,
+    }
+}
+
+/// `applaunch` / `alaunch` — search-based application launcher.
+fn cmd_applaunch(args: &str) {
+    use crate::fs::applaunch;
+    use alloc::string::String;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "search" | "find" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: applaunch search <query>");
+                return;
+            }
+            let query = parts[1..].join(" ");
+            let max = 10;
+            let results = applaunch::search(&query, max);
+            if results.is_empty() {
+                shell_println!("No results for '{}'", query);
+            } else {
+                for r in &results {
+                    shell_println!("  #{}: {} [{}] score={} launches={}", r.id, r.name, r.result_type.label(), r.score, r.launch_count);
+                }
+            }
+        }
+        "launch" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match applaunch::record_launch(id) {
+                        Ok(action) => shell_println!("Launched #{}: {}", id, action),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid item ID");
+                }
+            } else {
+                shell_println!("Usage: applaunch launch <id>");
+            }
+        }
+        "register" | "add" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: applaunch register <name> <type> [action] [icon]");
+                return;
+            }
+            let name = parts[1];
+            let rtype = parse_result_type(parts[2]);
+            let action = if parts.len() > 3 { parts[3] } else { "launch:default" };
+            let icon = if parts.len() > 4 { parts[4] } else { "app" };
+            match applaunch::register(name, alloc::vec![], rtype, action, icon) {
+                Ok(id) => shell_println!("Registered '{}' as #{} [{}]", name, id, rtype.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unregister" | "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match applaunch::unregister(id) {
+                        Ok(()) => shell_println!("Unregistered #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid item ID");
+                }
+            } else {
+                shell_println!("Usage: applaunch unregister <id>");
+            }
+        }
+        "list" => {
+            let items = applaunch::list_items();
+            if items.is_empty() {
+                shell_println!("No registered items");
+            } else {
+                for i in &items {
+                    shell_println!("  #{}: {} [{}] → {} (launches={})", i.id, i.name, i.result_type.label(), i.action, i.launch_count);
+                }
+            }
+        }
+        "top" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(5);
+            let top = applaunch::top_launched(max);
+            if top.is_empty() {
+                shell_println!("No launch history");
+            } else {
+                for (i, item) in top.iter().enumerate() {
+                    shell_println!("  {}. {} — {} launches", i + 1, item.name, item.launch_count);
+                }
+            }
+        }
+        "stats" => {
+            let (items, searches, launches, ops) = applaunch::stats();
+            shell_println!("App Launcher: {} items, {} searches, {} launches, {} ops", items, searches, launches, ops);
+        }
+        "test" => {
+            applaunch::self_test();
+            shell_println!("applaunch self-test complete");
+        }
+        "init" => {
+            applaunch::init_defaults();
+            shell_println!("applaunch initialised");
+        }
+        _ => {
+            shell_println!("applaunch — search-based application launcher");
+            shell_println!("  search <query>           Search for items");
+            shell_println!("  launch <id>              Launch and record");
+            shell_println!("  register <name> <type>   Register item");
+            shell_println!("  unregister <id>          Remove item");
+            shell_println!("  list                     List all items");
+            shell_println!("  top [n]                  Top launched items");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_result_type(s: &str) -> crate::fs::applaunch::ResultType {
+    use crate::fs::applaunch::ResultType;
+    match s.to_lowercase().as_str() {
+        "app" | "application" => ResultType::Application,
+        "file" => ResultType::File,
+        "setting" | "settings" => ResultType::Setting,
+        "command" | "cmd" => ResultType::Command,
+        "calc" | "calculation" => ResultType::Calculation,
+        "web" | "websearch" => ResultType::WebSearch,
+        "bookmark" | "bm" => ResultType::Bookmark,
+        _ => ResultType::Application,
+    }
+}
+
+/// `sysprofiler` / `sprof` — detailed hardware/software inventory.
+fn cmd_sysprofiler(args: &str) {
+    use crate::fs::sysprofiler;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "section" | "get" => {
+            if let Some(name) = parts.get(1) {
+                let section = parse_profiler_section(name);
+                match sysprofiler::get_section(section) {
+                    Some(data) => {
+                        shell_println!("[{}]", data.section.label());
+                        for e in &data.entries {
+                            shell_println!("  {}: {}", e.key, e.value);
+                        }
+                    }
+                    None => shell_println!("Section '{}' not found", name),
+                }
+            } else {
+                shell_println!("Usage: sysprofiler section <cpu|memory|storage|...>");
+            }
+        }
+        "all" => {
+            let sections = sysprofiler::get_all();
+            if sections.is_empty() {
+                shell_println!("No profiler data");
+            } else {
+                for s in &sections {
+                    shell_println!("[{}]", s.section.label());
+                    for e in &s.entries {
+                        shell_println!("  {}: {}", e.key, e.value);
+                    }
+                }
+            }
+        }
+        "summary" => {
+            let summary = sysprofiler::get_summary();
+            shell_println!("{}", summary);
+        }
+        "set" => {
+            // set <section> <key> <value>
+            if parts.len() < 4 {
+                shell_println!("Usage: sysprofiler set <section> <key> <value...>");
+                return;
+            }
+            let section = parse_profiler_section(parts[1]);
+            let key = parts[2];
+            let value = parts[3..].join(" ");
+            match sysprofiler::set_entry(section, key, &value) {
+                Ok(()) => shell_println!("Set [{}] {} = {}", section.label(), key, value),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "refresh" => {
+            if let Some(name) = parts.get(1) {
+                let section = parse_profiler_section(name);
+                match sysprofiler::refresh_section(section) {
+                    Ok(()) => shell_println!("Refreshed {}", section.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: sysprofiler refresh <section>");
+            }
+        }
+        "stats" => {
+            let (sections, queries, refreshes, ops) = sysprofiler::stats();
+            shell_println!("System Profiler: {} sections, {} queries, {} refreshes, {} ops", sections, queries, refreshes, ops);
+        }
+        "test" => {
+            sysprofiler::self_test();
+            shell_println!("sysprofiler self-test complete");
+        }
+        "init" => {
+            sysprofiler::init_defaults();
+            shell_println!("sysprofiler initialised");
+        }
+        _ => {
+            shell_println!("sysprofiler — detailed hardware/software inventory");
+            shell_println!("  section <name>               Show section");
+            shell_println!("  all                          Show all sections");
+            shell_println!("  summary                      Text summary");
+            shell_println!("  set <section> <key> <value>  Set entry");
+            shell_println!("  refresh <section>            Refresh section");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_profiler_section(s: &str) -> crate::fs::sysprofiler::Section {
+    use crate::fs::sysprofiler::Section;
+    match s.to_lowercase().as_str() {
+        "cpu" | "processor" => Section::Cpu,
+        "memory" | "mem" | "ram" => Section::Memory,
+        "storage" | "disk" => Section::Storage,
+        "graphics" | "gpu" => Section::Graphics,
+        "network" | "net" => Section::Network,
+        "audio" | "sound" => Section::Audio,
+        "usb" => Section::Usb,
+        "firmware" | "bios" | "uefi" => Section::Firmware,
+        "software" | "sw" => Section::Software,
+        "display" | "screen" => Section::Display,
+        _ => Section::Cpu,
+    }
+}
+
+/// `clipsync` / `clsync` — cross-device clipboard sync.
+fn cmd_clipsync(args: &str) {
+    use crate::fs::clipsync;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "enable" | "on" => {
+            match clipsync::set_enabled(true) {
+                Ok(()) => shell_println!("Clipboard sync enabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" | "off" => {
+            match clipsync::set_enabled(false) {
+                Ok(()) => shell_println!("Clipboard sync disabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "status" => {
+            let enabled = clipsync::is_enabled();
+            shell_println!("Clipboard sync: {}", if enabled { "ENABLED" } else { "DISABLED" });
+        }
+        "device" | "add" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: clipsync device <name> <send|receive|bidirectional>");
+                return;
+            }
+            let name = parts[1];
+            let dir = parse_sync_direction(parts[2]);
+            match clipsync::add_device(name, dir) {
+                Ok(id) => shell_println!("Added device #{}: {} ({})", id, name, dir.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match clipsync::remove_device(id) {
+                        Ok(()) => shell_println!("Removed device #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid device ID");
+                }
+            } else {
+                shell_println!("Usage: clipsync remove <device_id>");
+            }
+        }
+        "copy" => {
+            // copy <type> <preview> <size>
+            if parts.len() < 4 {
+                shell_println!("Usage: clipsync copy <type> <size> <preview...>");
+                return;
+            }
+            let ctype = parse_sync_content_type(parts[1]);
+            let size = parts[2].parse::<u64>().unwrap_or(0);
+            let preview = parts[3..].join(" ");
+            match clipsync::on_copy(ctype, &preview, size) {
+                Ok(id) => shell_println!("Queued entry #{} ({}, {} bytes)", id, ctype.label(), size),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "sync" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match clipsync::sync_to_device(id) {
+                        Ok(count) => shell_println!("Synced {} entries to device #{}", count, id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid device ID");
+                }
+            } else {
+                shell_println!("Usage: clipsync sync <device_id>");
+            }
+        }
+        "devices" | "list" => {
+            let devices = clipsync::list_devices();
+            if devices.is_empty() {
+                shell_println!("No sync devices");
+            } else {
+                for d in &devices {
+                    let en = if d.enabled { "ON" } else { "OFF" };
+                    shell_println!("  #{}: {} [{}] {} — sent={} recv={}", d.id, d.name, en, d.direction.label(), d.items_sent, d.items_received);
+                }
+            }
+        }
+        "queue" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let queue = clipsync::get_queue(max);
+            if queue.is_empty() {
+                shell_println!("Sync queue empty");
+            } else {
+                for e in &queue {
+                    let synced = if e.synced { "✓" } else { "…" };
+                    shell_println!("  #{}: [{}] {} {} ({} bytes)", e.id, e.content_type.label(), synced, e.preview, e.size_bytes);
+                }
+            }
+        }
+        "maxsize" => {
+            if let Some(s) = parts.get(1) {
+                if let Ok(bytes) = s.parse::<u64>() {
+                    match clipsync::set_max_size(bytes) {
+                        Ok(()) => shell_println!("Max sync size: {} bytes", bytes),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid size");
+                }
+            } else {
+                shell_println!("Usage: clipsync maxsize <bytes>");
+            }
+        }
+        "allow" | "deny" => {
+            if let Some(t) = parts.get(1) {
+                let ctype = parse_sync_content_type(t);
+                let allowed = sub == "allow";
+                match clipsync::set_type_allowed(ctype, allowed) {
+                    Ok(()) => shell_println!("{} {} sync: {}", ctype.label(), if allowed { "allowed" } else { "denied" }, if allowed { "ON" } else { "OFF" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: clipsync allow|deny <text|image|file|richtext|url>");
+            }
+        }
+        "stats" => {
+            let (devices, sent, received, bytes, ops) = clipsync::stats();
+            shell_println!("Clipboard Sync: {} devices", devices);
+            shell_println!("  Sent: {} | Received: {} | Bytes: {} | Ops: {}", sent, received, bytes, ops);
+        }
+        "test" => {
+            clipsync::self_test();
+            shell_println!("clipsync self-test complete");
+        }
+        "init" => {
+            clipsync::init_defaults();
+            shell_println!("clipsync initialised");
+        }
+        _ => {
+            shell_println!("clipsync — cross-device clipboard sync");
+            shell_println!("  enable / disable             Toggle sync");
+            shell_println!("  status                       Show status");
+            shell_println!("  device <name> <direction>    Add device");
+            shell_println!("  remove <id>                  Remove device");
+            shell_println!("  copy <type> <size> <text>    Queue for sync");
+            shell_println!("  sync <device_id>             Sync to device");
+            shell_println!("  devices                      List devices");
+            shell_println!("  queue [n]                    Show queue");
+            shell_println!("  maxsize <bytes>              Set max size");
+            shell_println!("  allow|deny <type>            Filter types");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_sync_direction(s: &str) -> crate::fs::clipsync::SyncDirection {
+    use crate::fs::clipsync::SyncDirection;
+    match s.to_lowercase().as_str() {
+        "send" | "sendonly" => SyncDirection::SendOnly,
+        "receive" | "recv" | "receiveonly" => SyncDirection::ReceiveOnly,
+        "both" | "bidirectional" | "bi" => SyncDirection::Bidirectional,
+        _ => SyncDirection::Bidirectional,
+    }
+}
+
+fn parse_sync_content_type(s: &str) -> crate::fs::clipsync::SyncContentType {
+    use crate::fs::clipsync::SyncContentType;
+    match s.to_lowercase().as_str() {
+        "text" | "txt" => SyncContentType::Text,
+        "image" | "img" => SyncContentType::Image,
+        "file" => SyncContentType::File,
+        "richtext" | "rich" => SyncContentType::RichText,
+        "url" | "link" => SyncContentType::Url,
+        _ => SyncContentType::Text,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -50459,7 +51031,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

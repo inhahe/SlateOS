@@ -372,6 +372,10 @@ const ROOT_FILES: &[&str] = &[
     "diskclean",
     "acl",
     "associations",
+    "logrotate",
+    "powerwake",
+    "diskio",
+    "sysuptime",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7420,6 +7424,63 @@ fn gen_associations() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_logrotate() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Log Rotation ===\n");
+    let (rule_count, total_rotations, bytes_rotated, total_cleanups, ops) = crate::fs::logrotate::stats();
+    out.push_str(&format!("rule_count: {}\n", rule_count));
+    out.push_str(&format!("total_rotations: {}\n", total_rotations));
+    out.push_str(&format!("bytes_rotated: {}\n", bytes_rotated));
+    out.push_str(&format!("total_cleanups: {}\n", total_cleanups));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_powerwake() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Power Wake ===\n");
+    let (timer_count, wol_count, total_wakes, total_wol_sent, ops) = crate::fs::powerwake::stats();
+    out.push_str(&format!("timer_count: {}\n", timer_count));
+    out.push_str(&format!("wol_target_count: {}\n", wol_count));
+    out.push_str(&format!("total_wakes: {}\n", total_wakes));
+    out.push_str(&format!("total_wol_sent: {}\n", total_wol_sent));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_diskio() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Disk I/O ===\n");
+    let (dev_count, reads, writes, bytes_read, bytes_written, ops) = crate::fs::diskio::stats();
+    out.push_str(&format!("device_count: {}\n", dev_count));
+    out.push_str(&format!("global_reads: {}\n", reads));
+    out.push_str(&format!("global_writes: {}\n", writes));
+    out.push_str(&format!("global_bytes_read: {}\n", bytes_read));
+    out.push_str(&format!("global_bytes_written: {}\n", bytes_written));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_sysuptime() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== System Uptime ===\n");
+    let uptime = crate::fs::sysuptime::current_uptime_ns();
+    let formatted = crate::fs::sysuptime::format_duration(uptime);
+    let (hist_count, total_sessions, longest, total_uptime, ops) = crate::fs::sysuptime::stats();
+    out.push_str(&format!("current_uptime: {}\n", formatted));
+    out.push_str(&format!("current_uptime_ns: {}\n", uptime));
+    out.push_str(&format!("session_history: {}\n", hist_count));
+    out.push_str(&format!("total_sessions: {}\n", total_sessions));
+    out.push_str(&format!("longest_uptime_ns: {}\n", longest));
+    out.push_str(&format!("total_uptime_ns: {}\n", total_uptime));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7957,6 +8018,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "diskclean" => Ok(gen_diskclean()),
         "acl" => Ok(gen_acl()),
         "associations" => Ok(gen_associations()),
+        "logrotate" => Ok(gen_logrotate()),
+        "powerwake" => Ok(gen_powerwake()),
+        "diskio" => Ok(gen_diskio()),
+        "sysuptime" => Ok(gen_sysuptime()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -3463,6 +3463,7 @@ const COMMANDS: &[&str] = &[
     "vpnprofile", "vpnp", "diskhealth", "dhealth", "recoverypart", "rpart",
     "userprofile", "uprof", "diskclean", "dclean",
     "cas",
+    "logrotate", "lrot", "powerwake", "pwake", "diskio", "dio", "sysuptime", "suptime",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4985,6 +4986,10 @@ fn dispatch(line: &str) {
         "userprofile" | "uprof" => cmd_userprofile(args),
         "diskclean" | "dclean" => cmd_diskclean(args),
         "cas" => cmd_cas(args),
+        "logrotate" | "lrot" => cmd_logrotate(args),
+        "powerwake" | "pwake" => cmd_powerwake(args),
+        "diskio" | "dio" => cmd_diskio(args),
+        "sysuptime" | "suptime" => cmd_sysuptime(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -46322,6 +46327,332 @@ fn cmd_cas(args: &str) {
     }
 }
 
+/// `logrotate` / `lrot` — log rotation management.
+fn cmd_logrotate(args: &str) {
+    use crate::fs::logrotate;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "stats" | "" => {
+            let (rule_count, rotations, bytes_rotated, cleanups, ops) = logrotate::stats();
+            shell_println!("=== Log Rotation ===");
+            shell_println!("  Rules:          {}", rule_count);
+            shell_println!("  Total rotations: {}", rotations);
+            shell_println!("  Bytes rotated:  {}", bytes_rotated);
+            shell_println!("  Cleanups:       {}", cleanups);
+            shell_println!("  Ops:            {}", ops);
+        }
+        "list" => {
+            logrotate::init_defaults();
+            let rules = logrotate::list_rules();
+            if rules.is_empty() {
+                shell_println!("No rotation rules configured.");
+            } else {
+                shell_println!("{:<4} {:<30} {:<10} {:<8} {}", "ID", "Path", "Compress", "Max", "Enabled");
+                for r in &rules {
+                    shell_println!("{:<4} {:<30} {:<10} {:<8} {}",
+                        r.id, r.log_path, r.compress.label(), r.max_archives,
+                        if r.enabled { "yes" } else { "no" });
+                }
+            }
+        }
+        "add" => {
+            if let Some(path) = parts.get(1) {
+                logrotate::init_defaults();
+                let compress = parse_logrotate_compress(parts.get(2).copied().unwrap_or("gzip"));
+                let max = parts.get(3).and_then(|v| v.parse::<u32>().ok()).unwrap_or(7);
+                match logrotate::add_rule(path, logrotate::RotateTrigger::Daily, compress, max) {
+                    Ok(id) => shell_println!("Rule {} added for {}", id, path),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: logrotate add <path> [compress] [max_archives]");
+            }
+        }
+        "remove" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match logrotate::remove_rule(id) {
+                        Ok(()) => shell_println!("Rule {} removed", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID"); }
+            } else { shell_println!("Usage: logrotate remove <id>"); }
+        }
+        "rotate" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match logrotate::rotate(id) {
+                        Ok(bytes) => shell_println!("Rotated: {} bytes", bytes),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID"); }
+            } else {
+                logrotate::init_defaults();
+                match logrotate::check_all() {
+                    Ok(n) => shell_println!("Rotated {} logs", n),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "events" => {
+            let events = logrotate::list_events();
+            if events.is_empty() {
+                shell_println!("No rotation events.");
+            } else {
+                for e in events.iter().rev().take(20) {
+                    shell_println!("  Rule {}: {} ({} bytes)", e.rule_id, e.archive_name, e.original_size);
+                }
+            }
+        }
+        _ => {
+            shell_println!("Usage: logrotate [stats|list|add|remove|rotate|events]");
+        }
+    }
+}
+
+fn parse_logrotate_compress(s: &str) -> crate::fs::logrotate::CompressMethod {
+    use crate::fs::logrotate::CompressMethod;
+    match s {
+        "none" => CompressMethod::None,
+        "gzip" | "gz" => CompressMethod::Gzip,
+        "bzip2" | "bz2" => CompressMethod::Bzip2,
+        "xz" => CompressMethod::Xz,
+        "zstd" | "zst" => CompressMethod::Zstd,
+        _ => CompressMethod::Gzip,
+    }
+}
+
+/// `powerwake` / `pwake` — wake-on-LAN and scheduled wake management.
+fn cmd_powerwake(args: &str) {
+    use crate::fs::powerwake;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "stats" | "" => {
+            let (timers, wol_targets, total_wakes, wol_sent, ops) = powerwake::stats();
+            shell_println!("=== Power Wake ===");
+            shell_println!("  Active timers:  {}", timers);
+            shell_println!("  WoL targets:    {}", wol_targets);
+            shell_println!("  Total wakes:    {}", total_wakes);
+            shell_println!("  WoL packets:    {}", wol_sent);
+            shell_println!("  Ops:            {}", ops);
+        }
+        "timers" => {
+            powerwake::init_defaults();
+            let timers = powerwake::list_timers();
+            if timers.is_empty() {
+                shell_println!("No wake timers.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<10} {}", "ID", "Reason", "Recurring", "Enabled");
+                for t in &timers {
+                    shell_println!("{:<4} {:<20} {:<10} {}",
+                        t.id, t.reason,
+                        if t.recurring { "yes" } else { "no" },
+                        if t.enabled { "yes" } else { "no" });
+                }
+            }
+        }
+        "schedule" => {
+            let reason = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if reason.is_empty() {
+                shell_println!("Usage: powerwake schedule <reason>");
+                return;
+            }
+            powerwake::init_defaults();
+            let future = crate::hpet::elapsed_ns() + 3_600_000_000_000; // 1 hour
+            match powerwake::schedule_wake(future, &reason, false, 0) {
+                Ok(id) => shell_println!("Timer {} scheduled", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cancel" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match powerwake::cancel_timer(id) {
+                        Ok(()) => shell_println!("Timer {} cancelled", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID"); }
+            } else { shell_println!("Usage: powerwake cancel <id>"); }
+        }
+        "wol" => {
+            match parts.get(1).copied() {
+                Some("add") => {
+                    if let (Some(name), Some(mac)) = (parts.get(2), parts.get(3)) {
+                        powerwake::init_defaults();
+                        match powerwake::add_wol_target(name, mac) {
+                            Ok(id) => shell_println!("WoL target {} added: {} ({})", id, name, mac),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else { shell_println!("Usage: powerwake wol add <name> <mac>"); }
+                }
+                Some("send") => {
+                    if let Some(id_str) = parts.get(2) {
+                        if let Ok(id) = id_str.parse::<u32>() {
+                            match powerwake::send_wol(id) {
+                                Ok(()) => shell_println!("WoL packet sent"),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        } else { shell_println!("Invalid ID"); }
+                    } else { shell_println!("Usage: powerwake wol send <id>"); }
+                }
+                Some("list") | None => {
+                    powerwake::init_defaults();
+                    let targets = powerwake::list_wol_targets();
+                    if targets.is_empty() {
+                        shell_println!("No WoL targets.");
+                    } else {
+                        shell_println!("{:<4} {:<15} {:<20} {}", "ID", "Name", "MAC", "Sent");
+                        for w in &targets {
+                            shell_println!("{:<4} {:<15} {:<20} {}", w.id, w.name, w.mac_address, w.send_count);
+                        }
+                    }
+                }
+                Some("remove") => {
+                    if let Some(id_str) = parts.get(2) {
+                        if let Ok(id) = id_str.parse::<u32>() {
+                            match powerwake::remove_wol_target(id) {
+                                Ok(()) => shell_println!("WoL target {} removed", id),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        } else { shell_println!("Invalid ID"); }
+                    } else { shell_println!("Usage: powerwake wol remove <id>"); }
+                }
+                _ => { shell_println!("Usage: powerwake wol [list|add|send|remove]"); }
+            }
+        }
+        "history" => {
+            powerwake::init_defaults();
+            let hist = powerwake::wake_history();
+            if hist.is_empty() {
+                shell_println!("No wake history.");
+            } else {
+                for e in hist.iter().rev().take(20) {
+                    shell_println!("  {} — {}", e.source.label(), e.detail);
+                }
+            }
+        }
+        _ => {
+            shell_println!("Usage: powerwake [stats|timers|schedule|cancel|wol|history]");
+        }
+    }
+}
+
+/// `diskio` / `dio` — disk I/O statistics.
+fn cmd_diskio(args: &str) {
+    use crate::fs::diskio;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "stats" | "" => {
+            let (dev_count, reads, writes, br, bw, ops) = diskio::stats();
+            shell_println!("=== Disk I/O ===");
+            shell_println!("  Devices:        {}", dev_count);
+            shell_println!("  Global reads:   {}", reads);
+            shell_println!("  Global writes:  {}", writes);
+            shell_println!("  Bytes read:     {}", br);
+            shell_println!("  Bytes written:  {}", bw);
+            shell_println!("  Ops:            {}", ops);
+        }
+        "list" => {
+            diskio::init_defaults();
+            let devs = diskio::all_devices();
+            if devs.is_empty() {
+                shell_println!("No I/O recorded yet.");
+            } else {
+                shell_println!("{:<12} {:>8} {:>8} {:>12} {:>12} {:>10} {:>10}",
+                    "Device", "Reads", "Writes", "BytesRead", "BytesWrite", "AvgRd(ns)", "AvgWr(ns)");
+                for d in &devs {
+                    shell_println!("{:<12} {:>8} {:>8} {:>12} {:>12} {:>10} {:>10}",
+                        d.device_name, d.reads, d.writes, d.bytes_read, d.bytes_written,
+                        d.avg_read_latency_ns(), d.avg_write_latency_ns());
+                }
+            }
+        }
+        "device" => {
+            if let Some(name) = parts.get(1) {
+                match diskio::device_stats(name) {
+                    Some(d) => {
+                        shell_println!("=== {} ===", d.device_name);
+                        shell_println!("  Reads:          {} ({} bytes)", d.reads, d.bytes_read);
+                        shell_println!("  Writes:         {} ({} bytes)", d.writes, d.bytes_written);
+                        shell_println!("  Avg read lat:   {} ns", d.avg_read_latency_ns());
+                        shell_println!("  Max read lat:   {} ns", d.read_latency_max_ns);
+                        shell_println!("  Avg write lat:  {} ns", d.avg_write_latency_ns());
+                        shell_println!("  Max write lat:  {} ns", d.write_latency_max_ns);
+                        shell_println!("  Read errors:    {}", d.read_errors);
+                        shell_println!("  Write errors:   {}", d.write_errors);
+                    }
+                    None => shell_println!("Device '{}' not found", name),
+                }
+            } else { shell_println!("Usage: diskio device <name>"); }
+        }
+        "reset" => {
+            if let Some(name) = parts.get(1) {
+                match diskio::reset_device(name) {
+                    Ok(()) => shell_println!("Stats for '{}' reset", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: diskio reset <device>"); }
+        }
+        _ => {
+            shell_println!("Usage: diskio [stats|list|device|reset]");
+        }
+    }
+}
+
+/// `sysuptime` / `suptime` — system uptime tracking.
+fn cmd_sysuptime(args: &str) {
+    use crate::fs::sysuptime;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            sysuptime::init_defaults();
+            let uptime = sysuptime::current_uptime_ns();
+            let formatted = sysuptime::format_duration(uptime);
+            let session = sysuptime::current_session_id();
+            let longest = sysuptime::longest_uptime_ns();
+            shell_println!("=== System Uptime ===");
+            shell_println!("  Current uptime: {}", formatted);
+            shell_println!("  Session ID:     {}", session);
+            shell_println!("  Longest ever:   {}", sysuptime::format_duration(longest));
+        }
+        "history" => {
+            sysuptime::init_defaults();
+            let hist = sysuptime::history();
+            if hist.is_empty() {
+                shell_println!("No shutdown history.");
+            } else {
+                shell_println!("{:<6} {:<20} {}", "ID", "Duration", "Reason");
+                for s in hist.iter().rev().take(20) {
+                    shell_println!("{:<6} {:<20} {}",
+                        s.session_id,
+                        sysuptime::format_duration(s.duration_ns),
+                        s.shutdown_reason.label());
+                }
+            }
+        }
+        "stats" => {
+            let (hist_count, total_sessions, longest, total_uptime, ops) = sysuptime::stats();
+            shell_println!("=== Uptime Statistics ===");
+            shell_println!("  History entries: {}", hist_count);
+            shell_println!("  Total sessions:  {}", total_sessions);
+            shell_println!("  Longest uptime:  {}", sysuptime::format_duration(longest));
+            shell_println!("  Total uptime:    {}", sysuptime::format_duration(total_uptime));
+            shell_println!("  Ops:             {}", ops);
+        }
+        _ => {
+            shell_println!("Usage: sysuptime [show|history|stats]");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -54918,7 +55249,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

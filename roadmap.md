@@ -896,6 +896,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Recovery Partition (fs::recoverypart): recovery environment with 8 tool types, space management, integrity verification, repair simulation, boot-to-recovery; `recoverypart`/`rpart` kshell command; /proc/recoverypart; 8 self-tests
   - [x] User Profile (fs::userprofile): user profile management with 5 account types, create/delete/switch, lock/unlock, display name/avatar, login tracking; `userprofile`/`uprof` kshell command; /proc/userprofile; 8 self-tests
   - [x] Disk Cleanup (fs::diskclean): automated storage cleanup with 10 categories, scan/clean/estimate, safe-to-remove flags, per-category summaries; `diskclean`/`dclean` kshell command; /proc/diskclean; 8 self-tests
+  - [x] CAS CLI (fs::cas): content-addressed store kshell command for put/get/has/release/gc/limit; `cas` kshell command
+  - [x] ACL/Associations procfs: added /proc/acl and /proc/associations entries
+  - [x] Log Rotation (fs::logrotate): automated log rotation with 5 compression methods, trigger conditions, retention policies, rotation events; `logrotate`/`lrot` kshell command; /proc/logrotate; 8 self-tests
+  - [x] Power Wake (fs::powerwake): Wake-on-LAN and scheduled wake with 7 wake sources, wake timers, WoL targets, wake history; `powerwake`/`pwake` kshell command; /proc/powerwake; 8 self-tests
+  - [x] Disk I/O (fs::diskio): per-device I/O statistics with read/write tracking, latency, throughput, error counting; `diskio`/`dio` kshell command; /proc/diskio; 8 self-tests
+  - [x] System Uptime (fs::sysuptime): uptime tracking with session history, shutdown reasons, longest uptime, duration formatting; `sysuptime`/`suptime` kshell command; /proc/sysuptime; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

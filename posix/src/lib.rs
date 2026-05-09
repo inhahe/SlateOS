@@ -23,7 +23,8 @@
 //! - **Terminal**: `ioctl` (TIOCGWINSZ, TCGETS, FIONBIO, etc.),
 //!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, termios flags
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
-//!   `execve`, `waitpid`, `sleep`, `nanosleep`
+//!   `posix_spawnp`, `execve`, `execvp`, `waitpid`, `sleep`,
+//!   `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`
 //! - **Pipes**: `pipe`, `pipe2`
 //! - **Signals**: Stub constants and handlers (partial)
@@ -31,7 +32,10 @@
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
 //!   `setjmp`/`longjmp`, `qsort`, `bsearch`, `atoi`/`strtol`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
-//! - **Misc**: `getcwd`, `chdir`, `errno`, `sysconf`, `getenv`/`setenv`
+//! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`
+//! - **System**: `uname`
+//! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
+//!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`
 //!
 //! ## Error Handling
 //!
@@ -108,5 +112,7 @@ pub mod string;
 pub mod syscall;
 pub mod time;
 pub mod types;
+pub mod resource;
 pub mod unistd;
+pub mod utsname;
 pub mod dirent;

@@ -231,6 +231,181 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
 }
 
 // ---------------------------------------------------------------------------
+// pread / pwrite
+// ---------------------------------------------------------------------------
+
+/// Read from a file at a given offset without changing the file position.
+///
+/// This is implemented as seek→read→seek-back.  This is not atomic
+/// with respect to other threads, but sufficient for single-threaded
+/// programs.  Pipes and consoles return `ESPIPE`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
+    if buf.is_null() && count > 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    if entry.kind != HandleKind::File {
+        errno::set_errno(errno::ESPIPE);
+        return -1;
+    }
+
+    // Save current position.
+    let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
+    if saved < 0 {
+        return errno::translate(saved) as SsizeT;
+    }
+
+    // Seek to the requested offset.
+    let seek_ret = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    if seek_ret < 0 {
+        return errno::translate(seek_ret) as SsizeT;
+    }
+
+    // Read.
+    let read_ret = syscall3(SYS_FS_READ, entry.handle, buf as u64, count as u64);
+
+    // Restore original position (best effort — if this fails, the file
+    // position is lost, but the alternative is leaking the error).
+    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+
+    if read_ret < 0 {
+        return errno::translate(read_ret) as SsizeT;
+    }
+    read_ret as SsizeT
+}
+
+/// Write to a file at a given offset without changing the file position.
+///
+/// Same seek→write→seek-back strategy as `pread`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
+    if buf.is_null() && count > 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    if entry.kind != HandleKind::File {
+        errno::set_errno(errno::ESPIPE);
+        return -1;
+    }
+
+    // Save current position.
+    let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
+    if saved < 0 {
+        return errno::translate(saved) as SsizeT;
+    }
+
+    // Seek to the requested offset.
+    let seek_ret = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    if seek_ret < 0 {
+        return errno::translate(seek_ret) as SsizeT;
+    }
+
+    // Write.
+    let write_ret = syscall3(SYS_FS_WRITE, entry.handle, buf as u64, count as u64);
+
+    // Restore original position.
+    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+
+    if write_ret < 0 {
+        return errno::translate(write_ret) as SsizeT;
+    }
+    write_ret as SsizeT
+}
+
+// ---------------------------------------------------------------------------
+// readv / writev
+// ---------------------------------------------------------------------------
+
+/// I/O vector for scatter/gather I/O.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Iovec {
+    /// Base address of buffer.
+    pub iov_base: *mut u8,
+    /// Length of buffer.
+    pub iov_len: SizeT,
+}
+
+/// Read data into multiple buffers (scatter read).
+///
+/// Reads sequentially into each iovec buffer.  Returns the total
+/// number of bytes read, or -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
+    if iov.is_null() || iovcnt <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let mut total: SsizeT = 0;
+    let mut i: i32 = 0;
+    while i < iovcnt {
+        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
+        let vec = unsafe { &*iov.add(i as usize) };
+        if vec.iov_len > 0 {
+            let n = read(fd, vec.iov_base, vec.iov_len);
+            if n < 0 {
+                // If we already read some data, return that.
+                if total > 0 {
+                    return total;
+                }
+                return n;
+            }
+            total = total.wrapping_add(n);
+            // Short read — don't continue to next buffer.
+            if (n as SizeT) < vec.iov_len {
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+
+    total
+}
+
+/// Write data from multiple buffers (gather write).
+///
+/// Writes sequentially from each iovec buffer.  Returns the total
+/// number of bytes written, or -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
+    if iov.is_null() || iovcnt <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let mut total: SsizeT = 0;
+    let mut i: i32 = 0;
+    while i < iovcnt {
+        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
+        let vec = unsafe { &*iov.add(i as usize) };
+        if vec.iov_len > 0 {
+            let n = write(fd, vec.iov_base.cast_const(), vec.iov_len);
+            if n < 0 {
+                if total > 0 {
+                    return total;
+                }
+                return n;
+            }
+            total = total.wrapping_add(n);
+            if (n as SizeT) < vec.iov_len {
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+
+    total
+}
+
+// ---------------------------------------------------------------------------
 // dup / dup2
 // ---------------------------------------------------------------------------
 

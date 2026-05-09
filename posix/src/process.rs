@@ -170,3 +170,87 @@ pub extern "C" fn gettid() -> PidT {
     let ret = syscall0(SYS_TASK_ID);
     ret as PidT
 }
+
+// ---------------------------------------------------------------------------
+// Process groups / sessions (stubs)
+// ---------------------------------------------------------------------------
+//
+// Our kernel doesn't have process groups or sessions yet.  These stubs
+// return the process's own PID as its group/session ID, making every
+// process appear to be its own group and session leader.  This is
+// sufficient for programs that query but don't rely on job control.
+
+/// Get the process group ID of the calling process.
+///
+/// Stub: returns the caller's PID (every process is its own group).
+#[unsafe(no_mangle)]
+pub extern "C" fn getpgrp() -> PidT {
+    getpid()
+}
+
+/// Get the process group ID of a specific process.
+///
+/// Stub: if `pid` is 0 or the caller's own PID, returns the caller's
+/// PID.  For other PIDs, also returns the PID (as if each process is
+/// its own group leader).
+#[unsafe(no_mangle)]
+pub extern "C" fn getpgid(pid: PidT) -> PidT {
+    if pid == 0 {
+        return getpid();
+    }
+    // Without kernel support, just return the pid itself.
+    pid
+}
+
+/// Set the process group ID of a process.
+///
+/// Stub: succeeds silently (no-op).  Real implementation needs kernel
+/// support for process group tracking.
+#[unsafe(no_mangle)]
+pub extern "C" fn setpgid(_pid: PidT, _pgid: PidT) -> i32 {
+    0
+}
+
+/// Set the process group ID of the calling process.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn setpgrp() -> i32 {
+    0
+}
+
+/// Get the session ID of a process.
+///
+/// Stub: returns the PID (every process is its own session leader).
+#[unsafe(no_mangle)]
+pub extern "C" fn getsid(pid: PidT) -> PidT {
+    if pid == 0 {
+        return getpid();
+    }
+    pid
+}
+
+/// Create a new session.
+///
+/// Stub: returns the caller's PID (as if a new session was created).
+/// Real implementation needs kernel session/controlling-terminal support.
+#[unsafe(no_mangle)]
+pub extern "C" fn setsid() -> PidT {
+    getpid()
+}
+
+/// Get the foreground process group ID of a terminal.
+///
+/// Stub: returns the caller's PID.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcgetpgrp(_fd: crate::types::Fd) -> PidT {
+    getpid()
+}
+
+/// Set the foreground process group ID of a terminal.
+///
+/// Stub: succeeds silently (no-op).
+#[unsafe(no_mangle)]
+pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, _pgrp: PidT) -> i32 {
+    0
+}

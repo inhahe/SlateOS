@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4833,6 +4833,8 @@ fn dispatch(line: &str) {
         "powerprofile" | "pprofile" => cmd_powerprofile(args),
         "defaultapps" | "defapp" => cmd_defaultapps(args),
         "monitors" | "monitor" => cmd_monitors(args),
+        "fwsettings" | "firewall" => cmd_fwsettings(args),
+        "updatemgr" | "updates" => cmd_updatemgr(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -27977,6 +27979,348 @@ fn cmd_monitors(args: &str) {
     }
 }
 
+/// `fwsettings` / `firewall` — firewall settings and rules.
+fn cmd_fwsettings(args: &str) {
+    use crate::fs::fwsettings;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (rules, apps, blocked, allowed, enabled, ops) = fwsettings::stats();
+            shell_println!("=== Firewall Settings ===");
+            shell_println!("  Enabled        : {}", enabled);
+            shell_println!("  Zone           : {}", fwsettings::active_zone().label());
+            shell_println!("  Rules          : {}", rules);
+            shell_println!("  App perms      : {}", apps);
+            shell_println!("  Blocked        : {}", blocked);
+            shell_println!("  Allowed        : {}", allowed);
+            shell_println!("  Operations     : {}", ops);
+        }
+        "on" => {
+            let _ = fwsettings::set_enabled(true);
+            shell_println!("Firewall enabled.");
+        }
+        "off" => {
+            let _ = fwsettings::set_enabled(false);
+            shell_println!("Firewall disabled.");
+        }
+        "zone" => {
+            match parts.get(1).copied() {
+                Some("home") => { let _ = fwsettings::set_zone(fwsettings::NetworkZone::Home); shell_println!("Zone: Home"); }
+                Some("work") => { let _ = fwsettings::set_zone(fwsettings::NetworkZone::Work); shell_println!("Zone: Work"); }
+                Some("public") => { let _ = fwsettings::set_zone(fwsettings::NetworkZone::Public); shell_println!("Zone: Public"); }
+                _ => shell_println!("Usage: firewall zone <home|work|public>"),
+            }
+        }
+        "rules" => {
+            let rules = fwsettings::list_rules();
+            if rules.is_empty() {
+                shell_println!("No firewall rules.");
+            } else {
+                shell_println!("{:>4} {:<20} {:>8} {:>5} {:>6} {:>6} {:>7} {:>5}",
+                    "ID", "NAME", "DIR", "PROTO", "PORT", "ACTION", "ZONE", "HITS");
+                for r in &rules {
+                    let zone = r.zone.map_or("all".into(), |z| String::from(z.label()));
+                    let port_str = if r.port == 0 { String::from("*") } else if r.port_end != 0 { format!("{}-{}", r.port, r.port_end) } else { format!("{}", r.port) };
+                    let en = if r.enabled { "" } else { " [off]" };
+                    shell_println!("{:>4} {:<20} {:>8} {:>5} {:>6} {:>6} {:>7} {:>5}{}",
+                        r.id, r.name, r.direction.label(), r.protocol.label(),
+                        port_str, r.action.label(), zone, r.hits, en);
+                }
+            }
+        }
+        "add" => {
+            // firewall add <name> <in|out|both> <tcp|udp|icmp|any> <port> <allow|block>
+            if parts.len() >= 6 {
+                let name = parts[1];
+                let dir = match parts[2] {
+                    "in" => fwsettings::Direction::Inbound,
+                    "out" => fwsettings::Direction::Outbound,
+                    _ => fwsettings::Direction::Both,
+                };
+                let proto = match parts[3] {
+                    "tcp" => fwsettings::Protocol::Tcp,
+                    "udp" => fwsettings::Protocol::Udp,
+                    "icmp" => fwsettings::Protocol::Icmp,
+                    _ => fwsettings::Protocol::Any,
+                };
+                let port: u16 = parts[4].parse().unwrap_or(0);
+                let action = match parts[5] {
+                    "block" => fwsettings::RuleAction::Block,
+                    "log" => fwsettings::RuleAction::Log,
+                    _ => fwsettings::RuleAction::Allow,
+                };
+                match fwsettings::add_rule(name, dir, proto, port, action) {
+                    Ok(id) => shell_println!("Rule #{} added: {} {} {} port {} {}",
+                        id, name, dir.label(), proto.label(), port, action.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: firewall add <name> <in|out|both> <tcp|udp|icmp|any> <port> <allow|block>");
+            }
+        }
+        "rm" | "remove" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match fwsettings::remove_rule(id) {
+                    Ok(()) => shell_println!("Rule #{} removed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: firewall rm <id>");
+            }
+        }
+        "enable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                let _ = fwsettings::set_rule_enabled(id, true);
+                shell_println!("Rule #{} enabled.", id);
+            }
+        }
+        "disable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                let _ = fwsettings::set_rule_enabled(id, false);
+                shell_println!("Rule #{} disabled.", id);
+            }
+        }
+        "app" => {
+            match parts.get(1).copied() {
+                Some("list") => {
+                    let perms = fwsettings::list_app_permissions();
+                    if perms.is_empty() {
+                        shell_println!("No app permissions.");
+                    } else {
+                        shell_println!("{:<20} {:>4} {:>4} {:>8} {:>8}", "APP", "OUT", "IN", "BLOCKED", "ALLOWED");
+                        for p in &perms {
+                            shell_println!("{:<20} {:>4} {:>4} {:>8} {:>8}",
+                                p.app_id,
+                                if p.allow_outbound { "yes" } else { "no" },
+                                if p.allow_inbound { "yes" } else { "no" },
+                                p.blocked_count, p.allowed_count);
+                        }
+                    }
+                }
+                Some("allow") if parts.len() >= 3 => {
+                    let app = parts[2];
+                    let _ = fwsettings::set_app_permission(app, true, true);
+                    shell_println!("App '{}': allow all.", app);
+                }
+                Some("block") if parts.len() >= 3 => {
+                    let app = parts[2];
+                    let _ = fwsettings::set_app_permission(app, false, false);
+                    shell_println!("App '{}': block all.", app);
+                }
+                Some("outonly") if parts.len() >= 3 => {
+                    let app = parts[2];
+                    let _ = fwsettings::set_app_permission(app, true, false);
+                    shell_println!("App '{}': outbound only.", app);
+                }
+                Some("rm") if parts.len() >= 3 => {
+                    let app = parts[2];
+                    let _ = fwsettings::remove_app_permission(app);
+                    shell_println!("App '{}' permission removed.", app);
+                }
+                _ => shell_println!("Usage: firewall app <list|allow|block|outonly|rm> [app_id]"),
+            }
+        }
+        "stealth" => {
+            let val = !matches!(parts.get(1).copied(), Some("off") | Some("no"));
+            let _ = fwsettings::set_stealth_mode(val);
+            shell_println!("Stealth mode: {}", val);
+        }
+        "stats" => {
+            let (rules, apps, blocked, allowed, enabled, ops) = fwsettings::stats();
+            shell_println!("Firewall stats: rules={} apps={} blocked={} allowed={} enabled={} ops={}", rules, apps, blocked, allowed, enabled, ops);
+        }
+        "test" => {
+            fwsettings::self_test();
+            shell_println!("fwsettings: self-tests completed (see serial).");
+        }
+        "init" => {
+            fwsettings::init_defaults();
+            shell_println!("Firewall initialized.");
+        }
+        _ => {
+            shell_println!("fwsettings (firewall) — firewall settings");
+            shell_println!("  show                       Overview");
+            shell_println!("  on / off                   Enable/disable");
+            shell_println!("  zone <home|work|public>    Set zone");
+            shell_println!("  rules                      List rules");
+            shell_println!("  add <name> <dir> <proto> <port> <action>");
+            shell_println!("  rm <id>                    Remove rule");
+            shell_println!("  enable/disable <id>        Rule on/off");
+            shell_println!("  app list/allow/block/outonly/rm <app>");
+            shell_println!("  stealth <on|off>           Stealth mode");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `updatemgr` / `updates` — system update management.
+fn cmd_updatemgr(args: &str) {
+    use crate::fs::updatemgr;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (pending, history, version, channel, auto, ops) = updatemgr::stats();
+            let (crit, imp, rec, opt) = updatemgr::pending_count();
+            shell_println!("=== System Updates ===");
+            shell_println!("  OS Version     : {}", version);
+            shell_println!("  Channel        : {}", channel);
+            shell_println!("  Auto-check     : {}", auto);
+            shell_println!("  Pending        : {} ({}C {}I {}R {}O)", pending, crit, imp, rec, opt);
+            shell_println!("  Download size  : {}", updatemgr::format_update_size(updatemgr::pending_size()));
+            shell_println!("  History        : {}", history);
+            shell_println!("  Operations     : {}", ops);
+        }
+        "list" => {
+            let updates = updatemgr::list_updates();
+            if updates.is_empty() {
+                shell_println!("No pending updates.");
+            } else {
+                shell_println!("{:>4} {:<20} {:>10} {:>10} {:>10} {:>12} {:>7}",
+                    "ID", "PACKAGE", "FROM", "TO", "STATUS", "SIZE", "SEV");
+                for u in &updates {
+                    shell_println!("{:>4} {:<20} {:>10} {:>10} {:>10} {:>12} {:>7}",
+                        u.id, u.package, u.from_version, u.to_version,
+                        u.status.label(), updatemgr::format_update_size(u.size_bytes),
+                        u.severity.label());
+                }
+            }
+        }
+        "check" => {
+            match updatemgr::check_updates() {
+                Ok(count) => shell_println!("{} updates pending.", count),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "install" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match updatemgr::install_update(id) {
+                    Ok(()) => shell_println!("Update #{} installed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: updates install <id>");
+            }
+        }
+        "download" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match updatemgr::download_update(id) {
+                    Ok(()) => shell_println!("Download started for update #{}.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: updates download <id>");
+            }
+        }
+        "defer" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match updatemgr::defer_update(id) {
+                    Ok(()) => shell_println!("Update #{} deferred.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: updates defer <id>");
+            }
+        }
+        "info" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match updatemgr::get_update(id) {
+                    Ok(u) => {
+                        shell_println!("Update #{}: {} {} → {}", u.id, u.package, u.from_version, u.to_version);
+                        shell_println!("  Type     : {}", u.update_type.label());
+                        shell_println!("  Severity : {}", u.severity.label());
+                        shell_println!("  Status   : {}", u.status.label());
+                        shell_println!("  Size     : {}", updatemgr::format_update_size(u.size_bytes));
+                        shell_println!("  Restart  : {}", u.requires_restart);
+                        if !u.description.is_empty() {
+                            shell_println!("  Desc     : {}", u.description);
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: updates info <id>");
+            }
+        }
+        "history" => {
+            let history = updatemgr::update_history();
+            if history.is_empty() {
+                shell_println!("No update history.");
+            } else {
+                for u in &history {
+                    shell_println!("  {} {} → {} [{}]", u.package, u.from_version, u.to_version, u.status.label());
+                }
+            }
+        }
+        "channel" => {
+            match parts.get(1).copied() {
+                Some("stable") => { let _ = updatemgr::set_channel(updatemgr::UpdateChannel::Stable); shell_println!("Channel: Stable"); }
+                Some("beta") => { let _ = updatemgr::set_channel(updatemgr::UpdateChannel::Beta); shell_println!("Channel: Beta"); }
+                Some("nightly") => { let _ = updatemgr::set_channel(updatemgr::UpdateChannel::Nightly); shell_println!("Channel: Nightly"); }
+                _ => shell_println!("Usage: updates channel <stable|beta|nightly>"),
+            }
+        }
+        "auto" => {
+            match parts.get(1).copied() {
+                Some("on") | Some("yes") => { let _ = updatemgr::set_auto_check(true); shell_println!("Auto-check: on"); }
+                Some("off") | Some("no") => { let _ = updatemgr::set_auto_check(false); shell_println!("Auto-check: off"); }
+                _ => {
+                    if let Ok(cfg) = updatemgr::get_config() {
+                        shell_println!("Auto-check: {} (every {} hours)", cfg.auto_check, cfg.check_interval_hours);
+                        shell_println!("Auto-download: {}", cfg.auto_download);
+                        shell_println!("Auto-install: {}", cfg.auto_install);
+                        shell_println!("Auto-install security: {}", cfg.auto_install_security);
+                    }
+                }
+            }
+        }
+        "version" => {
+            shell_println!("OS: {}", updatemgr::os_version());
+        }
+        "archive" => {
+            match updatemgr::archive_completed() {
+                Ok(n) => shell_println!("Archived {} completed updates.", n),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (pending, history, version, channel, auto, ops) = updatemgr::stats();
+            shell_println!("Update stats: pending={} history={} version={} channel={} auto={} ops={}", pending, history, version, channel, auto, ops);
+        }
+        "test" => {
+            updatemgr::self_test();
+            shell_println!("updatemgr: self-tests completed (see serial).");
+        }
+        "init" => {
+            updatemgr::init_defaults();
+            shell_println!("Update manager initialized.");
+        }
+        _ => {
+            shell_println!("updatemgr (updates) — system update management");
+            shell_println!("  show                Overview");
+            shell_println!("  list                Pending updates");
+            shell_println!("  check               Check for updates");
+            shell_println!("  install <id>        Install update");
+            shell_println!("  download <id>       Download update");
+            shell_println!("  defer <id>          Defer update");
+            shell_println!("  info <id>           Update details");
+            shell_println!("  history             Update history");
+            shell_println!("  channel <ch>        Set update channel");
+            shell_println!("  auto [on|off]       Auto-check settings");
+            shell_println!("  version             OS version");
+            shell_println!("  archive             Archive completed");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -36573,7 +36917,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

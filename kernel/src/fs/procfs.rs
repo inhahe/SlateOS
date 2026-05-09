@@ -229,6 +229,8 @@ const ROOT_FILES: &[&str] = &[
     "powerprofile",
     "defaultapps",
     "monitors",
+    "fwsettings",
+    "updatemgr",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5131,6 +5133,46 @@ fn gen_monitors() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fwsettings() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (rules, apps, blocked, allowed, enabled, ops) = super::fwsettings::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("zone: {}\n", super::fwsettings::active_zone().label()));
+    out.push_str(&format!("rules: {}\n", rules));
+    out.push_str(&format!("app_permissions: {}\n", apps));
+    out.push_str(&format!("total_blocked: {}\n", blocked));
+    out.push_str(&format!("total_allowed: {}\n", allowed));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_updatemgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (pending, history, version, channel, auto, ops) = super::updatemgr::stats();
+    out.push_str(&format!("os_version: {}\n", version));
+    out.push_str(&format!("channel: {}\n", channel));
+    out.push_str(&format!("auto_check: {}\n", auto));
+    out.push_str(&format!("pending_updates: {}\n", pending));
+    out.push_str(&format!("history: {}\n", history));
+    out.push_str(&format!("pending_size: {}\n", super::updatemgr::format_update_size(super::updatemgr::pending_size())));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let (crit, imp, rec, opt) = super::updatemgr::pending_count();
+    if crit + imp + rec + opt > 0 {
+        out.push_str(&format!("critical: {}\n", crit));
+        out.push_str(&format!("important: {}\n", imp));
+        out.push_str(&format!("recommended: {}\n", rec));
+        out.push_str(&format!("optional: {}\n", opt));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5525,6 +5567,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "powerprofile" => Ok(gen_powerprofile()),
         "defaultapps" => Ok(gen_defaultapps()),
         "monitors" => Ok(gen_monitors()),
+        "fwsettings" => Ok(gen_fwsettings()),
+        "updatemgr" => Ok(gen_updatemgr()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

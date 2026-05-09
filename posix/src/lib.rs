@@ -41,6 +41,11 @@
 //! - **Logging**: `openlog`, `syslog`, `closelog`, `setlogmask`
 //! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,
 //!   `getlogin`, password/group enumeration
+//! - **Math**: `fabs`, `floor`, `ceil`, `round`, `trunc`, `fmod`,
+//!   `sqrt`, `pow`, `exp`/`exp2`, `log`/`log2`/`log10`,
+//!   `sin`, `cos`, `tan`, `atan2`, `frexp`, `ldexp`, `modf`,
+//!   `isnan`, `isinf`, `isfinite`, `copysign`, `fmin`, `fmax`
+//!   (and `f32` variants)
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`, `pathconf`, `confstr`
@@ -106,6 +111,7 @@ pub mod glob;
 pub mod libgen;
 pub mod ioctl;
 pub mod malloc;
+pub mod math;
 pub mod fdtable;
 pub mod file;
 pub mod locale;

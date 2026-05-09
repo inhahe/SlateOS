@@ -3461,6 +3461,7 @@ const COMMANDS: &[&str] = &[
     "eventlog", "elog", "systemimage", "simg", "raidmgr", "raid", "networkbridge", "nbridge",
     "secureerase", "serase", "dnssettings", "dns", "backupsched", "bsched", "displaycal", "dcal",
     "vpnprofile", "vpnp", "diskhealth", "dhealth", "recoverypart", "rpart",
+    "userprofile", "uprof", "diskclean", "dclean",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4980,6 +4981,8 @@ fn dispatch(line: &str) {
         "vpnprofile" | "vpnp" => cmd_vpnprofile(args),
         "diskhealth" | "dhealth" => cmd_diskhealth(args),
         "recoverypart" | "rpart" => cmd_recoverypart(args),
+        "userprofile" | "uprof" => cmd_userprofile(args),
+        "diskclean" | "dclean" => cmd_diskclean(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -45996,6 +45999,220 @@ fn parse_recovery_tool_type(s: &str) -> crate::fs::recoverypart::ToolType {
     }
 }
 
+/// `userprofile` / `uprof` — user account profile management.
+fn cmd_userprofile(args: &str) {
+    use crate::fs::userprofile;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let profiles = userprofile::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No user profiles");
+            } else {
+                shell_println!("{} profile(s):", profiles.len());
+                for p in &profiles {
+                    let active = if p.is_active { "*" } else { " " };
+                    let locked = if p.is_locked { " [locked]" } else { "" };
+                    shell_println!("  {}[{}] {} ({}) {} logins={}{}", active, p.id, p.username, p.account_type.label(), p.display_name, p.login_count, locked);
+                }
+            }
+        }
+        "create" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: userprofile create <username> <display_name> [type]");
+                return;
+            }
+            let username = parts[1];
+            let display = parts[2];
+            let atype = parts.get(3).map_or(crate::fs::userprofile::AccountType::Standard, |t| parse_account_type(t));
+            match userprofile::create_profile(username, display, atype) {
+                Ok(id) => shell_println!("Created profile '{}' (id={})", username, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: userprofile delete <id>"); return; }
+            };
+            match userprofile::delete_profile(id) {
+                Ok(()) => shell_println!("Deleted profile {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "switch" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: userprofile switch <id>"); return; }
+            };
+            match userprofile::switch_user(id) {
+                Ok(()) => shell_println!("Switched to user {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "lock" | "unlock" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: userprofile {} <id>", sub); return; }
+            };
+            let locked = sub == "lock";
+            match userprofile::set_locked(id, locked) {
+                Ok(()) => shell_println!("Profile {} {}", id, if locked { "locked" } else { "unlocked" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rename" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: userprofile rename <id> <new_display_name>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            let name = parts[2..].join(" ");
+            match userprofile::set_display_name(id, &name) {
+                Ok(()) => shell_println!("Renamed profile {} to '{}'", id, name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "whoami" => {
+            match userprofile::active_user() {
+                Some(u) => shell_println!("{} ({}) — {}", u.username, u.account_type.label(), u.display_name),
+                None => shell_println!("No active user"),
+            }
+        }
+        "info" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: userprofile info <id>"); return; }
+            };
+            match userprofile::get_profile(id) {
+                Some(p) => {
+                    shell_println!("User #{}: {}", p.id, p.username);
+                    shell_println!("  Display: {}", p.display_name);
+                    shell_println!("  Type: {}", p.account_type.label());
+                    shell_println!("  Home: {}", p.home_dir);
+                    shell_println!("  Shell: {}", p.shell);
+                    shell_println!("  Logins: {}", p.login_count);
+                    shell_println!("  Active: {}, Locked: {}", p.is_active, p.is_locked);
+                }
+                None => shell_println!("Profile {} not found", id),
+            }
+        }
+        "stats" => {
+            let (count, logins, switches, ops) = userprofile::stats();
+            shell_println!("User Profiles: profiles={} logins={} switches={} ops={}", count, logins, switches, ops);
+        }
+        "init" => { userprofile::init_defaults(); shell_println!("User profiles initialized"); }
+        "test" => userprofile::self_test(),
+        _ => {
+            shell_println!("Usage: userprofile <list|create|delete|switch|lock|unlock|rename|whoami|info|stats|init|test>");
+            shell_println!("Aliases: uprof");
+        }
+    }
+}
+
+fn parse_account_type(s: &str) -> crate::fs::userprofile::AccountType {
+    use crate::fs::userprofile::AccountType;
+    match s.to_lowercase().as_str() {
+        "admin" => AccountType::Admin,
+        "standard" | "std" => AccountType::Standard,
+        "guest" => AccountType::Guest,
+        "system" | "sys" => AccountType::System,
+        "managed" => AccountType::Managed,
+        _ => AccountType::Standard,
+    }
+}
+
+/// `diskclean` / `dclean` — automated disk cleanup.
+fn cmd_diskclean(args: &str) {
+    use crate::fs::diskclean;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "scan" => {
+            match diskclean::scan() {
+                Ok(summaries) => {
+                    if summaries.is_empty() {
+                        shell_println!("No reclaimable items found");
+                    } else {
+                        let total: u64 = summaries.iter().map(|s| s.total_bytes).sum();
+                        shell_println!("Found {} categories, {}B reclaimable:", summaries.len(), total);
+                        for s in &summaries {
+                            shell_println!("  {} — {} items, {}B", s.category.label(), s.item_count, s.total_bytes);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clean" => {
+            let cats: Vec<crate::fs::diskclean::CleanCategory> = if parts.len() > 1 {
+                parts[1..].iter().map(|s| parse_clean_category(s)).collect()
+            } else {
+                alloc::vec![
+                    crate::fs::diskclean::CleanCategory::TempFiles,
+                    crate::fs::diskclean::CleanCategory::SystemCache,
+                    crate::fs::diskclean::CleanCategory::OldLogs,
+                    crate::fs::diskclean::CleanCategory::ThumbnailCache,
+                    crate::fs::diskclean::CleanCategory::CrashDumps,
+                ]
+            };
+            match diskclean::clean(&cats) {
+                Ok((items, bytes)) => shell_println!("Cleaned {} items, {}B freed", items, bytes),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "estimate" => {
+            let est = diskclean::estimate();
+            shell_println!("Estimated reclaimable: {}B", est);
+        }
+        "items" => {
+            let items = diskclean::list_items();
+            if items.is_empty() {
+                shell_println!("No items (run scan first)");
+            } else {
+                shell_println!("{} item(s):", items.len());
+                for i in &items {
+                    let safe = if i.safe_to_remove { "safe" } else { "KEEP" };
+                    shell_println!("  [{}] {} — {}B [{}]", i.category.label(), i.path, i.size_bytes, safe);
+                }
+            }
+        }
+        "stats" => {
+            let (count, scans, cleaned_bytes, cleaned_items, ops) = diskclean::stats();
+            shell_println!("Disk Cleanup: items={} scans={} cleaned_bytes={} cleaned_items={} ops={}", count, scans, cleaned_bytes, cleaned_items, ops);
+        }
+        "init" => { diskclean::init_defaults(); shell_println!("Disk cleanup initialized"); }
+        "test" => diskclean::self_test(),
+        _ => {
+            shell_println!("Usage: diskclean <scan|clean|estimate|items|stats|init|test>");
+            shell_println!("Aliases: dclean");
+        }
+    }
+}
+
+fn parse_clean_category(s: &str) -> crate::fs::diskclean::CleanCategory {
+    use crate::fs::diskclean::CleanCategory;
+    match s.to_lowercase().as_str() {
+        "temp" | "tmpfiles" => CleanCategory::TempFiles,
+        "syscache" | "systemcache" => CleanCategory::SystemCache,
+        "appcache" => CleanCategory::AppCache,
+        "logs" | "oldlogs" => CleanCategory::OldLogs,
+        "packages" | "pkgcache" => CleanCategory::PackageCache,
+        "thumbs" | "thumbnails" => CleanCategory::ThumbnailCache,
+        "trash" | "trashbin" => CleanCategory::TrashBin,
+        "updates" => CleanCategory::DownloadedUpdates,
+        "browser" => CleanCategory::BrowserData,
+        "crashes" | "dumps" => CleanCategory::CrashDumps,
+        _ => CleanCategory::TempFiles,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -54592,7 +54809,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

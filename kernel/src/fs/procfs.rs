@@ -368,6 +368,8 @@ const ROOT_FILES: &[&str] = &[
     "vpnprofile",
     "diskhealth",
     "recoverypart",
+    "userprofile",
+    "diskclean",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7368,6 +7370,31 @@ fn gen_recoverypart() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_userprofile() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== User Profiles ===\n");
+    let (profile_count, total_logins, total_switches, ops) = crate::fs::userprofile::stats();
+    out.push_str(&format!("profile_count: {}\n", profile_count));
+    out.push_str(&format!("total_logins: {}\n", total_logins));
+    out.push_str(&format!("total_switches: {}\n", total_switches));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_diskclean() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Disk Cleanup ===\n");
+    let (item_count, total_scans, cleaned_bytes, cleaned_items, ops) = crate::fs::diskclean::stats();
+    out.push_str(&format!("item_count: {}\n", item_count));
+    out.push_str(&format!("total_scans: {}\n", total_scans));
+    out.push_str(&format!("cleaned_bytes: {}\n", cleaned_bytes));
+    out.push_str(&format!("cleaned_items: {}\n", cleaned_items));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7901,6 +7928,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "vpnprofile" => Ok(gen_vpnprofile()),
         "diskhealth" => Ok(gen_diskhealth()),
         "recoverypart" => Ok(gen_recoverypart()),
+        "userprofile" => Ok(gen_userprofile()),
+        "diskclean" => Ok(gen_diskclean()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

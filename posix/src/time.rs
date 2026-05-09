@@ -180,6 +180,71 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
     }
 }
 
+/// Set the clock.
+///
+/// Stub: returns -1 with `EPERM`.  The kernel clock cannot be
+/// adjusted from userspace yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn clock_settime(_clk_id: ClockidT, _tp: *const Timespec) -> i32 {
+    errno::set_errno(errno::EPERM);
+    -1
+}
+
+/// Timer flag: time value is absolute (not relative).
+pub const TIMER_ABSTIME: i32 = 1;
+
+/// High-resolution sleep with clock selection.
+///
+/// If `flags` includes `TIMER_ABSTIME`, `request` is treated as an
+/// absolute time point.  Otherwise, it is relative (same as
+/// `nanosleep`).
+///
+/// Returns 0 on success, or an error code (not via errno — POSIX
+/// specifies direct return for this function).
+#[unsafe(no_mangle)]
+pub extern "C" fn clock_nanosleep(
+    clk_id: ClockidT,
+    flags: i32,
+    request: *const Timespec,
+    remain: *mut Timespec,
+) -> i32 {
+    if request.is_null() {
+        return errno::EINVAL;
+    }
+
+    if clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_REALTIME {
+        return errno::EINVAL;
+    }
+
+    if flags & TIMER_ABSTIME != 0 {
+        // Absolute time: compute the relative duration.
+        let mut now = Timespec { tv_sec: 0, tv_nsec: 0 };
+        if clock_gettime(clk_id, &raw mut now) < 0 {
+            return errno::EINVAL;
+        }
+
+        // SAFETY: request is non-null.
+        let req = unsafe { &*request };
+        #[allow(clippy::arithmetic_side_effects)]
+        let target_ns = req.tv_sec * 1_000_000_000 + req.tv_nsec;
+        #[allow(clippy::arithmetic_side_effects)]
+        let now_ns = now.tv_sec * 1_000_000_000 + now.tv_nsec;
+
+        if target_ns <= now_ns {
+            return 0; // Already past.
+        }
+
+        #[allow(clippy::arithmetic_side_effects)]
+        let sleep_ns = (target_ns - now_ns) as u64;
+        let _ = syscall1(SYS_SLEEP, sleep_ns);
+    } else {
+        // Relative time: same as nanosleep.
+        nanosleep(request, remain);
+    }
+
+    0
+}
+
 /// Get time of day (legacy interface).
 ///
 /// Uses `CLOCK_MONOTONIC` since we don't have a wall clock yet.

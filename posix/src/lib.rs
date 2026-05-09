@@ -12,9 +12,9 @@
 //!
 //! - **File I/O**: `open`, `close`, `read`, `write`, `lseek`, `stat`,
 //!   `fstat`, `unlink`, `mkdir`, `rmdir`, `rename`, `dup`, `dup2`,
-//!   `access`, `chmod`, `chown`, `umask`, `truncate`, `ftruncate`,
-//!   `fsync`, `link`, `symlink`, `readlink`, `utimes`, `futimes`,
-//!   `utimensat`, `futimens`
+//!   `dup3`, `access`, `chmod`, `chown`, `umask`, `truncate`,
+//!   `ftruncate`, `fsync`, `fdatasync`, `link`, `symlink`, `readlink`,
+//!   `utimes`, `futimes`, `utimensat`, `futimens`, `sendfile`
 //! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
 //!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
 //!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
@@ -68,10 +68,11 @@
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,
 //!   `pathconf`, `confstr`, `strlcpy`, `strlcat`, `mkdtemp`, `flock`,
-//!   `daemon`, `getloadavg`, `sync`, `sethostname`, `chroot`,
+//!   `daemon`, `getloadavg`, `sync`, `syncfs`, `sethostname`, `chroot`,
 //!   `flockfile`/`funlockfile`/`ftrylockfile`, `if_nametoindex`,
 //!   `if_indextoname`, `ppoll`, `putenv`, `strcasestr`,
-//!   `explicit_bzero`, `strtoimax`/`strtoumax`
+//!   `explicit_bzero`, `strtoimax`/`strtoumax`, `getrandom`,
+//!   `getentropy`, `clock_nanosleep`, `clock_settime`
 //!
 //! ## Error Handling
 //!

@@ -502,6 +502,28 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
 }
 
 // ---------------------------------------------------------------------------
+// dup3
+// ---------------------------------------------------------------------------
+
+/// Duplicate a file descriptor, with flags.
+///
+/// Like `dup2`, but the `flags` parameter can include `O_CLOEXEC`.
+/// We accept the flag but don't enforce it (no exec-close semantics
+/// yet).
+///
+/// Returns `newfd` on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, _flags: i32) -> Fd {
+    if oldfd == newfd {
+        // POSIX / Linux: dup3 returns EINVAL when oldfd == newfd
+        // (unlike dup2 which succeeds).
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    dup2(oldfd, newfd)
+}
+
+// ---------------------------------------------------------------------------
 // stat / fstat / lstat
 // ---------------------------------------------------------------------------
 
@@ -1252,6 +1274,75 @@ pub extern "C" fn flock(_fd: Fd, _operation: i32) -> i32 {
     // Advisory locking not yet implemented in the kernel.
     // Return success so programs that create lock files don't fail.
     0
+}
+
+// ---------------------------------------------------------------------------
+// sendfile
+// ---------------------------------------------------------------------------
+
+/// Copy data between file descriptors (in-kernel optimization).
+///
+/// Copies up to `count` bytes from `in_fd` to `out_fd`.  If `offset`
+/// is non-null, it specifies the starting offset in `in_fd` (and is
+/// updated to reflect the new position).
+///
+/// Stub: performs the copy in userspace via read+write loop.
+#[unsafe(no_mangle)]
+pub extern "C" fn sendfile(
+    out_fd: Fd,
+    in_fd: Fd,
+    offset: *mut i64,
+    count: usize,
+) -> isize {
+    // If an offset is specified, seek to it first.
+    if !offset.is_null() {
+        // SAFETY: offset is valid (caller contract).
+        let off = unsafe { *offset };
+        let ret = lseek(in_fd, off, 0); // SEEK_SET = 0
+        if ret < 0 {
+            return -1;
+        }
+    }
+
+    // Copy in chunks via a stack buffer.
+    let mut buf = [0u8; 4096];
+    let mut total: usize = 0;
+
+    while total < count {
+        let remaining = count.wrapping_sub(total);
+        let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+
+        let nr = read(in_fd, buf.as_mut_ptr(), chunk);
+        if nr < 0 {
+            if total > 0 {
+                break; // Return partial transfer.
+            }
+            return -1;
+        }
+        if nr == 0 {
+            break; // EOF.
+        }
+
+        let nw = write(out_fd, buf.as_ptr(), nr as usize);
+        if nw < 0 {
+            if total > 0 {
+                break;
+            }
+            return -1;
+        }
+
+        total = total.wrapping_add(nw as usize);
+    }
+
+    // Update offset if provided.
+    if !offset.is_null() {
+        // SAFETY: offset is valid.
+        unsafe {
+            *offset = (*offset).wrapping_add(total as i64);
+        }
+    }
+
+    total as isize
 }
 
 // ---------------------------------------------------------------------------

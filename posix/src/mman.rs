@@ -199,3 +199,47 @@ pub extern "C" fn shm_unlink(_name: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// posix_madvise
+// ---------------------------------------------------------------------------
+
+/// POSIX memory advice constants.
+pub const POSIX_MADV_NORMAL: i32 = 0;
+/// Expect random access.
+pub const POSIX_MADV_RANDOM: i32 = 1;
+/// Expect sequential access.
+pub const POSIX_MADV_SEQUENTIAL: i32 = 2;
+/// Expect access in the near future.
+pub const POSIX_MADV_WILLNEED: i32 = 3;
+/// Do not expect access in the near future.
+pub const POSIX_MADV_DONTNEED: i32 = 4;
+
+/// POSIX-specified memory advice.
+///
+/// Unlike `madvise` (which sets errno), `posix_madvise` returns the
+/// error code directly (0 on success).
+///
+/// Stub: always returns 0 (advisory, no kernel action).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_madvise(
+    _addr: *mut core::ffi::c_void,
+    _len: SizeT,
+    _advice: i32,
+) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
+// memfd_create (Linux extension)
+// ---------------------------------------------------------------------------
+
+/// Create an anonymous file backed by memory.
+///
+/// Stub: returns -1 with ENOSYS.  Requires kernel support for
+/// anonymous file descriptors backed by anonymous memory.
+#[unsafe(no_mangle)]
+pub extern "C" fn memfd_create(_name: *const u8, _flags: u32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}

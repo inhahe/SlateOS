@@ -787,6 +787,127 @@ pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// getrandom / getentropy
+// ---------------------------------------------------------------------------
+
+/// Flags for `getrandom`.
+pub const GRND_NONBLOCK: u32 = 1;
+/// Use the random source (not urandom).
+pub const GRND_RANDOM: u32 = 2;
+
+/// Fill a buffer with random bytes.
+///
+/// Uses `rdrand` x86_64 instruction where available.  Falls back to
+/// a simple LCG seeded from the monotonic clock if RDRAND fails.
+///
+/// Returns the number of bytes filled, or -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    fill_random(buf, buflen);
+    buflen as isize
+}
+
+/// Fill a buffer with random bytes (simplified API).
+///
+/// Like `getrandom` but with no flags and returns 0/errno.
+/// Maximum 256 bytes per call (POSIX requirement).
+#[unsafe(no_mangle)]
+pub extern "C" fn getentropy(buf: *mut u8, buflen: usize) -> i32 {
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if buflen > 256 {
+        errno::set_errno(errno::EIO);
+        return -1;
+    }
+
+    fill_random(buf, buflen);
+    0
+}
+
+/// Fill a buffer with pseudo-random bytes.
+///
+/// Tries RDRAND first (hardware RNG), falls back to an LCG seeded from
+/// the monotonic clock.  Not cryptographically strong — suitable for
+/// seeding userspace PRNGs, temp file names, etc.
+fn fill_random(buf: *mut u8, len: usize) {
+    // Try RDRAND first.
+    let mut seed: u64 = 0;
+    let rdrand_ok: bool;
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ok: u8;
+        // SAFETY: rdrand is safe to execute; it simply reads hardware RNG.
+        unsafe {
+            core::arch::asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) seed,
+                ok = out(reg_byte) ok,
+                options(nostack, nomem),
+            );
+        }
+        rdrand_ok = ok != 0;
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        rdrand_ok = false;
+    }
+
+    if !rdrand_ok {
+        // Fallback: seed from monotonic clock.
+        let ns = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        seed = ns;
+    }
+
+    // Use a simple LCG to fill the buffer.  XOR with RDRAND output
+    // if available for better entropy distribution.
+    let mut state = seed;
+    let mut i: usize = 0;
+    while i < len {
+        // LCG step: state = state * 6364136223846793005 + 1442695040888963407
+        state = state
+            .wrapping_mul(0x5851_F42D_4C95_7F2D)
+            .wrapping_add(0x1405_7B7E_F767_814F);
+
+        // Extract byte from upper bits (better quality).
+        let byte = (state >> 56) as u8;
+        // SAFETY: i < len, buf is valid for len bytes.
+        unsafe { *buf.add(i) = byte; }
+        i = i.wrapping_add(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fdatasync / syncfs
+// ---------------------------------------------------------------------------
+
+/// Flush data (not metadata) for an open file descriptor.
+///
+/// Stub: delegates to `fsync` (we don't distinguish data-only sync).
+#[unsafe(no_mangle)]
+pub extern "C" fn fdatasync(fd: Fd) -> i32 {
+    // Our fsync already just returns 0 (filesystem writes are sync).
+    crate::file::fsync(fd)
+}
+
+/// Synchronize all data for the filesystem containing `fd`.
+///
+/// Stub: no-op (same as `sync` — our writes are synchronous).
+#[unsafe(no_mangle)]
+pub extern "C" fn syncfs(_fd: Fd) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
 // abort
 // ---------------------------------------------------------------------------
 

@@ -962,6 +962,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ppoll: poll with timespec timeout (converts to ms, delegates to poll), sigmask ignored
   - [x] if_nametoindex/if_indextoname: network interface stubs (no named interfaces), IF_NAMESIZE constant
   - [x] inttypes: strtoimax/strtoumax (delegate to strtoll/strtoull), imaxabs, imaxdiv, wcstoimax/wcstoumax stubs
+  - [x] getrandom/getentropy: pseudo-random bytes via RDRAND + LCG fallback (not cryptographic)
+  - [x] dup3: dup2 with flags (O_CLOEXEC accepted but not enforced), EINVAL when oldfd==newfd
+  - [x] fdatasync/syncfs: stubs (writes are synchronous), sendfile (userspace read+write loop)
+  - [x] clock_settime (stub EPERM), clock_nanosleep (relative + absolute time, TIMER_ABSTIME)
+  - [x] posix_madvise: POSIX_MADV_* constants + stub (returns 0); memfd_create stub (ENOSYS)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

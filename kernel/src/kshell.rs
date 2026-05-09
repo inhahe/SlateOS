@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4881,6 +4881,10 @@ fn dispatch(line: &str) {
         "dumpanalyzer" | "dump" => cmd_dumpanalyzer(args),
         "memdiag" | "mdiag" => cmd_memdiag(args),
         "parentaltime" | "ptime" => cmd_parentaltime(args),
+        "mediakeys" | "mkeys" => cmd_mediakeys(args),
+        "webcam" | "cam" => cmd_webcam(args),
+        "speechio" | "speech" => cmd_speechio(args),
+        "mobilelink" | "mlink" => cmd_mobilelink(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -34216,6 +34220,640 @@ fn cmd_parentaltime(args: &str) {
     }
 }
 
+/// `mediakeys` / `mkeys` — media playback session management.
+fn cmd_mediakeys(args: &str) {
+    use crate::fs::mediakeys;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            mediakeys::init_defaults();
+            let sessions = mediakeys::list_sessions();
+            if sessions.is_empty() {
+                shell_println!("No media sessions.");
+            } else {
+                shell_println!("{:<4} {:<15} {:<20} {:<15} {:<10} {:<8}",
+                    "ID", "App", "Title", "Artist", "State", "Active");
+                for s in &sessions {
+                    shell_println!("{:<4} {:<15} {:<20} {:<15} {:<10} {:<8}",
+                        s.id, s.app_name, s.title, s.artist,
+                        s.state.label(), if s.is_active { "Yes" } else { "No" });
+                }
+            }
+        }
+        "register" | "add" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let pid = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            if app.is_empty() {
+                shell_println!("Usage: mkeys register <app_name> [pid]");
+            } else {
+                match mediakeys::register_session(app, pid) {
+                    Ok(id) => shell_println!("Registered session {} for '{}'", id, app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unregister" | "rm" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match mediakeys::unregister_session(id) {
+                        Ok(()) => shell_println!("Unregistered session {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: mkeys unregister <id>"); }
+        }
+        "update" | "np" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let title = parts.get(2).copied().unwrap_or("");
+            let artist = parts.get(3).copied().unwrap_or("");
+            let album = parts.get(4).copied().unwrap_or("");
+            let dur = parts.get(5).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if let Ok(id) = id_str.parse::<u32>() {
+                match mediakeys::update_now_playing(id, title, artist, album, dur) {
+                    Ok(()) => shell_println!("Updated now playing for session {}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: mkeys update <id> <title> [artist] [album] [duration_ms]"); }
+        }
+        "play" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    mediakeys::set_playback_state(id, mediakeys::PlaybackState::Playing).ok();
+                    shell_println!("Session {} → Playing", id);
+                }
+            } else {
+                mediakeys::handle_key(mediakeys::MediaKey::Play).ok();
+                shell_println!("Play (active session)");
+            }
+        }
+        "pause" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    mediakeys::set_playback_state(id, mediakeys::PlaybackState::Paused).ok();
+                    shell_println!("Session {} → Paused", id);
+                }
+            } else {
+                mediakeys::handle_key(mediakeys::MediaKey::Pause).ok();
+                shell_println!("Pause (active session)");
+            }
+        }
+        "toggle" | "pp" => {
+            mediakeys::handle_key(mediakeys::MediaKey::PlayPause).ok();
+            shell_println!("Play/Pause toggled.");
+        }
+        "stop" => {
+            mediakeys::handle_key(mediakeys::MediaKey::Stop).ok();
+            shell_println!("Stopped.");
+        }
+        "next" => {
+            mediakeys::handle_key(mediakeys::MediaKey::Next).ok();
+            shell_println!("Next track.");
+        }
+        "prev" => {
+            mediakeys::handle_key(mediakeys::MediaKey::Previous).ok();
+            shell_println!("Previous track.");
+        }
+        "active" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match mediakeys::set_active(id) {
+                        Ok(()) => shell_println!("Session {} is now active.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else {
+                match mediakeys::get_active_session() {
+                    Some(s) => shell_println!("Active: {} — {} by {} [{}]",
+                        s.app_name, s.title, s.artist, s.state.label()),
+                    None => shell_println!("No active session."),
+                }
+            }
+        }
+        "stats" => {
+            let (count, total, keys, active_id, ops) = mediakeys::stats();
+            shell_println!("Sessions: {}, Total: {}, Key events: {}", count, total, keys);
+            shell_println!("Active ID: {}, Ops: {}", active_id, ops);
+        }
+        "test" => { mediakeys::self_test(); shell_println!("Media keys self-test complete."); }
+        "init" => { mediakeys::init_defaults(); shell_println!("Media keys initialized."); }
+        _ => {
+            shell_println!("mediakeys (mkeys) — media playback sessions");
+            shell_println!("  show / list                    List sessions");
+            shell_println!("  register <app> [pid]           Register session");
+            shell_println!("  unregister <id>                Remove session");
+            shell_println!("  update <id> <title> [artist]   Now playing");
+            shell_println!("  play / pause / toggle / stop   Transport");
+            shell_println!("  next / prev                    Track control");
+            shell_println!("  active [id]                    Show/set active");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `webcam` / `cam` — camera device management.
+fn cmd_webcam(args: &str) {
+    use crate::fs::webcam;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            webcam::init_defaults();
+            let cams = webcam::list_cameras();
+            if cams.is_empty() {
+                shell_println!("No cameras.");
+            } else {
+                shell_println!("{:<4} {:<25} {:<10} {:<15} {:<7}",
+                    "ID", "Name", "Type", "Privacy", "Default");
+                for c in &cams {
+                    shell_println!("{:<4} {:<25} {:<10} {:<15} {:<7}",
+                        c.id, c.name, c.connection.label(), c.privacy.label(),
+                        if c.is_default { "Yes" } else { "No" });
+                }
+            }
+        }
+        "streams" => {
+            let streams = webcam::list_streams();
+            if streams.is_empty() {
+                shell_println!("No active streams.");
+            } else {
+                shell_println!("{:<4} {:<6} {:<15} {:<12} {:<6}",
+                    "SID", "CamID", "App", "Resolution", "FPS");
+                for s in &streams {
+                    shell_println!("{:<4} {:<6} {:<15} {}x{:<8} {:<6}",
+                        s.stream_id, s.camera_id, s.app_name, s.width, s.height, s.fps);
+                }
+            }
+        }
+        "register" | "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: cam register <name> [usb|builtin|network|virtual]");
+            } else {
+                let conn = match parts.get(2).copied().unwrap_or("usb") {
+                    "builtin" => webcam::CameraConnection::Builtin,
+                    "network" => webcam::CameraConnection::Network,
+                    "virtual" => webcam::CameraConnection::Virtual,
+                    _ => webcam::CameraConnection::Usb,
+                };
+                match webcam::register_camera(name, conn) {
+                    Ok(id) => shell_println!("Registered camera {} '{}'", id, name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unregister" | "rm" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match webcam::unregister_camera(id) {
+                        Ok(()) => shell_println!("Unregistered camera {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: cam unregister <id>"); }
+        }
+        "open" => {
+            let cam_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let app = parts.get(2).copied().unwrap_or("kshell");
+            let w = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1280);
+            let h = parts.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(720);
+            let fps = parts.get(5).and_then(|s| s.parse::<u32>().ok()).unwrap_or(30);
+            if cam_id == 0 {
+                shell_println!("Usage: cam open <cam_id> [app] [width] [height] [fps]");
+            } else {
+                match webcam::open_stream(cam_id, app, 0, w, h, fps) {
+                    Ok(sid) => shell_println!("Opened stream {} on camera {}", sid, cam_id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "close" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(sid) = id_str.parse::<u32>() {
+                    match webcam::close_stream(sid) {
+                        Ok(()) => shell_println!("Closed stream {}", sid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: cam close <stream_id>"); }
+        }
+        "privacy" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let mode = parts.get(2).copied().unwrap_or("");
+            if let Ok(id) = id_str.parse::<u32>() {
+                let setting = match mode {
+                    "open" => webcam::PrivacySetting::Open,
+                    "prompt" => webcam::PrivacySetting::PromptRequired,
+                    "disabled" | "off" => webcam::PrivacySetting::Disabled,
+                    _ => { shell_println!("Modes: open, prompt, disabled"); return; }
+                };
+                match webcam::set_privacy(id, setting) {
+                    Ok(()) => shell_println!("Camera {} privacy → {}", id, setting.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: cam privacy <cam_id> <open|prompt|disabled>"); }
+        }
+        "block" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: cam block <app_name>");
+            } else {
+                match webcam::block_app(app) {
+                    Ok(()) => shell_println!("Blocked '{}'", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unblock" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: cam unblock <app_name>");
+            } else {
+                match webcam::unblock_app(app) {
+                    Ok(()) => shell_println!("Unblocked '{}'", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "blocked" => {
+            let blocked = webcam::list_blocked();
+            if blocked.is_empty() {
+                shell_println!("No blocked apps.");
+            } else {
+                for b in &blocked { shell_println!("  {}", b.app_name); }
+            }
+        }
+        "default" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match webcam::set_default(id) {
+                        Ok(()) => shell_println!("Camera {} is now default.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: cam default <cam_id>"); }
+        }
+        "inuse" => {
+            let ids = webcam::cameras_in_use();
+            if ids.is_empty() {
+                shell_println!("No cameras in use.");
+            } else {
+                shell_println!("Cameras in use: {:?}", ids);
+            }
+        }
+        "stats" => {
+            let (cams, streams, total, denied, ops) = webcam::stats();
+            shell_println!("Cameras: {}, Active streams: {}, Total: {}", cams, streams, total);
+            shell_println!("Denied: {}, Ops: {}", denied, ops);
+        }
+        "test" => { webcam::self_test(); shell_println!("Webcam self-test complete."); }
+        "init" => { webcam::init_defaults(); shell_println!("Webcam initialized."); }
+        _ => {
+            shell_println!("webcam (cam) — camera management");
+            shell_println!("  show / list                 List cameras");
+            shell_println!("  streams                     Active streams");
+            shell_println!("  register <name> [type]      Add camera");
+            shell_println!("  unregister <id>             Remove camera");
+            shell_println!("  open <cam_id> [app] [w] [h] Open stream");
+            shell_println!("  close <stream_id>           Close stream");
+            shell_println!("  privacy <id> <mode>         Set privacy");
+            shell_println!("  block / unblock <app>       App access");
+            shell_println!("  blocked                     List blocked");
+            shell_println!("  default <id>                Set default");
+            shell_println!("  inuse                       Show active");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `speechio` / `speech` — speech input/output services.
+fn cmd_speechio(args: &str) {
+    use crate::fs::speechio;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "voices" => {
+            speechio::init_defaults();
+            let voices = speechio::list_voices();
+            if voices.is_empty() {
+                shell_println!("No voices.");
+            } else {
+                shell_println!("{:<4} {:<15} {:<8} {:<10} {:<7}",
+                    "ID", "Name", "Lang", "Gender", "Default");
+                for v in &voices {
+                    shell_println!("{:<4} {:<15} {:<8} {:<10} {:<7}",
+                        v.id, v.name, v.language, v.gender.label(),
+                        if v.is_default { "Yes" } else { "No" });
+                }
+            }
+        }
+        "speak" | "say" => {
+            let text = if parts.len() > 1 {
+                parts[1..].join(" ")
+            } else {
+                shell_println!("Usage: speech speak <text>");
+                return;
+            };
+            match speechio::speak(&text, None, 100, 100, 80) {
+                Ok(id) => shell_println!("Queued utterance {} — \"{}\"", id, text),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stop" => {
+            speechio::stop_speaking().ok();
+            shell_println!("Stopped all speech.");
+        }
+        "queue" => {
+            let utts = speechio::list_utterances();
+            if utts.is_empty() {
+                shell_println!("No utterances.");
+            } else {
+                shell_println!("{:<4} {:<10} {:<30} {:<5} {:<5}",
+                    "ID", "State", "Text", "Rate", "Vol");
+                for u in &utts {
+                    let text_short: String = u.text.chars().take(28).collect();
+                    shell_println!("{:<4} {:<10} {:<30} {:<5} {:<5}",
+                        u.id, u.state.label(), text_short, u.rate_percent, u.volume_percent);
+                }
+            }
+        }
+        "cancel" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match speechio::cancel_utterance(id) {
+                        Ok(()) => shell_println!("Cancelled utterance {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: speech cancel <id>"); }
+        }
+        "addvoice" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let lang = parts.get(2).copied().unwrap_or("en-US");
+            let gender = match parts.get(3).copied().unwrap_or("neutral") {
+                "male" | "m" => speechio::VoiceGender::Male,
+                "female" | "f" => speechio::VoiceGender::Female,
+                _ => speechio::VoiceGender::Neutral,
+            };
+            if name.is_empty() {
+                shell_println!("Usage: speech addvoice <name> [lang] [male|female|neutral]");
+            } else {
+                match speechio::add_voice(name, lang, gender) {
+                    Ok(id) => shell_println!("Added voice {} '{}'", id, name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rmvoice" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match speechio::remove_voice(id) {
+                        Ok(()) => shell_println!("Removed voice {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: speech rmvoice <id>"); }
+        }
+        "default" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match speechio::set_default_voice(id) {
+                        Ok(()) => shell_println!("Voice {} is now default.", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: speech default <voice_id>"); }
+        }
+        "tts" => {
+            let mode = parts.get(1).copied().unwrap_or("");
+            match mode {
+                "on" | "enable" => {
+                    speechio::set_tts_enabled(true).ok();
+                    shell_println!("TTS enabled.");
+                }
+                "off" | "disable" => {
+                    speechio::set_tts_enabled(false).ok();
+                    shell_println!("TTS disabled.");
+                }
+                _ => shell_println!("Usage: speech tts <on|off>"),
+            }
+        }
+        "listen" => {
+            let mode = parts.get(1).copied().unwrap_or("start");
+            match mode {
+                "start" | "on" => {
+                    speechio::set_recognition_enabled(true).ok();
+                    match speechio::start_listening() {
+                        Ok(()) => shell_println!("Listening..."),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "stop" | "off" => {
+                    speechio::stop_listening().ok();
+                    shell_println!("Stopped listening.");
+                }
+                _ => shell_println!("Usage: speech listen <start|stop>"),
+            }
+        }
+        "results" => {
+            let results = speechio::list_results();
+            if results.is_empty() {
+                shell_println!("No recognition results.");
+            } else {
+                for r in &results {
+                    shell_println!("[{}] \"{}\", confidence: {}.{}%",
+                        r.id, r.text, r.confidence / 100, r.confidence % 100);
+                }
+            }
+        }
+        "stats" => {
+            let (voices, spoken, recognized, tts_on, ops) = speechio::stats();
+            shell_println!("Voices: {}, Spoken: {}, Recognized: {}", voices, spoken, recognized);
+            shell_println!("TTS: {}, Ops: {}", if tts_on { "On" } else { "Off" }, ops);
+        }
+        "test" => { speechio::self_test(); shell_println!("Speech I/O self-test complete."); }
+        "init" => { speechio::init_defaults(); shell_println!("Speech I/O initialized."); }
+        _ => {
+            shell_println!("speechio (speech) — speech services");
+            shell_println!("  voices / show           List voices");
+            shell_println!("  speak <text>            Queue TTS");
+            shell_println!("  stop                    Stop speaking");
+            shell_println!("  queue                   Show utterances");
+            shell_println!("  cancel <id>             Cancel utterance");
+            shell_println!("  addvoice <name> [lang]  Add voice");
+            shell_println!("  rmvoice <id>            Remove voice");
+            shell_println!("  default <id>            Set default voice");
+            shell_println!("  tts <on|off>            Toggle TTS");
+            shell_println!("  listen <start|stop>     Recognition");
+            shell_println!("  results                 Show results");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `mobilelink` / `mlink` — phone/mobile device linking.
+fn cmd_mobilelink(args: &str) {
+    use crate::fs::mobilelink;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            mobilelink::init_defaults();
+            let devs = mobilelink::list_devices();
+            if devs.is_empty() {
+                shell_println!("No linked devices.");
+            } else {
+                shell_println!("{:<4} {:<18} {:<10} {:<15} {:<12} {:<5}",
+                    "ID", "Name", "Platform", "Model", "State", "Batt");
+                for d in &devs {
+                    shell_println!("{:<4} {:<18} {:<10} {:<15} {:<12} {}%",
+                        d.id, d.name, d.platform.label(), d.model,
+                        d.state.label(), d.battery_percent);
+                }
+            }
+        }
+        "pair" | "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let model = parts.get(2).copied().unwrap_or("Unknown");
+            if name.is_empty() {
+                shell_println!("Usage: mlink pair <name> [model] [android|ios|other]");
+            } else {
+                let platform = match parts.get(3).copied().unwrap_or("android") {
+                    "ios" => mobilelink::MobilePlatform::Ios,
+                    "other" => mobilelink::MobilePlatform::Other,
+                    _ => mobilelink::MobilePlatform::Android,
+                };
+                match mobilelink::start_pairing(name, platform, model) {
+                    Ok((id, code)) => shell_println!("Pairing device {}. Code: {}", id, code),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "confirm" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let code_str = parts.get(2).copied().unwrap_or("");
+            if let (Ok(id), Ok(code)) = (id_str.parse::<u32>(), code_str.parse::<u32>()) {
+                match mobilelink::confirm_pairing(id, code) {
+                    Ok(()) => shell_println!("Device {} paired successfully.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: mlink confirm <device_id> <code>"); }
+        }
+        "disconnect" | "dc" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match mobilelink::disconnect(id) {
+                        Ok(()) => shell_println!("Disconnected device {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: mlink disconnect <id>"); }
+        }
+        "reconnect" | "rc" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match mobilelink::reconnect(id) {
+                        Ok(()) => shell_println!("Reconnected device {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: mlink reconnect <id>"); }
+        }
+        "remove" | "rm" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match mobilelink::remove_device(id) {
+                        Ok(()) => shell_println!("Removed device {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: mlink remove <id>"); }
+        }
+        "notif" | "notifications" => {
+            let dev_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let notifs = mobilelink::list_notifications(dev_id);
+            if notifs.is_empty() {
+                shell_println!("No notifications.");
+            } else {
+                for n in &notifs {
+                    let status = if n.dismissed { " (dismissed)" } else { "" };
+                    shell_println!("[{}] {} — {} / {}{}", n.id, n.app_name, n.title, n.body, status);
+                }
+            }
+        }
+        "sms" | "msg" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let to = parts.get(2).copied().unwrap_or("");
+            let body = if parts.len() > 3 { parts[3..].join(" ") } else { String::new() };
+            if let Ok(id) = id_str.parse::<u32>() {
+                if to.is_empty() || body.is_empty() {
+                    shell_println!("Usage: mlink sms <device_id> <recipient> <message>");
+                } else {
+                    match mobilelink::send_sms(id, to, &body) {
+                        Ok(mid) => shell_println!("Sent SMS {} to {}", mid, to),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: mlink sms <device_id> <recipient> <message>"); }
+        }
+        "feature" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let feat = parts.get(2).copied().unwrap_or("");
+            let enable = parts.get(3).copied().unwrap_or("on") != "off";
+            if let Ok(id) = id_str.parse::<u32>() {
+                let feature = match feat {
+                    "notif" => mobilelink::LinkFeature::NotificationMirror,
+                    "sms" => mobilelink::LinkFeature::Sms,
+                    "calls" => mobilelink::LinkFeature::PhoneCalls,
+                    "files" => mobilelink::LinkFeature::FileTransfer,
+                    "clipboard" => mobilelink::LinkFeature::ClipboardSync,
+                    "photos" => mobilelink::LinkFeature::PhotoStream,
+                    "battery" => mobilelink::LinkFeature::BatteryStatus,
+                    _ => { shell_println!("Features: notif, sms, calls, files, clipboard, photos, battery"); return; }
+                };
+                match mobilelink::set_feature(id, feature, enable) {
+                    Ok(()) => shell_println!("Feature '{}' {} for device {}",
+                        feat, if enable { "enabled" } else { "disabled" }, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: mlink feature <device_id> <feature> [on|off]"); }
+        }
+        "battery" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    let pct = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+                    mobilelink::update_battery(id, pct).ok();
+                    shell_println!("Device {} battery → {}%", id, pct);
+                }
+            } else { shell_println!("Usage: mlink battery <id> <percent>"); }
+        }
+        "stats" => {
+            let (devs, paired, notifs, msgs, transfers, ops) = mobilelink::stats();
+            shell_println!("Devices: {}, Total paired: {}, Notifications: {}", devs, paired, notifs);
+            shell_println!("Messages: {}, Transfers: {}, Ops: {}", msgs, transfers, ops);
+        }
+        "test" => { mobilelink::self_test(); shell_println!("Mobile link self-test complete."); }
+        "init" => { mobilelink::init_defaults(); shell_println!("Mobile link initialized."); }
+        _ => {
+            shell_println!("mobilelink (mlink) — phone/device linking");
+            shell_println!("  show / list                 List devices");
+            shell_println!("  pair <name> [model]         Start pairing");
+            shell_println!("  confirm <id> <code>         Confirm pairing");
+            shell_println!("  disconnect / reconnect <id> Connection");
+            shell_println!("  remove <id>                 Unpair device");
+            shell_println!("  notif [device_id]           Notifications");
+            shell_println!("  sms <id> <to> <message>     Send SMS");
+            shell_println!("  feature <id> <feat> [on|off] Toggle feature");
+            shell_println!("  battery <id> <percent>      Update battery");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -42812,7 +43450,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -132,10 +132,12 @@ pub mod magnifier;
 pub mod loginscreen;
 #[allow(dead_code)]
 pub mod lz4;
+pub mod mediakeys;
 pub mod memdiag;
 pub mod memfs;
 pub mod mime;
 pub mod mmtune;
+pub mod mobilelink;
 pub mod monitors;
 pub mod mount_ns;
 pub mod mousesettings;
@@ -193,6 +195,7 @@ pub mod snapshot;
 pub mod soundevents;
 pub mod soundmixer;
 pub mod sparse;
+pub mod speechio;
 pub mod spellcheck;
 pub mod splice;
 pub mod startmenu;
@@ -235,6 +238,7 @@ pub mod viewstate;
 pub mod vpn;
 pub mod wakesensor;
 pub mod wallpaper;
+pub mod webcam;
 pub mod widgets;
 pub mod winsnap;
 #[allow(dead_code)]

@@ -803,6 +803,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Dump analyzer (fs::dumpanalyzer): crash dump analysis with CrashSeverity (5 levels), FaultType (12 types), stack frame parsing, root cause summary, kernel/app crash tracking; `dumpanalyzer`/`dump` kshell command; /proc/dumpanalyzer; 11 self-tests
   - [x] Memory diagnostics (fs::memdiag): RAM testing with TestType (5 types), ECC error tracking (correctable/uncorrectable), DIMM slot identification, health summary; `memdiag`/`mdiag` kshell command; /proc/memdiag; 11 self-tests
   - [x] Parental time (fs::parentaltime): time-based usage restrictions with daily/weekly limits, schedule windows per day, warning threshold, usage recording, enforcement tracking; `parentaltime`/`ptime` kshell command; /proc/parentaltime; 11 self-tests
+  - [x] Media keys (fs::mediakeys): media playback session management with PlaybackState/MediaKey enums, now-playing info (title/artist/album/duration/position), active session dispatch, play/pause toggle, auto-fallback on unregister; `mediakeys`/`mkeys` kshell command; /proc/mediakeys; 11 self-tests
+  - [x] Webcam (fs::webcam): camera device management with privacy controls (Open/PromptRequired/Disabled), per-app blocking, multi-stream support, camera-in-use tracking, default camera selection, connection types (USB/Builtin/Network/Virtual); `webcam`/`cam` kshell command; /proc/webcam; 10 self-tests
+  - [x] Speech I/O (fs::speechio): text-to-speech with voice management (gender/language), utterance queue with state machine (Queued/Speaking/Completed/Cancelled), speech recognition with confidence scoring, TTS enable/disable, rate/pitch/volume control; `speechio`/`speech` kshell command; /proc/speechio; 10 self-tests
+  - [x] Mobile Link (fs::mobilelink): phone/device pairing with 6-digit codes, notification mirroring, SMS from desktop, file transfer tracking, battery status, per-feature toggles (7 features), disconnect/reconnect lifecycle; `mobilelink`/`mlink` kshell command; /proc/mobilelink; 10 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

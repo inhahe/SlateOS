@@ -277,6 +277,10 @@ const ROOT_FILES: &[&str] = &[
     "dumpanalyzer",
     "memdiag",
     "parentaltime",
+    "mediakeys",
+    "webcam",
+    "speechio",
+    "mobilelink",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5959,6 +5963,55 @@ fn gen_parentaltime() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_mediakeys() -> Vec<u8> {
+    use crate::fs::mediakeys;
+    let (count, total, keys, active_id, ops) = mediakeys::stats();
+    let mut out = String::from("session_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("total_sessions: {}\n", total));
+    out.push_str(&format!("total_key_events: {}\n", keys));
+    out.push_str(&format!("active_session_id: {}\n", active_id));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_webcam() -> Vec<u8> {
+    use crate::fs::webcam;
+    let (cams, streams, total, denied, ops) = webcam::stats();
+    let mut out = String::from("camera_count: ");
+    out.push_str(&format!("{}\n", cams));
+    out.push_str(&format!("active_streams: {}\n", streams));
+    out.push_str(&format!("total_streams: {}\n", total));
+    out.push_str(&format!("total_denied: {}\n", denied));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_speechio() -> Vec<u8> {
+    use crate::fs::speechio;
+    let (voices, spoken, recognized, tts_on, ops) = speechio::stats();
+    let mut out = String::from("voice_count: ");
+    out.push_str(&format!("{}\n", voices));
+    out.push_str(&format!("total_spoken: {}\n", spoken));
+    out.push_str(&format!("total_recognized: {}\n", recognized));
+    out.push_str(&format!("tts_enabled: {}\n", tts_on));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_mobilelink() -> Vec<u8> {
+    use crate::fs::mobilelink;
+    let (devs, paired, notifs, msgs, transfers, ops) = mobilelink::stats();
+    let mut out = String::from("device_count: ");
+    out.push_str(&format!("{}\n", devs));
+    out.push_str(&format!("total_paired: {}\n", paired));
+    out.push_str(&format!("total_notifications: {}\n", notifs));
+    out.push_str(&format!("total_messages: {}\n", msgs));
+    out.push_str(&format!("total_transfers: {}\n", transfers));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6401,6 +6454,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dumpanalyzer" => Ok(gen_dumpanalyzer()),
         "memdiag" => Ok(gen_memdiag()),
         "parentaltime" => Ok(gen_parentaltime()),
+        "mediakeys" => Ok(gen_mediakeys()),
+        "webcam" => Ok(gen_webcam()),
+        "speechio" => Ok(gen_speechio()),
+        "mobilelink" => Ok(gen_mobilelink()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

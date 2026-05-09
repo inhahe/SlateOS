@@ -233,6 +233,8 @@ const ROOT_FILES: &[&str] = &[
     "updatemgr",
     "notifprefs",
     "fileshare",
+    "parental",
+    "audiodevice",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5221,6 +5223,49 @@ fn gen_fileshare() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_parental() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (profile_count, total_blocked, ops) = super::parental::stats();
+    out.push_str(&format!("profiles: {}\n", profile_count));
+    out.push_str(&format!("total_blocked: {}\n", total_blocked));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let profiles = super::parental::list_profiles();
+    for p in &profiles {
+        let en = if p.enabled { "enabled" } else { "disabled" };
+        out.push_str(&format!("{}: uid={} filter={} apps={} [{}]\n",
+            p.name, p.uid, p.filter_level.label(), p.app_mode.label(), en));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_audiodevice() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (device_count, output_count, input_count, default_out, default_in, ops) =
+        super::audiodevice::stats();
+    out.push_str(&format!("devices: {}\n", device_count));
+    out.push_str(&format!("output_devices: {}\n", output_count));
+    out.push_str(&format!("input_devices: {}\n", input_count));
+    out.push_str(&format!("default_output_id: {}\n", default_out));
+    out.push_str(&format!("default_input_id: {}\n", default_in));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let devices = super::audiodevice::list_devices();
+    for d in &devices {
+        let muted = if d.muted { " [muted]" } else { "" };
+        let def = if d.is_default { " *" } else { "" };
+        out.push_str(&format!("{}: {} ({}) vol={}{}{}\n",
+            d.id, d.name, d.direction.label(), d.volume, muted, def));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5619,6 +5664,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "updatemgr" => Ok(gen_updatemgr()),
         "notifprefs" => Ok(gen_notifprefs()),
         "fileshare" => Ok(gen_fileshare()),
+        "parental" => Ok(gen_parental()),
+        "audiodevice" => Ok(gen_audiodevice()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

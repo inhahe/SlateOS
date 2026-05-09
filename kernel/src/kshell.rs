@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4837,6 +4837,8 @@ fn dispatch(line: &str) {
         "updatemgr" | "updates" => cmd_updatemgr(args),
         "notifprefs" | "nprefs" => cmd_notifprefs(args),
         "fileshare" | "share" => cmd_fileshare(args),
+        "parental" | "pctl" => cmd_parental(args),
+        "audiodevice" | "adev" => cmd_audiodevice(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -28673,6 +28675,560 @@ fn cmd_fileshare(args: &str) {
     }
 }
 
+/// `parental` / `pctl` — parental controls for child accounts.
+fn cmd_parental(args: &str) {
+    use crate::fs::parental;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let profiles = parental::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No child profiles configured.");
+            } else {
+                shell_println!("{:<6} {:<16} {:<8} {:<10} {:<12} limit  used  blocked", "UID", "Name", "Active", "Filter", "App Mode");
+                for p in &profiles {
+                    let en = if p.enabled { "yes" } else { "no" };
+                    shell_println!("{:<6} {:<16} {:<8} {:<10} {:<12} {}m    {}m    {}",
+                        p.uid, p.name, en, p.filter_level.label(),
+                        p.app_mode.label(), p.daily_limit_minutes,
+                        p.time_used_today, p.blocked_count);
+                }
+            }
+        }
+        "create" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental create <uid> <name>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let name = parts[2];
+            match parental::create_profile(uid, name) {
+                Ok(()) => shell_println!("Created child profile '{}' (uid={})", name, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: parental remove <uid>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            match parental::remove_profile(uid) {
+                Ok(()) => shell_println!("Removed profile for uid={}", uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: parental {} <uid>", sub);
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let on = sub == "enable";
+            match parental::set_enabled(uid, on) {
+                Ok(()) => shell_println!("{} controls for uid={}", if on { "Enabled" } else { "Disabled" }, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "filter" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental filter <uid> <none|light|moderate|strict>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let level = match parts[2] {
+                "none" => parental::FilterLevel::None,
+                "light" => parental::FilterLevel::Light,
+                "moderate" => parental::FilterLevel::Moderate,
+                "strict" => parental::FilterLevel::Strict,
+                _ => { shell_println!("Unknown filter: {}", parts[2]); return; }
+            };
+            match parental::set_filter_level(uid, level) {
+                Ok(()) => shell_println!("Set filter to {} for uid={}", level.label(), uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "blocksite" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental blocksite <uid> <pattern>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let pattern = parts[2];
+            match parental::add_blocked_site(uid, pattern) {
+                Ok(()) => shell_println!("Blocked site '{}' for uid={}", pattern, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unblocksite" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental unblocksite <uid> <pattern>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            match parental::remove_blocked_site(uid, parts[2]) {
+                Ok(()) => shell_println!("Unblocked site for uid={}", uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "appmode" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental appmode <uid> <allowall|allowlist|blockall>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let mode = match parts[2] {
+                "allowall" => parental::AppRestrictionMode::AllowAll,
+                "allowlist" => parental::AppRestrictionMode::AllowList,
+                "blockall" => parental::AppRestrictionMode::BlockAll,
+                _ => { shell_println!("Unknown mode: {}", parts[2]); return; }
+            };
+            match parental::set_app_mode(uid, mode) {
+                Ok(()) => shell_println!("Set app mode to {} for uid={}", mode.label(), uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "blockapp" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental blockapp <uid> <app_id>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            match parental::add_blocked_app(uid, parts[2]) {
+                Ok(()) => shell_println!("Blocked app '{}' for uid={}", parts[2], uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "allowapp" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental allowapp <uid> <app_id>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            match parental::add_allowed_app(uid, parts[2]) {
+                Ok(()) => shell_println!("Allowed app '{}' for uid={}", parts[2], uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "limit" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental limit <uid> <minutes>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let mins: u32 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid minutes"); return; }
+            };
+            match parental::set_daily_limit(uid, mins) {
+                Ok(()) => shell_println!("Daily limit set to {} minutes for uid={}", mins, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "schedule" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: parental schedule <uid> <day 0-6> <start_hour> <end_hour> [max_min]");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let day: usize = match parts[2].parse() {
+                Ok(v) if v < 7 => v,
+                _ => { shell_println!("Invalid day (0-6)"); return; }
+            };
+            let start: u8 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid start hour"); return; }
+            };
+            let end: u8 = match parts[4].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid end hour"); return; }
+            };
+            let max_min: u32 = if parts.len() > 5 {
+                match parts[5].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid max minutes"); return; } }
+            } else {
+                0
+            };
+            match parental::set_schedule(uid, day, start, end, max_min) {
+                Ok(()) => shell_println!("Schedule day {} set: {}-{} (max {}m) for uid={}", day, start, end, max_min, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: parental check <app|web|time> <uid> <value>");
+                return;
+            }
+            let check_type = parts[1];
+            let uid: u32 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            match check_type {
+                "app" => {
+                    if parts.len() < 4 { shell_println!("Usage: parental check app <uid> <app_id>"); return; }
+                    let ok = parental::check_app_allowed(uid, parts[3]);
+                    shell_println!("App '{}' for uid={}: {}", parts[3], uid, if ok { "ALLOWED" } else { "BLOCKED" });
+                }
+                "web" => {
+                    if parts.len() < 4 { shell_println!("Usage: parental check web <uid> <url>"); return; }
+                    let ok = parental::check_web_allowed(uid, parts[3]);
+                    shell_println!("URL '{}' for uid={}: {}", parts[3], uid, if ok { "ALLOWED" } else { "BLOCKED" });
+                }
+                "time" => {
+                    if parts.len() < 5 { shell_println!("Usage: parental check time <uid> <hour> <day>"); return; }
+                    let hour: u8 = match parts[3].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid hour"); return; } };
+                    let day: usize = match parts[4].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid day"); return; } };
+                    let ok = parental::check_time_allowed(uid, hour, day);
+                    shell_println!("Time check hour={} day={} for uid={}: {}", hour, day, uid, if ok { "ALLOWED" } else { "BLOCKED" });
+                }
+                _ => shell_println!("Unknown check type: {} (app|web|time)", check_type),
+            }
+        }
+        "profile" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: parental profile <uid>");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            match parental::get_profile(uid) {
+                Ok(p) => {
+                    shell_println!("Child: {} (uid={})", p.name, p.uid);
+                    shell_println!("  Enabled:      {}", p.enabled);
+                    shell_println!("  Filter:       {}", p.filter_level.label());
+                    shell_println!("  App mode:     {}", p.app_mode.label());
+                    shell_println!("  Safe search:  {}", p.safe_search);
+                    shell_println!("  Daily limit:  {} minutes", p.daily_limit_minutes);
+                    shell_println!("  Used today:   {} minutes", p.time_used_today);
+                    shell_println!("  Blocked:      {} total", p.blocked_count);
+                    if !p.blocked_apps.is_empty() {
+                        shell_println!("  Blocked apps: {}", p.blocked_apps.join(", "));
+                    }
+                    if !p.allowed_apps.is_empty() {
+                        shell_println!("  Allowed apps: {}", p.allowed_apps.join(", "));
+                    }
+                    if !p.blocked_sites.is_empty() {
+                        shell_println!("  Blocked sites: {}", p.blocked_sites.join(", "));
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (profiles, blocked, ops) = parental::stats();
+            shell_println!("Profiles: {}  Total blocked: {}  Ops: {}", profiles, blocked, ops);
+        }
+        "test" => {
+            parental::self_test();
+            shell_println!("Parental self-test complete.");
+        }
+        "init" => {
+            parental::init_defaults();
+            shell_println!("Parental controls initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("parental (pctl) — parental controls");
+            shell_println!("  show                         List profiles");
+            shell_println!("  create <uid> <name>          Create child profile");
+            shell_println!("  remove <uid>                 Remove profile");
+            shell_println!("  profile <uid>                Show profile details");
+            shell_println!("  enable/disable <uid>         Toggle controls");
+            shell_println!("  filter <uid> <level>         Set filter (none|light|moderate|strict)");
+            shell_println!("  appmode <uid> <mode>         Set app mode (allowall|allowlist|blockall)");
+            shell_println!("  blockapp <uid> <app>         Block app");
+            shell_println!("  allowapp <uid> <app>         Allow app");
+            shell_println!("  blocksite <uid> <pattern>    Block website");
+            shell_println!("  unblocksite <uid> <pattern>  Unblock website");
+            shell_println!("  limit <uid> <minutes>        Set daily limit");
+            shell_println!("  schedule <uid> <day> <start> <end> [max]");
+            shell_println!("  check app|web|time <uid> <value>");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'parental help' for usage.");
+        }
+    }
+}
+
+/// `audiodevice` / `adev` — audio device management.
+fn cmd_audiodevice(args: &str) {
+    use crate::fs::audiodevice;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let devices = audiodevice::list_devices();
+            if devices.is_empty() {
+                shell_println!("No audio devices.");
+            } else {
+                shell_println!("{:<4} {:<24} {:<10} {:<8} {:<6} {:<6} {}", "ID", "Name", "Type", "Dir", "Vol", "Muted", "");
+                for d in &devices {
+                    let def = if d.is_default { " *default" } else { "" };
+                    shell_println!("{:<4} {:<24} {:<10} {:<8} {:<6} {:<6}{}",
+                        d.id, d.name, d.device_type.label(), d.direction.label(),
+                        d.volume, d.muted, def);
+                }
+            }
+        }
+        "outputs" => {
+            let devices = audiodevice::output_devices();
+            if devices.is_empty() {
+                shell_println!("No output devices.");
+            } else {
+                for d in &devices {
+                    let def = if d.is_default { " *" } else { "" };
+                    shell_println!("{}: {} (vol={}, {}){}", d.id, d.name,
+                        d.volume, d.sample_rate.label(), def);
+                }
+            }
+        }
+        "inputs" => {
+            let devices = audiodevice::input_devices();
+            if devices.is_empty() {
+                shell_println!("No input devices.");
+            } else {
+                for d in &devices {
+                    let def = if d.is_default { " *" } else { "" };
+                    shell_println!("{}: {} (vol={}, {}){}", d.id, d.name,
+                        d.volume, d.sample_rate.label(), def);
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: audiodevice add <name> <type> <dir> [driver]");
+                shell_println!("  types: speakers|mic|headphones|usb|bluetooth|hdmi|virtual|dac");
+                shell_println!("  dirs:  output|input|duplex");
+                return;
+            }
+            let name = parts[1];
+            let dev_type = match parts[2] {
+                "speakers" => audiodevice::AudioDeviceType::Speakers,
+                "mic" | "microphone" => audiodevice::AudioDeviceType::Microphone,
+                "headphones" => audiodevice::AudioDeviceType::Headphones,
+                "usb" => audiodevice::AudioDeviceType::Usb,
+                "bluetooth" | "bt" => audiodevice::AudioDeviceType::Bluetooth,
+                "hdmi" => audiodevice::AudioDeviceType::Hdmi,
+                "virtual" => audiodevice::AudioDeviceType::Virtual,
+                "dac" => audiodevice::AudioDeviceType::ExternalDac,
+                _ => { shell_println!("Unknown type: {}", parts[2]); return; }
+            };
+            let direction = match parts[3] {
+                "output" | "out" => audiodevice::DeviceDirection::Output,
+                "input" | "in" => audiodevice::DeviceDirection::Input,
+                "duplex" => audiodevice::DeviceDirection::Duplex,
+                _ => { shell_println!("Unknown direction: {}", parts[3]); return; }
+            };
+            let driver = if parts.len() > 4 { parts[4] } else { "generic" };
+            match audiodevice::add_device(name, dev_type, direction, driver) {
+                Ok(id) => shell_println!("Added device '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: audiodevice remove <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match audiodevice::remove_device(id) {
+                Ok(()) => shell_println!("Removed device {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "default" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: audiodevice default <output|input> <id>");
+                return;
+            }
+            let id: u32 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match parts[1] {
+                "output" | "out" => match audiodevice::set_default_output(id) {
+                    Ok(()) => shell_println!("Default output set to device {}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                "input" | "in" => match audiodevice::set_default_input(id) {
+                    Ok(()) => shell_println!("Default input set to device {}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Specify 'output' or 'input'"),
+            }
+        }
+        "volume" | "vol" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: audiodevice volume <id> <0-100>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            let vol: u32 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid volume"); return; }
+            };
+            match audiodevice::set_device_volume(id, vol) {
+                Ok(()) => shell_println!("Volume for device {} set to {}", id, vol),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mute" | "unmute" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: audiodevice {} <id>", sub);
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            let m = sub == "mute";
+            match audiodevice::set_device_mute(id, m) {
+                Ok(()) => shell_println!("Device {} {}", id, if m { "muted" } else { "unmuted" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rate" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: audiodevice rate <id> <44100|48000|88200|96000|192000>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            let rate = match parts[2] {
+                "44100" => audiodevice::SampleRate::Rate44100,
+                "48000" => audiodevice::SampleRate::Rate48000,
+                "88200" => audiodevice::SampleRate::Rate88200,
+                "96000" => audiodevice::SampleRate::Rate96000,
+                "192000" => audiodevice::SampleRate::Rate192000,
+                _ => { shell_println!("Unknown rate: {} (44100|48000|88200|96000|192000)", parts[2]); return; }
+            };
+            match audiodevice::set_sample_rate(id, rate) {
+                Ok(()) => shell_println!("Sample rate for device {} set to {}", id, parts[2]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "autoswitch" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: audiodevice autoswitch <on|off>");
+                return;
+            }
+            let on = match parts[1] {
+                "on" | "true" | "yes" | "1" => true,
+                "off" | "false" | "no" | "0" => false,
+                _ => { shell_println!("Specify on or off"); return; }
+            };
+            match audiodevice::set_auto_switch(on) {
+                Ok(()) => shell_println!("Auto-switch on connect: {}", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: audiodevice info <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match audiodevice::get_device(id) {
+                Ok(d) => {
+                    shell_println!("Device {}: {}", d.id, d.name);
+                    shell_println!("  Type:       {}", d.device_type.label());
+                    shell_println!("  Direction:  {}", d.direction.label());
+                    shell_println!("  State:      {}", d.state.label());
+                    shell_println!("  Volume:     {}{}", d.volume, if d.muted { " (muted)" } else { "" });
+                    shell_println!("  Default:    {}", d.is_default);
+                    shell_println!("  Rate:       {}", d.sample_rate.label());
+                    shell_println!("  Bit depth:  {}", d.bit_depth);
+                    shell_println!("  Channels:   {}", d.channels);
+                    shell_println!("  Latency:    {} ms", d.latency_ms);
+                    shell_println!("  Driver:     {}", d.driver);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, outputs, inputs, def_out, def_in, ops) = audiodevice::stats();
+            shell_println!("Devices: {} (out={}, in={})  Default out={} in={}  Ops: {}",
+                total, outputs, inputs, def_out, def_in, ops);
+        }
+        "test" => {
+            audiodevice::self_test();
+            shell_println!("Audio device self-test complete.");
+        }
+        "init" => {
+            audiodevice::init_defaults();
+            shell_println!("Audio devices initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("audiodevice (adev) — audio device management");
+            shell_println!("  show                        List all devices");
+            shell_println!("  outputs / inputs            List by direction");
+            shell_println!("  info <id>                   Device details");
+            shell_println!("  add <name> <type> <dir>     Add device");
+            shell_println!("  remove <id>                 Remove device");
+            shell_println!("  default output|input <id>   Set default");
+            shell_println!("  volume <id> <0-100>         Set volume");
+            shell_println!("  mute/unmute <id>            Toggle mute");
+            shell_println!("  rate <id> <rate>            Set sample rate");
+            shell_println!("  autoswitch on|off           Auto-switch on connect");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'audiodevice help' for usage.");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -37269,7 +37825,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

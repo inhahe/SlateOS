@@ -1,0 +1,11 @@
+# Build configuration for the posix crate.
+#
+# Default target is bare-metal x86_64 (matches the workspace config).
+# For running tests on the host:
+#   cargo test --target x86_64-pc-windows-gnu
+#
+# Note: setjmp is gated behind #[cfg(not(test))] because it uses
+# ELF-specific global_asm directives.
+
+[build]
+target = "x86_64-unknown-none"

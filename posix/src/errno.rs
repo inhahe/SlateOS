@@ -185,3 +185,118 @@ pub fn translate(ret: i64) -> i64 {
     set_errno(err);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_get_errno() {
+        set_errno(0);
+        assert_eq!(get_errno(), 0);
+
+        set_errno(ENOENT);
+        assert_eq!(get_errno(), ENOENT);
+
+        set_errno(EINVAL);
+        assert_eq!(get_errno(), EINVAL);
+    }
+
+    #[test]
+    fn test_translate_success() {
+        set_errno(0);
+        let result = translate(42);
+        assert_eq!(result, 42);
+        assert_eq!(get_errno(), 0); // errno unchanged on success.
+    }
+
+    #[test]
+    fn test_translate_zero() {
+        set_errno(99);
+        let result = translate(0);
+        assert_eq!(result, 0);
+        assert_eq!(get_errno(), 99); // errno unchanged on success.
+    }
+
+    #[test]
+    fn test_translate_not_found() {
+        let result = translate(native::NOT_FOUND);
+        assert_eq!(result, -1);
+        assert_eq!(get_errno(), ENOENT);
+    }
+
+    #[test]
+    fn test_translate_already_exists() {
+        let result = translate(native::ALREADY_EXISTS);
+        assert_eq!(result, -1);
+        assert_eq!(get_errno(), EEXIST);
+    }
+
+    #[test]
+    fn test_translate_invalid_argument() {
+        let result = translate(native::INVALID_ARGUMENT);
+        assert_eq!(result, -1);
+        assert_eq!(get_errno(), EINVAL);
+    }
+
+    #[test]
+    fn test_translate_out_of_memory() {
+        let result = translate(native::OUT_OF_MEMORY);
+        assert_eq!(result, -1);
+        assert_eq!(get_errno(), ENOMEM);
+    }
+
+    #[test]
+    fn test_translate_would_block() {
+        let result = translate(native::WOULD_BLOCK);
+        assert_eq!(result, -1);
+        assert_eq!(get_errno(), EAGAIN);
+    }
+
+    #[test]
+    fn test_translate_unknown_error() {
+        let result = translate(-9999);
+        assert_eq!(result, -1);
+        assert_eq!(get_errno(), EIO);
+    }
+
+    #[test]
+    fn test_errno_constants_match_linux() {
+        // Verify key errno values match Linux x86_64 for compatibility.
+        assert_eq!(EPERM, 1);
+        assert_eq!(ENOENT, 2);
+        assert_eq!(EINTR, 4);
+        assert_eq!(EIO, 5);
+        assert_eq!(EBADF, 9);
+        assert_eq!(ENOMEM, 12);
+        assert_eq!(EACCES, 13);
+        assert_eq!(EEXIST, 17);
+        assert_eq!(EINVAL, 22);
+        assert_eq!(ENOSYS, 38);
+        assert_eq!(ENOTSOCK, 88);
+        assert_eq!(ECONNREFUSED, 111);
+    }
+
+    #[test]
+    fn test_ewouldblock_equals_eagain() {
+        assert_eq!(EWOULDBLOCK, EAGAIN);
+    }
+
+    #[test]
+    fn test_eopnotsupp_equals_enotsup() {
+        assert_eq!(EOPNOTSUPP, ENOTSUP);
+    }
+
+    #[test]
+    fn test_errno_location() {
+        set_errno(42);
+        let ptr = __errno_location();
+        assert!(!ptr.is_null());
+        // SAFETY: ptr is valid and points to the errno atomic.
+        assert_eq!(unsafe { *ptr }, 42);
+    }
+}

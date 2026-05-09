@@ -1525,3 +1525,199 @@ fn translate_net_error(code: i64) -> i32 {
         _ => errno::EIO,             // Unknown → generic I/O error
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests — pure logic functions only (no syscalls needed)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Byte-order tests --
+
+    #[test]
+    fn test_htons_ntohs_roundtrip() {
+        for val in [0u16, 1, 80, 443, 8080, 0xFFFF] {
+            assert_eq!(ntohs(htons(val)), val);
+        }
+    }
+
+    #[test]
+    fn test_htonl_ntohl_roundtrip() {
+        for val in [0u32, 1, 0x7F000001, 0xC0A80001, 0xFFFFFFFF] {
+            assert_eq!(ntohl(htonl(val)), val);
+        }
+    }
+
+    #[test]
+    fn test_htons_big_endian() {
+        // On little-endian x86_64, htons should swap bytes.
+        let val: u16 = 0x1234;
+        let net = htons(val);
+        assert_eq!(net.to_be(), val.to_be());
+        // Round-trip must recover original.
+        assert_eq!(ntohs(net), val);
+    }
+
+    #[test]
+    fn test_htonl_big_endian() {
+        let val: u32 = 0x12345678;
+        let net = htonl(val);
+        assert_eq!(ntohl(net), val);
+    }
+
+    // -- inet_addr tests --
+
+    #[test]
+    fn test_inet_addr_valid() {
+        let addr = unsafe { inet_addr(c"127.0.0.1".as_ptr().cast::<u8>()) };
+        // 127.0.0.1 in network byte order = 0x7F000001 big-endian.
+        assert_eq!(addr, u32::from_be_bytes([127, 0, 0, 1]));
+    }
+
+    #[test]
+    fn test_inet_addr_zeros() {
+        let addr = unsafe { inet_addr(c"0.0.0.0".as_ptr().cast::<u8>()) };
+        assert_eq!(addr, 0);
+    }
+
+    #[test]
+    fn test_inet_addr_broadcast() {
+        let addr = unsafe { inet_addr(c"255.255.255.255".as_ptr().cast::<u8>()) };
+        assert_eq!(addr, u32::from_be_bytes([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn test_inet_addr_typical() {
+        let addr = unsafe { inet_addr(c"192.168.1.1".as_ptr().cast::<u8>()) };
+        assert_eq!(addr, u32::from_be_bytes([192, 168, 1, 1]));
+    }
+
+    #[test]
+    fn test_inet_addr_invalid_null() {
+        let addr = unsafe { inet_addr(core::ptr::null()) };
+        assert_eq!(addr, 0xFFFF_FFFF); // INADDR_NONE
+    }
+
+    #[test]
+    fn test_inet_addr_invalid_format() {
+        // Too few octets.
+        assert_eq!(unsafe { inet_addr(c"127.0.1".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        // Too many octets.
+        assert_eq!(unsafe { inet_addr(c"1.2.3.4.5".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        // Octet > 255.
+        assert_eq!(unsafe { inet_addr(c"256.0.0.1".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        // Non-numeric.
+        assert_eq!(unsafe { inet_addr(c"abc.def.ghi.jkl".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        // Empty.
+        assert_eq!(unsafe { inet_addr(c"".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        // Leading dot.
+        assert_eq!(unsafe { inet_addr(c".1.2.3".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+    }
+
+    // -- inet_ntoa tests --
+
+    #[test]
+    fn test_inet_ntoa_loopback() {
+        let addr = InAddr { s_addr: u32::from_be_bytes([127, 0, 0, 1]) };
+        let ptr = inet_ntoa(addr);
+        let s = unsafe { c_str_to_slice(ptr) };
+        assert_eq!(s, b"127.0.0.1");
+    }
+
+    #[test]
+    fn test_inet_ntoa_zeros() {
+        let addr = InAddr { s_addr: 0 };
+        let ptr = inet_ntoa(addr);
+        let s = unsafe { c_str_to_slice(ptr) };
+        assert_eq!(s, b"0.0.0.0");
+    }
+
+    #[test]
+    fn test_inet_ntoa_broadcast() {
+        let addr = InAddr { s_addr: u32::from_be_bytes([255, 255, 255, 255]) };
+        let ptr = inet_ntoa(addr);
+        let s = unsafe { c_str_to_slice(ptr) };
+        assert_eq!(s, b"255.255.255.255");
+    }
+
+    #[test]
+    fn test_inet_addr_ntoa_roundtrip() {
+        let original = c"10.20.30.40";
+        let addr_val = unsafe { inet_addr(original.as_ptr().cast::<u8>()) };
+        assert_ne!(addr_val, 0xFFFF_FFFF);
+        let ptr = inet_ntoa(InAddr { s_addr: addr_val });
+        let result = unsafe { c_str_to_slice(ptr) };
+        assert_eq!(result, b"10.20.30.40");
+    }
+
+    // -- parse_port_string tests --
+
+    #[test]
+    fn test_parse_port_valid() {
+        assert_eq!(parse_port_string(c"80".as_ptr().cast::<u8>()), 80);
+        assert_eq!(parse_port_string(c"443".as_ptr().cast::<u8>()), 443);
+        assert_eq!(parse_port_string(c"8080".as_ptr().cast::<u8>()), 8080);
+        assert_eq!(parse_port_string(c"65535".as_ptr().cast::<u8>()), 65535);
+        assert_eq!(parse_port_string(c"0".as_ptr().cast::<u8>()), 0);
+    }
+
+    #[test]
+    fn test_parse_port_invalid() {
+        // Non-numeric.
+        assert_eq!(parse_port_string(c"http".as_ptr().cast::<u8>()), 0);
+        // Too large.
+        assert_eq!(parse_port_string(c"65536".as_ptr().cast::<u8>()), 0);
+        // Null pointer.
+        assert_eq!(parse_port_string(core::ptr::null()), 0);
+        // Empty.
+        assert_eq!(parse_port_string(c"".as_ptr().cast::<u8>()), 0);
+    }
+
+    // -- translate_net_error tests --
+
+    #[test]
+    fn test_translate_net_error_known() {
+        assert_eq!(translate_net_error(-100), errno::ECONNREFUSED);
+        assert_eq!(translate_net_error(-101), errno::EADDRINUSE);
+        assert_eq!(translate_net_error(-102), errno::EINVAL);
+        assert_eq!(translate_net_error(-200), errno::ENOMEM);
+        assert_eq!(translate_net_error(-202), errno::EAGAIN);
+        assert_eq!(translate_net_error(-400), errno::EACCES);
+    }
+
+    #[test]
+    fn test_translate_net_error_unknown() {
+        assert_eq!(translate_net_error(-999), errno::EIO);
+        assert_eq!(translate_net_error(-1), errno::EIO);
+    }
+
+    // -- SockaddrIn layout tests --
+
+    #[test]
+    fn test_sockaddr_in_size() {
+        // sockaddr_in should be 16 bytes (like Linux).
+        assert_eq!(core::mem::size_of::<SockaddrIn>(), 16);
+    }
+
+    #[test]
+    fn test_sockaddr_size() {
+        // sockaddr should also be 16 bytes.
+        assert_eq!(core::mem::size_of::<Sockaddr>(), 16);
+    }
+
+    // -- Helper --
+
+    /// Read a null-terminated C string into a byte slice.
+    unsafe fn c_str_to_slice(ptr: *const u8) -> &'static [u8] {
+        if ptr.is_null() {
+            return &[];
+        }
+        let mut len = 0;
+        while unsafe { *ptr.add(len) } != 0 {
+            len += 1;
+        }
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    }
+}

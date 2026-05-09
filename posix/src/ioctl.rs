@@ -524,3 +524,116 @@ pub unsafe extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32
     unsafe { (*termios_p).c_ospeed = speed; }
     0
 }
+
+// ---------------------------------------------------------------------------
+// Tests — pure logic functions only (no syscalls)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Structure size tests --
+
+    #[test]
+    fn test_winsize_size() {
+        // Winsize should be 8 bytes (4 × u16).
+        assert_eq!(core::mem::size_of::<Winsize>(), 8);
+    }
+
+    #[test]
+    fn test_termios_size() {
+        // Termios layout: c_iflag(4) + c_oflag(4) + c_cflag(4) + c_lflag(4) +
+        // c_line(1) + c_cc(32) + padding(3) + c_ispeed(4) + c_ospeed(4) = 60.
+        let size = core::mem::size_of::<Termios>();
+        // Exact size depends on alignment/padding; just verify it's reasonable.
+        assert!(size >= 44 + NCCS, "Termios too small: {size}");
+        assert!(size <= 64, "Termios too large: {size}");
+    }
+
+    // -- Default terminal dimensions --
+
+    #[test]
+    fn test_default_winsize() {
+        assert_eq!(DEFAULT_WINSIZE.ws_row, 25);
+        assert_eq!(DEFAULT_WINSIZE.ws_col, 80);
+    }
+
+    // -- Default termios --
+
+    #[test]
+    fn test_default_termios_canonical() {
+        let t = default_termios();
+        // Should be in canonical mode with echo.
+        assert_ne!(t.c_lflag & ICANON, 0, "Should be canonical");
+        assert_ne!(t.c_lflag & ECHO, 0, "Should have echo");
+        assert_ne!(t.c_lflag & ISIG, 0, "Should have signals");
+    }
+
+    #[test]
+    fn test_default_termios_cr_nl() {
+        let t = default_termios();
+        // Input: CR→NL translation.
+        assert_ne!(t.c_iflag & ICRNL, 0, "Should translate CR→NL");
+        // Output: NL→CRNL + post-processing.
+        assert_ne!(t.c_oflag & OPOST, 0, "Should post-process output");
+        assert_ne!(t.c_oflag & ONLCR, 0, "Should map NL→CRNL");
+    }
+
+    #[test]
+    fn test_default_termios_8bit() {
+        let t = default_termios();
+        assert_eq!(t.c_cflag & CSIZE, CS8, "Should be 8-bit");
+    }
+
+    #[test]
+    fn test_default_termios_control_chars() {
+        let t = default_termios();
+        assert_eq!(t.c_cc[VINTR], 0x03, "Ctrl-C");
+        assert_eq!(t.c_cc[VQUIT], 0x1C, "Ctrl-\\");
+        assert_eq!(t.c_cc[VERASE], 0x7F, "DEL");
+        assert_eq!(t.c_cc[VKILL], 0x15, "Ctrl-U");
+        assert_eq!(t.c_cc[VEOF], 0x04, "Ctrl-D");
+        assert_eq!(t.c_cc[VSUSP], 0x1A, "Ctrl-Z");
+    }
+
+    // -- Baud rate helper tests --
+
+    #[test]
+    fn test_cfget_set_speed() {
+        let mut t = default_termios();
+        assert_eq!(unsafe { cfgetispeed(&raw const t) }, B38400);
+        assert_eq!(unsafe { cfgetospeed(&raw const t) }, B38400);
+
+        assert_eq!(unsafe { cfsetispeed(&raw mut t, B115200) }, 0);
+        assert_eq!(unsafe { cfsetospeed(&raw mut t, B9600) }, 0);
+
+        assert_eq!(unsafe { cfgetispeed(&raw const t) }, B115200);
+        assert_eq!(unsafe { cfgetospeed(&raw const t) }, B9600);
+    }
+
+    #[test]
+    fn test_cfget_null() {
+        assert_eq!(unsafe { cfgetispeed(core::ptr::null()) }, 0);
+        assert_eq!(unsafe { cfgetospeed(core::ptr::null()) }, 0);
+    }
+
+    #[test]
+    fn test_cfset_null() {
+        assert_eq!(unsafe { cfsetispeed(core::ptr::null_mut(), 0) }, -1);
+        assert_eq!(unsafe { cfsetospeed(core::ptr::null_mut(), 0) }, -1);
+    }
+
+    // -- ioctl request code tests --
+
+    #[test]
+    fn test_ioctl_constants_match_linux() {
+        // These must match Linux x86_64 values for compatibility.
+        assert_eq!(TIOCGWINSZ, 0x5413);
+        assert_eq!(TIOCSWINSZ, 0x5414);
+        assert_eq!(TCGETS, 0x5401);
+        assert_eq!(TCSETS, 0x5402);
+        assert_eq!(FIONBIO, 0x5421);
+        assert_eq!(FIONREAD, 0x541B);
+    }
+}

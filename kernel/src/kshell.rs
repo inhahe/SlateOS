@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip", "focussession", "fsess", "quicknote", "qnote", "cscheme", "uischeme", "appcompat", "acompat", "windowrules", "wrules", "spatialaudio", "spatial", "filetransfer", "ftrans", "startupopt", "sopt",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip", "focussession", "fsess", "quicknote", "qnote", "cscheme", "uischeme", "appcompat", "acompat", "windowrules", "wrules", "spatialaudio", "spatial", "filetransfer", "ftrans", "startupopt", "sopt", "usagetime", "utime", "voicecontrol", "vctl", "devpair", "dpair", "notifgroup", "ngroup",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4933,6 +4933,10 @@ fn dispatch(line: &str) {
         "spatialaudio" | "spatial" => cmd_spatialaudio(args),
         "filetransfer" | "ftrans" => cmd_filetransfer(args),
         "startupopt" | "sopt" => cmd_startupopt(args),
+        "usagetime" | "utime" => cmd_usagetime(args),
+        "voicecontrol" | "vctl" => cmd_voicecontrol(args),
+        "devpair" | "dpair" => cmd_devpair(args),
+        "notifgroup" | "ngroup" => cmd_notifgroup(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -40768,6 +40772,598 @@ fn parse_stage_category(s: &str) -> Option<crate::fs::startupopt::StageCategory>
     }
 }
 
+/// `usagetime` / `utime` — per-app usage time tracking.
+fn cmd_usagetime(args: &str) {
+    use crate::fs::usagetime;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "top" | "show" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let top = usagetime::top_apps(max);
+            if top.is_empty() {
+                shell_println!("No usage data.");
+            } else {
+                for a in &top {
+                    let hrs = a.total_foreground_ms / 3_600_000;
+                    let mins = (a.total_foreground_ms % 3_600_000) / 60_000;
+                    let limit_str = a.daily_limit_ms.map_or(
+                        alloc::string::String::from("no limit"),
+                        |l| format!("limit {}m", l / 60_000)
+                    );
+                    shell_println!("  {} — {}h {}m ({} sessions, {})",
+                        a.app_name, hrs, mins, a.session_count, limit_str);
+                }
+            }
+        }
+        "focus" => {
+            if let Some(app) = parts.get(1) {
+                match usagetime::app_focused(app) {
+                    Ok(()) => shell_println!("Tracking '{}' focus.", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: usagetime focus <app>");
+            }
+        }
+        "blur" => {
+            if let Some(app) = parts.get(1) {
+                match usagetime::app_blurred(app) {
+                    Ok(ms) => shell_println!("'{}' blurred after {}ms.", app, ms),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: usagetime blur <app>");
+            }
+        }
+        "limit" => {
+            let app = parts.get(1).copied();
+            let mins = parts.get(2).and_then(|s| s.parse::<u64>().ok());
+            if let (Some(app), Some(m)) = (app, mins) {
+                match usagetime::set_limit(app, m * 60_000) {
+                    Ok(()) => shell_println!("Limit set for '{}': {} min.", app, m),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: usagetime limit <app> <minutes>");
+            }
+        }
+        "unlimit" => {
+            if let Some(app) = parts.get(1) {
+                match usagetime::remove_limit(app) {
+                    Ok(()) => shell_println!("Limit removed for '{}'.", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: usagetime unlimit <app>");
+            }
+        }
+        "category" | "cat" => {
+            let app = parts.get(1).copied();
+            let cat = parts.get(2).and_then(|s| parse_usage_category(s));
+            if let (Some(app), Some(c)) = (app, cat) {
+                match usagetime::set_category(app, c) {
+                    Ok(()) => shell_println!("Category set for '{}': {}.", app, c.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: usagetime category <app> <productivity|communication|entertainment|social|utility|dev|other>");
+            }
+        }
+        "reset" => {
+            match usagetime::reset_usage() {
+                Ok(()) => shell_println!("Usage data reset."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => {
+            match usagetime::set_tracking(true) {
+                Ok(()) => shell_println!("Tracking enabled."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            match usagetime::set_tracking(false) {
+                Ok(()) => shell_println!("Tracking disabled."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (apps, sessions, tracked_ms, limited, ops) = usagetime::stats();
+            shell_println!("Apps: {}, Sessions: {}, Tracked: {}ms, Limited: {}, Ops: {}",
+                apps, sessions, tracked_ms, limited, ops);
+        }
+        "test" => usagetime::self_test(),
+        "init" => {
+            usagetime::init_defaults();
+            shell_println!("Usage time subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: usagetime <subcommand>");
+            shell_println!("  top [max]             Top apps by usage");
+            shell_println!("  focus/blur <app>      Track focus/blur");
+            shell_println!("  limit <app> <mins>    Set daily limit");
+            shell_println!("  unlimit <app>         Remove limit");
+            shell_println!("  category <app> <cat>  Set category");
+            shell_println!("  reset                 Reset all data");
+            shell_println!("  enable / disable      Toggle tracking");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_usage_category(s: &str) -> Option<crate::fs::usagetime::UsageCategory> {
+    use crate::fs::usagetime::UsageCategory;
+    match s.to_lowercase().as_str() {
+        "productivity" | "prod" => Some(UsageCategory::Productivity),
+        "communication" | "comm" => Some(UsageCategory::Communication),
+        "entertainment" | "ent" => Some(UsageCategory::Entertainment),
+        "social" => Some(UsageCategory::Social),
+        "utility" | "util" => Some(UsageCategory::Utility),
+        "development" | "dev" => Some(UsageCategory::Development),
+        "other" => Some(UsageCategory::Other),
+        _ => None,
+    }
+}
+
+/// `voicecontrol` / `vctl` — voice commands for OS actions.
+fn cmd_voicecontrol(args: &str) {
+    use crate::fs::voicecontrol;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "status" => {
+            let listening = voicecontrol::is_listening();
+            let wake = voicecontrol::get_wake_word();
+            shell_println!("Listening: {}", listening);
+            shell_println!("Wake word: '{}'", wake);
+            let (cmds, recognitions, executed, rejected, _) = voicecontrol::stats();
+            shell_println!("Commands: {}, Recognized: {}, Executed: {}, Rejected: {}",
+                cmds, recognitions, executed, rejected);
+        }
+        "enable" => {
+            match voicecontrol::set_enabled(true) {
+                Ok(()) => shell_println!("Voice control enabled."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            match voicecontrol::set_enabled(false) {
+                Ok(()) => shell_println!("Voice control disabled."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "listen" => {
+            match voicecontrol::set_listening(true) {
+                Ok(()) => shell_println!("Now listening..."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stop" => {
+            match voicecontrol::set_listening(false) {
+                Ok(()) => shell_println!("Stopped listening."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "wake" => {
+            if let Some(word) = parts.get(1) {
+                let phrase = parts[1..].join(" ");
+                match voicecontrol::set_wake_word(&phrase) {
+                    Ok(()) => shell_println!("Wake word set to '{}'.", phrase),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Wake word: '{}'", voicecontrol::get_wake_word());
+            }
+        }
+        "list" => {
+            let cmds = voicecontrol::list_commands();
+            if cmds.is_empty() {
+                shell_println!("No commands.");
+            } else {
+                for c in &cmds {
+                    shell_println!("  [{}] '{}' → {} ({}, {}, uses={})",
+                        c.id, c.phrase, c.action, c.category.label(),
+                        if c.enabled { "on" } else { "off" }, c.use_count);
+                }
+            }
+        }
+        "add" => {
+            let phrase = parts.get(1).copied();
+            let action = parts.get(2).copied();
+            if let (Some(p), Some(a)) = (phrase, action) {
+                let phrase_full = if parts.len() > 3 { parts[1..parts.len()-1].join(" ") } else { String::from(p) };
+                match voicecontrol::add_command(&phrase_full, voicecontrol::CommandCategory::Custom, a) {
+                    Ok(id) => shell_println!("Command added: id={}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: voicecontrol add <phrase> <action>");
+            }
+        }
+        "remove" | "rm" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match voicecontrol::remove_command(id) {
+                    Ok(()) => shell_println!("Command {} removed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: voicecontrol remove <id>");
+            }
+        }
+        "recognize" | "rec" => {
+            if parts.len() > 1 {
+                let phrase = parts[1..].join(" ");
+                match voicecontrol::recognize(&phrase, voicecontrol::Confidence::High) {
+                    Ok(Some(action)) => shell_println!("Recognized → {}", action),
+                    Ok(None) => shell_println!("Not recognized: '{}'", phrase),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: voicecontrol recognize <phrase>");
+            }
+        }
+        "history" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let history = voicecontrol::get_history(max);
+            if history.is_empty() {
+                shell_println!("No recognition history.");
+            } else {
+                for r in &history {
+                    let cmd = r.matched_command_id.map_or(
+                        alloc::string::String::from("no match"),
+                        |id| format!("cmd={}", id)
+                    );
+                    shell_println!("  '{}' ({}) — {}", r.phrase, r.confidence.label(), cmd);
+                }
+            }
+        }
+        "stats" => {
+            let (cmds, recognitions, executed, rejected, ops) = voicecontrol::stats();
+            shell_println!("Commands: {}, Recognitions: {}, Executed: {}, Rejected: {}, Ops: {}",
+                cmds, recognitions, executed, rejected, ops);
+        }
+        "test" => voicecontrol::self_test(),
+        "init" => {
+            voicecontrol::init_defaults();
+            shell_println!("Voice control subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: voicecontrol <subcommand>");
+            shell_println!("  show / status         Show state");
+            shell_println!("  enable / disable      Toggle voice control");
+            shell_println!("  listen / stop         Start/stop listening");
+            shell_println!("  wake [word]           Get/set wake word");
+            shell_println!("  list                  List all commands");
+            shell_println!("  add <phrase> <action> Add command");
+            shell_println!("  remove <id>           Remove command");
+            shell_println!("  recognize <phrase>    Test recognition");
+            shell_println!("  history [max]         Recognition history");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `devpair` / `dpair` — device pairing workflow.
+fn cmd_devpair(args: &str) {
+    use crate::fs::devpair;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "show" => {
+            let devices = devpair::list_devices();
+            if devices.is_empty() {
+                shell_println!("No devices.");
+            } else {
+                for d in &devices {
+                    shell_println!("  [{}] {} ({}) — {} addr={} signal={}{}",
+                        d.id, d.name, d.device_type.label(), d.state.label(),
+                        d.address, d.signal_strength,
+                        if d.trusted { " [trusted]" } else { "" });
+                }
+            }
+        }
+        "scan" => {
+            match devpair::start_scan() {
+                Ok(()) => shell_println!("Scanning for devices..."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stopscan" => {
+            match devpair::stop_scan() {
+                Ok(()) => shell_println!("Scan stopped."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "discover" => {
+            let name = parts.get(1).copied().unwrap_or("Device");
+            let addr = parts.get(2).copied().unwrap_or("00:00:00:00:00:00");
+            let dtype = parts.get(3).and_then(|s| parse_pair_device_type(s)).unwrap_or(devpair::PairDeviceType::Other);
+            match devpair::discover(name, addr, dtype, -50) {
+                Ok(id) => shell_println!("Device discovered: id={}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pair" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match devpair::pair(id) {
+                    Ok(()) => shell_println!("Pairing device {}...", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: devpair pair <id>");
+            }
+        }
+        "confirm" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match devpair::confirm_pair(id) {
+                    Ok(()) => shell_println!("Device {} paired successfully.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: devpair confirm <id>");
+            }
+        }
+        "trust" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match devpair::trust(id, true) {
+                    Ok(()) => shell_println!("Device {} trusted.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: devpair trust <id>");
+            }
+        }
+        "untrust" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match devpair::trust(id, false) {
+                    Ok(()) => shell_println!("Device {} untrusted.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: devpair untrust <id>");
+            }
+        }
+        "disconnect" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match devpair::disconnect(id) {
+                    Ok(()) => shell_println!("Device {} disconnected.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: devpair disconnect <id>");
+            }
+        }
+        "forget" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match devpair::forget(id) {
+                    Ok(()) => shell_println!("Device {} forgotten.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: devpair forget <id>");
+            }
+        }
+        "paired" => {
+            let paired = devpair::list_paired();
+            if paired.is_empty() {
+                shell_println!("No paired devices.");
+            } else {
+                for d in &paired {
+                    shell_println!("  [{}] {} ({}){}", d.id, d.name,
+                        d.device_type.label(), if d.trusted { " [trusted]" } else { "" });
+                }
+            }
+        }
+        "stats" => {
+            let (devices, paired, trusted, total_paired, total_failed, ops) = devpair::stats();
+            shell_println!("Devices: {}, Paired: {}, Trusted: {}, Total paired: {}, Failed: {}, Ops: {}",
+                devices, paired, trusted, total_paired, total_failed, ops);
+        }
+        "test" => devpair::self_test(),
+        "init" => {
+            devpair::init_defaults();
+            shell_println!("Device pairing subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: devpair <subcommand>");
+            shell_println!("  list / show           List all devices");
+            shell_println!("  scan / stopscan       Start/stop scanning");
+            shell_println!("  discover <n> <a> [t]  Simulate discovery");
+            shell_println!("  pair <id>             Initiate pairing");
+            shell_println!("  confirm <id>          Confirm pairing");
+            shell_println!("  trust/untrust <id>    Trust management");
+            shell_println!("  disconnect <id>       Disconnect");
+            shell_println!("  forget <id>           Remove device");
+            shell_println!("  paired                List paired devices");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_pair_device_type(s: &str) -> Option<crate::fs::devpair::PairDeviceType> {
+    use crate::fs::devpair::PairDeviceType;
+    match s.to_lowercase().as_str() {
+        "headphones" | "hp" => Some(PairDeviceType::Headphones),
+        "speaker" | "spk" => Some(PairDeviceType::Speaker),
+        "keyboard" | "kb" => Some(PairDeviceType::Keyboard),
+        "mouse" => Some(PairDeviceType::Mouse),
+        "gamepad" | "gp" => Some(PairDeviceType::Gamepad),
+        "phone" => Some(PairDeviceType::Phone),
+        "computer" | "pc" => Some(PairDeviceType::Computer),
+        "printer" | "prn" => Some(PairDeviceType::Printer),
+        "display" | "mon" => Some(PairDeviceType::Display),
+        "other" => Some(PairDeviceType::Other),
+        _ => None,
+    }
+}
+
+/// `notifgroup` / `ngroup` — notification grouping and bundling.
+fn cmd_notifgroup(args: &str) {
+    use crate::fs::notifgroup;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "list" => {
+            let groups = notifgroup::get_groups();
+            if groups.is_empty() {
+                shell_println!("No notification groups.");
+            } else {
+                let unread = notifgroup::unread_count();
+                shell_println!("{} groups, {} unread", groups.len(), unread);
+                for g in &groups {
+                    let unread_in_group = g.notifications.iter().filter(|n| !n.read).count();
+                    shell_println!("  [{}] {} — {} notifs ({} unread){}{}",
+                        g.group_id, g.app_name, g.notifications.len(), unread_in_group,
+                        if g.expanded { " [expanded]" } else { "" },
+                        if g.muted { " [muted]" } else { "" });
+                    if g.expanded {
+                        for n in &g.notifications {
+                            let read_mark = if n.read { "✓" } else { "•" };
+                            shell_println!("    {} [{}] {} — {}", read_mark, n.priority.label(), n.title, n.body);
+                        }
+                    }
+                }
+            }
+        }
+        "add" => {
+            let app = parts.get(1).copied().unwrap_or("app");
+            let title = parts.get(2).copied().unwrap_or("Notification");
+            let body = if parts.len() > 3 { parts[3..].join(" ") } else { alloc::string::String::new() };
+            match notifgroup::add_notification(app, title, &body, notifgroup::NotifPriority::Normal) {
+                Ok((gid, nid)) => shell_println!("Added: group={}, notif={}", gid, nid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "read" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match notifgroup::mark_read(id) {
+                    Ok(()) => shell_println!("Notification {} marked read.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifgroup read <notif_id>");
+            }
+        }
+        "readgroup" | "rg" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match notifgroup::mark_group_read(id) {
+                    Ok(()) => shell_println!("Group {} marked read.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifgroup readgroup <group_id>");
+            }
+        }
+        "expand" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match notifgroup::set_expanded(id, true) {
+                    Ok(()) => shell_println!("Group {} expanded.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifgroup expand <group_id>");
+            }
+        }
+        "collapse" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match notifgroup::set_expanded(id, false) {
+                    Ok(()) => shell_println!("Group {} collapsed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifgroup collapse <group_id>");
+            }
+        }
+        "mute" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match notifgroup::set_muted(id, true) {
+                    Ok(()) => shell_println!("Group {} muted.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifgroup mute <group_id>");
+            }
+        }
+        "unmute" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match notifgroup::set_muted(id, false) {
+                    Ok(()) => shell_println!("Group {} unmuted.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifgroup unmute <group_id>");
+            }
+        }
+        "dismiss" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match notifgroup::dismiss_group(id) {
+                    Ok(()) => shell_println!("Group {} dismissed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifgroup dismiss <group_id>");
+            }
+        }
+        "clear" => {
+            match notifgroup::dismiss_all() {
+                Ok(()) => shell_println!("All notifications dismissed."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mode" => {
+            if let Some(m) = parts.get(1).and_then(|s| parse_grouping_mode(s)) {
+                match notifgroup::set_mode(m) {
+                    Ok(()) => shell_println!("Grouping mode set to {}.", m.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let current = notifgroup::get_mode();
+                shell_println!("Current mode: {}", current.label());
+                shell_println!("Usage: notifgroup mode <app|category|conversation|none>");
+            }
+        }
+        "stats" => {
+            let (groups, total, unread, dismissed, ops) = notifgroup::stats();
+            shell_println!("Groups: {}, Total: {}, Unread: {}, Dismissed: {}, Ops: {}",
+                groups, total, unread, dismissed, ops);
+        }
+        "test" => notifgroup::self_test(),
+        "init" => {
+            notifgroup::init_defaults();
+            shell_println!("Notification grouping subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: notifgroup <subcommand>");
+            shell_println!("  show / list           Show groups");
+            shell_println!("  add <app> <title> ... Add notification");
+            shell_println!("  read <notif_id>       Mark read");
+            shell_println!("  readgroup <group_id>  Mark group read");
+            shell_println!("  expand/collapse <id>  Expand/collapse");
+            shell_println!("  mute/unmute <id>      Mute/unmute");
+            shell_println!("  dismiss <id>          Dismiss group");
+            shell_println!("  clear                 Dismiss all");
+            shell_println!("  mode [type]           Get/set grouping");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_grouping_mode(s: &str) -> Option<crate::fs::notifgroup::GroupingMode> {
+    use crate::fs::notifgroup::GroupingMode;
+    match s.to_lowercase().as_str() {
+        "app" | "byapp" => Some(GroupingMode::ByApp),
+        "category" | "bycat" => Some(GroupingMode::ByCategory),
+        "conversation" | "conv" => Some(GroupingMode::ByConversation),
+        "none" | "off" => Some(GroupingMode::None),
+        _ => None,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -49364,7 +49960,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

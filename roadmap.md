@@ -855,6 +855,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Spatial Audio (fs::spatialaudio): 3D audio positioning with 6 speaker layouts (Stereo/5.1/7.1/Atmos/Binaural/Custom), 6 room sizes, head tracking, reverb/distance attenuation/Doppler, per-app overrides; `spatialaudio`/`spatial` kshell command; /proc/spatialaudio; 8 self-tests
   - [x] File Transfer (fs::filetransfer): AirDrop-like device-to-device sharing with 3 visibility modes, 4 transport protocols (Bluetooth/WifiDirect/LAN/Auto), 7 transfer states, nearby device discovery, send/accept/reject/cancel workflow; `filetransfer`/`ftrans` kshell command; /proc/filetransfer; 8 self-tests
   - [x] Startup Optimization (fs::startupopt): boot profiling with 8 stage categories (Firmware/Bootloader/KernelEarly/Drivers/Services/UserSession/Desktop/AutoStart), timing measurement, analyze/suggest workflow with priority-ranked optimizations, fastest-boot tracking; `startupopt`/`sopt` kshell command; /proc/startupopt; 8 self-tests
+  - [x] Usage Time (fs::usagetime): per-app usage tracking with focus/blur events, daily limits, 7 usage categories, top-apps ranking, usage reset; `usagetime`/`utime` kshell command; /proc/usagetime; 8 self-tests
+  - [x] Voice Control (fs::voicecontrol): voice command system with 7 command categories, 10 default commands, wake word, confidence filtering (High/Medium/Low/Rejected), recognition history, custom command registration; `voicecontrol`/`vctl` kshell command; /proc/voicecontrol; 8 self-tests
+  - [x] Device Pairing (fs::devpair): Bluetooth/WiFi device pairing workflow with 7 pair states, 10 device types, scan/pair/confirm/trust lifecycle, auto-connect for trusted devices, forget/disconnect; `devpair`/`dpair` kshell command; /proc/devpair; 8 self-tests
+  - [x] Notification Grouping (fs::notifgroup): notification bundling with 4 grouping modes (ByApp/ByCategory/ByConversation/None), 4 priority levels, expand/collapse groups, mute/unmute, mark read, dismiss group/all; `notifgroup`/`ngroup` kshell command; /proc/notifgroup; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

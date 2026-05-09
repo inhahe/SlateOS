@@ -329,6 +329,10 @@ const ROOT_FILES: &[&str] = &[
     "spatialaudio",
     "filetransfer",
     "startupopt",
+    "usagetime",
+    "voicecontrol",
+    "devpair",
+    "notifgroup",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6737,6 +6741,86 @@ fn gen_startupopt() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_usagetime() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Usage Time ===\n");
+    let (apps, sessions, tracked_ms, limited, ops) = super::usagetime::stats();
+    out.push_str(&format!("tracked_apps: {}\n", apps));
+    out.push_str(&format!("total_sessions: {}\n", sessions));
+    out.push_str(&format!("total_tracked_ms: {}\n", tracked_ms));
+    out.push_str(&format!("apps_with_limits: {}\n", limited));
+    let top = super::usagetime::top_apps(10);
+    for a in &top {
+        let hrs = a.total_foreground_ms / 3_600_000;
+        let mins = (a.total_foreground_ms % 3_600_000) / 60_000;
+        out.push_str(&format!("  {} — {}h {}m ({} sessions)\n",
+            a.app_name, hrs, mins, a.session_count));
+    }
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_voicecontrol() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Voice Control ===\n");
+    let listening = super::voicecontrol::is_listening();
+    let wake = super::voicecontrol::get_wake_word();
+    out.push_str(&format!("listening: {}\n", listening));
+    out.push_str(&format!("wake_word: {}\n", wake));
+    let (cmds, recognitions, executed, rejected, ops) = super::voicecontrol::stats();
+    out.push_str(&format!("commands: {}\n", cmds));
+    out.push_str(&format!("total_recognitions: {}\n", recognitions));
+    out.push_str(&format!("total_executed: {}\n", executed));
+    out.push_str(&format!("total_rejected: {}\n", rejected));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_devpair() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Device Pairing ===\n");
+    let scanning = super::devpair::is_scanning();
+    out.push_str(&format!("scanning: {}\n", scanning));
+    let (devices, paired, trusted, total_paired, total_failed, ops) = super::devpair::stats();
+    out.push_str(&format!("devices: {}\n", devices));
+    out.push_str(&format!("paired: {}\n", paired));
+    out.push_str(&format!("trusted: {}\n", trusted));
+    out.push_str(&format!("total_paired: {}\n", total_paired));
+    out.push_str(&format!("total_failed: {}\n", total_failed));
+    let list = super::devpair::list_devices();
+    for d in &list {
+        out.push_str(&format!("  [{}] {} ({}) — {} signal={}\n",
+            d.id, d.name, d.device_type.label(), d.state.label(), d.signal_strength));
+    }
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_notifgroup() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Notification Grouping ===\n");
+    let mode = super::notifgroup::get_mode();
+    out.push_str(&format!("mode: {}\n", mode.label()));
+    let (groups, total, unread, dismissed, ops) = super::notifgroup::stats();
+    out.push_str(&format!("groups: {}\n", groups));
+    out.push_str(&format!("total_notifications: {}\n", total));
+    out.push_str(&format!("unread: {}\n", unread));
+    out.push_str(&format!("total_dismissed: {}\n", dismissed));
+    let group_list = super::notifgroup::get_groups();
+    for g in &group_list {
+        out.push_str(&format!("  [{}] {} — {} notifs ({}{})\n",
+            g.group_id, g.app_name, g.notifications.len(),
+            if g.expanded { "expanded" } else { "collapsed" },
+            if g.muted { ", muted" } else { "" }));
+    }
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7231,6 +7315,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "spatialaudio" => Ok(gen_spatialaudio()),
         "filetransfer" => Ok(gen_filetransfer()),
         "startupopt" => Ok(gen_startupopt()),
+        "usagetime" => Ok(gen_usagetime()),
+        "voicecontrol" => Ok(gen_voicecontrol()),
+        "devpair" => Ok(gen_devpair()),
+        "notifgroup" => Ok(gen_notifgroup()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

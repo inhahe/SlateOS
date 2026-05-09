@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4905,6 +4905,10 @@ fn dispatch(line: &str) {
         "netprofile" | "nprof" => cmd_netprofile(args),
         "apppermissions" | "apperm" => cmd_apppermissions(args),
         "kbshortcuts" | "kbsc" => cmd_kbshortcuts(args),
+        "displayarrange" | "darr" => cmd_displayarrange(args),
+        "sysanimations" | "sanim" => cmd_sysanimations(args),
+        "filevault" | "fvault" => cmd_filevault(args),
+        "mousegestures" | "mgest" => cmd_mousegestures(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -37237,6 +37241,364 @@ fn cmd_kbshortcuts(args: &str) {
     }
 }
 
+/// `displayarrange` / `darr` — multi-monitor arrangement.
+fn cmd_displayarrange(args: &str) {
+    use crate::fs::displayarrange;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            displayarrange::init_defaults();
+            shell_println!("Display arrangement initialized");
+        }
+        "list" => {
+            let displays = displayarrange::list_displays();
+            if displays.is_empty() {
+                shell_println!("No displays");
+            } else {
+                shell_println!("Topology: {}", displayarrange::topology().label());
+                for d in &displays {
+                    shell_println!("#{}: {} — {}x{} at ({},{}) {} {}{}",
+                        d.id, d.name, d.width, d.height, d.x, d.y,
+                        d.orientation.label(),
+                        if d.enabled { "ON" } else { "OFF" },
+                        if d.is_primary { " [PRIMARY]" } else { "" });
+                }
+            }
+        }
+        "add" => {
+            let name = parts.get(1).copied().unwrap_or("Monitor");
+            let w: u32 = parts.get(2).unwrap_or(&"1920").parse().unwrap_or(1920);
+            let h: u32 = parts.get(3).unwrap_or(&"1080").parse().unwrap_or(1080);
+            match displayarrange::add_display(name, w, h) {
+                Ok(id) => shell_println!("Added display #{}: {} ({}x{})", id, name, w, h),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pos" | "position" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let x: i32 = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0);
+            let y: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
+            match displayarrange::set_position(id, x, y) {
+                Ok(()) => shell_println!("Display #{} at ({}, {})", id, x, y),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "primary" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            match displayarrange::set_primary(id) {
+                Ok(()) => shell_println!("Primary: #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "orient" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let o = match parts.get(2).copied().unwrap_or("landscape") {
+                "portrait" | "vert" => displayarrange::Orientation::Portrait,
+                "landscape-flip" | "lflip" => displayarrange::Orientation::LandscapeFlipped,
+                "portrait-flip" | "pflip" => displayarrange::Orientation::PortraitFlipped,
+                _ => displayarrange::Orientation::Landscape,
+            };
+            match displayarrange::set_orientation(id, o) {
+                Ok(()) => shell_println!("Orientation: {}", o.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "topology" | "topo" => {
+            let t = match parts.get(1).copied().unwrap_or("extend") {
+                "mirror" => displayarrange::Topology::Mirror,
+                "single" => displayarrange::Topology::SingleDisplay,
+                _ => displayarrange::Topology::Extend,
+            };
+            match displayarrange::set_topology(t) {
+                Ok(()) => shell_println!("Topology: {}", t.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, topo, rearrangements, ops) = displayarrange::stats();
+            shell_println!("Displays: {}, Topology: {}, Rearrangements: {}, Ops: {}", count, topo, rearrangements, ops);
+        }
+        "test" => displayarrange::self_test(),
+        _ => {
+            shell_println!("Usage: displayarrange <command>");
+            shell_println!("  list                  List displays");
+            shell_println!("  add <name> [w] [h]    Add display");
+            shell_println!("  pos <id> <x> <y>      Set position");
+            shell_println!("  primary <id>          Set primary");
+            shell_println!("  orient <id> <orient>  Set orientation");
+            shell_println!("  topology <mode>       extend/mirror/single");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `sysanimations` / `sanim` — system animation settings.
+fn cmd_sysanimations(args: &str) {
+    use crate::fs::sysanimations;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            sysanimations::init_defaults();
+            shell_println!("System animations initialized");
+        }
+        "list" => {
+            let anims = sysanimations::list_animations();
+            let (enabled, speed, reduce) = sysanimations::global_state();
+            shell_println!("Global: {}, Speed: {}%, Reduce motion: {}", if enabled { "ON" } else { "OFF" }, speed, reduce);
+            for a in &anims {
+                let eff = sysanimations::effective_duration(a.animation_type);
+                shell_println!("  {} — {}ms ({}) [{}] effective: {}ms",
+                    a.animation_type.label(), a.duration_ms, a.easing.label(),
+                    if a.enabled { "ON" } else { "OFF" }, eff);
+            }
+        }
+        "enable" => {
+            match sysanimations::set_global_enabled(true) {
+                Ok(()) => shell_println!("Animations enabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            match sysanimations::set_global_enabled(false) {
+                Ok(()) => shell_println!("Animations disabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "speed" => {
+            let pct: u32 = parts.get(1).unwrap_or(&"100").parse().unwrap_or(100);
+            match sysanimations::set_speed(pct) {
+                Ok(()) => shell_println!("Speed: {}%", pct.clamp(10, 400)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reduce" => {
+            let on = parts.get(1).copied().unwrap_or("on") != "off";
+            match sysanimations::set_reduce_motion(on) {
+                Ok(()) => shell_println!("Reduce motion: {}", on),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, enabled, changes, ops) = sysanimations::stats();
+            shell_println!("Animations: {}, Enabled: {}, Changes: {}, Ops: {}", count, enabled, changes, ops);
+        }
+        "test" => sysanimations::self_test(),
+        _ => {
+            shell_println!("Usage: sysanimations <command>");
+            shell_println!("  list                List animations");
+            shell_println!("  enable / disable    Toggle all");
+            shell_println!("  speed <percent>     Speed (10-400%)");
+            shell_println!("  reduce [on|off]     Reduce motion");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `filevault` / `fvault` — encrypted folder management.
+fn cmd_filevault(args: &str) {
+    use crate::fs::filevault;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            filevault::init_defaults();
+            shell_println!("File vault initialized");
+        }
+        "list" => {
+            let vaults = filevault::list_vaults();
+            if vaults.is_empty() {
+                shell_println!("No vaults");
+            } else {
+                for v in &vaults {
+                    shell_println!("#{}: {} — {} [{}] at {} → {}",
+                        v.id, v.name, v.state.label(), v.cipher.label(),
+                        v.path, v.mount_point);
+                    shell_println!("    Auto-lock: {}s", v.auto_lock_secs);
+                }
+            }
+        }
+        "create" => {
+            let name = parts.get(1).copied().unwrap_or("Vault");
+            let path = parts.get(2).copied().unwrap_or("/home/vault");
+            let password = parts.get(3).copied().unwrap_or("password");
+            let cipher = match parts.get(4).copied().unwrap_or("aes") {
+                "chacha" | "chacha20" => filevault::VaultCipher::ChaCha20Poly1305,
+                "cbc" => filevault::VaultCipher::Aes256Cbc,
+                _ => filevault::VaultCipher::Aes256Gcm,
+            };
+            match filevault::create_vault(name, path, password, cipher) {
+                Ok(id) => shell_println!("Created vault #{}: {} ({})", id, name, cipher.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unlock" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid vault ID"); return; }
+            };
+            let password = parts.get(2).copied().unwrap_or("");
+            match filevault::unlock(id, password) {
+                Ok(()) => shell_println!("Vault #{} unlocked", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "lock" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid vault ID"); return; }
+            };
+            match filevault::lock(id) {
+                Ok(()) => shell_println!("Vault #{} locked", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "autolock" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid vault ID"); return; }
+            };
+            let secs: u32 = parts.get(2).unwrap_or(&"300").parse().unwrap_or(300);
+            match filevault::set_auto_lock(id, secs) {
+                Ok(()) => shell_println!("Auto-lock: {}s", secs),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, unlocked, unlocks, failed, ops) = filevault::stats();
+            shell_println!("Vaults: {}, Unlocked: {}, Unlocks: {}, Failed: {}, Ops: {}", count, unlocked, unlocks, failed, ops);
+        }
+        "test" => filevault::self_test(),
+        _ => {
+            shell_println!("Usage: filevault <command>");
+            shell_println!("  list                     List vaults");
+            shell_println!("  create <name> <path> <pw> [cipher]");
+            shell_println!("  unlock <id> <password>   Unlock vault");
+            shell_println!("  lock <id>                Lock vault");
+            shell_println!("  autolock <id> <seconds>  Auto-lock timeout");
+            shell_println!("  Ciphers: aes chacha cbc");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `mousegestures` / `mgest` — mouse gesture navigation.
+fn cmd_mousegestures(args: &str) {
+    use crate::fs::mousegestures;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            mousegestures::init_defaults();
+            shell_println!("Mouse gestures initialized");
+        }
+        "list" => {
+            let bindings = mousegestures::list_bindings();
+            if bindings.is_empty() {
+                shell_println!("No gesture bindings");
+            } else {
+                for b in &bindings {
+                    shell_println!("#{}: {} → {} ({}) [{}] used: {}",
+                        b.id, b.pattern.label(), b.action, b.description,
+                        if b.enabled { "ON" } else { "OFF" }, b.use_count);
+                }
+            }
+        }
+        "recognize" | "test-gesture" => {
+            // Parse directions from args: e.g., "left up right"
+            let dirs: Vec<mousegestures::Direction> = parts[1..].iter().filter_map(|s| {
+                match *s {
+                    "up" | "u" => Some(mousegestures::Direction::Up),
+                    "down" | "d" => Some(mousegestures::Direction::Down),
+                    "left" | "l" => Some(mousegestures::Direction::Left),
+                    "right" | "r" => Some(mousegestures::Direction::Right),
+                    _ => None,
+                }
+            }).collect();
+            if dirs.is_empty() {
+                shell_println!("Usage: mousegestures recognize <dir> [dir...]");
+                return;
+            }
+            match mousegestures::recognize(&dirs) {
+                Ok(Some(action)) => shell_println!("Recognized: {}", action),
+                Ok(None) => shell_println!("No matching gesture"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "bind" => {
+            // bind <dirs> <action> [desc]
+            // e.g., bind left+up new_tab "New Tab"
+            let dir_str = parts.get(1).copied().unwrap_or("left");
+            let action = parts.get(2).copied().unwrap_or("action");
+            let desc = parts.get(3).copied().unwrap_or(action);
+            let dirs: Vec<mousegestures::Direction> = dir_str.split('+').filter_map(|s| {
+                match s {
+                    "up" | "u" => Some(mousegestures::Direction::Up),
+                    "down" | "d" => Some(mousegestures::Direction::Down),
+                    "left" | "l" => Some(mousegestures::Direction::Left),
+                    "right" | "r" => Some(mousegestures::Direction::Right),
+                    _ => None,
+                }
+            }).collect();
+            match mousegestures::bind(dirs, action, desc) {
+                Ok(id) => shell_println!("Bound gesture #{}: {} → {}", id, dir_str, action),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unbind" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid binding ID"); return; }
+            };
+            match mousegestures::unbind(id) {
+                Ok(()) => shell_println!("Unbound gesture #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => {
+            match mousegestures::set_enabled(true) {
+                Ok(()) => shell_println!("Gestures enabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            match mousegestures::set_enabled(false) {
+                Ok(()) => shell_println!("Gestures disabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, gestures, recognized, ops) = mousegestures::stats();
+            shell_println!("Bindings: {}, Gestures: {}, Recognized: {}, Ops: {}", count, gestures, recognized, ops);
+        }
+        "test" => mousegestures::self_test(),
+        _ => {
+            shell_println!("Usage: mousegestures <command>");
+            shell_println!("  list                   List bindings");
+            shell_println!("  recognize <dirs...>    Test gesture");
+            shell_println!("  bind <dirs> <action>   Bind gesture");
+            shell_println!("  unbind <id>            Remove binding");
+            shell_println!("  enable / disable       Toggle gestures");
+            shell_println!("  Directions: up down left right (combine with +)");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -45833,7 +46195,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -301,6 +301,10 @@ const ROOT_FILES: &[&str] = &[
     "netprofile",
     "apppermissions",
     "kbshortcuts",
+    "displayarrange",
+    "sysanimations",
+    "filevault",
+    "mousegestures",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6268,6 +6272,55 @@ fn gen_kbshortcuts() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_displayarrange() -> Vec<u8> {
+    use alloc::format;
+    use super::displayarrange;
+    let (count, topo, rearrangements, ops) = displayarrange::stats();
+    let mut out = String::from("display_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("topology: {}\n", topo));
+    out.push_str(&format!("total_rearrangements: {}\n", rearrangements));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_sysanimations() -> Vec<u8> {
+    use alloc::format;
+    use super::sysanimations;
+    let (count, enabled, changes, ops) = sysanimations::stats();
+    let mut out = String::from("animation_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("enabled_count: {}\n", enabled));
+    out.push_str(&format!("total_changes: {}\n", changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_filevault() -> Vec<u8> {
+    use alloc::format;
+    use super::filevault;
+    let (count, unlocked, unlocks, failed, ops) = filevault::stats();
+    let mut out = String::from("vault_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("unlocked_count: {}\n", unlocked));
+    out.push_str(&format!("total_unlocks: {}\n", unlocks));
+    out.push_str(&format!("total_failed_auths: {}\n", failed));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_mousegestures() -> Vec<u8> {
+    use alloc::format;
+    use super::mousegestures;
+    let (count, gestures, recognized, ops) = mousegestures::stats();
+    let mut out = String::from("binding_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("total_gestures: {}\n", gestures));
+    out.push_str(&format!("total_recognized: {}\n", recognized));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6734,6 +6787,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "netprofile" => Ok(gen_netprofile()),
         "apppermissions" => Ok(gen_apppermissions()),
         "kbshortcuts" => Ok(gen_kbshortcuts()),
+        "displayarrange" => Ok(gen_displayarrange()),
+        "sysanimations" => Ok(gen_sysanimations()),
+        "filevault" => Ok(gen_filevault()),
+        "mousegestures" => Ok(gen_mousegestures()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

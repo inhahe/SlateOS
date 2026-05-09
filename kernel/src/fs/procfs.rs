@@ -384,6 +384,10 @@ const ROOT_FILES: &[&str] = &[
     "cputopo",
     "memlayout",
     "irqbalance",
+    "fs_loadavg",
+    "kernlog",
+    "coredump",
+    "fwupdate",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7607,6 +7611,56 @@ fn gen_irqbalance() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fs_loadavg() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (a1, a5, a15, running, total) = crate::fs::loadavg::get();
+    out.push_str(&format!("{} {} {} {}/{}\n",
+        crate::fs::loadavg::format_load(a1),
+        crate::fs::loadavg::format_load(a5),
+        crate::fs::loadavg::format_load(a15),
+        running, total));
+    out.into_bytes()
+}
+
+fn gen_kernlog() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Kernel Log ===\n");
+    let (count, total, dropped, ops) = crate::fs::kernlog::stats();
+    out.push_str(&format!("messages: {}\n", count));
+    out.push_str(&format!("total_logged: {}\n", total));
+    out.push_str(&format!("total_dropped: {}\n", dropped));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_coredump() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Core Dumps ===\n");
+    let (count, total, bytes, cleaned, ops) = crate::fs::coredump::stats();
+    out.push_str(&format!("stored_dumps: {}\n", count));
+    out.push_str(&format!("total_dumps: {}\n", total));
+    out.push_str(&format!("total_bytes: {}\n", bytes));
+    out.push_str(&format!("total_cleaned: {}\n", cleaned));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_fwupdate() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Firmware Update ===\n");
+    let (devs, updates, failures, checks, ops) = crate::fs::fwupdate::stats();
+    out.push_str(&format!("device_count: {}\n", devs));
+    out.push_str(&format!("total_updates: {}\n", updates));
+    out.push_str(&format!("total_failures: {}\n", failures));
+    out.push_str(&format!("total_checks: {}\n", checks));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8156,6 +8210,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cputopo" => Ok(gen_cputopo()),
         "memlayout" => Ok(gen_memlayout()),
         "irqbalance" => Ok(gen_irqbalance()),
+        "fs_loadavg" => Ok(gen_fs_loadavg()),
+        "kernlog" => Ok(gen_kernlog()),
+        "coredump" => Ok(gen_coredump()),
+        "fwupdate" => Ok(gen_fwupdate()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

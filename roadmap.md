@@ -910,6 +910,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] CPU Topology (fs::cputopo): topology info with packages, cores, threads, cache hierarchy, NUMA, SMT, online/offline; `cputopo`/`ctopo` kshell command; /proc/cputopo; 8 self-tests
   - [x] Memory Layout (fs::memlayout): physical memory region tracking with 12 region types, sorted listing, RAM/reserved/kernel totals; `memlayout`/`mlayout` kshell command; /proc/memlayout; 8 self-tests
   - [x] IRQ Balance (fs::irqbalance): IRQ affinity balancing with 4 policies, per-CPU load tracking, auto-rebalance, IRQ registration; `irqbal` kshell command; /proc/irqbalance; 8 self-tests
+  - [x] Load Average (fs::loadavg): EMA-based 1/5/15min load tracking with fixed-point ×1000 math, history snapshots, format_load(); `lavg` kshell command; /proc/fs_loadavg; 8 self-tests
+  - [x] Kernel Log (fs::kernlog): Ring buffer (4096 entries) with 8 log levels, source filtering, dmesg/tail/filter/clear; `kernlog`/`klog` kshell command; /proc/kernlog; 8 self-tests
+  - [x] Core Dump (fs::coredump): Crash dump management with 7 dump reasons, size limits, enable/disable, cleanup; `coredump`/`cdump` kshell command; /proc/coredump; 8 self-tests
+  - [x] Firmware Update (fs::fwupdate): Firmware version tracking for 8 component types, 6 update statuses, simulated apply, update history; `fwupdate`/`fwup` kshell command; /proc/fwupdate; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

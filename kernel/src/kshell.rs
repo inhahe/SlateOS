@@ -3466,6 +3466,7 @@ const COMMANDS: &[&str] = &[
     "logrotate", "lrot", "powerwake", "pwake", "diskio", "dio", "sysuptime", "suptime",
     "netspeed", "nspeed", "cfreq", "therm", "swapmon", "smon",
     "sysctlfs", "sctlfs", "cputopo", "ctopo", "memlayout", "mlayout", "irqbal",
+    "lavg", "kernlog", "klog", "coredump", "cdump", "fwupdate", "fwup",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -5000,6 +5001,10 @@ fn dispatch(line: &str) {
         "cputopo" | "ctopo" => cmd_cputopo(args),
         "memlayout" | "mlayout" => cmd_memlayout(args),
         "irqbal" => cmd_irqbal(args),
+        "lavg" => cmd_lavg(args),
+        "kernlog" | "klog" => cmd_kernlog(args),
+        "coredump" | "cdump" => cmd_coredump(args),
+        "fwupdate" | "fwup" => cmd_fwupdate(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -47191,6 +47196,355 @@ fn parse_irqbal_policy(s: &str) -> crate::fs::irqbalance::BalancePolicy {
     }
 }
 
+/// `lavg` — fs-zone load average tracking (EMA-based).
+fn cmd_lavg(args: &str) {
+    use crate::fs::loadavg;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "status" | "" => {
+            loadavg::init_defaults();
+            let (avg1, avg5, avg15, running, total) = loadavg::get();
+            shell_println!("Load averages (×1000 fixed-point):");
+            shell_println!("  1min:  {}", loadavg::format_load(avg1));
+            shell_println!("  5min:  {}", loadavg::format_load(avg5));
+            shell_println!("  15min: {}", loadavg::format_load(avg15));
+            shell_println!("  Running/Total: {}/{}", running, total);
+        }
+        "update" => {
+            loadavg::init_defaults();
+            let running = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            let total = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10);
+            if let Err(e) = loadavg::update(running, total) {
+                shell_println!("Error: {:?}", e);
+            } else {
+                shell_println!("Load average updated with {}/{} running/total", running, total);
+            }
+        }
+        "history" => {
+            let snaps = loadavg::history();
+            if snaps.is_empty() {
+                shell_println!("No load history recorded.");
+            } else {
+                shell_println!("{} load snapshots:", snaps.len());
+                let show = if snaps.len() > 10 { &snaps[snaps.len()-10..] } else { &snaps };
+                for s in show {
+                    shell_println!("  1m={} 5m={} 15m={} {}/{} @{}ns",
+                        loadavg::format_load(s.avg_1m), loadavg::format_load(s.avg_5m),
+                        loadavg::format_load(s.avg_15m), s.running, s.total, s.timestamp_ns);
+                }
+            }
+        }
+        "stats" => {
+            loadavg::init_defaults();
+            let (hist, updates, ops) = loadavg::stats();
+            shell_println!("Load average stats:");
+            shell_println!("  History entries: {}", hist);
+            shell_println!("  Total updates:   {}", updates);
+            shell_println!("  Operations:      {}", ops);
+        }
+        "test" => {
+            loadavg::self_test();
+            shell_println!("loadavg self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: lavg [status|update <tasks>|history|stats|test]");
+        }
+    }
+}
+
+/// `kernlog` / `klog` — kernel log ring buffer.
+fn cmd_kernlog(args: &str) {
+    use crate::fs::kernlog;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "dmesg" | "" => {
+            kernlog::init_defaults();
+            let msgs = kernlog::dmesg();
+            if msgs.is_empty() {
+                shell_println!("No kernel log messages.");
+            } else {
+                shell_println!("{} messages:", msgs.len());
+                let show = if msgs.len() > 20 { &msgs[msgs.len()-20..] } else { &msgs };
+                for e in show {
+                    shell_println!("  [{}] <{}> {}: {}", e.seq, e.level.label(), e.source, e.message);
+                }
+            }
+        }
+        "log" => {
+            kernlog::init_defaults();
+            let level_str = parts.get(1).copied().unwrap_or("info");
+            let source = parts.get(2).copied().unwrap_or("kshell");
+            let msg: alloc::string::String = parts.get(3..).map_or(
+                alloc::string::String::from("test message"),
+                |p| p.join(" "),
+            );
+            let level = parse_kernlog_level(level_str);
+            match kernlog::log(level, source, &msg) {
+                Ok(seq) => shell_println!("Logged as seq {}", seq),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "tail" => {
+            kernlog::init_defaults();
+            let n = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let msgs = kernlog::tail(n);
+            for e in &msgs {
+                shell_println!("  [{}] <{}> {}: {}", e.seq, e.level.label(), e.source, e.message);
+            }
+        }
+        "filter" => {
+            kernlog::init_defaults();
+            let kind = parts.get(1).copied().unwrap_or("");
+            let val = parts.get(2).copied().unwrap_or("");
+            match kind {
+                "level" => {
+                    let level = parse_kernlog_level(val);
+                    let msgs = kernlog::filter_level(level);
+                    shell_println!("{} messages at level {}:", msgs.len(), level.label());
+                    for e in &msgs {
+                        shell_println!("  [{}] {}: {}", e.seq, e.source, e.message);
+                    }
+                }
+                "source" => {
+                    let msgs = kernlog::filter_source(val);
+                    shell_println!("{} messages from '{}':", msgs.len(), val);
+                    for e in &msgs {
+                        shell_println!("  [{}] <{}> {}", e.seq, e.level.label(), e.message);
+                    }
+                }
+                _ => shell_println!("Usage: kernlog filter <level|source> <value>"),
+            }
+        }
+        "clear" => {
+            kernlog::init_defaults();
+            if let Err(e) = kernlog::clear() {
+                shell_println!("Error: {:?}", e);
+            } else {
+                shell_println!("Kernel log cleared.");
+            }
+        }
+        "stats" => {
+            kernlog::init_defaults();
+            let (count, total, dropped, ops) = kernlog::stats();
+            shell_println!("Kernel log stats:");
+            shell_println!("  Current messages: {}", count);
+            shell_println!("  Total logged:     {}", total);
+            shell_println!("  Dropped:          {}", dropped);
+            shell_println!("  Operations:       {}", ops);
+        }
+        "test" => {
+            kernlog::self_test();
+            shell_println!("kernlog self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: kernlog [dmesg|log <level> <source> <msg>|tail [n]|filter <level|source> <val>|clear|stats|test]");
+        }
+    }
+}
+
+fn parse_kernlog_level(s: &str) -> crate::fs::kernlog::LogLevel {
+    use crate::fs::kernlog::LogLevel;
+    match s {
+        "emerg" | "emergency" => LogLevel::Emergency,
+        "alert" => LogLevel::Alert,
+        "crit" | "critical" => LogLevel::Critical,
+        "err" | "error" => LogLevel::Error,
+        "warn" | "warning" => LogLevel::Warning,
+        "notice" => LogLevel::Notice,
+        "info" => LogLevel::Info,
+        "debug" | "dbg" => LogLevel::Debug,
+        _ => LogLevel::Info,
+    }
+}
+
+/// `coredump` / `cdump` — crash dump management.
+fn cmd_coredump(args: &str) {
+    use crate::fs::coredump;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "" => {
+            coredump::init_defaults();
+            let dumps = coredump::list_dumps();
+            if dumps.is_empty() {
+                shell_println!("No core dumps stored.");
+            } else {
+                shell_println!("{} core dump(s):", dumps.len());
+                for d in &dumps {
+                    shell_println!("  [{}] pid={} {} reason={} size={} path={}",
+                        d.id, d.pid, d.process_name, d.reason.label(),
+                        d.size_bytes, d.path);
+                }
+            }
+        }
+        "get" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            match coredump::get_dump(id) {
+                Some(d) => {
+                    shell_println!("Core dump #{}:", d.id);
+                    shell_println!("  PID:      {}", d.pid);
+                    shell_println!("  Process:  {}", d.process_name);
+                    shell_println!("  Reason:   {}", d.reason.label());
+                    shell_println!("  Signal:   {}", d.signal_code);
+                    shell_println!("  Size:     {} bytes", d.size_bytes);
+                    shell_println!("  Path:     {}", d.path);
+                    shell_println!("  Time:     {}ns", d.timestamp_ns);
+                }
+                None => shell_println!("Dump {} not found.", id),
+            }
+        }
+        "record" => {
+            coredump::init_defaults();
+            let pid = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            let name = parts.get(2).copied().unwrap_or("test_process");
+            let size = parts.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(4096);
+            match coredump::record_dump(pid, name, coredump::DumpReason::Segfault, size, 11) {
+                Ok(id) => shell_println!("Recorded core dump #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "rm" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            match coredump::delete_dump(id) {
+                Ok(()) => shell_println!("Deleted dump {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cleanup" => {
+            coredump::init_defaults();
+            let keep = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            match coredump::cleanup(keep) {
+                Ok(n) => shell_println!("Cleaned up {} old dumps (keeping {}).", n, keep),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => {
+            coredump::init_defaults();
+            if let Err(e) = coredump::set_enabled(true) {
+                shell_println!("Error: {:?}", e);
+            } else {
+                shell_println!("Core dumps enabled.");
+            }
+        }
+        "disable" => {
+            coredump::init_defaults();
+            if let Err(e) = coredump::set_enabled(false) {
+                shell_println!("Error: {:?}", e);
+            } else {
+                shell_println!("Core dumps disabled.");
+            }
+        }
+        "stats" => {
+            coredump::init_defaults();
+            let (count, total, bytes, cleaned, ops) = coredump::stats();
+            shell_println!("Core dump stats:");
+            shell_println!("  Current dumps: {}", count);
+            shell_println!("  Total dumps:   {}", total);
+            shell_println!("  Total bytes:   {}", bytes);
+            shell_println!("  Cleaned up:    {}", cleaned);
+            shell_println!("  Operations:    {}", ops);
+        }
+        "test" => {
+            coredump::self_test();
+            shell_println!("coredump self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: coredump [list|get <id>|record <pid> <name> <size>|delete <id>|cleanup [keep]|enable|disable|stats|test]");
+        }
+    }
+}
+
+/// `fwupdate` / `fwup` — firmware version management and update tracking.
+fn cmd_fwupdate(args: &str) {
+    use crate::fs::fwupdate;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "" => {
+            fwupdate::init_defaults();
+            let devices = fwupdate::list_devices();
+            if devices.is_empty() {
+                shell_println!("No firmware devices.");
+            } else {
+                shell_println!("{} firmware device(s):", devices.len());
+                for d in &devices {
+                    let avail = d.available_version.as_deref().unwrap_or("-");
+                    shell_println!("  [{}] {} ({}) v{} → {} [{}] vendor={}",
+                        d.id, d.name, d.fw_type.label(), d.current_version,
+                        avail, d.status.label(), d.vendor);
+                }
+            }
+        }
+        "get" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            match fwupdate::get_device(id) {
+                Some(d) => {
+                    let avail = d.available_version.as_deref().unwrap_or("none");
+                    shell_println!("Firmware device #{}:", d.id);
+                    shell_println!("  Name:      {}", d.name);
+                    shell_println!("  Type:      {}", d.fw_type.label());
+                    shell_println!("  Current:   {}", d.current_version);
+                    shell_println!("  Available: {}", avail);
+                    shell_println!("  Status:    {}", d.status.label());
+                    shell_println!("  Vendor:    {}", d.vendor);
+                }
+                None => shell_println!("Device {} not found.", id),
+            }
+        }
+        "check" => {
+            fwupdate::init_defaults();
+            match fwupdate::check_updates() {
+                Ok(n) => shell_println!("{} firmware update(s) available.", n),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "apply" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            match fwupdate::apply_update(id) {
+                Ok(()) => shell_println!("Firmware update applied for device {}. Reboot required.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "history" => {
+            let records = fwupdate::update_history();
+            if records.is_empty() {
+                shell_println!("No firmware update history.");
+            } else {
+                shell_println!("{} update record(s):", records.len());
+                for r in &records {
+                    let status = if r.success { "OK" } else { "FAILED" };
+                    shell_println!("  dev={} ({}) {} → {} [{}] @{}ns",
+                        r.device_id, r.device_name, r.from_version,
+                        r.to_version, status, r.timestamp_ns);
+                }
+            }
+        }
+        "stats" => {
+            fwupdate::init_defaults();
+            let (devs, updates, failures, checks, ops) = fwupdate::stats();
+            shell_println!("Firmware update stats:");
+            shell_println!("  Devices:     {}", devs);
+            shell_println!("  Updates:     {}", updates);
+            shell_println!("  Failures:    {}", failures);
+            shell_println!("  Checks:      {}", checks);
+            shell_println!("  Operations:  {}", ops);
+        }
+        "test" => {
+            fwupdate::self_test();
+            shell_println!("fwupdate self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: fwupdate [list|get <id>|check|apply <id>|history|stats|test]");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -55787,7 +56141,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -926,6 +926,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] mkdtemp: create unique temporary directory (modeled after mkstemp with mkdir)
   - [x] err/warn: BSD error functions — err/errx/warn/warnx/verr/verrx/vwarn/vwarnx for formatted error messages to stderr
   - [x] ftw/nftw: file tree walk — recursive directory traversal with user callback, FTW_DEPTH/FTW_PHYS flags, FTW struct with base offset and depth
+  - [x] getopt_long/getopt_long_only: GNU long option parsing (struct option, NO/REQUIRED/OPTIONAL_ARGUMENT, flag pointer, --opt=value)
+  - [x] aligned allocation: posix_memalign, aligned_alloc (C11), valloc, memalign — over-allocation with back-pointer for alignments > 16 bytes
+  - [x] flock: advisory file locking stub (LOCK_SH/LOCK_EX/LOCK_UN/LOCK_NB, always succeeds)
+  - [x] mkdtemp: unique temporary directory creation (reuses mkstemp counter with mkdir)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

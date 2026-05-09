@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip", "focussession", "fsess", "quicknote", "qnote", "cscheme", "uischeme", "appcompat", "acompat",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip", "focussession", "fsess", "quicknote", "qnote", "cscheme", "uischeme", "appcompat", "acompat", "windowrules", "wrules", "spatialaudio", "spatial", "filetransfer", "ftrans", "startupopt", "sopt",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4929,6 +4929,10 @@ fn dispatch(line: &str) {
         "quicknote" | "qnote" => cmd_quicknote(args),
         "cscheme" | "uischeme" => cmd_uicolorscheme(args),
         "appcompat" | "acompat" => cmd_appcompat(args),
+        "windowrules" | "wrules" => cmd_windowrules(args),
+        "spatialaudio" | "spatial" => cmd_spatialaudio(args),
+        "filetransfer" | "ftrans" => cmd_filetransfer(args),
+        "startupopt" | "sopt" => cmd_startupopt(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -40181,6 +40185,589 @@ fn parse_shim(s: &str) -> Option<crate::fs::appcompat::Shim> {
     }
 }
 
+/// `windowrules` / `wrules` — per-window placement and behavior rules.
+fn cmd_windowrules(args: &str) {
+    use crate::fs::windowrules;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" | "show" => {
+            let rules = windowrules::list_rules();
+            if rules.is_empty() {
+                shell_println!("No window rules.");
+            } else {
+                for r in &rules {
+                    shell_println!("  [{}] {} — {} '{}' ({} actions, {}, hits={})",
+                        r.id, r.name, r.match_type.label(), r.match_value,
+                        r.actions.len(), if r.enabled { "on" } else { "off" }, r.hit_count);
+                }
+            }
+        }
+        "add" => {
+            let match_t = parts.get(1).and_then(|s| parse_match_type(s));
+            let value = parts.get(2).copied();
+            let name = if parts.len() > 3 { parts[3..].join(" ") } else { alloc::string::String::from("Rule") };
+            if let (Some(mt), Some(v)) = (match_t, value) {
+                match windowrules::add_rule(&name, mt, v) {
+                    Ok(id) => shell_println!("Rule created: id={}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: windowrules add <match_type> <value> [name]");
+                shell_println!("  Match types: app, appcontains, title, class, any");
+            }
+        }
+        "action" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            let action = parts.get(2).and_then(|s| parse_rule_action(s));
+            let p1 = parts.get(3).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            let p2 = parts.get(4).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            if let (Some(id), Some(act)) = (id, action) {
+                match windowrules::add_action(id, act, p1, p2) {
+                    Ok(()) => shell_println!("Action {} added to rule {}.", act.label(), id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: windowrules action <rule_id> <action> [p1] [p2]");
+                shell_println!("  Actions: position, size, workspace, ontop, onbottom, opacity,");
+                shell_println!("           nodecor, maximized, minimized, fullscreen, skiptask,");
+                shell_println!("           skippager, pinall, center");
+            }
+        }
+        "enable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match windowrules::set_enabled(id, true) {
+                    Ok(()) => shell_println!("Rule {} enabled.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: windowrules enable <id>");
+            }
+        }
+        "disable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match windowrules::set_enabled(id, false) {
+                    Ok(()) => shell_println!("Rule {} disabled.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: windowrules disable <id>");
+            }
+        }
+        "remove" | "rm" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match windowrules::remove_rule(id) {
+                    Ok(()) => shell_println!("Rule {} removed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: windowrules remove <id>");
+            }
+        }
+        "match" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let title = parts.get(2).copied().unwrap_or("");
+            let matches = windowrules::match_rules(app, title, "");
+            if matches.is_empty() {
+                shell_println!("No rules match app='{}' title='{}'.", app, title);
+            } else {
+                for (id, actions) in &matches {
+                    let labels: Vec<&str> = actions.iter().map(|a| a.action.label()).collect();
+                    shell_println!("  Rule {}: {}", id, labels.join(", "));
+                }
+            }
+        }
+        "stats" => {
+            let (rules, enabled, matches, applied, ops) = windowrules::stats();
+            shell_println!("Rules: {}, Enabled: {}, Matches: {}, Applied: {}, Ops: {}",
+                rules, enabled, matches, applied, ops);
+        }
+        "test" => windowrules::self_test(),
+        "init" => {
+            windowrules::init_defaults();
+            shell_println!("Window rules subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: windowrules <subcommand>");
+            shell_println!("  list / show           List all rules");
+            shell_println!("  add <type> <val> [nm] Add rule");
+            shell_println!("  action <id> <act> ... Add action to rule");
+            shell_println!("  enable/disable <id>   Toggle rule");
+            shell_println!("  remove <id>           Remove rule");
+            shell_println!("  match <app> [title]   Test matching");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_match_type(s: &str) -> Option<crate::fs::windowrules::MatchType> {
+    use crate::fs::windowrules::MatchType;
+    match s.to_lowercase().as_str() {
+        "app" | "appexact" => Some(MatchType::AppExact),
+        "appcontains" | "appc" => Some(MatchType::AppContains),
+        "title" | "titlecontains" => Some(MatchType::TitleContains),
+        "class" | "classexact" => Some(MatchType::ClassExact),
+        "any" | "all" => Some(MatchType::Any),
+        _ => None,
+    }
+}
+
+fn parse_rule_action(s: &str) -> Option<crate::fs::windowrules::RuleAction> {
+    use crate::fs::windowrules::RuleAction;
+    match s.to_lowercase().as_str() {
+        "position" | "pos" => Some(RuleAction::SetPosition),
+        "size" => Some(RuleAction::SetSize),
+        "workspace" | "ws" => Some(RuleAction::MoveToWorkspace),
+        "ontop" | "alwaysontop" => Some(RuleAction::AlwaysOnTop),
+        "onbottom" => Some(RuleAction::AlwaysOnBottom),
+        "opacity" => Some(RuleAction::SetOpacity),
+        "nodecor" | "nodecorations" => Some(RuleAction::NoDecorations),
+        "maximized" | "max" => Some(RuleAction::StartMaximized),
+        "minimized" | "min" => Some(RuleAction::StartMinimized),
+        "fullscreen" | "fs" => Some(RuleAction::StartFullscreen),
+        "skiptask" | "skiptaskbar" => Some(RuleAction::SkipTaskbar),
+        "skippager" => Some(RuleAction::SkipPager),
+        "pinall" | "pinallws" => Some(RuleAction::PinAllWorkspaces),
+        "center" => Some(RuleAction::CenterOnScreen),
+        _ => None,
+    }
+}
+
+/// `spatialaudio` / `spatial` — 3D audio positioning.
+fn cmd_spatialaudio(args: &str) {
+    use crate::fs::spatialaudio;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "status" => {
+            if let Some(cfg) = spatialaudio::get_config() {
+                shell_println!("Spatial audio: {}", if cfg.global_enabled { "ON" } else { "OFF" });
+                shell_println!("Layout: {} ({}ch)", cfg.layout.label(), cfg.layout.channel_count());
+                shell_println!("Room: {}", cfg.room_size.label());
+                shell_println!("Head tracking: {}", cfg.head_tracking);
+                shell_println!("Reverb: {}%", cfg.reverb_level);
+                shell_println!("Distance attenuation: {}", cfg.distance_attenuation);
+                shell_println!("Doppler: {}", cfg.doppler_effect);
+            } else {
+                shell_println!("Not initialised.");
+            }
+        }
+        "enable" => {
+            match spatialaudio::set_enabled(true) {
+                Ok(()) => shell_println!("Spatial audio enabled."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            match spatialaudio::set_enabled(false) {
+                Ok(()) => shell_println!("Spatial audio disabled."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "layout" => {
+            if let Some(layout) = parts.get(1).and_then(|s| parse_speaker_layout(s)) {
+                match spatialaudio::set_layout(layout) {
+                    Ok(()) => shell_println!("Layout set to {}.", layout.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: spatialaudio layout <stereo|5.1|7.1|atmos|binaural>");
+            }
+        }
+        "room" => {
+            if let Some(room) = parts.get(1).and_then(|s| parse_room_size(s)) {
+                match spatialaudio::set_room_size(room) {
+                    Ok(()) => shell_println!("Room set to {}.", room.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: spatialaudio room <none|small|medium|large|hall|arena>");
+            }
+        }
+        "reverb" => {
+            if let Some(level) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match spatialaudio::set_reverb(level) {
+                    Ok(()) => shell_println!("Reverb set to {}%.", level.min(100)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: spatialaudio reverb <0-100>");
+            }
+        }
+        "headtrack" => {
+            let on = parts.get(1).copied().unwrap_or("on") == "on";
+            match spatialaudio::set_head_tracking(on) {
+                Ok(()) => shell_println!("Head tracking {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "doppler" => {
+            let on = parts.get(1).copied().unwrap_or("on") == "on";
+            match spatialaudio::set_doppler(on) {
+                Ok(()) => shell_println!("Doppler effect {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "app" => {
+            let app = parts.get(1).copied();
+            let enabled = parts.get(2).map(|s| *s != "off" && *s != "false" && *s != "0").unwrap_or(true);
+            if let Some(app) = app {
+                match spatialaudio::set_app_enabled(app, enabled) {
+                    Ok(()) => shell_println!("App '{}' spatial audio {}.", app, if enabled { "enabled" } else { "disabled" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: spatialaudio app <name> [on|off]");
+            }
+        }
+        "apps" => {
+            let configs = spatialaudio::list_app_configs();
+            if configs.is_empty() {
+                shell_println!("No per-app configs.");
+            } else {
+                for c in &configs {
+                    shell_println!("  {} — {}", c.app_name, if c.enabled { "on" } else { "off" });
+                }
+            }
+        }
+        "stats" => {
+            let (apps, streams, changes, ops) = spatialaudio::stats();
+            shell_println!("App configs: {}, Streams: {}, Changes: {}, Ops: {}",
+                apps, streams, changes, ops);
+        }
+        "test" => spatialaudio::self_test(),
+        "init" => {
+            spatialaudio::init_defaults();
+            shell_println!("Spatial audio subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: spatialaudio <subcommand>");
+            shell_println!("  show / status         Show config");
+            shell_println!("  enable / disable      Toggle spatial audio");
+            shell_println!("  layout <type>         Set speaker layout");
+            shell_println!("  room <size>           Set room size");
+            shell_println!("  reverb <0-100>        Set reverb level");
+            shell_println!("  headtrack [on|off]    Toggle head tracking");
+            shell_println!("  doppler [on|off]      Toggle Doppler effect");
+            shell_println!("  app <name> [on|off]   Per-app toggle");
+            shell_println!("  apps                  List app configs");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_speaker_layout(s: &str) -> Option<crate::fs::spatialaudio::SpeakerLayout> {
+    use crate::fs::spatialaudio::SpeakerLayout;
+    match s.to_lowercase().as_str() {
+        "stereo" | "2.0" => Some(SpeakerLayout::Stereo),
+        "5.1" | "surround51" => Some(SpeakerLayout::Surround51),
+        "7.1" | "surround71" => Some(SpeakerLayout::Surround71),
+        "atmos" | "dolby" => Some(SpeakerLayout::Atmos),
+        "binaural" | "headphone" => Some(SpeakerLayout::Binaural),
+        "custom" => Some(SpeakerLayout::Custom),
+        _ => None,
+    }
+}
+
+fn parse_room_size(s: &str) -> Option<crate::fs::spatialaudio::RoomSize> {
+    use crate::fs::spatialaudio::RoomSize;
+    match s.to_lowercase().as_str() {
+        "none" | "off" => Some(RoomSize::None),
+        "small" => Some(RoomSize::Small),
+        "medium" | "med" => Some(RoomSize::Medium),
+        "large" => Some(RoomSize::Large),
+        "hall" | "concert" => Some(RoomSize::Hall),
+        "arena" => Some(RoomSize::Arena),
+        _ => None,
+    }
+}
+
+/// `filetransfer` / `ftrans` — device-to-device file sharing.
+fn cmd_filetransfer(args: &str) {
+    use crate::fs::filetransfer;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "status" => {
+            let vis = filetransfer::get_visibility();
+            shell_println!("Visibility: {}", vis.label());
+            let devices = filetransfer::list_devices();
+            shell_println!("Nearby devices: {}", devices.len());
+            for d in &devices {
+                shell_println!("  [{}] {} ({}, {}, signal={})",
+                    d.id, d.name, d.device_type, d.transport.label(), d.signal_strength);
+            }
+        }
+        "visibility" | "vis" => {
+            if let Some(v) = parts.get(1).and_then(|s| parse_visibility(s)) {
+                match filetransfer::set_visibility(v) {
+                    Ok(()) => shell_println!("Visibility set to {}.", v.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: filetransfer visibility <hidden|contacts|everyone>");
+            }
+        }
+        "savepath" => {
+            if let Some(path) = parts.get(1) {
+                match filetransfer::set_save_path(path) {
+                    Ok(()) => shell_println!("Save path set to '{}'.", path),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: filetransfer savepath <path>");
+            }
+        }
+        "discover" => {
+            let name = parts.get(1).copied().unwrap_or("Device");
+            let dtype = parts.get(2).copied().unwrap_or("unknown");
+            let transport = parts.get(3).and_then(|s| parse_transport(s)).unwrap_or(filetransfer::Transport::Auto);
+            match filetransfer::discover_device(name, dtype, transport, -50) {
+                Ok(id) => shell_println!("Device discovered: id={}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "send" => {
+            let device_id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            let file_name = parts.get(2).copied();
+            let size = parts.get(3).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            if let (Some(did), Some(fname)) = (device_id, file_name) {
+                match filetransfer::send_file(did, fname, size) {
+                    Ok(tid) => shell_println!("Transfer initiated: id={}", tid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: filetransfer send <device_id> <filename> [size]");
+            }
+        }
+        "accept" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match filetransfer::accept_transfer(id) {
+                    Ok(()) => shell_println!("Transfer {} accepted.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: filetransfer accept <transfer_id>");
+            }
+        }
+        "reject" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match filetransfer::reject_transfer(id) {
+                    Ok(()) => shell_println!("Transfer {} rejected.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: filetransfer reject <transfer_id>");
+            }
+        }
+        "cancel" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match filetransfer::cancel_transfer(id) {
+                    Ok(()) => shell_println!("Transfer {} cancelled.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: filetransfer cancel <transfer_id>");
+            }
+        }
+        "transfers" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+            let transfers = filetransfer::list_transfers(max);
+            if transfers.is_empty() {
+                shell_println!("No transfers.");
+            } else {
+                for t in &transfers {
+                    let dir = if t.outgoing { "OUT" } else { "IN " };
+                    shell_println!("  [{}] {} {} → {} ({}, {}/{})",
+                        t.id, dir, t.file_name, t.device_name, t.status.label(),
+                        t.bytes_transferred, t.file_size);
+                }
+            }
+        }
+        "stats" => {
+            let (devs, sent, recv, bytes_s, bytes_r, ops) = filetransfer::stats();
+            shell_println!("Devices: {}, Sent: {}, Received: {}, Bytes sent: {}, Bytes recv: {}, Ops: {}",
+                devs, sent, recv, bytes_s, bytes_r, ops);
+        }
+        "test" => filetransfer::self_test(),
+        "init" => {
+            filetransfer::init_defaults();
+            shell_println!("File transfer subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: filetransfer <subcommand>");
+            shell_println!("  show / status         Show nearby devices");
+            shell_println!("  visibility <mode>     Set visibility");
+            shell_println!("  savepath <path>       Set receive path");
+            shell_println!("  discover <n> <t> [tr] Simulate discovery");
+            shell_println!("  send <dev> <file> [s] Send file");
+            shell_println!("  accept/reject <id>    Accept/reject transfer");
+            shell_println!("  cancel <id>           Cancel transfer");
+            shell_println!("  transfers [max]       List transfers");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_visibility(s: &str) -> Option<crate::fs::filetransfer::Visibility> {
+    use crate::fs::filetransfer::Visibility;
+    match s.to_lowercase().as_str() {
+        "hidden" | "off" => Some(Visibility::Hidden),
+        "contacts" | "contactsonly" => Some(Visibility::ContactsOnly),
+        "everyone" | "all" => Some(Visibility::Everyone),
+        _ => None,
+    }
+}
+
+fn parse_transport(s: &str) -> Option<crate::fs::filetransfer::Transport> {
+    use crate::fs::filetransfer::Transport;
+    match s.to_lowercase().as_str() {
+        "bt" | "bluetooth" => Some(Transport::Bluetooth),
+        "wifi" | "wifidirect" => Some(Transport::WifiDirect),
+        "lan" | "local" | "network" => Some(Transport::LocalNetwork),
+        "auto" => Some(Transport::Auto),
+        _ => None,
+    }
+}
+
+/// `startupopt` / `sopt` — boot profiling and optimization.
+fn cmd_startupopt(args: &str) {
+    use crate::fs::startupopt;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "status" => {
+            let (stages, boots, last_ms, fastest_ms, analyses, ops) = startupopt::stats();
+            shell_println!("Boot count: {}", boots);
+            shell_println!("Last boot: {}ms", last_ms);
+            shell_println!("Fastest boot: {}ms", fastest_ms);
+            shell_println!("Stages recorded: {}", stages);
+            shell_println!("Analyses run: {}", analyses);
+        }
+        "stages" => {
+            let sorted = startupopt::get_stages_by_duration();
+            if sorted.is_empty() {
+                shell_println!("No stages recorded.");
+            } else {
+                shell_println!("Stages (slowest first):");
+                for s in &sorted {
+                    shell_println!("  {} ({}) — {}ms", s.name, s.category.label(), s.duration_ms);
+                }
+            }
+        }
+        "category" | "cat" => {
+            if let Some(cat) = parts.get(1).and_then(|s| parse_stage_category(s)) {
+                let stages = startupopt::get_stages_by_category(cat);
+                if stages.is_empty() {
+                    shell_println!("No stages for {}.", cat.label());
+                } else {
+                    for s in &stages {
+                        shell_println!("  {} — {}ms", s.name, s.duration_ms);
+                    }
+                }
+            } else {
+                shell_println!("Usage: startupopt category <firmware|bootloader|kernel|drivers|services|session|desktop|autostart>");
+            }
+        }
+        "begin" => {
+            let name = parts.get(1).copied().unwrap_or("stage");
+            let cat = parts.get(2).and_then(|s| parse_stage_category(s)).unwrap_or(startupopt::StageCategory::Services);
+            match startupopt::begin_stage(name, cat) {
+                Ok(()) => shell_println!("Stage '{}' started.", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "end" => {
+            if let Some(name) = parts.get(1) {
+                match startupopt::end_stage(name) {
+                    Ok(ms) => shell_println!("Stage '{}' completed: {}ms.", name, ms),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: startupopt end <stage_name>");
+            }
+        }
+        "boot" => {
+            match startupopt::record_boot() {
+                Ok(total) => shell_println!("Boot recorded: total {}ms.", total),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "analyze" => {
+            match startupopt::analyze() {
+                Ok(count) => {
+                    shell_println!("{} suggestions generated.", count);
+                    let suggestions = startupopt::get_suggestions();
+                    for s in &suggestions {
+                        let applied = if s.applied { " [applied]" } else { "" };
+                        shell_println!("  [{}] [{}] {} (save ~{}ms){}",
+                            s.id, s.priority.label(), s.description, s.estimated_savings_ms, applied);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "apply" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match startupopt::apply_suggestion(id) {
+                    Ok(()) => shell_println!("Suggestion {} marked as applied.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: startupopt apply <suggestion_id>");
+            }
+        }
+        "clear" => {
+            match startupopt::clear_stages() {
+                Ok(()) => shell_println!("Stages cleared."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (stages, boots, last_ms, fastest_ms, analyses, ops) = startupopt::stats();
+            shell_println!("Stages: {}, Boots: {}, Last: {}ms, Fastest: {}ms, Analyses: {}, Ops: {}",
+                stages, boots, last_ms, fastest_ms, analyses, ops);
+        }
+        "test" => startupopt::self_test(),
+        "init" => {
+            startupopt::init_defaults();
+            shell_println!("Startup optimization subsystem initialised.");
+        }
+        _ => {
+            shell_println!("Usage: startupopt <subcommand>");
+            shell_println!("  show / status         Boot timing summary");
+            shell_println!("  stages                List stages (slowest first)");
+            shell_println!("  category <cat>        Stages by category");
+            shell_println!("  begin <name> [cat]    Begin recording stage");
+            shell_println!("  end <name>            End recording stage");
+            shell_println!("  boot                  Record boot completion");
+            shell_println!("  analyze               Generate suggestions");
+            shell_println!("  apply <id>            Mark suggestion applied");
+            shell_println!("  clear                 Clear stage data");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_stage_category(s: &str) -> Option<crate::fs::startupopt::StageCategory> {
+    use crate::fs::startupopt::StageCategory;
+    match s.to_lowercase().as_str() {
+        "firmware" | "fw" => Some(StageCategory::Firmware),
+        "bootloader" | "boot" => Some(StageCategory::Bootloader),
+        "kernel" | "kernearly" => Some(StageCategory::KernelEarly),
+        "drivers" | "drv" => Some(StageCategory::Drivers),
+        "services" | "svc" => Some(StageCategory::Services),
+        "session" | "user" => Some(StageCategory::UserSession),
+        "desktop" | "desk" => Some(StageCategory::Desktop),
+        "autostart" | "auto" => Some(StageCategory::AutoStart),
+        _ => None,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -48777,7 +49364,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

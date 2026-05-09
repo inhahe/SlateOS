@@ -325,6 +325,10 @@ const ROOT_FILES: &[&str] = &[
     "quicknote",
     "colorscheme",
     "appcompat",
+    "windowrules",
+    "spatialaudio",
+    "filetransfer",
+    "startupopt",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6639,6 +6643,100 @@ fn gen_appcompat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_windowrules() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Window Rules ===\n");
+    let (rules, enabled, matches, applied, ops) = super::windowrules::stats();
+    out.push_str(&format!("rules: {}\n", rules));
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("total_matches: {}\n", matches));
+    out.push_str(&format!("total_applied: {}\n", applied));
+    let list = super::windowrules::list_rules();
+    for r in &list {
+        out.push_str(&format!("  [{}] {} — {} '{}' ({} actions, {})\n",
+            r.id, r.name, r.match_type.label(), r.match_value,
+            r.actions.len(), if r.enabled { "on" } else { "off" }));
+    }
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_spatialaudio() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Spatial Audio ===\n");
+    if let Some(cfg) = super::spatialaudio::get_config() {
+        out.push_str(&format!("enabled: {}\n", cfg.global_enabled));
+        out.push_str(&format!("layout: {} ({}ch)\n", cfg.layout.label(), cfg.layout.channel_count()));
+        out.push_str(&format!("room: {}\n", cfg.room_size.label()));
+        out.push_str(&format!("head_tracking: {}\n", cfg.head_tracking));
+        out.push_str(&format!("reverb: {}%\n", cfg.reverb_level));
+        out.push_str(&format!("distance_attenuation: {}\n", cfg.distance_attenuation));
+        out.push_str(&format!("doppler: {}\n", cfg.doppler_effect));
+    }
+    let (apps, streams, changes, ops) = super::spatialaudio::stats();
+    out.push_str(&format!("app_configs: {}\n", apps));
+    out.push_str(&format!("streams_processed: {}\n", streams));
+    out.push_str(&format!("config_changes: {}\n", changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_filetransfer() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== File Transfer ===\n");
+    let vis = super::filetransfer::get_visibility();
+    out.push_str(&format!("visibility: {}\n", vis.label()));
+    let devices = super::filetransfer::list_devices();
+    out.push_str(&format!("nearby_devices: {}\n", devices.len()));
+    for d in &devices {
+        out.push_str(&format!("  [{}] {} ({}, {})\n",
+            d.id, d.name, d.device_type, d.transport.label()));
+    }
+    let transfers = super::filetransfer::list_transfers(10);
+    if !transfers.is_empty() {
+        out.push_str("recent_transfers:\n");
+        for t in &transfers {
+            let dir = if t.outgoing { "→" } else { "←" };
+            out.push_str(&format!("  [{}] {} {} {} ({})\n",
+                t.id, dir, t.device_name, t.file_name, t.status.label()));
+        }
+    }
+    let (devs, sent, recv, bytes_s, bytes_r, ops) = super::filetransfer::stats();
+    out.push_str(&format!("total_sent: {}\n", sent));
+    out.push_str(&format!("total_received: {}\n", recv));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_startupopt() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Startup Optimization ===\n");
+    let (stages, boots, last_ms, fastest_ms, analyses, ops) = super::startupopt::stats();
+    out.push_str(&format!("boot_count: {}\n", boots));
+    out.push_str(&format!("last_boot_ms: {}\n", last_ms));
+    out.push_str(&format!("fastest_boot_ms: {}\n", fastest_ms));
+    out.push_str(&format!("stages: {}\n", stages));
+    let sorted = super::startupopt::get_stages_by_duration();
+    for s in sorted.iter().take(10) {
+        out.push_str(&format!("  {} ({}) — {}ms\n",
+            s.name, s.category.label(), s.duration_ms));
+    }
+    let suggestions = super::startupopt::get_suggestions();
+    if !suggestions.is_empty() {
+        out.push_str(&format!("suggestions: {}\n", suggestions.len()));
+        for s in &suggestions {
+            out.push_str(&format!("  [{}] [{}] {}\n", s.id, s.priority.label(), s.description));
+        }
+    }
+    out.push_str(&format!("total_analyses: {}\n", analyses));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7129,6 +7227,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "quicknote" => Ok(gen_quicknote()),
         "colorscheme" => Ok(gen_colorscheme()),
         "appcompat" => Ok(gen_appcompat()),
+        "windowrules" => Ok(gen_windowrules()),
+        "spatialaudio" => Ok(gen_spatialaudio()),
+        "filetransfer" => Ok(gen_filetransfer()),
+        "startupopt" => Ok(gen_startupopt()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

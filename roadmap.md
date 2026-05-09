@@ -795,6 +795,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Print queue (fs::printqueue): print job queue with JobStatus (6 states), PageSize (6 types), multi-printer support, submit/cancel/complete jobs, pause/resume printer, clear completed; `printqueue`/`pqueue` kshell command; /proc/printqueue; 11 self-tests
   - [x] Service manager (fs::servicemgr): system service lifecycle with ServiceState (6 states), StartupType (4 types), start/stop/restart, dependency tracking, auto-restart, find by name; `servicemgr`/`svcmgr` kshell command; /proc/servicemgr; 11 self-tests
   - [x] Hardware monitor (fs::hwmonitor): sensor monitoring with SensorType (6 types), millidegree/millivolt integer precision, per-sensor min/max/threshold tracking, alert generation, inverted fan speed thresholds; `hwmonitor`/`hwmon` kshell command; /proc/hwmonitor; 11 self-tests
+  - [x] App sandbox (fs::appsandbox): per-app capability isolation with Permission (10 types), TrustLevel (5 levels), access check with allow/deny/prompt, default rules per trust level, grant/revoke permissions; `appsandbox`/`sandbox` kshell command; /proc/appsandbox; 11 self-tests
+  - [x] Gamepad input (fs::gamepadinput): game controller management with GamepadType (6 types), ConnectionType (3 types), button bitmask input, axis state tracking, dead zone/rumble config, auto player assignment; `gamepadinput`/`gamepad` kshell command; /proc/gamepadinput; 11 self-tests
+  - [x] System restore (fs::sysrestore): incremental snapshots with SnapshotType (6 types), rotation policy (max count/size/age), pin/unpin protection, create/restore/delete lifecycle; `sysrestore`/`srestore` kshell command; /proc/sysrestore; 11 self-tests
+  - [x] Audio multiplexer (fs::audiomux): per-app audio routing with EndpointType (7 types), stream management, per-stream volume/mute, reroute to different output, default output selection; `audiomux`/`amux` kshell command; /proc/audiomux; 11 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

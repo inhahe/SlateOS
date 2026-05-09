@@ -269,6 +269,10 @@ const ROOT_FILES: &[&str] = &[
     "printqueue",
     "servicemgr",
     "hwmonitor",
+    "appsandbox",
+    "gamepadinput",
+    "sysrestore",
+    "audiomux",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5856,6 +5860,54 @@ fn gen_hwmonitor() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_appsandbox() -> Vec<u8> {
+    use crate::fs::appsandbox;
+    let (sandbox_count, total_created, total_checks, total_denied, ops) = appsandbox::stats();
+    let mut out = String::from("sandbox_count: ");
+    out.push_str(&format!("{}\n", sandbox_count));
+    out.push_str(&format!("total_created: {}\n", total_created));
+    out.push_str(&format!("total_checks: {}\n", total_checks));
+    out.push_str(&format!("total_denied: {}\n", total_denied));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_gamepadinput() -> Vec<u8> {
+    use crate::fs::gamepadinput;
+    let (gamepad_count, connected_count, total_connected, total_inputs, ops) = gamepadinput::stats();
+    let mut out = String::from("gamepad_count: ");
+    out.push_str(&format!("{}\n", gamepad_count));
+    out.push_str(&format!("connected: {}\n", connected_count));
+    out.push_str(&format!("total_connected: {}\n", total_connected));
+    out.push_str(&format!("total_inputs: {}\n", total_inputs));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_sysrestore() -> Vec<u8> {
+    use crate::fs::sysrestore;
+    let (snapshot_count, total_created, total_restored, total_rotated, ops) = sysrestore::stats();
+    let mut out = String::from("snapshot_count: ");
+    out.push_str(&format!("{}\n", snapshot_count));
+    out.push_str(&format!("total_created: {}\n", total_created));
+    out.push_str(&format!("total_restored: {}\n", total_restored));
+    out.push_str(&format!("total_rotated: {}\n", total_rotated));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_audiomux() -> Vec<u8> {
+    use crate::fs::audiomux;
+    let (output_count, stream_count, total_created, total_reroutes, ops) = audiomux::stats();
+    let mut out = String::from("output_count: ");
+    out.push_str(&format!("{}\n", output_count));
+    out.push_str(&format!("stream_count: {}\n", stream_count));
+    out.push_str(&format!("total_streams_created: {}\n", total_created));
+    out.push_str(&format!("total_reroutes: {}\n", total_reroutes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6290,6 +6342,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "printqueue" => Ok(gen_printqueue()),
         "servicemgr" => Ok(gen_servicemgr()),
         "hwmonitor" => Ok(gen_hwmonitor()),
+        "appsandbox" => Ok(gen_appsandbox()),
+        "gamepadinput" => Ok(gen_gamepadinput()),
+        "sysrestore" => Ok(gen_sysrestore()),
+        "audiomux" => Ok(gen_audiomux()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

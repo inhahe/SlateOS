@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4873,6 +4873,10 @@ fn dispatch(line: &str) {
         "printqueue" | "pqueue" => cmd_printqueue(args),
         "servicemgr" | "svcmgr" => cmd_servicemgr(args),
         "hwmonitor" | "hwmon" => cmd_hwmonitor(args),
+        "appsandbox" | "sandbox" => cmd_appsandbox(args),
+        "gamepadinput" | "gamepad" => cmd_gamepadinput(args),
+        "sysrestore" | "srestore" => cmd_sysrestore(args),
+        "audiomux" | "amux" => cmd_audiomux(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -33372,6 +33376,472 @@ fn cmd_hwmonitor(args: &str) {
     }
 }
 
+/// `appsandbox` / `sandbox` — application sandboxing.
+fn cmd_appsandbox(args: &str) {
+    use crate::fs::appsandbox;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            appsandbox::init_defaults();
+            let sandboxes = appsandbox::list_sandboxes();
+            if sandboxes.is_empty() {
+                shell_println!("No sandboxes.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<12} {:<8} {:<8} {:<8}", "ID", "App", "Trust", "Active", "Checks", "Denied");
+                for s in &sandboxes {
+                    shell_println!("{:<4} {:<20} {:<12} {:<8} {:<8} {:<8}",
+                        s.id, s.app_name, s.trust_level.label(), s.active, s.access_attempts, s.access_denied);
+                }
+            }
+        }
+        "create" | "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let trust_str = parts.get(2).copied().unwrap_or("standard");
+            if name.is_empty() {
+                shell_println!("Usage: sandbox create <app_name> [untrusted|low|standard|elevated|system]");
+            } else {
+                let trust = match trust_str {
+                    "untrusted" | "u" => appsandbox::TrustLevel::Untrusted,
+                    "low" | "l" => appsandbox::TrustLevel::LowTrust,
+                    "elevated" | "e" => appsandbox::TrustLevel::Elevated,
+                    "system" | "s" => appsandbox::TrustLevel::System,
+                    _ => appsandbox::TrustLevel::Standard,
+                };
+                match appsandbox::create_sandbox(name, trust) {
+                    Ok(id) => shell_println!("Created sandbox '{}' (id={}, trust={})", name, id, trust.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "check" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let perm_str = parts.get(2).copied().unwrap_or("file_read");
+            if let Ok(id) = id_str.parse::<u32>() {
+                let perm = match perm_str {
+                    "read" | "file_read" => appsandbox::Permission::FileRead,
+                    "write" | "file_write" => appsandbox::Permission::FileWrite,
+                    "network" | "net" => appsandbox::Permission::NetworkAccess,
+                    "camera" => appsandbox::Permission::Camera,
+                    "mic" | "microphone" => appsandbox::Permission::Microphone,
+                    "location" | "loc" => appsandbox::Permission::Location,
+                    "clipboard" | "clip" => appsandbox::Permission::Clipboard,
+                    _ => appsandbox::Permission::FileRead,
+                };
+                match appsandbox::check_access(id, perm) {
+                    Ok(d) => shell_println!("Access {}: {}", perm.label(), d.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: sandbox check <id> <permission>"); }
+        }
+        "grant" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let perm_str = parts.get(2).copied().unwrap_or("");
+            if let Ok(id) = id_str.parse::<u32>() {
+                let perm = match perm_str {
+                    "read" | "file_read" => appsandbox::Permission::FileRead,
+                    "write" | "file_write" => appsandbox::Permission::FileWrite,
+                    "network" | "net" => appsandbox::Permission::NetworkAccess,
+                    "camera" => appsandbox::Permission::Camera,
+                    _ => { shell_println!("Unknown permission."); return; }
+                };
+                match appsandbox::grant_permission(id, perm, "") {
+                    Ok(()) => shell_println!("Granted {} to sandbox {}", perm.label(), id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: sandbox grant <id> <permission>"); }
+        }
+        "revoke" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let perm_str = parts.get(2).copied().unwrap_or("");
+            if let Ok(id) = id_str.parse::<u32>() {
+                let perm = match perm_str {
+                    "read" | "file_read" => appsandbox::Permission::FileRead,
+                    "write" | "file_write" => appsandbox::Permission::FileWrite,
+                    "network" | "net" => appsandbox::Permission::NetworkAccess,
+                    _ => { shell_println!("Unknown permission."); return; }
+                };
+                match appsandbox::revoke_permission(id, perm) {
+                    Ok(()) => shell_println!("Revoked {} from sandbox {}", perm.label(), id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: sandbox revoke <id> <permission>"); }
+        }
+        "remove" | "delete" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match appsandbox::remove_sandbox(id) {
+                        Ok(()) => shell_println!("Removed sandbox {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: sandbox remove <id>"); }
+        }
+        "stats" => {
+            let (count, created, checks, denied, ops) = appsandbox::stats();
+            shell_println!("Sandboxes: {}, Created: {}", count, created);
+            shell_println!("Checks: {}, Denied: {}, Ops: {}", checks, denied, ops);
+        }
+        "test" => { appsandbox::self_test(); shell_println!("App sandbox self-test complete."); }
+        "init" => { appsandbox::init_defaults(); shell_println!("App sandbox initialized."); }
+        _ => {
+            shell_println!("appsandbox (sandbox) — app sandboxing");
+            shell_println!("  show / list            List sandboxes");
+            shell_println!("  create <app> [trust]   Create sandbox");
+            shell_println!("  check <id> <perm>      Check access");
+            shell_println!("  grant <id> <perm>      Grant permission");
+            shell_println!("  revoke <id> <perm>     Revoke permission");
+            shell_println!("  remove <id>            Remove sandbox");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `gamepadinput` / `gamepad` — game controller input.
+fn cmd_gamepadinput(args: &str) {
+    use crate::fs::gamepadinput;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            gamepadinput::init_defaults();
+            let pads = gamepadinput::list_gamepads();
+            if pads.is_empty() {
+                shell_println!("No gamepads connected.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<12} {:<10} {:<6} {:<8}", "ID", "Name", "Type", "Conn", "Batt%", "Player");
+                for g in &pads {
+                    let batt = if g.battery_percent == 255 { "N/A".into() } else { format!("{}%", g.battery_percent) };
+                    shell_println!("{:<4} {:<20} {:<12} {:<10} {:<6} {:<8}",
+                        g.id, g.name, g.gamepad_type.label(), g.connection.label(),
+                        batt, if g.player_number > 0 { format!("P{}", g.player_number) } else { "-".into() });
+                }
+            }
+        }
+        "add" | "register" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let type_str = parts.get(2).copied().unwrap_or("generic");
+            if name.is_empty() {
+                shell_println!("Usage: gamepad add <name> [xbox|ps|switch|generic|stick|wheel]");
+            } else {
+                let gtype = match type_str {
+                    "xbox" | "xb" => gamepadinput::GamepadType::Xbox,
+                    "ps" | "playstation" => gamepadinput::GamepadType::PlayStation,
+                    "switch" | "ns" => gamepadinput::GamepadType::NintendoSwitch,
+                    "stick" | "flight" => gamepadinput::GamepadType::FlightStick,
+                    "wheel" | "racing" => gamepadinput::GamepadType::RacingWheel,
+                    _ => gamepadinput::GamepadType::Generic,
+                };
+                match gamepadinput::register_gamepad(name, gtype, gamepadinput::ConnectionType::Usb, 255) {
+                    Ok(id) => shell_println!("Registered '{}' as gamepad {} ({})", name, id, gtype.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "remove" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match gamepadinput::remove_gamepad(id) {
+                        Ok(()) => shell_println!("Removed gamepad {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: gamepad remove <id>"); }
+        }
+        "deadzone" | "dz" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let val_str = parts.get(2).copied().unwrap_or("");
+            if let (Ok(id), Ok(val)) = (id_str.parse::<u32>(), val_str.parse::<i32>()) {
+                match gamepadinput::set_dead_zone(id, val) {
+                    Ok(()) => shell_println!("Dead zone set to {} for gamepad {}", val, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: gamepad deadzone <id> <value>"); }
+        }
+        "rumble" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let val_str = parts.get(2).copied().unwrap_or("5000");
+            if let (Ok(id), Ok(val)) = (id_str.parse::<u32>(), val_str.parse::<u32>()) {
+                match gamepadinput::set_rumble(id, val) {
+                    Ok(()) => shell_println!("Rumble set to {} for gamepad {}", val, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: gamepad rumble <id> [intensity]"); }
+        }
+        "info" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match gamepadinput::get_gamepad(id) {
+                        Ok(g) => {
+                            shell_println!("Gamepad #{}", g.id);
+                            shell_println!("  Name:       {}", g.name);
+                            shell_println!("  Type:       {}", g.gamepad_type.label());
+                            shell_println!("  Connection: {}", g.connection.label());
+                            shell_println!("  Battery:    {}", if g.battery_percent == 255 { "N/A".into() } else { format!("{}%", g.battery_percent) });
+                            shell_println!("  Player:     {}", g.player_number);
+                            shell_println!("  Dead zone:  {}", g.dead_zone);
+                            shell_println!("  Rumble:     {}", g.rumble_intensity);
+                            shell_println!("  Connected:  {}", g.connected);
+                            shell_println!("  Presses:    {}", g.total_presses);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: gamepad info <id>"); }
+        }
+        "stats" => {
+            let (count, connected, total_conn, total_inp, ops) = gamepadinput::stats();
+            shell_println!("Gamepads: {}, Connected: {}", count, connected);
+            shell_println!("Total connected: {}, Inputs: {}, Ops: {}", total_conn, total_inp, ops);
+        }
+        "test" => { gamepadinput::self_test(); shell_println!("Gamepad input self-test complete."); }
+        "init" => { gamepadinput::init_defaults(); shell_println!("Gamepad input initialized."); }
+        _ => {
+            shell_println!("gamepadinput (gamepad) — controller input");
+            shell_println!("  show / list          List gamepads");
+            shell_println!("  info <id>            Gamepad details");
+            shell_println!("  add <name> [type]    Register gamepad");
+            shell_println!("  remove <id>          Remove gamepad");
+            shell_println!("  deadzone <id> <val>  Set dead zone");
+            shell_println!("  rumble <id> [val]    Set rumble");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `sysrestore` / `srestore` — system snapshot management.
+fn cmd_sysrestore(args: &str) {
+    use crate::fs::sysrestore;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            sysrestore::init_defaults();
+            let snaps = sysrestore::list_snapshots();
+            if snaps.is_empty() {
+                shell_println!("No snapshots.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<12} {:<10} {:<12} {:<6}", "ID", "Description", "Type", "State", "Size(MB)", "Pin");
+                for s in &snaps {
+                    let size_mb = s.size_bytes / (1024 * 1024);
+                    shell_println!("{:<4} {:<20} {:<12} {:<10} {:<12} {:<6}",
+                        s.id, s.description, s.snapshot_type.label(), s.state.label(), size_mb, if s.pinned { "yes" } else { "no" });
+                }
+                let total = sysrestore::total_size();
+                shell_println!("\nTotal size: {} MB", total / (1024 * 1024));
+            }
+        }
+        "create" | "snap" => {
+            let desc = parts.get(1).copied().unwrap_or("Manual snapshot");
+            let type_str = parts.get(2).copied().unwrap_or("manual");
+            let stype = match type_str {
+                "update" => sysrestore::SnapshotType::PreUpdate,
+                "driver" => sysrestore::SnapshotType::PreDriverInstall,
+                "config" => sysrestore::SnapshotType::PreConfigChange,
+                "scheduled" => sysrestore::SnapshotType::Scheduled,
+                "emergency" => sysrestore::SnapshotType::Emergency,
+                _ => sysrestore::SnapshotType::Manual,
+            };
+            match sysrestore::create_snapshot(desc, stype, 100_000_000, 500) {
+                Ok(id) => shell_println!("Created snapshot {} ({})", id, desc),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "restore" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match sysrestore::restore_snapshot(id) {
+                        Ok(()) => shell_println!("Restored from snapshot {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: srestore restore <id>"); }
+        }
+        "pin" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match sysrestore::pin_snapshot(id) {
+                        Ok(()) => shell_println!("Pinned snapshot {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: srestore pin <id>"); }
+        }
+        "unpin" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match sysrestore::unpin_snapshot(id) {
+                        Ok(()) => shell_println!("Unpinned snapshot {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: srestore unpin <id>"); }
+        }
+        "delete" | "rm" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match sysrestore::delete_snapshot(id) {
+                        Ok(()) => shell_println!("Deleted snapshot {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: srestore delete <id>"); }
+        }
+        "rotate" => {
+            match sysrestore::run_rotation() {
+                Ok(n) => shell_println!("Rotation removed {} snapshot(s).", n),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "policy" => {
+            let policy = sysrestore::get_rotation_policy();
+            shell_println!("Rotation policy:");
+            shell_println!("  Max snapshots: {}", policy.max_snapshots);
+            shell_println!("  Max size: {} MB", policy.max_total_bytes / (1024 * 1024));
+            shell_println!("  Max age: {} days", policy.max_age_secs / 86400);
+            shell_println!("  Keep minimum: {}", policy.keep_minimum);
+        }
+        "stats" => {
+            let (count, created, restored, rotated, ops) = sysrestore::stats();
+            shell_println!("Snapshots: {}, Created: {}, Restored: {}", count, created, restored);
+            shell_println!("Rotated: {}, Ops: {}", rotated, ops);
+        }
+        "test" => { sysrestore::self_test(); shell_println!("System restore self-test complete."); }
+        "init" => { sysrestore::init_defaults(); shell_println!("System restore initialized."); }
+        _ => {
+            shell_println!("sysrestore (srestore) — system snapshots");
+            shell_println!("  show / list           List snapshots");
+            shell_println!("  create [desc] [type]  Create snapshot");
+            shell_println!("  restore <id>          Restore snapshot");
+            shell_println!("  pin / unpin <id>      Pin/unpin");
+            shell_println!("  delete <id>           Delete snapshot");
+            shell_println!("  rotate                Run rotation");
+            shell_println!("  policy                Show policy");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `audiomux` / `amux` — per-app audio routing.
+fn cmd_audiomux(args: &str) {
+    use crate::fs::audiomux;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "outputs" => {
+            audiomux::init_defaults();
+            let outputs = audiomux::list_outputs();
+            if outputs.is_empty() {
+                shell_println!("No audio outputs.");
+            } else {
+                shell_println!("{:<4} {:<24} {:<12} {:<6} {:<6} {:<8}", "ID", "Name", "Type", "Vol", "Mute", "Default");
+                for o in &outputs {
+                    shell_println!("{:<4} {:<24} {:<12} {:<6} {:<6} {:<8}",
+                        o.id, o.name, o.endpoint.label(), o.volume, o.muted, if o.is_default { "*" } else { "" });
+                }
+            }
+        }
+        "streams" => {
+            let streams = audiomux::list_streams();
+            if streams.is_empty() {
+                shell_println!("No active streams.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<6} {:<8} {:<6} {:<6}", "ID", "App", "PID", "State", "Vol", "Out");
+                for s in &streams {
+                    shell_println!("{:<4} {:<20} {:<6} {:<8} {:<6} {:<6}",
+                        s.id, s.app_name, s.app_pid, s.state.label(), s.volume, s.output_id);
+                }
+            }
+        }
+        "stream" | "play" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let pid_str = parts.get(2).copied().unwrap_or("0");
+            if app.is_empty() {
+                shell_println!("Usage: amux stream <app_name> [pid] [output_id]");
+            } else {
+                let pid = pid_str.parse::<u32>().unwrap_or(0);
+                let out = parts.get(3).and_then(|s| s.parse::<u32>().ok());
+                match audiomux::create_stream(app, pid, out) {
+                    Ok(id) => shell_println!("Created stream {} for '{}'", id, app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "volume" | "vol" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let vol_str = parts.get(2).copied().unwrap_or("");
+            if let (Ok(id), Ok(vol)) = (id_str.parse::<u32>(), vol_str.parse::<u32>()) {
+                match audiomux::set_stream_volume(id, vol) {
+                    Ok(()) => shell_println!("Stream {} volume set to {}", id, vol),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: amux volume <stream_id> <0-100>"); }
+        }
+        "mute" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match audiomux::set_stream_muted(id, true) {
+                        Ok(()) => shell_println!("Muted stream {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: amux mute <stream_id>"); }
+        }
+        "unmute" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match audiomux::set_stream_muted(id, false) {
+                        Ok(()) => shell_println!("Unmuted stream {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: amux unmute <stream_id>"); }
+        }
+        "reroute" | "route" => {
+            let stream_str = parts.get(1).copied().unwrap_or("");
+            let out_str = parts.get(2).copied().unwrap_or("");
+            if let (Ok(sid), Ok(oid)) = (stream_str.parse::<u32>(), out_str.parse::<u32>()) {
+                match audiomux::reroute_stream(sid, oid) {
+                    Ok(()) => shell_println!("Rerouted stream {} to output {}", sid, oid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: amux reroute <stream_id> <output_id>"); }
+        }
+        "default" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match audiomux::set_default_output(id) {
+                        Ok(()) => shell_println!("Default output set to {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: amux default <output_id>"); }
+        }
+        "stats" => {
+            let (outs, streams, created, reroutes, ops) = audiomux::stats();
+            shell_println!("Outputs: {}, Streams: {}", outs, streams);
+            shell_println!("Total created: {}, Reroutes: {}, Ops: {}", created, reroutes, ops);
+        }
+        "test" => { audiomux::self_test(); shell_println!("Audio mux self-test complete."); }
+        "init" => { audiomux::init_defaults(); shell_println!("Audio mux initialized."); }
+        _ => {
+            shell_println!("audiomux (amux) — per-app audio routing");
+            shell_println!("  show / outputs         List outputs");
+            shell_println!("  streams                Active streams");
+            shell_println!("  stream <app> [pid]     Create stream");
+            shell_println!("  volume <id> <vol>      Set volume");
+            shell_println!("  mute / unmute <id>     Mute/unmute");
+            shell_println!("  reroute <sid> <oid>    Route to output");
+            shell_println!("  default <oid>          Set default output");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -41968,7 +42438,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -934,6 +934,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Auth Broker (fs::authbroker): Plan 9 Factotum-inspired credential management with 6 auth methods, lockout after N failures, capability granting with TTL, revocation; `authbroker`/`abroker` kshell command; /proc/authbroker; 8 self-tests
   - [x] Process Isolation (fs::prociso): Namespace management with 7 types (mnt/pid/net/user/ipc/uts/cgroup), 3 isolation levels, hierarchical namespaces, container primitives; `prociso`/`piso` kshell command; /proc/prociso; 8 self-tests
   - [x] Device Events (fs::dmevent): Udev-style hotplug monitoring with 7 event types, 8 subsystems, auto-action rules, device tracking, event ring buffer; `dmevent`/`dmev` kshell command; /proc/dmevent; 8 self-tests
+  - [x] Page Fault Tracker (fs::pftrack): Per-process fault stats with 5 fault kinds, hotspot analysis, top-N faulters, event ring buffer; `pftrack`/`pft` kshell command; /proc/pftrack; 8 self-tests
+  - [x] IPC Log (fs::ipclog): IPC message logging with 6 message types, per-channel stats, PID/channel queries, latency tracking; `ipclog`/`ipcl` kshell command; /proc/ipclog; 8 self-tests
+  - [x] NUMA Statistics (fs::numastat): Per-node memory/access tracking, local/remote alloc counting, inter-node distances, migration stats, balance analysis; `numastat`/`nstat` kshell command; /proc/numastat; 8 self-tests
+  - [x] Shared Memory (fs::shmem): Named region management with 4 permission levels, attach/detach, auto-delete non-persistent, per-PID queries; `shmem`/`shm` kshell command; /proc/shmem; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

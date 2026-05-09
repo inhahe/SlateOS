@@ -408,6 +408,10 @@ const ROOT_FILES: &[&str] = &[
     "authbroker",
     "prociso",
     "dmevent",
+    "pftrack",
+    "ipclog",
+    "numastat",
+    "shmem",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8004,6 +8008,60 @@ fn gen_dmevent() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_pftrack() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (procs, evs, total, minor, major, ops) = crate::fs::pftrack::stats();
+    out.push_str(&format!("processes: {}\nbuffered: {}\ntotal_faults: {}\nminor: {}\nmajor: {}\nops: {}\n",
+        procs, evs, total, minor, major, ops));
+    for p in crate::fs::pftrack::list_processes() {
+        out.push_str(&format!("  pid={} {} total={} minor={} major={} cow={}\n",
+            p.pid, p.name, p.total, p.minor, p.major, p.cow));
+    }
+    out.into_bytes()
+}
+
+fn gen_ipclog() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (channels, msgs, total, bytes, errors, enabled, ops) = crate::fs::ipclog::stats();
+    out.push_str(&format!("channels: {}\nbuffered: {}\ntotal_msgs: {}\ntotal_bytes: {}\nerrors: {}\nenabled: {}\nops: {}\n",
+        channels, msgs, total, bytes, errors, enabled, ops));
+    for ch in crate::fs::ipclog::list_channels() {
+        out.push_str(&format!("  ch#{} {} sent={} recv={} lat={}us err={}\n",
+            ch.channel_id, ch.name, ch.messages_sent, ch.messages_received, ch.avg_latency_us, ch.errors));
+    }
+    out.into_bytes()
+}
+
+fn gen_numastat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (nodes, allocs, remote, migrations, pct, ops) = crate::fs::numastat::stats();
+    out.push_str(&format!("nodes: {}\ntotal_allocs: {}\nremote_allocs: {}\nmigrations: {}\nremote_pct: {}%\nops: {}\n",
+        nodes, allocs, remote, migrations, pct, ops));
+    for n in crate::fs::numastat::list_nodes() {
+        out.push_str(&format!("  node{} [{}] mem={}/{} local={} remote={} lat={}ns cpus={}\n",
+            n.id, n.state.label(), n.used_memory, n.total_memory,
+            n.local_allocs, n.remote_allocs, n.avg_latency_ns, n.cpus.len()));
+    }
+    out.into_bytes()
+}
+
+fn gen_shmem() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (regions, created, deleted, attaches, detaches, bytes, ops) = crate::fs::shmem::stats();
+    out.push_str(&format!("regions: {}\ncreated: {}\ndeleted: {}\nattaches: {}\ndetaches: {}\ntotal_bytes: {}\nops: {}\n",
+        regions, created, deleted, attaches, detaches, bytes, ops));
+    for r in crate::fs::shmem::list_regions() {
+        let pers = if r.persistent { " PERSIST" } else { "" };
+        out.push_str(&format!("  #{} {} size={} [{}] owner={} attached={}{}\n",
+            r.id, r.name, r.size, r.permission.label(), r.owner_pid, r.attached_pids.len(), pers));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8577,6 +8635,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "authbroker" => Ok(gen_authbroker()),
         "prociso" => Ok(gen_prociso()),
         "dmevent" => Ok(gen_dmevent()),
+        "pftrack" => Ok(gen_pftrack()),
+        "ipclog" => Ok(gen_ipclog()),
+        "numastat" => Ok(gen_numastat()),
+        "shmem" => Ok(gen_shmem()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

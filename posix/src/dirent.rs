@@ -83,7 +83,12 @@ pub extern "C" fn opendir(name: *const u8) -> *mut Dir {
         return core::ptr::null_mut();
     }
 
-    let path_len = unsafe { crate::file::c_strlen_pub(name) };
+    // Resolve relative paths against CWD.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(name, &mut resolved) }) else {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return core::ptr::null_mut();
+    };
 
     // Allocate a Dir from the static pool.
     let dir_ptr = alloc_dir();
@@ -98,8 +103,8 @@ pub extern "C" fn opendir(name: *const u8) -> *mut Dir {
     // Issue SYS_FS_LIST_DIR to get all entries at once.
     let ret = syscall3(
         SYS_FS_LIST_DIR,
-        name as u64,
-        path_len as u64,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
         dir.buf.as_mut_ptr() as u64,
     );
 

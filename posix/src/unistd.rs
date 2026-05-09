@@ -3,6 +3,20 @@
 //! Functions that don't fit neatly into another category: `getcwd`,
 //! `chdir`, `isatty`, `getuid`, `getgid`, `sysconf`, `write` to
 //! stdout/stderr.
+//!
+//! ## Current Working Directory
+//!
+//! CWD is tracked purely in userspace via a static buffer per process
+//! (each process has its own address space).  `chdir()` validates the
+//! target via `SYS_FS_STAT` and stores the normalized absolute path.
+//! `getcwd()` copies from this buffer.  `resolve_path()` is the public
+//! API used by all file-operation functions (`open`, `stat`, `unlink`,
+//! etc.) to resolve relative paths before passing them to the kernel.
+//!
+//! ## Path Normalization
+//!
+//! `normalize_path()` handles `.`, `..`, redundant `/`, and trailing
+//! slashes.  `..` at root is a no-op (cannot ascend above `/`).
 
 use crate::errno;
 use crate::syscall::*;
@@ -33,16 +47,237 @@ pub const _SC_NPROCESSORS_ONLN: i32 = 84;
 pub const _SC_OPEN_MAX: i32 = 4;
 
 // ---------------------------------------------------------------------------
+// Current working directory tracking
+// ---------------------------------------------------------------------------
+
+/// Maximum path length (POSIX `PATH_MAX`).
+///
+/// Bounds the CWD buffer and all resolved absolute paths returned by
+/// [`resolve_path`].
+pub const PATH_MAX: usize = 4096;
+
+/// Current working directory buffer.
+///
+/// Each userspace process gets its own copy via separate virtual
+/// address spaces.  Initialized to "/" (root filesystem).
+///
+/// Invariant: always contains a normalized absolute path of length
+/// `CWD_LEN` (no null terminator stored).
+static mut CWD_BUF: [u8; PATH_MAX] = {
+    let mut buf = [0u8; PATH_MAX];
+    buf[0] = b'/';
+    buf
+};
+
+/// Length of the CWD string (excludes any null terminator).
+static mut CWD_LEN: usize = 1;
+
+/// Raw pointer to the CWD buffer (avoids direct `static mut` reference).
+#[inline]
+fn cwd_buf_ptr() -> *mut [u8; PATH_MAX] {
+    core::ptr::addr_of_mut!(CWD_BUF)
+}
+
+/// Raw pointer to the CWD length.
+#[inline]
+fn cwd_len_ptr() -> *mut usize {
+    core::ptr::addr_of_mut!(CWD_LEN)
+}
+
+// ---------------------------------------------------------------------------
+// Path normalization
+// ---------------------------------------------------------------------------
+
+/// Normalize an absolute path by resolving `.`, `..`, and redundant `/`.
+///
+/// `input` must begin with `b'/'`.  The normalized result is written
+/// to `out` (no null terminator) and the byte length is returned.
+///
+/// Returns `None` if `input` is not absolute or the result exceeds
+/// `out.len()`.
+///
+/// Guarantees on the output:
+/// - Starts with `/`.
+/// - No trailing `/` (except root `/`).
+/// - No `//`, `/./`, or `/../` sequences.
+/// - `..` at root is a no-op (cannot ascend above `/`).
+fn normalize_path(input: &[u8], out: &mut [u8]) -> Option<usize> {
+    if input.first() != Some(&b'/') {
+        return None;
+    }
+
+    let in_len = input.len();
+    let out_cap = out.len();
+    let mut out_len: usize = 0;
+    let mut i: usize = 0;
+
+    while i < in_len {
+        // Skip consecutive slashes.
+        while i < in_len && input.get(i) == Some(&b'/') {
+            i = i.wrapping_add(1);
+        }
+        if i >= in_len {
+            break;
+        }
+
+        // Delimit the current component.
+        let start = i;
+        while i < in_len && input.get(i) != Some(&b'/') {
+            i = i.wrapping_add(1);
+        }
+        let comp_len = i.wrapping_sub(start);
+
+        // "." — current directory, skip entirely.
+        if comp_len == 1 && input.get(start) == Some(&b'.') {
+            continue;
+        }
+
+        // ".." — parent directory, pop the last component.
+        if comp_len == 2
+            && input.get(start) == Some(&b'.')
+            && input.get(start.wrapping_add(1)) == Some(&b'.')
+        {
+            while out_len > 0 {
+                out_len = out_len.wrapping_sub(1);
+                if out.get(out_len) == Some(&b'/') {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // Normal component: append "/name".
+        let needed = out_len.wrapping_add(1).wrapping_add(comp_len);
+        if needed > out_cap {
+            return None;
+        }
+
+        if let Some(slot) = out.get_mut(out_len) {
+            *slot = b'/';
+        }
+        out_len = out_len.wrapping_add(1);
+
+        for j in 0..comp_len {
+            if let (Some(dst), Some(&src)) = (
+                out.get_mut(out_len),
+                input.get(start.wrapping_add(j)),
+            ) {
+                *dst = src;
+                out_len = out_len.wrapping_add(1);
+            }
+        }
+    }
+
+    // Empty output means we collapsed everything back to root.
+    if out_len == 0 {
+        if let Some(slot) = out.get_mut(0) {
+            *slot = b'/';
+        }
+        out_len = 1;
+    }
+
+    Some(out_len)
+}
+
+/// Resolve a C-string path against the current working directory.
+///
+/// - Absolute paths (starting with `/`) are normalized in place.
+/// - Relative paths are prepended with the CWD before normalization.
+///
+/// The result is written to `out` (no null terminator) and the byte
+/// count is returned.  Returns `None` when `path` is null, empty, or
+/// the resolved result exceeds [`PATH_MAX`].
+///
+/// # Safety
+///
+/// `path` must point to a valid null-terminated C string.
+pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<usize> {
+    if path.is_null() {
+        return None;
+    }
+
+    // SAFETY: Caller guarantees `path` is a valid C string.
+    let path_len = unsafe { crate::string::strlen(path) };
+    if path_len == 0 {
+        return None;
+    }
+
+    // SAFETY: `strlen` guarantees `path` is readable for `path_len` bytes.
+    let first = unsafe { *path };
+
+    if first == b'/' {
+        // Absolute path — normalize directly.
+        let slice = unsafe { core::slice::from_raw_parts(path, path_len) };
+        normalize_path(slice, out)
+    } else {
+        // Relative path — prepend CWD, then normalize.
+        let mut combined = [0u8; PATH_MAX];
+
+        // SAFETY: Single-threaded per-process access to CWD state.
+        let cwd_len = unsafe { *cwd_len_ptr() };
+        if cwd_len >= PATH_MAX {
+            return None;
+        }
+        // SAFETY: cwd_buf_ptr() is valid for PATH_MAX bytes; cwd_len <= PATH_MAX.
+        let cwd = unsafe {
+            core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
+        };
+
+        // Copy CWD into the combined buffer.
+        let mut pos: usize = 0;
+        for idx in 0..cwd_len {
+            if let (Some(&b), Some(slot)) = (cwd.get(idx), combined.get_mut(pos)) {
+                *slot = b;
+                pos = pos.wrapping_add(1);
+            }
+        }
+
+        // Append separator unless CWD already ends with '/'.
+        let last_is_slash = pos > 0
+            && combined.get(pos.wrapping_sub(1)) == Some(&b'/');
+        if !last_is_slash {
+            if pos >= PATH_MAX {
+                return None;
+            }
+            if let Some(slot) = combined.get_mut(pos) {
+                *slot = b'/';
+            }
+            pos = pos.wrapping_add(1);
+        }
+
+        // Append the relative path.
+        let rel = unsafe { core::slice::from_raw_parts(path, path_len) };
+        for idx in 0..path_len {
+            if pos >= PATH_MAX {
+                return None;
+            }
+            if let (Some(&b), Some(slot)) = (rel.get(idx), combined.get_mut(pos)) {
+                *slot = b;
+                pos = pos.wrapping_add(1);
+            }
+        }
+
+        match combined.get(..pos) {
+            Some(slice) => normalize_path(slice, out),
+            None => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
-/// Get current working directory.
+/// Get the current working directory.
 ///
-/// Returns `buf` on success, NULL on error (errno set).
+/// Copies the absolute pathname of the CWD into `buf` (null-terminated).
+/// Returns `buf` on success, null on error with errno set.
 ///
-/// Note: Our kernel doesn't track per-process CWD yet.  This returns
-/// "/" as a placeholder until per-process working directories are
-/// implemented.
+/// # Errors
+///
+/// - `EINVAL` — `buf` is null or `size` is 0.
+/// - `ERANGE` — `size` is too small for the CWD path plus its null
+///   terminator.
 #[unsafe(no_mangle)]
 pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
     if buf.is_null() || size == 0 {
@@ -50,29 +285,99 @@ pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
         return core::ptr::null_mut();
     }
 
-    // TODO: Implement proper CWD tracking per-process.
-    // For now, return "/" as the default working directory.
-    if size < 2 {
+    // SAFETY: Single-threaded per-process access to CWD state.
+    let cwd_len = unsafe { *cwd_len_ptr() };
+
+    // Need room for the path string plus a null terminator.
+    let needed = cwd_len.wrapping_add(1);
+    if size < needed {
         errno::set_errno(errno::ERANGE);
         return core::ptr::null_mut();
     }
 
+    // SAFETY: CWD buffer is valid for `cwd_len` bytes; `buf` is valid
+    // for at least `size` bytes (caller contract).
     unsafe {
-        *buf = b'/';
-        *buf.add(1) = 0;
+        let cwd = core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len);
+        for i in 0..cwd_len {
+            if let Some(&b) = cwd.get(i) {
+                *buf.add(i) = b;
+            }
+        }
+        *buf.add(cwd_len) = 0;
     }
+
     buf
 }
 
 /// Change the current working directory.
 ///
-/// Note: Our kernel doesn't track per-process CWD yet.
-/// Returns -1 with ENOSYS.
+/// Resolves `path` against the current CWD (if relative), verifies
+/// that the target exists and is a directory, then stores the
+/// normalized absolute path as the new CWD.
+///
+/// Returns 0 on success, -1 on error with errno set.
+///
+/// # Errors
+///
+/// - `EFAULT` — `path` is null.
+/// - `ENOENT` — `path` is empty or does not exist.
+/// - `ENOTDIR` — resolved path exists but is not a directory.
+/// - `ENAMETOOLONG` — resolved path exceeds `PATH_MAX`.
 #[unsafe(no_mangle)]
-pub extern "C" fn chdir(_path: *const u8) -> i32 {
-    // TODO: Implement per-process CWD tracking in the kernel.
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn chdir(path: *const u8) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // SAFETY: `path` is a valid C string (caller contract).
+    let path_len = unsafe { crate::string::strlen(path) };
+    if path_len == 0 {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+
+    // Resolve relative paths and normalize.
+    let mut resolved = [0u8; PATH_MAX];
+    let Some(resolved_len) = (unsafe { resolve_path(path, &mut resolved) }) else {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    };
+
+    // Verify the target exists and is a directory.
+    let mut stat_buf = core::mem::MaybeUninit::<crate::stat::Stat>::zeroed();
+    let ret = syscall3(
+        SYS_FS_STAT,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
+        stat_buf.as_mut_ptr() as u64,
+    );
+
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+
+    // SAFETY: Kernel wrote a valid Stat into the buffer.
+    let sb = unsafe { stat_buf.assume_init() };
+    if !sb.is_dir() {
+        errno::set_errno(errno::ENOTDIR);
+        return -1;
+    }
+
+    // Store as the new CWD.
+    // SAFETY: Single-threaded per-process access.
+    unsafe {
+        let buf = &mut *cwd_buf_ptr();
+        for i in 0..resolved_len {
+            if let (Some(dst), Some(&src)) = (buf.get_mut(i), resolved.get(i)) {
+                *dst = src;
+            }
+        }
+        *cwd_len_ptr() = resolved_len;
+    }
+
+    0
 }
 
 // isatty() is defined in ioctl.rs — it checks the fd table's HandleKind
@@ -134,4 +439,166 @@ pub extern "C" fn abort() -> ! {
     let _ = syscall2(SYS_CONSOLE_WRITE, msg.as_ptr() as u64, msg.len() as u64);
     #[allow(clippy::used_underscore_items)] // _exit is the POSIX name.
     crate::process::_exit(134); // 128 + SIGABRT(6)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------
+    // normalize_path — pure function, exhaustively testable
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn norm_root() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/");
+    }
+
+    #[test]
+    fn norm_simple_path() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/foo", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo");
+    }
+
+    #[test]
+    fn norm_trailing_slash() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/foo/", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo");
+    }
+
+    #[test]
+    fn norm_double_slash() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"//foo", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo");
+    }
+
+    #[test]
+    fn norm_many_slashes() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"///foo///bar///", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo/bar");
+    }
+
+    #[test]
+    fn norm_dot() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/foo/./bar", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo/bar");
+    }
+
+    #[test]
+    fn norm_dot_at_end() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/foo/.", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo");
+    }
+
+    #[test]
+    fn norm_dotdot() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/foo/bar/..", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo");
+    }
+
+    #[test]
+    fn norm_dotdot_to_root() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/foo/..", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/");
+    }
+
+    #[test]
+    fn norm_dotdot_beyond_root() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/..", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/");
+    }
+
+    #[test]
+    fn norm_multiple_dotdot_beyond_root() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/../../..", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/");
+    }
+
+    #[test]
+    fn norm_complex_mixed() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/a/b/../c/./d/../e", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/a/c/e");
+    }
+
+    #[test]
+    fn norm_multi_dotdot() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/a/b/c/../../d", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/a/d");
+    }
+
+    #[test]
+    fn norm_only_slashes() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"////", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/");
+    }
+
+    #[test]
+    fn norm_rejects_relative() {
+        let mut out = [0u8; PATH_MAX];
+        assert!(normalize_path(b"foo/bar", &mut out).is_none());
+    }
+
+    #[test]
+    fn norm_rejects_empty() {
+        let mut out = [0u8; PATH_MAX];
+        assert!(normalize_path(b"", &mut out).is_none());
+    }
+
+    #[test]
+    fn norm_deep_nesting() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/a/b/c/d/e/f/g", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/a/b/c/d/e/f/g");
+    }
+
+    #[test]
+    fn norm_dotdot_preserves_sibling() {
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/home/user/../other/file.txt", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/home/other/file.txt");
+    }
+
+    #[test]
+    fn norm_dot_files_preserved() {
+        // ".hidden" is a regular component, not a "." directive.
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/.hidden/..config", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/.hidden/..config");
+    }
+
+    #[test]
+    fn norm_three_dots_preserved() {
+        // "..." is a regular component, not ".." or ".".
+        let mut out = [0u8; PATH_MAX];
+        let len = normalize_path(b"/foo/.../bar", &mut out).unwrap();
+        assert_eq!(&out[..len], b"/foo/.../bar");
+    }
+
+    // ------------------------------------------------------------------
+    // PATH_MAX constant
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn path_max_is_4096() {
+        assert_eq!(PATH_MAX, 4096);
+    }
 }

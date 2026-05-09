@@ -58,10 +58,14 @@ pub extern "C" fn posix_spawn(
         return errno::EINVAL;
     }
 
-    let path_len = unsafe { crate::file::c_strlen_pub(path) };
+    // Resolve relative paths against CWD.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
+        return errno::ENAMETOOLONG;
+    };
 
-    // Load the ELF binary.
-    let (buf_ptr, elf_len) = match load_elf(path, path_len) {
+    // Load the ELF binary using the resolved absolute path.
+    let (buf_ptr, elf_len) = match load_elf(resolved.as_ptr(), resolved_len) {
         Ok(result) => result,
         Err(err) => return err,
     };
@@ -71,8 +75,8 @@ pub extern "C" fn posix_spawn(
         SYS_PROCESS_SPAWN,
         buf_ptr as u64,
         elf_len as u64,
-        path as u64,      // Use path as the process name.
-        path_len as u64,
+        resolved.as_ptr() as u64,  // Use resolved path as the process name.
+        resolved_len as u64,
     );
 
     // Free the ELF buffer.
@@ -128,10 +132,15 @@ pub extern "C" fn execve(
         return -1;
     }
 
-    let path_len = unsafe { crate::file::c_strlen_pub(path) };
+    // Resolve relative paths against CWD.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    };
 
-    // Load the ELF binary.
-    let (buf_ptr, elf_len) = match load_elf(path, path_len) {
+    // Load the ELF binary using the resolved absolute path.
+    let (buf_ptr, elf_len) = match load_elf(resolved.as_ptr(), resolved_len) {
         Ok(result) => result,
         Err(err) => {
             errno::set_errno(err);

@@ -128,6 +128,15 @@ make sure latest WINE plan and automatic code change plan are in roadmap
 
 ## POSIX Layer Notes
 
+- (DONE) CWD tracking: Per-process userspace CWD buffer (4096 bytes) in
+  posix/src/unistd.rs.  chdir() validates via SYS_FS_STAT + is_dir(),
+  stores normalized absolute path.  getcwd() copies from buffer.
+  resolve_path() public API resolves relative paths against CWD; wired
+  into all path-taking file operations (open, stat, lstat, unlink, rename,
+  link, symlink linkpath, readlink, mkdir, rmdir, truncate, access,
+  opendir, posix_spawn, execve).  Path normalization handles ".", "..",
+  redundant "/", and trailing slashes.  20 unit tests for normalize_path.
+
 - Pipe dup is not yet supported.  dup(pipe_fd) returns ENOSYS because there is
   no SYS_PIPE_DUP kernel syscall and the fd table has no handle refcounting.
   Fix requires either: (a) adding SYS_PIPE_DUP to kernel (kernel-ipc zone),

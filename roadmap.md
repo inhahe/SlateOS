@@ -789,7 +789,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Memory: mmap, munmap, mprotect
   - [x] Strings: memcpy, memmove, memset, memcmp, memchr, strlen, strnlen, strcmp, strncmp, strcpy, strncpy, strchr, strrchr
   - [x] Directory: opendir, readdir, closedir (static Dir pool, 8 concurrent)
-  - [x] Misc: getcwd, chdir, isatty, getuid/geteuid/getgid/getegid, sysconf, abort
+  - [x] Misc: getcwd, chdir (full CWD tracking with path normalization + resolve_path() wired into all file ops), isatty, getuid/geteuid/getgid/getegid, sysconf, abort
   - [x] Fcntl: O_* flags, SEEK_*, access mode flags, S_IF* file type bits
   - [x] Fd table: userspace fd→handle mapping (File/Pipe/Console), 256 entries, fds 0/1/2 pre-initialized
   - [x] pipe/pipe2 via SYS_PIPE_CREATE with fd table integration

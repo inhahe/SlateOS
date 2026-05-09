@@ -39,18 +39,18 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
         return -1;
     }
 
-    // Calculate path length (C string → length).
-    let path_len = unsafe { c_strlen(path) };
+    // Resolve relative paths against CWD and normalize.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
 
-    // Translate POSIX flags to our native flags.
-    // Our kernel open flags are simpler — we pass the raw POSIX
-    // flags and let the kernel interpret them.
     let native_flags = translate_open_flags(flags);
 
     let ret = syscall3(
         SYS_FS_OPEN,
-        path as u64,
-        path_len as u64,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
         native_flags,
     );
 
@@ -341,15 +341,15 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
         return -1;
     }
 
-    let path_len = unsafe { c_strlen(path) };
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
 
-    // Our SYS_FS_STAT returns: size (i64) in rax.
-    // For a full stat we need more info — use a kernel stat buffer.
-    // For now, do a minimal translation: just get the size.
     let ret = syscall3(
         SYS_FS_STAT,
-        path as u64,
-        path_len as u64,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
         buf as u64,
     );
 
@@ -422,11 +422,15 @@ pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
         return -1;
     }
 
-    let path_len = unsafe { c_strlen(path) };
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+
     let ret = syscall3(
         SYS_FS_LSTAT,
-        path as u64,
-        path_len as u64,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
         buf as u64,
     );
 
@@ -449,8 +453,12 @@ pub extern "C" fn unlink(path: *const u8) -> i32 {
         return -1;
     }
 
-    let path_len = unsafe { c_strlen(path) };
-    let ret = syscall2(SYS_FS_DELETE, path as u64, path_len as u64);
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+
+    let ret = syscall2(SYS_FS_DELETE, resolved.as_ptr() as u64, resolved_len as u64);
     errno::translate(ret) as i32
 }
 
@@ -464,14 +472,20 @@ pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
         return -1;
     }
 
-    let old_len = unsafe { c_strlen(oldpath) };
-    let new_len = unsafe { c_strlen(newpath) };
+    let mut old_resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(old_len) = resolve_or_err(oldpath, &mut old_resolved) else {
+        return -1;
+    };
+    let mut new_resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(new_len) = resolve_or_err(newpath, &mut new_resolved) else {
+        return -1;
+    };
 
     let ret = syscall4(
         SYS_FS_RENAME,
-        oldpath as u64,
+        old_resolved.as_ptr() as u64,
         old_len as u64,
-        newpath as u64,
+        new_resolved.as_ptr() as u64,
         new_len as u64,
     );
     errno::translate(ret) as i32
@@ -485,14 +499,20 @@ pub extern "C" fn link(oldpath: *const u8, newpath: *const u8) -> i32 {
         return -1;
     }
 
-    let old_len = unsafe { c_strlen(oldpath) };
-    let new_len = unsafe { c_strlen(newpath) };
+    let mut old_resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(old_len) = resolve_or_err(oldpath, &mut old_resolved) else {
+        return -1;
+    };
+    let mut new_resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(new_len) = resolve_or_err(newpath, &mut new_resolved) else {
+        return -1;
+    };
 
     let ret = syscall4(
         SYS_FS_LINK,
-        oldpath as u64,
+        old_resolved.as_ptr() as u64,
         old_len as u64,
-        newpath as u64,
+        new_resolved.as_ptr() as u64,
         new_len as u64,
     );
     errno::translate(ret) as i32
@@ -506,14 +526,21 @@ pub extern "C" fn symlink(target: *const u8, linkpath: *const u8) -> i32 {
         return -1;
     }
 
+    // Target is stored verbatim — do NOT resolve it.  The filesystem
+    // records the exact string and resolves it at follow time.
     let target_len = unsafe { c_strlen(target) };
-    let link_len = unsafe { c_strlen(linkpath) };
+
+    // Linkpath is the filesystem location where the symlink is created.
+    let mut link_resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(link_len) = resolve_or_err(linkpath, &mut link_resolved) else {
+        return -1;
+    };
 
     let ret = syscall4(
         SYS_FS_SYMLINK,
         target as u64,
         target_len as u64,
-        linkpath as u64,
+        link_resolved.as_ptr() as u64,
         link_len as u64,
     );
     errno::translate(ret) as i32
@@ -529,11 +556,15 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
         return -1;
     }
 
-    let path_len = unsafe { c_strlen(path) };
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+
     let ret = syscall4(
         SYS_FS_READLINK,
-        path as u64,
-        path_len as u64,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
         buf as u64,
         bufsiz as u64,
     );
@@ -554,8 +585,12 @@ pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
         return -1;
     }
 
-    let path_len = unsafe { c_strlen(path) };
-    let ret = syscall2(SYS_FS_MKDIR, path as u64, path_len as u64);
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+
+    let ret = syscall2(SYS_FS_MKDIR, resolved.as_ptr() as u64, resolved_len as u64);
     errno::translate(ret) as i32
 }
 
@@ -567,8 +602,12 @@ pub extern "C" fn rmdir(path: *const u8) -> i32 {
         return -1;
     }
 
-    let path_len = unsafe { c_strlen(path) };
-    let ret = syscall2(SYS_FS_RMDIR, path as u64, path_len as u64);
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+
+    let ret = syscall2(SYS_FS_RMDIR, resolved.as_ptr() as u64, resolved_len as u64);
     errno::translate(ret) as i32
 }
 
@@ -584,11 +623,15 @@ pub extern "C" fn truncate(path: *const u8, length: OffT) -> i32 {
         return -1;
     }
 
-    let path_len = unsafe { c_strlen(path) };
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+
     let ret = syscall3(
         SYS_FS_TRUNCATE,
-        path as u64,
-        path_len as u64,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
         length as u64,
     );
     errno::translate(ret) as i32
@@ -648,6 +691,25 @@ fn lookup_fd(fd: Fd) -> Option<fdtable::FdEntry> {
         errno::set_errno(errno::EBADF);
     }
     entry
+}
+
+/// Resolve a C-string path relative to the current working directory.
+///
+/// On success writes the normalized absolute path into `resolved` and
+/// returns its byte length.  On failure sets errno to `ENAMETOOLONG`
+/// and returns `None`.
+#[must_use]
+fn resolve_or_err(
+    path: *const u8,
+    resolved: &mut [u8; crate::unistd::PATH_MAX],
+) -> Option<usize> {
+    // SAFETY: All callers already null-checked `path`.
+    if let Some(len) = unsafe { crate::unistd::resolve_path(path, resolved) } {
+        Some(len)
+    } else {
+        errno::set_errno(errno::ENAMETOOLONG);
+        None
+    }
 }
 
 /// Close an underlying kernel handle by type.
@@ -716,13 +778,18 @@ pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
         return -1;
     }
 
+    // Resolve relative paths against CWD.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+
     // Use stat to check if the file exists.
-    let path_len = unsafe { c_strlen(path) };
     let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
     let ret = syscall3(
         SYS_FS_STAT,
-        path as u64,
-        path_len as u64,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
         stat_buf.as_mut_ptr() as u64,
     );
 

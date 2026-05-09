@@ -116,6 +116,7 @@ pub mod fnmatch;
 pub mod getopt;
 pub mod glob;
 pub mod libgen;
+pub mod limits;
 pub mod ioctl;
 pub mod malloc;
 pub mod math;

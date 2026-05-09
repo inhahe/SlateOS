@@ -904,6 +904,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pthread condition variables: pthread_cond_init/destroy/wait/timedwait/signal/broadcast (generation counter + spin-yield), PthreadCondT struct, PTHREAD_COND_INITIALIZER
   - [x] sched_yield (yield CPU via SYS_SLEEP(0))
   - [x] pthread read-write locks: pthread_rwlock_init/destroy/rdlock/tryrdlock/wrlock/trywrlock/unlock (atomic state: 0=unlocked, N>0=N readers, -1=writer), PTHREAD_RWLOCK_INITIALIZER
+  - [x] limits: C/POSIX numeric limits as extern symbols (CHAR_BIT, INT_MAX, LONG_MAX, SIZE_MAX, SSIZE_MAX, PATH_MAX, NAME_MAX, PIPE_BUF, OPEN_MAX, IOV_MAX, LINE_MAX, etc.)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

@@ -231,6 +231,8 @@ const ROOT_FILES: &[&str] = &[
     "monitors",
     "fwsettings",
     "updatemgr",
+    "notifprefs",
+    "fileshare",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5173,6 +5175,52 @@ fn gen_updatemgr() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_notifprefs() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (app_count, sounds, position, dismiss, ops) = super::notifprefs::stats();
+    out.push_str(&format!("app_prefs: {}\n", app_count));
+    out.push_str(&format!("sounds: {}\n", sounds));
+    out.push_str(&format!("position: {}\n", position));
+    out.push_str(&format!("dismiss_timeout: {}\n", dismiss));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let prefs = super::notifprefs::list_app_prefs();
+    if !prefs.is_empty() {
+        out.push_str("apps:\n");
+        for p in &prefs {
+            out.push_str(&format!("  {}: enabled={} banner={} sound={} priority={} total={}\n",
+                p.app_id, p.enabled, p.banner_style.label(),
+                p.sound, p.priority.label(), p.total_count));
+        }
+    }
+
+    out.into_bytes()
+}
+
+fn gen_fileshare() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (local, remote, enabled, connected, ops) = super::fileshare::stats();
+    out.push_str(&format!("sharing_enabled: {}\n", enabled));
+    out.push_str(&format!("hostname: {}\n", super::fileshare::hostname()));
+    out.push_str(&format!("local_shares: {}\n", local));
+    out.push_str(&format!("remote_shares: {}\n", remote));
+    out.push_str(&format!("connected_remotes: {}\n", connected));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let shares = super::fileshare::list_shares();
+    for s in &shares {
+        let en = if s.enabled { "" } else { " [disabled]" };
+        out.push_str(&format!("{}: {} → {} [{}] {}{}\n",
+            s.id, s.name, s.path, s.protocol.label(), s.access.label(), en));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5569,6 +5617,8 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "monitors" => Ok(gen_monitors()),
         "fwsettings" => Ok(gen_fwsettings()),
         "updatemgr" => Ok(gen_updatemgr()),
+        "notifprefs" => Ok(gen_notifprefs()),
+        "fileshare" => Ok(gen_fileshare()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

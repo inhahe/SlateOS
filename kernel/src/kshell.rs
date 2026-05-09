@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4835,6 +4835,8 @@ fn dispatch(line: &str) {
         "monitors" | "monitor" => cmd_monitors(args),
         "fwsettings" | "firewall" => cmd_fwsettings(args),
         "updatemgr" | "updates" => cmd_updatemgr(args),
+        "notifprefs" | "nprefs" => cmd_notifprefs(args),
+        "fileshare" | "share" => cmd_fileshare(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -28321,6 +28323,356 @@ fn cmd_updatemgr(args: &str) {
     }
 }
 
+/// `notifprefs` / `nprefs` — per-app notification preferences.
+fn cmd_notifprefs(args: &str) {
+    use crate::fs::notifprefs;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (apps, sounds, pos, timeout, ops) = notifprefs::stats();
+            shell_println!("=== Notification Preferences ===");
+            shell_println!("  App prefs      : {}", apps);
+            shell_println!("  Sounds         : {}", sounds);
+            shell_println!("  Position       : {}", pos);
+            shell_println!("  Dismiss timeout: {} s", timeout);
+            shell_println!("  Operations     : {}", ops);
+            if let Ok(cfg) = notifprefs::global_config() {
+                shell_println!("  Lock screen    : {}", cfg.show_on_lock_screen);
+                shell_println!("  Show count     : {}", cfg.show_count);
+                shell_println!("  Max visible    : {}", cfg.max_visible);
+            }
+        }
+        "list" => {
+            let prefs = notifprefs::list_app_prefs();
+            if prefs.is_empty() {
+                shell_println!("No per-app notification preferences.");
+            } else {
+                shell_println!("{:<20} {:>7} {:>6} {:>5} {:>8} {:>6} {:>8}",
+                    "APP", "ENABLED", "BANNER", "SOUND", "PRIORITY", "DND-OV", "TOTAL");
+                for p in &prefs {
+                    shell_println!("{:<20} {:>7} {:>6} {:>5} {:>8} {:>6} {:>8}",
+                        p.app_id, p.enabled, p.banner_style.label(),
+                        p.sound, p.priority.label(),
+                        p.dnd_override, p.total_count);
+                }
+            }
+        }
+        "app" => {
+            if let Some(app_id) = parts.get(1) {
+                let pref = notifprefs::get_app_pref(app_id).unwrap();
+                shell_println!("App: {}", pref.app_id);
+                shell_println!("  Enabled    : {}", pref.enabled);
+                shell_println!("  Banner     : {}", pref.banner_style.label());
+                shell_println!("  Sound      : {}", pref.sound);
+                shell_println!("  Priority   : {}", pref.priority.label());
+                shell_println!("  Lock screen: {}", pref.lock_screen.label());
+                shell_println!("  DND override: {}", pref.dnd_override);
+                shell_println!("  Group      : {}", pref.group);
+                shell_println!("  Total      : {}", pref.total_count);
+                shell_println!("  Suppressed : {}", pref.suppressed_count);
+            } else {
+                shell_println!("Usage: notifprefs app <app_id>");
+            }
+        }
+        "enable" => {
+            if let Some(app_id) = parts.get(1) {
+                let _ = notifprefs::set_app_enabled(app_id, true);
+                shell_println!("Notifications enabled for '{}'.", app_id);
+            } else {
+                shell_println!("Usage: notifprefs enable <app_id>");
+            }
+        }
+        "disable" => {
+            if let Some(app_id) = parts.get(1) {
+                let _ = notifprefs::set_app_enabled(app_id, false);
+                shell_println!("Notifications disabled for '{}'.", app_id);
+            } else {
+                shell_println!("Usage: notifprefs disable <app_id>");
+            }
+        }
+        "banner" => {
+            // notifprefs banner <app> <full|brief|none>
+            if parts.len() >= 3 {
+                let app = parts[1];
+                let style = match parts[2] {
+                    "brief" => notifprefs::BannerStyle::Brief,
+                    "none" | "off" => notifprefs::BannerStyle::None,
+                    _ => notifprefs::BannerStyle::Full,
+                };
+                let _ = notifprefs::set_banner_style(app, style);
+                shell_println!("Banner for '{}': {}", app, style.label());
+            } else {
+                shell_println!("Usage: notifprefs banner <app> <full|brief|none>");
+            }
+        }
+        "priority" => {
+            if parts.len() >= 3 {
+                let app = parts[1];
+                let pri = match parts[2] {
+                    "critical" => notifprefs::NotifPriority::Critical,
+                    "high" => notifprefs::NotifPriority::High,
+                    "low" => notifprefs::NotifPriority::Low,
+                    "silent" => notifprefs::NotifPriority::Silent,
+                    _ => notifprefs::NotifPriority::Normal,
+                };
+                let _ = notifprefs::set_app_priority(app, pri);
+                shell_println!("Priority for '{}': {}", app, pri.label());
+            } else {
+                shell_println!("Usage: notifprefs priority <app> <critical|high|normal|low|silent>");
+            }
+        }
+        "sound" => {
+            match parts.get(1).copied() {
+                Some("on") | Some("yes") => {
+                    let _ = notifprefs::set_sounds_enabled(true);
+                    shell_println!("Global notification sounds: on");
+                }
+                Some("off") | Some("no") => {
+                    let _ = notifprefs::set_sounds_enabled(false);
+                    shell_println!("Global notification sounds: off");
+                }
+                Some(app) if parts.len() >= 3 => {
+                    let val = !matches!(parts[2], "off" | "no" | "false");
+                    let _ = notifprefs::set_app_sound(app, val);
+                    shell_println!("Sound for '{}': {}", app, val);
+                }
+                _ => shell_println!("Usage: notifprefs sound <on|off> OR notifprefs sound <app> <on|off>"),
+            }
+        }
+        "position" | "pos" => {
+            match parts.get(1).copied() {
+                Some("tr") | Some("topright") => { let _ = notifprefs::set_position(notifprefs::NotifPosition::TopRight); shell_println!("Position: Top Right"); }
+                Some("tl") | Some("topleft") => { let _ = notifprefs::set_position(notifprefs::NotifPosition::TopLeft); shell_println!("Position: Top Left"); }
+                Some("br") | Some("bottomright") => { let _ = notifprefs::set_position(notifprefs::NotifPosition::BottomRight); shell_println!("Position: Bottom Right"); }
+                Some("bl") | Some("bottomleft") => { let _ = notifprefs::set_position(notifprefs::NotifPosition::BottomLeft); shell_println!("Position: Bottom Left"); }
+                _ => shell_println!("Usage: notifprefs position <tr|tl|br|bl>"),
+            }
+        }
+        "timeout" => {
+            if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                let _ = notifprefs::set_dismiss_timeout(val);
+                shell_println!("Dismiss timeout: {} s", val);
+            } else {
+                shell_println!("Usage: notifprefs timeout <seconds>");
+            }
+        }
+        "rm" | "remove" => {
+            if let Some(app) = parts.get(1) {
+                match notifprefs::remove_app_pref(app) {
+                    Ok(()) => shell_println!("Preferences removed for '{}'.", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: notifprefs rm <app_id>");
+            }
+        }
+        "stats" => {
+            let (apps, sounds, pos, timeout, ops) = notifprefs::stats();
+            shell_println!("Notif prefs: apps={} sounds={} pos={} timeout={} ops={}", apps, sounds, pos, timeout, ops);
+        }
+        "test" => {
+            notifprefs::self_test();
+            shell_println!("notifprefs: self-tests completed (see serial).");
+        }
+        "init" => {
+            notifprefs::init_defaults();
+            shell_println!("Notification preferences initialized.");
+        }
+        _ => {
+            shell_println!("notifprefs (nprefs) — notification preferences");
+            shell_println!("  show                       Overview");
+            shell_println!("  list                       All app prefs");
+            shell_println!("  app <id>                   App details");
+            shell_println!("  enable/disable <app>       Toggle app");
+            shell_println!("  banner <app> <full|brief|none>");
+            shell_println!("  priority <app> <level>     Set priority");
+            shell_println!("  sound <on|off>             Global sounds");
+            shell_println!("  sound <app> <on|off>       App sound");
+            shell_println!("  position <tr|tl|br|bl>     Display position");
+            shell_println!("  timeout <seconds>          Auto-dismiss");
+            shell_println!("  rm <app>                   Remove app prefs");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `fileshare` / `share` — network file sharing.
+fn cmd_fileshare(args: &str) {
+    use crate::fs::fileshare;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (local, remote, enabled, connected, ops) = fileshare::stats();
+            shell_println!("=== File Sharing ===");
+            shell_println!("  Sharing enabled  : {}", enabled);
+            shell_println!("  Hostname         : {}", fileshare::hostname());
+            shell_println!("  Local shares     : {}", local);
+            shell_println!("  Remote mounts    : {} ({} connected)", remote, connected);
+            shell_println!("  Operations       : {}", ops);
+        }
+        "on" => {
+            let _ = fileshare::set_sharing_enabled(true);
+            shell_println!("File sharing enabled.");
+        }
+        "off" => {
+            let _ = fileshare::set_sharing_enabled(false);
+            shell_println!("File sharing disabled.");
+        }
+        "hostname" => {
+            if let Some(name) = parts.get(1) {
+                match fileshare::set_hostname(name) {
+                    Ok(()) => shell_println!("Hostname: {}", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Hostname: {}", fileshare::hostname());
+            }
+        }
+        "list" => {
+            let shares = fileshare::list_shares();
+            if shares.is_empty() {
+                shell_println!("No local shares.");
+            } else {
+                shell_println!("{:>4} {:<16} {:<30} {:>5} {:>10} {:>7}",
+                    "ID", "NAME", "PATH", "PROTO", "ACCESS", "ENABLED");
+                for s in &shares {
+                    shell_println!("{:>4} {:<16} {:<30} {:>5} {:>10} {:>7}",
+                        s.id, s.name, s.path, s.protocol.label(),
+                        s.access.label(), s.enabled);
+                }
+            }
+        }
+        "add" => {
+            // share add <name> <path> [smb|nfs]
+            if parts.len() >= 3 {
+                let name = parts[1];
+                let path = parts[2];
+                let proto = match parts.get(3).copied() {
+                    Some("nfs") => fileshare::ShareProtocol::Nfs,
+                    Some("webdav") => fileshare::ShareProtocol::WebDav,
+                    Some("sftp") => fileshare::ShareProtocol::Sftp,
+                    _ => fileshare::ShareProtocol::Smb,
+                };
+                match fileshare::add_share(name, path, proto, fileshare::ShareAccess::ReadOnly) {
+                    Ok(id) => shell_println!("Share #{} '{}' created ({}).", id, name, proto.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: share add <name> <path> [smb|nfs|webdav|sftp]");
+            }
+        }
+        "rm" | "remove" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match fileshare::remove_share(id) {
+                    Ok(()) => shell_println!("Share #{} removed.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: share rm <id>");
+            }
+        }
+        "access" => {
+            if parts.len() >= 3 {
+                let id: u32 = parts[1].parse().unwrap_or(0);
+                let access = match parts[2] {
+                    "rw" | "readwrite" => fileshare::ShareAccess::ReadWrite,
+                    "full" => fileshare::ShareAccess::FullControl,
+                    _ => fileshare::ShareAccess::ReadOnly,
+                };
+                let _ = fileshare::set_share_access(id, access);
+                shell_println!("Share #{}: {}", id, access.label());
+            } else {
+                shell_println!("Usage: share access <id> <ro|rw|full>");
+            }
+        }
+        "guest" => {
+            if parts.len() >= 3 {
+                let id: u32 = parts[1].parse().unwrap_or(0);
+                let allowed = matches!(parts[2], "on" | "yes" | "true");
+                let _ = fileshare::set_guest_access(id, allowed);
+                shell_println!("Share #{}: guest={}", id, allowed);
+            } else {
+                shell_println!("Usage: share guest <id> <on|off>");
+            }
+        }
+        "connect" => {
+            // share connect <host> <sharename> <mountpoint> [smb|nfs] [user]
+            if parts.len() >= 4 {
+                let host = parts[1];
+                let share_name = parts[2];
+                let mount = parts[3];
+                let proto = match parts.get(4).copied() {
+                    Some("nfs") => fileshare::ShareProtocol::Nfs,
+                    Some("sftp") => fileshare::ShareProtocol::Sftp,
+                    _ => fileshare::ShareProtocol::Smb,
+                };
+                let user = parts.get(5).copied().unwrap_or("");
+                match fileshare::connect_remote(host, share_name, mount, proto, user) {
+                    Ok(id) => shell_println!("Connected #{}: //{}:{}/{} → {}", id, host, proto.default_port(), share_name, mount),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: share connect <host> <share> <mountpoint> [proto] [user]");
+            }
+        }
+        "disconnect" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                let _ = fileshare::disconnect_remote(id);
+                shell_println!("Disconnected remote #{}.", id);
+            } else {
+                shell_println!("Usage: share disconnect <id>");
+            }
+        }
+        "remotes" => {
+            let remotes = fileshare::list_remotes();
+            if remotes.is_empty() {
+                shell_println!("No remote connections.");
+            } else {
+                for r in &remotes {
+                    let auto = if r.auto_mount { " [auto]" } else { "" };
+                    shell_println!("  #{} //{}/{} → {} [{}] {}{}",
+                        r.id, r.host, r.share_name, r.mount_point,
+                        r.protocol.label(), r.status.label(), auto);
+                }
+            }
+        }
+        "stats" => {
+            let (local, remote, enabled, connected, ops) = fileshare::stats();
+            shell_println!("Sharing stats: local={} remote={} enabled={} connected={} ops={}", local, remote, enabled, connected, ops);
+        }
+        "test" => {
+            fileshare::self_test();
+            shell_println!("fileshare: self-tests completed (see serial).");
+        }
+        "init" => {
+            fileshare::init_defaults();
+            shell_println!("File sharing initialized.");
+        }
+        _ => {
+            shell_println!("fileshare (share) — network file sharing");
+            shell_println!("  show                       Overview");
+            shell_println!("  on / off                   Enable/disable");
+            shell_println!("  hostname [name]            Get/set hostname");
+            shell_println!("  list                       Local shares");
+            shell_println!("  add <name> <path> [proto]  Add share");
+            shell_println!("  rm <id>                    Remove share");
+            shell_println!("  access <id> <ro|rw|full>   Set access");
+            shell_println!("  guest <id> <on|off>        Guest access");
+            shell_println!("  connect <host> <share> <mount> [proto] [user]");
+            shell_println!("  disconnect <id>            Disconnect");
+            shell_println!("  remotes                    Remote connections");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -36917,7 +37269,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

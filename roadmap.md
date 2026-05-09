@@ -952,6 +952,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] sync/sethostname/chroot: system stubs (sync no-op, sethostname EPERM, chroot ENOSYS)
   - [x] utimes/futimes/utimensat/futimens: file timestamp stubs (always succeed), UTIME_NOW/UTIME_OMIT constants
   - [x] settimeofday: stub (returns EPERM)
+  - [x] strcasestr: case-insensitive substring search; explicit_bzero (volatile-write guaranteed zeroing)
+  - [x] reallocarray: overflow-safe nmemb*size allocation (checked_mul + realloc)
+  - [x] putenv: insert "NAME=VALUE" string into environment (copies into static store)
+  - [x] ppoll: poll with timespec timeout (converts to ms, delegates to poll), sigmask ignored
+  - [x] if_nametoindex/if_indextoname: network interface stubs (no named interfaces), IF_NAMESIZE constant
+  - [x] inttypes: strtoimax/strtoumax (delegate to strtoll/strtoull), imaxabs, imaxdiv, wcstoimax/wcstoumax stubs
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

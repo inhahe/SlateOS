@@ -1118,3 +1118,106 @@ pub unsafe extern "C" fn strlcat(dst: *mut u8, src: *const u8, size: SizeT) -> S
 
     dst_len.wrapping_add(src_len)
 }
+
+// ---------------------------------------------------------------------------
+// strcasestr — case-insensitive substring search
+// ---------------------------------------------------------------------------
+
+/// Locate a case-insensitive substring.
+///
+/// Returns a pointer to the first occurrence of `needle` in
+/// `haystack`, ignoring ASCII case differences.  Returns null if not
+/// found.  If `needle` is empty, returns `haystack`.
+///
+/// # Safety
+///
+/// Both `haystack` and `needle` must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcasestr(
+    haystack: *const u8,
+    needle: *const u8,
+) -> *mut u8 {
+    if haystack.is_null() || needle.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    // SAFETY: Both pointers are valid null-terminated strings.
+    let nlen = unsafe { strlen(needle) };
+    if nlen == 0 {
+        return haystack.cast_mut();
+    }
+
+    let hlen = unsafe { strlen(haystack) };
+    if nlen > hlen {
+        return core::ptr::null_mut();
+    }
+
+    let end = hlen.wrapping_sub(nlen);
+    let mut i: usize = 0;
+    while i <= end {
+        if unsafe { casecmp_n(haystack.add(i), needle, nlen) } {
+            return unsafe { haystack.add(i).cast_mut() };
+        }
+        i = i.wrapping_add(1);
+    }
+
+    core::ptr::null_mut()
+}
+
+/// Compare `n` bytes of two strings, case-insensitively.
+///
+/// # Safety
+///
+/// Both pointers must be readable for `n` bytes.
+unsafe fn casecmp_n(a: *const u8, b: *const u8, n: usize) -> bool {
+    let mut j: usize = 0;
+    while j < n {
+        // SAFETY: j < n, both pointers valid for n bytes.
+        let ca = unsafe { *a.add(j) };
+        let cb = unsafe { *b.add(j) };
+        if to_lower(ca) != to_lower(cb) {
+            return false;
+        }
+        j = j.wrapping_add(1);
+    }
+    true
+}
+
+/// ASCII lowercase.
+fn to_lower(c: u8) -> u8 {
+    if c.is_ascii_uppercase() {
+        #[allow(clippy::arithmetic_side_effects)]
+        return c | 0x20;
+    }
+    c
+}
+
+// ---------------------------------------------------------------------------
+// explicit_bzero — guaranteed-not-optimized-away zeroing
+// ---------------------------------------------------------------------------
+
+/// Zero a memory region, guaranteed not to be optimized away.
+///
+/// Unlike `memset(s, 0, n)`, the compiler cannot elide this call even
+/// if the buffer is not read afterward.  Used for clearing sensitive
+/// data (passwords, keys) from memory.
+///
+/// # Safety
+///
+/// `s` must be valid for `n` bytes of writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn explicit_bzero(s: *mut u8, n: usize) {
+    if s.is_null() || n == 0 {
+        return;
+    }
+
+    // Use volatile writes so the compiler cannot elide them.
+    let mut i: usize = 0;
+    while i < n {
+        // SAFETY: s is valid for n bytes; i < n.
+        unsafe {
+            core::ptr::write_volatile(s.add(i), 0);
+        }
+        i = i.wrapping_add(1);
+    }
+}

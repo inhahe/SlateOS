@@ -32,7 +32,7 @@
 //!   `sigtimedwait`, `sigqueue`
 //! - **Threads**: `pthread` stubs, working mutex ops
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
-//!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`,
+//!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`/`reallocarray`,
 //!   `setjmp`/`longjmp`/`sigsetjmp`/`siglongjmp`, `qsort`, `bsearch`,
 //!   `atoi`/`strtol`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
@@ -69,7 +69,9 @@
 //!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,
 //!   `pathconf`, `confstr`, `strlcpy`, `strlcat`, `mkdtemp`, `flock`,
 //!   `daemon`, `getloadavg`, `sync`, `sethostname`, `chroot`,
-//!   `flockfile`/`funlockfile`/`ftrylockfile`
+//!   `flockfile`/`funlockfile`/`ftrylockfile`, `if_nametoindex`,
+//!   `if_indextoname`, `ppoll`, `putenv`, `strcasestr`,
+//!   `explicit_bzero`, `strtoimax`/`strtoumax`
 //!
 //! ## Error Handling
 //!
@@ -132,6 +134,7 @@ pub mod ftw;
 pub mod getopt;
 pub mod glob;
 pub mod iconv;
+pub mod inttypes;
 pub mod libgen;
 pub mod limits;
 pub mod ioctl;

@@ -255,6 +255,44 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
     ready_count
 }
 
+// ---------------------------------------------------------------------------
+// ppoll
+// ---------------------------------------------------------------------------
+
+/// Like `poll`, but with a `timespec` timeout and optional signal mask.
+///
+/// The `sigmask` parameter is ignored (our OS doesn't deliver signals).
+/// Converts the `timespec` to a millisecond timeout for the underlying
+/// `poll` implementation.
+///
+/// # Safety
+///
+/// `fds` must be valid for `nfds` elements.  `timeout_ts` may be null
+/// (infinite wait) or point to a valid `Timespec`.
+#[allow(clippy::similar_names)] // tspec vs tms — both timeout-related.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ppoll(
+    fds: *mut Pollfd,
+    nfds: NfdsT,
+    tspec: *const crate::stat::Timespec,
+    _sigmask: *const u64,
+) -> i32 {
+    let tms: i32 = if tspec.is_null() {
+        -1 // Infinite wait.
+    } else {
+        // SAFETY: tspec is non-null and points to valid Timespec.
+        let ts = unsafe { &*tspec };
+        // Convert seconds + nanoseconds to milliseconds, clamping to i32.
+        let ms = ts.tv_sec
+            .saturating_mul(1_000)
+            .saturating_add(ts.tv_nsec / 1_000_000);
+        if ms > i64::from(i32::MAX) { i32::MAX } else { ms as i32 }
+    };
+
+    // Delegate to poll.
+    unsafe { poll(fds, nfds, tms) }
+}
+
 /// Check fd readiness based on handle kind.
 ///
 /// Returns `(readable, writable, hangup)`.

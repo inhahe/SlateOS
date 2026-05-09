@@ -278,6 +278,26 @@ pub extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
     aligned_alloc(alignment, size)
 }
 
+/// Overflow-safe array allocation.
+///
+/// Allocates `nmemb * size` bytes, returning null with `ENOMEM` if the
+/// multiplication would overflow.  This is safer than `malloc(n * s)`
+/// where the multiplication can silently wrap.
+#[unsafe(no_mangle)]
+pub extern "C" fn reallocarray(
+    ptr: *mut u8,
+    nmemb: usize,
+    size: usize,
+) -> *mut u8 {
+    let Some(total) = nmemb.checked_mul(size) else {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
+    };
+    // SAFETY: realloc handles null/non-null ptr correctly; total was
+    // validated against overflow above.
+    unsafe { realloc(ptr, total) }
+}
+
 /// Internal aligned allocation implementation.
 ///
 /// Over-allocates and adjusts the returned pointer to satisfy alignment.

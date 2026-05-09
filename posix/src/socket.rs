@@ -1800,6 +1800,34 @@ fn parse_port_string(s: *const u8) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// if_nametoindex / if_indextoname — network interface stubs
+// ---------------------------------------------------------------------------
+
+/// Convert a network interface name to its index.
+///
+/// Stub: returns 0 (failure) since our OS doesn't have named network
+/// interfaces yet.  Programs that enumerate interfaces will see this
+/// as "interface not found".
+#[unsafe(no_mangle)]
+pub extern "C" fn if_nametoindex(_ifname: *const u8) -> u32 {
+    // 0 means "no such interface" per POSIX.
+    0
+}
+
+/// Convert a network interface index to its name.
+///
+/// Stub: returns null since we don't have named interfaces.
+/// `ifname` must point to a buffer of at least `IF_NAMESIZE` bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn if_indextoname(_ifindex: u32, _ifname: *mut u8) -> *mut u8 {
+    errno::set_errno(errno::ENXIO);
+    core::ptr::null_mut()
+}
+
+/// Maximum interface name length.
+pub const IF_NAMESIZE: usize = 16;
+
+// ---------------------------------------------------------------------------
 // Error translation
 // ---------------------------------------------------------------------------
 

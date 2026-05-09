@@ -184,6 +184,90 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// putenv
+// ---------------------------------------------------------------------------
+
+/// Insert or modify an environment variable.
+///
+/// `string` must be of the form `"NAME=VALUE"`.  Unlike `setenv`,
+/// `putenv` does *not* make a copy — POSIX says the caller must keep
+/// `string` alive.  Our implementation copies into the internal store
+/// (same as `setenv`) because the static `ENV_STORE` is the only
+/// backing store.
+///
+/// Returns 0 on success, -1 on error.
+///
+/// # Safety
+///
+/// `string` must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
+    if string.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    // Find the '=' separator.
+    let total_len = unsafe { string::strlen(string) };
+    let mut eq_pos: usize = 0;
+    let mut found = false;
+    while eq_pos < total_len {
+        // SAFETY: eq_pos < total_len, string is valid.
+        if unsafe { *string.add(eq_pos) } == b'=' {
+            found = true;
+            break;
+        }
+        eq_pos = eq_pos.wrapping_add(1);
+    }
+
+    if !found {
+        // No '=' means unset (glibc extension).
+        return unsafe { unsetenv(string) };
+    }
+
+    let name_len = eq_pos;
+    let value_ptr = unsafe { string.add(eq_pos.wrapping_add(1)) };
+    let value_len = total_len.wrapping_sub(eq_pos).wrapping_sub(1);
+
+    let total = name_len.wrapping_add(1).wrapping_add(value_len).wrapping_add(1);
+    if total > MAX_ENTRY_LEN {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return -1;
+    }
+
+    // SAFETY: Single-threaded access.
+    let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_mut() };
+    let Some(store) = store else {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return -1;
+    };
+
+    // Check if variable already exists — overwrite it.
+    for entry in store.iter_mut() {
+        if entry[0] == 0 {
+            continue;
+        }
+        if entry_matches_name(entry, string, name_len) {
+            write_entry(entry, string, name_len, value_ptr, value_len);
+            rebuild_environ_ptrs();
+            return 0;
+        }
+    }
+
+    // Find an empty slot.
+    for entry in store.iter_mut() {
+        if entry[0] == 0 {
+            write_entry(entry, string, name_len, value_ptr, value_len);
+            rebuild_environ_ptrs();
+            return 0;
+        }
+    }
+
+    crate::errno::set_errno(crate::errno::ENOMEM);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 

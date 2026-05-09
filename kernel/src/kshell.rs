@@ -3471,6 +3471,7 @@ const COMMANDS: &[&str] = &[
     "netmon", "nmon", "groupmgr", "grp", "sysrq", "telemetry", "telem",
     "fscache", "fcache", "nameservice", "nsvc", "oomkiller", "oom", "blktrace", "btrace",
     "cgroupfs", "cgrp", "secpolicy", "spol", "procstat", "pstat", "kernparam", "kparam",
+    "tracemon", "trcmon", "authbroker", "abroker", "prociso", "piso", "dmevent", "dmev",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -5025,6 +5026,10 @@ fn dispatch(line: &str) {
         "secpolicy" | "spol" => cmd_secpolicy(args),
         "procstat" | "pstat" => cmd_procstat(args),
         "kernparam" | "kparam" => cmd_kernparam(args),
+        "tracemon" | "trcmon" => cmd_tracemon(args),
+        "authbroker" | "abroker" => cmd_authbroker(args),
+        "prociso" | "piso" => cmd_prociso(args),
+        "dmevent" | "dmev" => cmd_dmevent(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -49093,6 +49098,464 @@ fn cmd_kernparam(args: &str) {
     }
 }
 
+/// `tracemon` / `trcmon` — kernel tracing and profiling.
+fn cmd_tracemon(args: &str) {
+    use crate::fs::tracemon;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            tracemon::init_defaults();
+            let tps = tracemon::list_tracepoints();
+            shell_println!("Tracepoints ({}):", tps.len());
+            for tp in &tps {
+                let st = if tp.enabled { "ON" } else { "off" };
+                shell_println!("  {} [{}] {} hits={} — {}", tp.name, tp.category.label(), st, tp.hit_count, tp.description);
+            }
+        }
+        "enable" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: tracemon enable <tracepoint>");
+                return;
+            }
+            tracemon::init_defaults();
+            match tracemon::enable(name) {
+                Ok(()) => shell_println!("Enabled: {}", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: tracemon disable <tracepoint>");
+                return;
+            }
+            tracemon::init_defaults();
+            match tracemon::disable(name) {
+                Ok(()) => shell_println!("Disabled: {}", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "on" => {
+            tracemon::init_defaults();
+            match tracemon::set_global(true) {
+                Ok(()) => shell_println!("Tracing enabled globally"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "off" => {
+            tracemon::init_defaults();
+            match tracemon::set_global(false) {
+                Ok(()) => shell_println!("Tracing disabled globally"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "read" => {
+            let n_str = parts.get(1).copied().unwrap_or("20");
+            let n = n_str.parse::<usize>().unwrap_or(20);
+            tracemon::init_defaults();
+            let events = tracemon::read_buffer(n);
+            shell_println!("Trace events ({}):", events.len());
+            for ev in &events {
+                shell_println!("  [{}] tp={} cpu={} pid={} {}", ev.timestamp_ns, ev.tracepoint_id, ev.cpu, ev.pid, ev.data);
+            }
+        }
+        "clear" => {
+            tracemon::init_defaults();
+            match tracemon::clear_buffer() {
+                Ok(()) => shell_println!("Trace buffer cleared"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "filter" => {
+            let pid_str = parts.get(1).copied().unwrap_or("");
+            tracemon::init_defaults();
+            if pid_str.is_empty() || pid_str == "none" {
+                match tracemon::set_filter_pid(None) {
+                    Ok(()) => shell_println!("PID filter cleared"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let pid = pid_str.parse::<u32>().unwrap_or(0);
+                match tracemon::set_filter_pid(Some(pid)) {
+                    Ok(()) => shell_println!("Filtering to PID {}", pid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "stats" => {
+            tracemon::init_defaults();
+            let (tp, ev, total, dropped, enabled, ops) = tracemon::stats();
+            shell_println!("Trace monitor stats:");
+            shell_println!("  Tracepoints: {}", tp);
+            shell_println!("  Buffered events: {}", ev);
+            shell_println!("  Total events: {}", total);
+            shell_println!("  Dropped: {}", dropped);
+            shell_println!("  Global enabled: {}", enabled);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            tracemon::self_test();
+            shell_println!("tracemon self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: tracemon [list|enable <name>|disable <name>|on|off|read [n]|clear|filter <pid|none>|stats|test]");
+        }
+    }
+}
+
+/// `authbroker` / `abroker` — authentication and credential management.
+fn cmd_authbroker(args: &str) {
+    use crate::fs::authbroker;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            authbroker::init_defaults();
+            let creds = authbroker::list_credentials(None);
+            shell_println!("Credentials ({}):", creds.len());
+            for c in &creds {
+                let locked = if c.locked { " LOCKED" } else { "" };
+                shell_println!("  #{} {} [{}] fails={}{}", c.id, c.principal, c.method.label(), c.failed_attempts, locked);
+            }
+        }
+        "auth" => {
+            let principal = parts.get(1).copied().unwrap_or("");
+            let method_str = parts.get(2).copied().unwrap_or("password");
+            if principal.is_empty() {
+                shell_println!("Usage: authbroker auth <principal> [method]");
+                shell_println!("  Methods: password|token|certificate|biometric|kerberos|pubkey");
+                return;
+            }
+            let method = match method_str {
+                "password" | "pass" => authbroker::AuthMethod::Password,
+                "token" => authbroker::AuthMethod::Token,
+                "certificate" | "cert" => authbroker::AuthMethod::Certificate,
+                "biometric" | "bio" => authbroker::AuthMethod::Biometric,
+                "kerberos" | "krb" => authbroker::AuthMethod::Kerberos,
+                "pubkey" | "pk" => authbroker::AuthMethod::PublicKey,
+                _ => { shell_println!("Unknown method: {}", method_str); return; }
+            };
+            authbroker::init_defaults();
+            match authbroker::authenticate(principal, method) {
+                Ok(r) => shell_println!("Result: {}", r.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unlock" => {
+            let principal = parts.get(1).copied().unwrap_or("");
+            if principal.is_empty() {
+                shell_println!("Usage: authbroker unlock <principal>");
+                return;
+            }
+            authbroker::init_defaults();
+            match authbroker::unlock(principal) {
+                Ok(()) => shell_println!("Unlocked: {}", principal),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "grant" => {
+            let principal = parts.get(1).copied().unwrap_or("");
+            let resource = parts.get(2).copied().unwrap_or("");
+            if principal.is_empty() || resource.is_empty() {
+                shell_println!("Usage: authbroker grant <principal> <resource>");
+                return;
+            }
+            authbroker::init_defaults();
+            match authbroker::grant_capability(principal, resource, 0) {
+                Ok(id) => shell_println!("Granted cap #{} to {} for {}", id, principal, resource),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "grants" => {
+            let principal = parts.get(1).map(|s| *s);
+            authbroker::init_defaults();
+            let grants = authbroker::list_grants(principal);
+            shell_println!("Active grants ({}):", grants.len());
+            for g in &grants {
+                shell_println!("  #{} {} -> {}", g.id, g.principal, g.resource);
+            }
+        }
+        "revoke" => {
+            let id_str = parts.get(1).copied().unwrap_or("0");
+            let id = id_str.parse::<u32>().unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: authbroker revoke <grant_id>");
+                return;
+            }
+            authbroker::init_defaults();
+            match authbroker::revoke_grant(id) {
+                Ok(()) => shell_println!("Revoked grant #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            authbroker::init_defaults();
+            let (creds, grants, attempts, granted, denied, revoked, ops) = authbroker::stats();
+            shell_println!("Auth broker stats:");
+            shell_println!("  Credentials: {}", creds);
+            shell_println!("  Active grants: {}", grants);
+            shell_println!("  Auth attempts: {}", attempts);
+            shell_println!("  Granted: {}", granted);
+            shell_println!("  Denied: {}", denied);
+            shell_println!("  Revoked: {}", revoked);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            authbroker::self_test();
+            shell_println!("authbroker self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: authbroker [list|auth <principal> [method]|unlock <principal>|grant <principal> <resource>|grants [principal]|revoke <id>|stats|test]");
+        }
+    }
+}
+
+/// `prociso` / `piso` — process isolation and namespaces.
+fn cmd_prociso(args: &str) {
+    use crate::fs::prociso;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            prociso::init_defaults();
+            let nss = prociso::list_namespaces();
+            shell_println!("Namespaces ({}):", nss.len());
+            for ns in &nss {
+                let parent = ns.parent_id.map_or(String::from("-"), |p| format!("{}", p));
+                shell_println!("  #{} {} [{}] iso={} parent={} procs={}",
+                    ns.id, ns.name, ns.ns_type.label(), ns.isolation.label(), parent, ns.processes.len());
+            }
+        }
+        "create" => {
+            let ns_type_str = parts.get(1).copied().unwrap_or("");
+            let name = parts.get(2).copied().unwrap_or("");
+            if ns_type_str.is_empty() || name.is_empty() {
+                shell_println!("Usage: prociso create <type> <name>");
+                shell_println!("  Types: mnt|pid|net|user|ipc|uts|cgroup");
+                return;
+            }
+            let ns_type = match ns_type_str {
+                "mnt" | "mount" => prociso::NsType::Mount,
+                "pid" => prociso::NsType::Pid,
+                "net" => prociso::NsType::Net,
+                "user" => prociso::NsType::User,
+                "ipc" => prociso::NsType::Ipc,
+                "uts" => prociso::NsType::Uts,
+                "cgroup" => prociso::NsType::Cgroup,
+                _ => { shell_println!("Unknown type: {}", ns_type_str); return; }
+            };
+            prociso::init_defaults();
+            match prociso::create_namespace(ns_type, name, prociso::IsolationLevel::Full, None) {
+                Ok(id) => shell_println!("Created namespace #{}: {}", id, name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            let id_str = parts.get(1).copied().unwrap_or("0");
+            let id = id_str.parse::<u32>().unwrap_or(0);
+            if id == 0 {
+                shell_println!("Usage: prociso delete <ns_id>");
+                return;
+            }
+            prociso::init_defaults();
+            match prociso::delete_namespace(id) {
+                Ok(()) => shell_println!("Deleted namespace #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "attach" => {
+            let pid_str = parts.get(1).copied().unwrap_or("0");
+            let ns_str = parts.get(2).copied().unwrap_or("0");
+            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            let ns_id = ns_str.parse::<u32>().unwrap_or(0);
+            if pid == 0 || ns_id == 0 {
+                shell_println!("Usage: prociso attach <pid> <ns_id>");
+                return;
+            }
+            prociso::init_defaults();
+            match prociso::attach(pid, ns_id) {
+                Ok(()) => shell_println!("Attached PID {} to namespace #{}", pid, ns_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "detach" => {
+            let pid_str = parts.get(1).copied().unwrap_or("0");
+            let ns_str = parts.get(2).copied().unwrap_or("0");
+            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            let ns_id = ns_str.parse::<u32>().unwrap_or(0);
+            if pid == 0 || ns_id == 0 {
+                shell_println!("Usage: prociso detach <pid> <ns_id>");
+                return;
+            }
+            prociso::init_defaults();
+            match prociso::detach(pid, ns_id) {
+                Ok(()) => shell_println!("Detached PID {} from namespace #{}", pid, ns_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "container" => {
+            let action = parts.get(1).copied().unwrap_or("");
+            match action {
+                "create" => {
+                    let name = parts.get(2).copied().unwrap_or("");
+                    if name.is_empty() {
+                        shell_println!("Usage: prociso container create <name>");
+                        return;
+                    }
+                    prociso::init_defaults();
+                    match prociso::create_container(name, &[prociso::NsType::Mount, prociso::NsType::Pid, prociso::NsType::Net]) {
+                        Ok(id) => shell_println!("Created container #{}: {}", id, name),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "list" => {
+                    prociso::init_defaults();
+                    let containers = prociso::list_containers();
+                    shell_println!("Containers ({}):", containers.len());
+                    for c in &containers {
+                        let st = if c.running { "running" } else { "stopped" };
+                        shell_println!("  #{} {} [{}] ns={}", c.id, c.name, st, c.namespaces.len());
+                    }
+                }
+                "delete" => {
+                    let id_str = parts.get(2).copied().unwrap_or("0");
+                    let id = id_str.parse::<u32>().unwrap_or(0);
+                    if id == 0 {
+                        shell_println!("Usage: prociso container delete <id>");
+                        return;
+                    }
+                    prociso::init_defaults();
+                    match prociso::delete_container(id) {
+                        Ok(()) => shell_println!("Deleted container #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                _ => shell_println!("Usage: prociso container [create <name>|list|delete <id>]"),
+            }
+        }
+        "stats" => {
+            prociso::init_defaults();
+            let (ns, cont, att, det, ops) = prociso::stats();
+            shell_println!("Process isolation stats:");
+            shell_println!("  Namespaces: {}", ns);
+            shell_println!("  Containers: {}", cont);
+            shell_println!("  Attaches: {}", att);
+            shell_println!("  Detaches: {}", det);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            prociso::self_test();
+            shell_println!("prociso self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: prociso [list|create <type> <name>|delete <id>|attach <pid> <ns>|detach <pid> <ns>|container ...|stats|test]");
+        }
+    }
+}
+
+/// `dmevent` / `dmev` — device hotplug and event monitoring.
+fn cmd_dmevent(args: &str) {
+    use crate::fs::dmevent;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "devices" => {
+            dmevent::init_defaults();
+            let devs = dmevent::list_devices();
+            shell_println!("Known devices ({}):", devs.len());
+            for d in &devs {
+                let st = if d.online { "online" } else { "offline" };
+                shell_println!("  {} [{}] {} {}", d.devname, d.subsystem.label(), st, d.devpath);
+            }
+        }
+        "events" => {
+            let n_str = parts.get(1).copied().unwrap_or("20");
+            let n = n_str.parse::<usize>().unwrap_or(20);
+            dmevent::init_defaults();
+            let events = dmevent::poll(n);
+            shell_println!("Recent events ({}):", events.len());
+            for ev in &events {
+                shell_println!("  seq={} {} [{}] {} {}", ev.seq, ev.event_type.label(), ev.subsystem.label(), ev.devname, ev.devpath);
+            }
+        }
+        "notify" => {
+            let ev_str = parts.get(1).copied().unwrap_or("");
+            let sub_str = parts.get(2).copied().unwrap_or("");
+            let devpath = parts.get(3).copied().unwrap_or("");
+            let devname = parts.get(4).copied().unwrap_or("");
+            if ev_str.is_empty() || sub_str.is_empty() || devpath.is_empty() {
+                shell_println!("Usage: dmevent notify <add|remove|change> <block|net|usb|...> <devpath> <devname>");
+                return;
+            }
+            let event_type = match ev_str {
+                "add" => dmevent::EventType::Add,
+                "remove" => dmevent::EventType::Remove,
+                "change" => dmevent::EventType::Change,
+                "online" => dmevent::EventType::Online,
+                "offline" => dmevent::EventType::Offline,
+                _ => { shell_println!("Unknown event: {}", ev_str); return; }
+            };
+            let subsystem = match sub_str {
+                "block" => dmevent::Subsystem::Block,
+                "net" => dmevent::Subsystem::Net,
+                "usb" => dmevent::Subsystem::Usb,
+                "pci" => dmevent::Subsystem::Pci,
+                "input" => dmevent::Subsystem::Input,
+                "tty" => dmevent::Subsystem::Tty,
+                "sound" => dmevent::Subsystem::Sound,
+                "gpu" => dmevent::Subsystem::Gpu,
+                _ => { shell_println!("Unknown subsystem: {}", sub_str); return; }
+            };
+            dmevent::init_defaults();
+            match dmevent::notify(event_type, subsystem, devpath, devname, &[]) {
+                Ok(seq) => shell_println!("Event #{}: {} {} {}", seq, ev_str, devname, devpath),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rules" => {
+            dmevent::init_defaults();
+            let rules = dmevent::list_rules();
+            shell_println!("Event rules ({}):", rules.len());
+            for r in &rules {
+                let st = if r.enabled { "ON" } else { "off" };
+                shell_println!("  #{} {} [{}] pattern={} action={} {}",
+                    r.id, r.event_type.label(), r.subsystem.label(), r.devname_pattern, r.action, st);
+            }
+        }
+        "clear" => {
+            dmevent::init_defaults();
+            match dmevent::clear_events() {
+                Ok(()) => shell_println!("Event log cleared"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            dmevent::init_defaults();
+            let (devs, evs, rules, total, matched, ops) = dmevent::stats();
+            shell_println!("Device event stats:");
+            shell_println!("  Devices: {}", devs);
+            shell_println!("  Buffered events: {}", evs);
+            shell_println!("  Rules: {}", rules);
+            shell_println!("  Total events: {}", total);
+            shell_println!("  Rule matches: {}", matched);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            dmevent::self_test();
+            shell_println!("dmevent self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: dmevent [devices|events [n]|notify <type> <subsys> <path> <name>|rules|clear|stats|test]");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -57689,7 +58152,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "timesync" | "tsync" | "kmod" | "entropy" | "epool" | "iosched" | "ioq" | "netmon" | "nmon" | "groupmgr" | "grp" | "sysrq" | "telemetry" | "telem" | "fscache" | "fcache" | "nameservice" | "nsvc" | "oomkiller" | "oom" | "blktrace" | "btrace" | "cgroupfs" | "cgrp" | "secpolicy" | "spol" | "procstat" | "pstat" | "kernparam" | "kparam" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "timesync" | "tsync" | "kmod" | "entropy" | "epool" | "iosched" | "ioq" | "netmon" | "nmon" | "groupmgr" | "grp" | "sysrq" | "telemetry" | "telem" | "fscache" | "fcache" | "nameservice" | "nsvc" | "oomkiller" | "oom" | "blktrace" | "btrace" | "cgroupfs" | "cgrp" | "secpolicy" | "spol" | "procstat" | "pstat" | "kernparam" | "kparam" | "tracemon" | "trcmon" | "authbroker" | "abroker" | "prociso" | "piso" | "dmevent" | "dmev" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

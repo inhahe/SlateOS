@@ -404,6 +404,10 @@ const ROOT_FILES: &[&str] = &[
     "secpolicy",
     "procstat",
     "kernparam",
+    "tracemon",
+    "authbroker",
+    "prociso",
+    "dmevent",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7947,6 +7951,59 @@ fn gen_kernparam() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_tracemon() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (tp_count, ev_count, total, dropped, enabled, ops) = crate::fs::tracemon::stats();
+    out.push_str(&format!("tracepoints: {}\nbuffered: {}\ntotal_events: {}\ndropped: {}\nenabled: {}\nops: {}\n",
+        tp_count, ev_count, total, dropped, enabled, ops));
+    for tp in crate::fs::tracemon::list_tracepoints() {
+        let st = if tp.enabled { "ON" } else { "off" };
+        out.push_str(&format!("  {} [{}] {} hits={}\n", tp.name, tp.category.label(), st, tp.hit_count));
+    }
+    out.into_bytes()
+}
+
+fn gen_authbroker() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (creds, grants, attempts, granted, denied, revoked, ops) = crate::fs::authbroker::stats();
+    out.push_str(&format!("credentials: {}\ngrants: {}\nattempts: {}\ngranted: {}\ndenied: {}\nrevoked: {}\nops: {}\n",
+        creds, grants, attempts, granted, denied, revoked, ops));
+    for c in crate::fs::authbroker::list_credentials(None) {
+        let locked = if c.locked { " LOCKED" } else { "" };
+        out.push_str(&format!("  {} [{}] fails={}{}\n", c.principal, c.method.label(), c.failed_attempts, locked));
+    }
+    out.into_bytes()
+}
+
+fn gen_prociso() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (ns_count, cont_count, attaches, detaches, ops) = crate::fs::prociso::stats();
+    out.push_str(&format!("namespaces: {}\ncontainers: {}\nattaches: {}\ndetaches: {}\nops: {}\n",
+        ns_count, cont_count, attaches, detaches, ops));
+    for ns in crate::fs::prociso::list_namespaces() {
+        let parent = ns.parent_id.map_or(String::from("-"), |p| format!("{}", p));
+        out.push_str(&format!("  ns#{} {} [{}] iso={} parent={} procs={}\n",
+            ns.id, ns.name, ns.ns_type.label(), ns.isolation.label(), parent, ns.processes.len()));
+    }
+    out.into_bytes()
+}
+
+fn gen_dmevent() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, evs, rules, total, matched, ops) = crate::fs::dmevent::stats();
+    out.push_str(&format!("devices: {}\nbuffered_events: {}\nrules: {}\ntotal_events: {}\nmatched: {}\nops: {}\n",
+        devs, evs, rules, total, matched, ops));
+    for d in crate::fs::dmevent::list_devices() {
+        let st = if d.online { "online" } else { "offline" };
+        out.push_str(&format!("  {} [{}] {} {}\n", d.devname, d.subsystem.label(), st, d.devpath));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8516,6 +8573,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "secpolicy" => Ok(gen_secpolicy()),
         "procstat" => Ok(gen_procstat()),
         "kernparam" => Ok(gen_kernparam()),
+        "tracemon" => Ok(gen_tracemon()),
+        "authbroker" => Ok(gen_authbroker()),
+        "prociso" => Ok(gen_prociso()),
+        "dmevent" => Ok(gen_dmevent()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

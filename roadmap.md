@@ -930,6 +930,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Security Policy (fs::secpolicy): MAC policy engine with 3 enforce modes, 6 action types, 3 decisions, priority-based rule matching, entity labels; `secpolicy`/`spol` kshell command; /proc/secpolicy; 8 self-tests
   - [x] Process Stats (fs::procstat): Per-process resource statistics with 5 states, CPU/memory/IO/faults/ctx-switches tracking, top-N by CPU/memory; `procstat`/`pstat` kshell command; /proc/procstat; 8 self-tests
   - [x] Kernel Parameters (fs::kernparam): Boot parameter management with 3 origins, key=value store, consume tracking, boolean checks, unconsumed listing; `kernparam`/`kparam` kshell command; /proc/kernparam; 8 self-tests
+  - [x] Trace Monitor (fs::tracemon): Ftrace-style tracing with 8 categories, per-tracepoint enable/disable, ring buffer with overwrite/one-shot modes, PID filtering, custom tracepoints; `tracemon`/`trcmon` kshell command; /proc/tracemon; 8 self-tests
+  - [x] Auth Broker (fs::authbroker): Plan 9 Factotum-inspired credential management with 6 auth methods, lockout after N failures, capability granting with TTL, revocation; `authbroker`/`abroker` kshell command; /proc/authbroker; 8 self-tests
+  - [x] Process Isolation (fs::prociso): Namespace management with 7 types (mnt/pid/net/user/ipc/uts/cgroup), 3 isolation levels, hierarchical namespaces, container primitives; `prociso`/`piso` kshell command; /proc/prociso; 8 self-tests
+  - [x] Device Events (fs::dmevent): Udev-style hotplug monitoring with 7 event types, 8 subsystems, auto-action rules, device tracking, event ring buffer; `dmevent`/`dmev` kshell command; /proc/dmevent; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

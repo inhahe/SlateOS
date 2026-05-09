@@ -835,6 +835,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] libgen: basename/dirname path component extraction
   - [x] resource: getrlimit/setrlimit (stored, not kernel-enforced), getrusage (zeroed)
   - [x] process groups: getpgrp/getpgid/setpgid/setpgrp/getsid/setsid/tcgetpgrp/tcsetpgrp (stubs — every process is own group leader)
+  - [x] getopt: POSIX command-line option parser with optarg/optind/opterr/optopt, grouped options, required arguments
+  - [x] fnmatch: shell-style pattern matching (*, ?, [...], FNM_PATHNAME/FNM_PERIOD/FNM_NOESCAPE)
+  - [x] strsignal/psignal: signal number → descriptive string (21 standard signals)
+  - [x] pathconf/fpathconf: LINK_MAX, NAME_MAX, PATH_MAX, PIPE_BUF configuration queries
+  - [x] confstr: CS_PATH → /bin:/usr/bin
+  - [x] mlock/munlock/mlockall/munlockall/msync/madvise: memory management stubs (accept silently)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

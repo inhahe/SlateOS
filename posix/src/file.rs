@@ -993,6 +993,154 @@ pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32)
 }
 
 // ---------------------------------------------------------------------------
+// *at() functions (AT_FDCWD stubs)
+// ---------------------------------------------------------------------------
+//
+// These delegate to the non-*at version when dirfd == AT_FDCWD (-100).
+// Other dirfd values return ENOSYS until we implement fchdir() or
+// kernel-level *at() support.
+
+/// AT_FDCWD: use the current working directory.
+pub const AT_FDCWD: i32 = -100;
+/// AT_SYMLINK_NOFOLLOW: do not follow symlinks.
+pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+/// AT_REMOVEDIR: unlinkat should remove a directory.
+pub const AT_REMOVEDIR: i32 = 0x200;
+
+/// Open a file relative to a directory fd.
+#[unsafe(no_mangle)]
+pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
+    if dirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    open(path, flags, mode)
+}
+
+/// Get file status relative to a directory fd.
+#[unsafe(no_mangle)]
+pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, _flags: i32) -> i32 {
+    if dirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    stat(path, buf)
+}
+
+/// Remove a file or directory relative to a directory fd.
+///
+/// When `flags` includes `AT_REMOVEDIR`, acts like rmdir.
+/// Otherwise acts like unlink.
+#[unsafe(no_mangle)]
+pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
+    if dirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    if flags & AT_REMOVEDIR != 0 {
+        rmdir(path)
+    } else {
+        unlink(path)
+    }
+}
+
+/// Rename a file relative to directory fds.
+#[unsafe(no_mangle)]
+pub extern "C" fn renameat(
+    olddirfd: i32,
+    oldpath: *const u8,
+    newdirfd: i32,
+    newpath: *const u8,
+) -> i32 {
+    if olddirfd != AT_FDCWD || newdirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    rename(oldpath, newpath)
+}
+
+/// Create a directory relative to a directory fd.
+#[unsafe(no_mangle)]
+pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
+    if dirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    mkdir(path, mode)
+}
+
+/// Read a symbolic link relative to a directory fd.
+#[unsafe(no_mangle)]
+pub extern "C" fn readlinkat(
+    dirfd: i32,
+    path: *const u8,
+    buf: *mut u8,
+    bufsiz: SizeT,
+) -> SsizeT {
+    if dirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    readlink(path, buf, bufsiz)
+}
+
+/// Create a symbolic link relative to a directory fd.
+#[unsafe(no_mangle)]
+pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32 {
+    if newdirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    symlink(target, linkpath)
+}
+
+/// Create a hard link relative to directory fds.
+#[unsafe(no_mangle)]
+pub extern "C" fn linkat(
+    olddirfd: i32,
+    oldpath: *const u8,
+    newdirfd: i32,
+    newpath: *const u8,
+    _flags: i32,
+) -> i32 {
+    if olddirfd != AT_FDCWD || newdirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    link(oldpath, newpath)
+}
+
+/// Change file mode bits relative to a directory fd.
+///
+/// Stub: accepts silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32) -> i32 {
+    if dirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    chmod(path, mode)
+}
+
+/// Change file owner/group relative to a directory fd.
+///
+/// Stub: accepts silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn fchownat(
+    dirfd: i32,
+    path: *const u8,
+    owner: UidT,
+    group: GidT,
+    _flags: i32,
+) -> i32 {
+    if dirfd != AT_FDCWD {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    chown(path, owner, group)
+}
+
+// ---------------------------------------------------------------------------
 // chmod / fchmod / chown / fchown (stubs)
 // ---------------------------------------------------------------------------
 

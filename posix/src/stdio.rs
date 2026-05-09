@@ -212,6 +212,210 @@ fn stream_to_fd(stream: *mut u8) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// fopen / fclose / fflush
+// ---------------------------------------------------------------------------
+
+/// Open a file as a stdio stream.
+///
+/// Returns a FILE* (which is really just the fd cast to a pointer).
+/// Returns null on error with errno set.
+///
+/// Supported modes: `"r"`, `"w"`, `"a"`, `"r+"`, `"w+"`, `"a+"`.
+/// The `"b"` suffix is accepted and ignored (binary mode is the default).
+///
+/// # Safety
+///
+/// `path` and `mode` must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut u8 {
+    if path.is_null() || mode.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    let flags = mode_to_flags(mode);
+    if flags < 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    let fd = crate::file::open(path, flags, 0o666);
+    if fd < 0 {
+        return core::ptr::null_mut();
+    }
+
+    fd as usize as *mut u8
+}
+
+/// Close a stdio stream.
+///
+/// Returns 0 on success, EOF on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fclose(stream: *mut u8) -> i32 {
+    let fd = stream_to_fd(stream);
+    // Don't close stdin/stdout/stderr.
+    if fd <= STDERR {
+        return 0;
+    }
+    let ret = crate::file::close(fd);
+    if ret < 0 { EOF } else { 0 }
+}
+
+/// Flush a stream (no-op).
+///
+/// We have no buffering, so fflush is always a no-op that succeeds.
+/// If stream is null, "flushes all open streams" — also a no-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn fflush(_stream: *mut u8) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
+// fgets / getline
+// ---------------------------------------------------------------------------
+
+/// Read a line from a stream.
+///
+/// Reads at most `size - 1` characters into `buf`, stopping at a
+/// newline or EOF.  The newline is included if read.  The string is
+/// always null-terminated.
+///
+/// Returns `buf` on success, null on error or EOF with no data read.
+#[unsafe(no_mangle)]
+pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
+    if buf.is_null() || size <= 0 {
+        return core::ptr::null_mut();
+    }
+
+    let fd = stream_to_fd(stream);
+    let max = (size as usize).wrapping_sub(1); // Leave room for null.
+    let mut pos: usize = 0;
+
+    while pos < max {
+        let mut byte: u8 = 0;
+        let n = crate::file::read(fd, &raw mut byte, 1);
+        if n <= 0 {
+            break; // EOF or error.
+        }
+        // SAFETY: pos < max < size, so buf.add(pos) is valid.
+        unsafe { *buf.add(pos) = byte; }
+        pos = pos.wrapping_add(1);
+        if byte == b'\n' {
+            break;
+        }
+    }
+
+    if pos == 0 {
+        return core::ptr::null_mut(); // Nothing read.
+    }
+
+    // Null-terminate.
+    // SAFETY: pos <= max = size-1, so buf.add(pos) is within bounds.
+    unsafe { *buf.add(pos) = 0; }
+
+    buf
+}
+
+// ---------------------------------------------------------------------------
+// fseek / ftell / rewind
+// ---------------------------------------------------------------------------
+
+/// Seek constants (match POSIX).
+pub const SEEK_SET: i32 = 0;
+pub const SEEK_CUR: i32 = 1;
+pub const SEEK_END: i32 = 2;
+
+/// Seek within a stream.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fseek(stream: *mut u8, offset: i64, whence: i32) -> i32 {
+    let fd = stream_to_fd(stream);
+    let ret = crate::file::lseek(fd, offset, whence);
+    if ret < 0 { -1 } else { 0 }
+}
+
+/// Get the current position in a stream.
+///
+/// Returns the current offset, or -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn ftell(stream: *mut u8) -> i64 {
+    let fd = stream_to_fd(stream);
+    crate::file::lseek(fd, 0, SEEK_CUR)
+}
+
+/// Rewind a stream to the beginning.
+///
+/// Equivalent to `fseek(stream, 0, SEEK_SET)` but returns void.
+#[unsafe(no_mangle)]
+pub extern "C" fn rewind(stream: *mut u8) {
+    let fd = stream_to_fd(stream);
+    let _ = crate::file::lseek(fd, 0, SEEK_SET);
+}
+
+// ---------------------------------------------------------------------------
+// fileno / feof / ferror / clearerr
+// ---------------------------------------------------------------------------
+
+/// Get the file descriptor for a stream.
+#[unsafe(no_mangle)]
+pub extern "C" fn fileno(stream: *mut u8) -> i32 {
+    stream_to_fd(stream)
+}
+
+/// Check end-of-file indicator for a stream.
+///
+/// Stub: always returns 0 (not at EOF).  We don't track per-stream
+/// EOF state since we have no real FILE struct.
+#[unsafe(no_mangle)]
+pub extern "C" fn feof(_stream: *mut u8) -> i32 {
+    0
+}
+
+/// Check error indicator for a stream.
+///
+/// Stub: always returns 0 (no error).
+#[unsafe(no_mangle)]
+pub extern "C" fn ferror(_stream: *mut u8) -> i32 {
+    0
+}
+
+/// Clear error and EOF indicators for a stream.
+///
+/// Stub: no-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn clearerr(_stream: *mut u8) {
+}
+
+/// Remove a file.
+///
+/// Wrapper around `unlink`.
+#[unsafe(no_mangle)]
+pub extern "C" fn remove(path: *const u8) -> i32 {
+    crate::file::unlink(path)
+}
+
+/// Rename a file.
+///
+/// Wrapper around the file::rename function.
+#[unsafe(no_mangle)]
+pub extern "C" fn stdio_rename(old: *const u8, new: *const u8) -> i32 {
+    crate::file::rename(old, new)
+}
+
+/// Create a temporary filename (not thread-safe).
+///
+/// Stub: returns null (not implemented).
+#[unsafe(no_mangle)]
+pub extern "C" fn tmpnam(_s: *mut u8) -> *mut u8 {
+    core::ptr::null_mut()
+}
+
+// ---------------------------------------------------------------------------
+// FILE* symbols
+// ---------------------------------------------------------------------------
+
 /// Provide global FILE* symbols for stdout, stderr, stdin.
 ///
 /// C programs access these as `extern FILE *stdout;`.
@@ -224,3 +428,30 @@ pub static stderr: usize = STDERR_FILENO;
 
 #[unsafe(no_mangle)]
 pub static stdin: usize = 0;
+
+// ---------------------------------------------------------------------------
+// Internal helper
+// ---------------------------------------------------------------------------
+
+/// Convert a fopen mode string to open flags.
+///
+/// Returns -1 if the mode is invalid.
+fn mode_to_flags(mode: *const u8) -> i32 {
+    // SAFETY: Caller guarantees mode is a valid C string.
+    let m0 = unsafe { *mode };
+    let m1 = unsafe { *mode.add(1) };
+
+    // Check for '+' in position 1 or 2 (after optional 'b').
+    let has_plus = m1 == b'+' || (m1 == b'b' && unsafe { *mode.add(2) } == b'+')
+        || (m1 != 0 && unsafe { *mode.add(2) } == b'+');
+
+    match (m0, has_plus) {
+        (b'r', false) => crate::fcntl::O_RDONLY,
+        (b'r', true) => crate::fcntl::O_RDWR,
+        (b'w', false) => crate::fcntl::O_WRONLY | crate::fcntl::O_CREAT | crate::fcntl::O_TRUNC,
+        (b'w', true) => crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_TRUNC,
+        (b'a', false) => crate::fcntl::O_WRONLY | crate::fcntl::O_CREAT | crate::fcntl::O_APPEND,
+        (b'a', true) => crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_APPEND,
+        _ => -1,
+    }
+}

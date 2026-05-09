@@ -814,7 +814,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ctype: isalpha, isdigit, isalnum, isspace, isupper, islower, isprint, iscntrl, ispunct, isxdigit, isgraph, isblank, isascii, toupper, tolower, toascii
   - [x] malloc/free/calloc/realloc via mmap-backed allocator (size header per allocation)
   - [x] setjmp/longjmp: x86_64 assembly, saves/restores callee-saved registers
-  - [x] stdio: putchar, puts, fputs, fputc, fgetc, getchar, fwrite, fread, perror, stdout/stderr/stdin symbols
+  - [x] stdio: putchar, puts, fputs, fputc, fgetc, getchar, fwrite, fread, perror, fopen/fclose/fflush, fgets, fseek/ftell/rewind, fileno, feof/ferror/clearerr, remove, stdout/stderr/stdin symbols
   - [x] signal stubs: POSIX signal constants, signal/kill/raise stubs (ENOSYS), sigset operations, raise(SIGABRT)→abort
   - [x] assert: __assert_fail for C assert() macro
   - [x] environ: getenv/setenv/unsetenv (static 128-entry store), environ pointer
@@ -828,6 +828,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [ ] signal handling shim (POSIX signals → native IPC)
   - [x] socket API shim: BSD socket API (socket/connect/bind/listen/accept/send/recv/sendto/recvfrom/shutdown/setsockopt/getsockopt/getpeername/getsockname), byte-order (htons/htonl/ntohs/ntohl), inet_addr/inet_ntoa, gethostbyname (DNS via SYS_DNS_RESOLVE), per-fd socket metadata side table, network error translation; supports AF_INET + SOCK_STREAM (TCP) + SOCK_DGRAM (UDP)
   - [ ] printf/snprintf (needs C variadic support or musl port)
+  - [x] pread/pwrite: positional read/write via seek-read-seekback
+  - [x] readv/writev: scatter/gather I/O via iovec loops
+  - [x] *at() functions: openat/fstatat/unlinkat/renameat/mkdirat/readlinkat/symlinkat/linkat/fchmodat/fchownat (AT_FDCWD only)
+  - [x] uname: struct utsname + uname() system identification
+  - [x] libgen: basename/dirname path component extraction
+  - [x] resource: getrlimit/setrlimit (stored, not kernel-enforced), getrusage (zeroed)
+  - [x] process groups: getpgrp/getpgid/setpgid/setpgrp/getsid/setsid/tcgetpgrp/tcsetpgrp (stubs — every process is own group leader)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

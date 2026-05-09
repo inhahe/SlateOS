@@ -709,6 +709,169 @@ pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// Read-write locks
+// ---------------------------------------------------------------------------
+
+/// Pthread read-write lock type.
+///
+/// Uses an `AtomicI32` as a combined state:
+/// - 0: unlocked
+/// - positive N: N readers holding the lock
+/// - -1: one writer holding the lock
+#[repr(C)]
+pub struct PthreadRwlockT {
+    state: AtomicI32,
+    _pad: [u8; 52],
+}
+
+/// Pthread read-write lock attribute type.
+pub type PthreadRwlockattrT = [u8; 8];
+
+/// Static initializer for `pthread_rwlock_t`.
+#[allow(clippy::declare_interior_mutable_const)]
+#[unsafe(no_mangle)]
+pub static PTHREAD_RWLOCK_INITIALIZER: PthreadRwlockT = PthreadRwlockT {
+    state: AtomicI32::new(0),
+    _pad: [0; 52],
+};
+
+/// Initialize a read-write lock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlock_init(
+    rwlock: *mut PthreadRwlockT,
+    _attr: *const PthreadRwlockattrT,
+) -> i32 {
+    if rwlock.is_null() {
+        return errno::EINVAL;
+    }
+    unsafe { (*rwlock).state = AtomicI32::new(0); }
+    0
+}
+
+/// Destroy a read-write lock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlock_destroy(_rwlock: *mut PthreadRwlockT) -> i32 {
+    0
+}
+
+/// Acquire a read lock (shared).
+///
+/// Spins until no writer holds the lock, then increments the reader count.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlock_rdlock(rwlock: *mut PthreadRwlockT) -> i32 {
+    if rwlock.is_null() {
+        return errno::EINVAL;
+    }
+    let rw = unsafe { &*rwlock };
+    loop {
+        let current = rw.state.load(Ordering::Acquire);
+        // If a writer holds the lock (state == -1), spin.
+        if current < 0 {
+            core::hint::spin_loop();
+            let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
+            continue;
+        }
+        // Try to add a reader.
+        if rw.state.compare_exchange_weak(
+            current,
+            current.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ).is_ok() {
+            return 0;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Try to acquire a read lock without blocking.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
+    if rwlock.is_null() {
+        return errno::EINVAL;
+    }
+    let rw = unsafe { &*rwlock };
+    let current = rw.state.load(Ordering::Acquire);
+    if current < 0 {
+        return errno::EBUSY;
+    }
+    if rw.state.compare_exchange(
+        current,
+        current.wrapping_add(1),
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    ).is_ok() {
+        0
+    } else {
+        errno::EBUSY
+    }
+}
+
+/// Acquire a write lock (exclusive).
+///
+/// Spins until no readers or writers hold the lock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlock_wrlock(rwlock: *mut PthreadRwlockT) -> i32 {
+    if rwlock.is_null() {
+        return errno::EINVAL;
+    }
+    let rw = unsafe { &*rwlock };
+    loop {
+        if rw.state.compare_exchange_weak(
+            0,
+            -1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ).is_ok() {
+            return 0;
+        }
+        core::hint::spin_loop();
+        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
+    }
+}
+
+/// Try to acquire a write lock without blocking.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
+    if rwlock.is_null() {
+        return errno::EINVAL;
+    }
+    let rw = unsafe { &*rwlock };
+    if rw.state.compare_exchange(
+        0,
+        -1,
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    ).is_ok() {
+        0
+    } else {
+        errno::EBUSY
+    }
+}
+
+/// Release a read-write lock.
+///
+/// If the calling thread holds a read lock, decrements the reader count.
+/// If the calling thread holds a write lock, releases it (sets state to 0).
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
+    if rwlock.is_null() {
+        return errno::EINVAL;
+    }
+    let rw = unsafe { &*rwlock };
+    let current = rw.state.load(Ordering::Acquire);
+    if current == -1 {
+        // Writer releasing — set to unlocked.
+        rw.state.store(0, Ordering::Release);
+    } else if current > 0 {
+        // Reader releasing — decrement count.
+        rw.state.fetch_sub(1, Ordering::AcqRel);
+    }
+    // If current == 0, the lock wasn't held — no-op (undefined behavior in POSIX).
+    0
+}
+
+// ---------------------------------------------------------------------------
 // sched_yield — voluntarily yield the CPU
 // ---------------------------------------------------------------------------
 

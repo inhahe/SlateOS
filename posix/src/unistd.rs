@@ -429,6 +429,77 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// realpath
+// ---------------------------------------------------------------------------
+
+/// Canonicalize a pathname.
+///
+/// Resolves `.`, `..`, redundant `/`, and relative paths against the
+/// CWD to produce a normalized absolute path.  Verifies the target
+/// exists via `SYS_FS_STAT`.
+///
+/// `resolved_path` must point to a buffer of at least `PATH_MAX`
+/// bytes.  If null, returns null with `EINVAL` (POSIX allows malloc
+/// fallback, but we are `no_std`).
+///
+/// **Limitation**: symlinks are not followed.  The returned path has
+/// `.`/`..` resolved and is absolute, but intermediate symlink
+/// components are not dereferenced.  This matches `realpath -s`
+/// semantics on some systems.
+///
+/// Returns `resolved_path` on success, null on error with errno set.
+#[unsafe(no_mangle)]
+pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
+    if path.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+    if resolved_path.is_null() {
+        // POSIX says we may malloc; we can't (no_std).
+        errno::set_errno(errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    // Resolve relative path against CWD and normalize.
+    let mut resolved = [0u8; PATH_MAX];
+    let Some(resolved_len) = (unsafe { resolve_path(path, &mut resolved) }) else {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return core::ptr::null_mut();
+    };
+
+    // Verify the path exists.
+    let mut stat_buf = core::mem::MaybeUninit::<crate::stat::Stat>::zeroed();
+    let ret = syscall3(
+        SYS_FS_STAT,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
+        stat_buf.as_mut_ptr() as u64,
+    );
+
+    if ret < 0 {
+        let _ = errno::translate(ret);
+        return core::ptr::null_mut();
+    }
+
+    // Copy to caller's buffer and null-terminate.
+    // SAFETY: resolved_path is valid for PATH_MAX bytes (caller contract).
+    unsafe {
+        for i in 0..resolved_len {
+            if let Some(&b) = resolved.get(i) {
+                *resolved_path.add(i) = b;
+            }
+        }
+        *resolved_path.add(resolved_len) = 0;
+    }
+
+    resolved_path
+}
+
+// ---------------------------------------------------------------------------
+// abort
+// ---------------------------------------------------------------------------
+
 /// Write a message to standard error and abort.
 ///
 /// Not exactly POSIX, but commonly needed by C runtime init code.

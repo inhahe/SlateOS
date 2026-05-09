@@ -906,6 +906,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] CPU Frequency (fs::cpufreq): frequency scaling with 6 governors, per-CPU settings, boost control, frequency transitions; `cfreq` kshell command; /proc/cpufreq; 8 self-tests
   - [x] Thermal Monitor (fs::thermal): thermal zones with CPU/GPU/chipset, trip points, fan control with 4 modes, throttle detection; `therm` kshell command; /proc/thermal; 8 self-tests
   - [x] Swap Monitor (fs::swapmon): swap usage with 4 device types, per-process tracking, swap in/out rates, usage snapshots; `swapmon`/`smon` kshell command; /proc/swapmon; 8 self-tests
+  - [x] Sysctl Parameters (fs::sysctlfs): kernel tunable key-value store with 10 defaults, get/set/add, prefix search, read-only protection; `sysctlfs`/`sctlfs` kshell command; /proc/sysctlfs; 8 self-tests
+  - [x] CPU Topology (fs::cputopo): topology info with packages, cores, threads, cache hierarchy, NUMA, SMT, online/offline; `cputopo`/`ctopo` kshell command; /proc/cputopo; 8 self-tests
+  - [x] Memory Layout (fs::memlayout): physical memory region tracking with 12 region types, sorted listing, RAM/reserved/kernel totals; `memlayout`/`mlayout` kshell command; /proc/memlayout; 8 self-tests
+  - [x] IRQ Balance (fs::irqbalance): IRQ affinity balancing with 4 policies, per-CPU load tracking, auto-rebalance, IRQ registration; `irqbal` kshell command; /proc/irqbalance; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -380,6 +380,10 @@ const ROOT_FILES: &[&str] = &[
     "cpufreq",
     "thermal",
     "swapmon",
+    "sysctlfs",
+    "cputopo",
+    "memlayout",
+    "irqbalance",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7547,6 +7551,62 @@ fn gen_swapmon() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sysctlfs() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Sysctl Parameters ===\n");
+    let (count, reads, writes, modified, ops) = crate::fs::sysctlfs::stats();
+    out.push_str(&format!("param_count: {}\n", count));
+    out.push_str(&format!("total_reads: {}\n", reads));
+    out.push_str(&format!("total_writes: {}\n", writes));
+    out.push_str(&format!("modified: {}\n", modified));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_cputopo() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== CPU Topology ===\n");
+    let (cpus, pkgs, numa, smt, queries, ops) = crate::fs::cputopo::stats();
+    out.push_str(&format!("logical_cpus: {}\n", cpus));
+    out.push_str(&format!("packages: {}\n", pkgs));
+    out.push_str(&format!("numa_nodes: {}\n", numa));
+    out.push_str(&format!("smt_enabled: {}\n", smt));
+    out.push_str(&format!("queries: {}\n", queries));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_memlayout() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Memory Layout ===\n");
+    let (regions, ram, reserved, kernel, queries, ops) = crate::fs::memlayout::stats();
+    out.push_str(&format!("region_count: {}\n", regions));
+    out.push_str(&format!("total_ram: {} ({})\n", ram, crate::fs::memlayout::format_size(ram)));
+    out.push_str(&format!("total_reserved: {}\n", reserved));
+    out.push_str(&format!("total_kernel: {}\n", kernel));
+    out.push_str(&format!("queries: {}\n", queries));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_irqbalance() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== IRQ Balance ===\n");
+    let (irqs, rebalances, migrations, ops) = crate::fs::irqbalance::stats();
+    out.push_str(&format!("irq_count: {}\n", irqs));
+    out.push_str(&format!("total_rebalances: {}\n", rebalances));
+    out.push_str(&format!("total_migrations: {}\n", migrations));
+    out.push_str(&format!("ops: {}\n", ops));
+    if let Some(policy) = crate::fs::irqbalance::get_policy() {
+        out.push_str(&format!("policy: {}\n", policy.label()));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8092,6 +8152,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cpufreq" => Ok(gen_cpufreq()),
         "thermal" => Ok(gen_thermal()),
         "swapmon" => Ok(gen_swapmon()),
+        "sysctlfs" => Ok(gen_sysctlfs()),
+        "cputopo" => Ok(gen_cputopo()),
+        "memlayout" => Ok(gen_memlayout()),
+        "irqbalance" => Ok(gen_irqbalance()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

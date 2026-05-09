@@ -305,6 +305,10 @@ const ROOT_FILES: &[&str] = &[
     "sysanimations",
     "filevault",
     "mousegestures",
+    "fontsettings",
+    "notifbadge",
+    "lockwallpaper",
+    "systemsounds",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6321,6 +6325,63 @@ fn gen_mousegestures() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fontsettings() -> Vec<u8> {
+    use alloc::format;
+    use super::fontsettings;
+    let (changes, ops) = fontsettings::stats();
+    let cfg = fontsettings::get_config();
+    let mut out = String::from("antialiasing: ");
+    out.push_str(cfg.as_ref().map_or("N/A", |c| c.antialiasing.label()));
+    out.push('\n');
+    out.push_str(&format!("hinting: {}\n", cfg.as_ref().map_or("N/A", |c| c.hinting.label())));
+    out.push_str(&format!("default_size_dp: {}\n", cfg.as_ref().map_or(0, |c| c.default_size_dp)));
+    out.push_str(&format!("text_scale_percent: {}\n", cfg.as_ref().map_or(100, |c| c.text_scale_percent)));
+    out.push_str(&format!("total_changes: {}\n", changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_notifbadge() -> Vec<u8> {
+    use alloc::format;
+    use super::notifbadge;
+    let (count, visible, updates, ops) = notifbadge::stats();
+    let mut out = String::from("badge_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("visible_count: {}\n", visible));
+    out.push_str(&format!("total_updates: {}\n", updates));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_lockwallpaper() -> Vec<u8> {
+    use alloc::format;
+    use super::lockwallpaper;
+    let (rotations, changes, ops) = lockwallpaper::stats();
+    let cfg = lockwallpaper::get_config();
+    let mut out = String::from("mode: ");
+    out.push_str(cfg.as_ref().map_or("N/A", |c| c.mode.label()));
+    out.push('\n');
+    out.push_str(&format!("current_image: {}\n", cfg.as_ref().map_or_else(String::new, |c| c.current_image.clone())));
+    out.push_str(&format!("total_rotations: {}\n", rotations));
+    out.push_str(&format!("total_changes: {}\n", changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_systemsounds() -> Vec<u8> {
+    use alloc::format;
+    use super::systemsounds;
+    let (schemes, events, plays, ops) = systemsounds::stats();
+    let mut out = String::from("active_scheme: ");
+    out.push_str(&systemsounds::active_scheme());
+    out.push('\n');
+    out.push_str(&format!("scheme_count: {}\n", schemes));
+    out.push_str(&format!("event_count: {}\n", events));
+    out.push_str(&format!("total_plays: {}\n", plays));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6791,6 +6852,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sysanimations" => Ok(gen_sysanimations()),
         "filevault" => Ok(gen_filevault()),
         "mousegestures" => Ok(gen_mousegestures()),
+        "fontsettings" => Ok(gen_fontsettings()),
+        "notifbadge" => Ok(gen_notifbadge()),
+        "lockwallpaper" => Ok(gen_lockwallpaper()),
+        "systemsounds" => Ok(gen_systemsounds()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

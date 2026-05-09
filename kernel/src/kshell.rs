@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4909,6 +4909,10 @@ fn dispatch(line: &str) {
         "sysanimations" | "sanim" => cmd_sysanimations(args),
         "filevault" | "fvault" => cmd_filevault(args),
         "mousegestures" | "mgest" => cmd_mousegestures(args),
+        "fontsettings" | "fntset" => cmd_fontsettings(args),
+        "notifbadge" | "nbadge" => cmd_notifbadge(args),
+        "lockwallpaper" | "lwp" => cmd_lockwallpaper(args),
+        "systemsounds" | "ssounds" => cmd_systemsounds(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -37599,6 +37603,556 @@ fn cmd_mousegestures(args: &str) {
     }
 }
 
+/// `fontsettings` / `fntset` — font rendering configuration.
+fn cmd_fontsettings(args: &str) {
+    use crate::fs::fontsettings;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { fontsettings::init_defaults(); shell_println!("Font settings initialised."); }
+        "show" | "" => {
+            fontsettings::init_defaults();
+            match fontsettings::get_config() {
+                Some(cfg) => {
+                    shell_println!("Font Settings:");
+                    shell_println!("  Antialiasing:   {}", cfg.antialiasing.label());
+                    shell_println!("  Hinting:        {}", cfg.hinting.label());
+                    shell_println!("  Default font:   {} ({} dp)", cfg.default_family, cfg.default_size_dp);
+                    shell_println!("  Monospace font: {} ({} dp)", cfg.monospace_family, cfg.monospace_size_dp);
+                    shell_println!("  Document font:  {}", cfg.document_family);
+                    shell_println!("  Min size:       {} dp", cfg.min_size_dp);
+                    shell_println!("  Text scale:     {}%", cfg.text_scale_percent);
+                    shell_println!("  Ligatures:      {}", if cfg.ligatures { "on" } else { "off" });
+                }
+                None => shell_println!("Font settings not initialised."),
+            }
+        }
+        "aa" => {
+            let method = parts.get(1).copied().unwrap_or("");
+            let aa = match method {
+                "none" => fontsettings::Antialiasing::None,
+                "grayscale" | "gray" => fontsettings::Antialiasing::Grayscale,
+                "subpixel" | "rgb" => fontsettings::Antialiasing::Subpixel,
+                "bgr" => fontsettings::Antialiasing::SubpixelBgr,
+                _ => { shell_println!("Usage: fontsettings aa <none|grayscale|subpixel|bgr>"); return; }
+            };
+            match fontsettings::set_antialiasing(aa) {
+                Ok(()) => shell_println!("Antialiasing set to {}.", aa.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "hinting" | "hint" => {
+            let level = parts.get(1).copied().unwrap_or("");
+            let h = match level {
+                "none" => fontsettings::Hinting::None,
+                "slight" => fontsettings::Hinting::Slight,
+                "medium" => fontsettings::Hinting::Medium,
+                "full" => fontsettings::Hinting::Full,
+                _ => { shell_println!("Usage: fontsettings hinting <none|slight|medium|full>"); return; }
+            };
+            match fontsettings::set_hinting(h) {
+                Ok(()) => shell_println!("Hinting set to {}.", h.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "font" => {
+            let family = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if family.is_empty() { shell_println!("Usage: fontsettings font <family>"); return; }
+            match fontsettings::set_default_font(&family) {
+                Ok(()) => shell_println!("Default font set to '{}'.", family),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mono" => {
+            let family = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if family.is_empty() { shell_println!("Usage: fontsettings mono <family>"); return; }
+            match fontsettings::set_monospace_font(&family) {
+                Ok(()) => shell_println!("Monospace font set to '{}'.", family),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "size" => {
+            let val = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match val {
+                Some(v) => match fontsettings::set_default_size(v) {
+                    Ok(()) => shell_println!("Default size set to {} dp.", v),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: fontsettings size <decipoints>"),
+            }
+        }
+        "scale" => {
+            let val = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match val {
+                Some(v) => match fontsettings::set_text_scale(v) {
+                    Ok(()) => shell_println!("Text scale set to {}%.", v),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: fontsettings scale <percent>"),
+            }
+        }
+        "ligatures" | "lig" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            match val {
+                "on" | "true" => match fontsettings::set_ligatures(true) {
+                    Ok(()) => shell_println!("Ligatures enabled."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                "off" | "false" => match fontsettings::set_ligatures(false) {
+                    Ok(()) => shell_println!("Ligatures disabled."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Usage: fontsettings ligatures <on|off>"),
+            }
+        }
+        "stats" => {
+            let (changes, ops) = fontsettings::stats();
+            shell_println!("Font settings stats:");
+            shell_println!("  Total changes: {}", changes);
+            shell_println!("  Operations:    {}", ops);
+        }
+        "test" => fontsettings::self_test(),
+        _ => {
+            shell_println!("Usage: fontsettings <subcommand>");
+            shell_println!("  show                  Current config");
+            shell_println!("  aa <method>           Set antialiasing (none|grayscale|subpixel|bgr)");
+            shell_println!("  hinting <level>       Set hinting (none|slight|medium|full)");
+            shell_println!("  font <family>         Set default font family");
+            shell_println!("  mono <family>         Set monospace font family");
+            shell_println!("  size <decipoints>     Set default size (60-400)");
+            shell_println!("  scale <percent>       Set text scale (50-300)");
+            shell_println!("  ligatures <on|off>    Toggle ligatures");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `notifbadge` / `nbadge` — notification badge management.
+fn cmd_notifbadge(args: &str) {
+    use crate::fs::notifbadge;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { notifbadge::init_defaults(); shell_println!("Notification badges initialised."); }
+        "show" | "" => {
+            notifbadge::init_defaults();
+            let visible = notifbadge::list_visible();
+            if visible.is_empty() {
+                shell_println!("No visible badges.");
+            } else {
+                shell_println!("Visible badges:");
+                for b in &visible {
+                    match b.style {
+                        notifbadge::BadgeStyle::Count => shell_println!("  {} — count: {}", b.app_name, b.count),
+                        notifbadge::BadgeStyle::Dot => shell_println!("  {} — dot", b.app_name),
+                        notifbadge::BadgeStyle::Attention => shell_println!("  {} — attention", b.app_name),
+                        notifbadge::BadgeStyle::Progress => shell_println!("  {} — progress: {}%", b.app_name, b.progress),
+                    }
+                }
+            }
+        }
+        "set" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let count = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            if app.is_empty() || count.is_none() {
+                shell_println!("Usage: notifbadge set <app> <count>");
+                return;
+            }
+            match notifbadge::set_count(app, count.unwrap_or(0)) {
+                Ok(()) => shell_println!("Badge for '{}' set to {}.", app, count.unwrap_or(0)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "inc" | "increment" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() { shell_println!("Usage: notifbadge inc <app>"); return; }
+            match notifbadge::increment(app) {
+                Ok(c) => shell_println!("Badge for '{}' incremented to {}.", app, c),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "dot" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let vis = parts.get(2).copied().unwrap_or("true");
+            if app.is_empty() { shell_println!("Usage: notifbadge dot <app> [true|false]"); return; }
+            let v = vis != "false";
+            match notifbadge::set_dot(app, v) {
+                Ok(()) => shell_println!("Dot badge for '{}' set to {}.", app, v),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "progress" | "prog" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            let pct = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            if app.is_empty() || pct.is_none() {
+                shell_println!("Usage: notifbadge progress <app> <0-100>");
+                return;
+            }
+            match notifbadge::set_progress(app, pct.unwrap_or(0)) {
+                Ok(()) => shell_println!("Progress badge for '{}' set to {}%.", app, pct.unwrap_or(0)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clear" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                match notifbadge::clear_all() {
+                    Ok(()) => shell_println!("All badges cleared."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                match notifbadge::clear(app) {
+                    Ok(()) => shell_println!("Badge for '{}' cleared.", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "get" => {
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() { shell_println!("Usage: notifbadge get <app>"); return; }
+            match notifbadge::get_badge(app) {
+                Some(b) => {
+                    shell_println!("Badge for '{}':", app);
+                    shell_println!("  Style:    {}", b.style.label());
+                    shell_println!("  Count:    {}", b.count);
+                    shell_println!("  Progress: {}%", b.progress);
+                    shell_println!("  Visible:  {}", b.visible);
+                }
+                None => shell_println!("No badge for '{}'.", app),
+            }
+        }
+        "enable" => match notifbadge::set_global_enabled(true) {
+            Ok(()) => shell_println!("Badges enabled globally."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "disable" => match notifbadge::set_global_enabled(false) {
+            Ok(()) => shell_println!("Badges disabled globally."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (count, visible, updates, ops) = notifbadge::stats();
+            shell_println!("Badge stats:");
+            shell_println!("  Badge count:   {}", count);
+            shell_println!("  Visible count: {}", visible);
+            shell_println!("  Total updates: {}", updates);
+            shell_println!("  Operations:    {}", ops);
+        }
+        "test" => notifbadge::self_test(),
+        _ => {
+            shell_println!("Usage: notifbadge <subcommand>");
+            shell_println!("  show                  List visible badges");
+            shell_println!("  set <app> <count>     Set count badge");
+            shell_println!("  inc <app>             Increment count");
+            shell_println!("  dot <app> [bool]      Set dot badge");
+            shell_println!("  progress <app> <pct>  Set progress badge");
+            shell_println!("  get <app>             Show badge details");
+            shell_println!("  clear [app]           Clear badge(s)");
+            shell_println!("  enable / disable      Toggle globally");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `lockwallpaper` / `lwp` — lock screen wallpaper management.
+fn cmd_lockwallpaper(args: &str) {
+    use crate::fs::lockwallpaper;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { lockwallpaper::init_defaults(); shell_println!("Lock wallpaper initialised."); }
+        "show" | "" => {
+            lockwallpaper::init_defaults();
+            match lockwallpaper::get_config() {
+                Some(cfg) => {
+                    shell_println!("Lock Wallpaper:");
+                    shell_println!("  Mode:           {}", cfg.mode.label());
+                    shell_println!("  Current image:  {}", cfg.current_image);
+                    shell_println!("  Fit:            {}", cfg.fit_mode.label());
+                    shell_println!("  Solid color:    {}", cfg.solid_color);
+                    shell_println!("  Show clock:     {}", cfg.show_clock);
+                    shell_println!("  Show notifs:    {}", cfg.show_notifications);
+                    shell_println!("  Blur behind:    {}", cfg.blur_behind);
+                    if cfg.mode == lockwallpaper::LockWallpaperMode::Slideshow {
+                        shell_println!("  Slideshow dir:  {}", cfg.slideshow_dir);
+                        shell_println!("  Interval:       {}s", cfg.slideshow_interval_secs);
+                        shell_println!("  Images:         {}", cfg.slideshow_images.len());
+                    }
+                }
+                None => shell_println!("Lock wallpaper not initialised."),
+            }
+        }
+        "image" | "set" => {
+            let path = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if path.is_empty() { shell_println!("Usage: lockwallpaper image <path>"); return; }
+            match lockwallpaper::set_image(&path) {
+                Ok(()) => shell_println!("Lock wallpaper set to '{}'.", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mode" => {
+            let m = parts.get(1).copied().unwrap_or("");
+            let mode = match m {
+                "static" => lockwallpaper::LockWallpaperMode::Static,
+                "slideshow" => lockwallpaper::LockWallpaperMode::Slideshow,
+                "spotlight" => lockwallpaper::LockWallpaperMode::Spotlight,
+                "color" | "solid" => lockwallpaper::LockWallpaperMode::SolidColor,
+                "desktop" => lockwallpaper::LockWallpaperMode::SameAsDesktop,
+                _ => { shell_println!("Usage: lockwallpaper mode <static|slideshow|spotlight|color|desktop>"); return; }
+            };
+            match lockwallpaper::set_mode(mode) {
+                Ok(()) => shell_println!("Lock wallpaper mode set to {}.", mode.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "slideshow" => {
+            let dir = parts.get(1).copied().unwrap_or("");
+            let interval = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(60);
+            if dir.is_empty() { shell_println!("Usage: lockwallpaper slideshow <dir> [interval_secs]"); return; }
+            match lockwallpaper::set_slideshow_dir(dir, interval) {
+                Ok(()) => shell_println!("Slideshow set: dir='{}', interval={}s.", dir, interval),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "addimage" | "add" => {
+            let path = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            if path.is_empty() { shell_println!("Usage: lockwallpaper add <image_path>"); return; }
+            match lockwallpaper::add_slideshow_image(&path) {
+                Ok(()) => shell_println!("Added '{}' to slideshow.", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rotate" | "next" => {
+            match lockwallpaper::rotate() {
+                Ok(img) => shell_println!("Rotated to: {}", img),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "fit" => {
+            let f = parts.get(1).copied().unwrap_or("");
+            let fit = match f {
+                "fill" => lockwallpaper::FitMode::Fill,
+                "fit" => lockwallpaper::FitMode::Fit,
+                "stretch" => lockwallpaper::FitMode::Stretch,
+                "tile" => lockwallpaper::FitMode::Tile,
+                "center" => lockwallpaper::FitMode::Center,
+                "span" => lockwallpaper::FitMode::Span,
+                _ => { shell_println!("Usage: lockwallpaper fit <fill|fit|stretch|tile|center|span>"); return; }
+            };
+            match lockwallpaper::set_fit_mode(fit) {
+                Ok(()) => shell_println!("Fit mode set to {}.", fit.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "color" => {
+            let c = parts.get(1).copied().unwrap_or("");
+            if c.is_empty() { shell_println!("Usage: lockwallpaper color <#rrggbb>"); return; }
+            match lockwallpaper::set_solid_color(c) {
+                Ok(()) => shell_println!("Solid color set to '{}'.", c),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clock" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            let (clk, notif) = match val {
+                "on" => (true, true),
+                "off" => (false, false),
+                _ => { shell_println!("Usage: lockwallpaper clock <on|off>"); return; }
+            };
+            match lockwallpaper::set_overlays(clk, notif) {
+                Ok(()) => shell_println!("Overlays set: clock={}, notifications={}.", clk, notif),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "blur" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            match val {
+                "on" | "true" => match lockwallpaper::set_blur(true) {
+                    Ok(()) => shell_println!("Blur enabled."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                "off" | "false" => match lockwallpaper::set_blur(false) {
+                    Ok(()) => shell_println!("Blur disabled."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Usage: lockwallpaper blur <on|off>"),
+            }
+        }
+        "stats" => {
+            let (rotations, changes, ops) = lockwallpaper::stats();
+            shell_println!("Lock wallpaper stats:");
+            shell_println!("  Total rotations: {}", rotations);
+            shell_println!("  Total changes:   {}", changes);
+            shell_println!("  Operations:      {}", ops);
+        }
+        "test" => lockwallpaper::self_test(),
+        _ => {
+            shell_println!("Usage: lockwallpaper <subcommand>");
+            shell_println!("  show                  Current config");
+            shell_println!("  image <path>          Set static image");
+            shell_println!("  mode <type>           Set mode (static|slideshow|spotlight|color|desktop)");
+            shell_println!("  slideshow <dir> [s]   Set slideshow directory");
+            shell_println!("  add <path>            Add slideshow image");
+            shell_println!("  rotate                Next slideshow image");
+            shell_println!("  fit <mode>            Set fit mode");
+            shell_println!("  color <#hex>          Set solid color");
+            shell_println!("  clock <on|off>        Toggle overlays");
+            shell_println!("  blur <on|off>         Toggle blur behind");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `systemsounds` / `ssounds` — system sound scheme management.
+fn cmd_systemsounds(args: &str) {
+    use crate::fs::systemsounds;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { systemsounds::init_defaults(); shell_println!("System sounds initialised."); }
+        "show" | "" => {
+            systemsounds::init_defaults();
+            shell_println!("Active scheme: {}", systemsounds::active_scheme());
+            shell_println!("Available schemes: {:?}", systemsounds::list_schemes());
+            let assignments = systemsounds::list_assignments();
+            if assignments.is_empty() {
+                shell_println!("No assignments in active scheme.");
+            } else {
+                shell_println!("Assignments ({}):", assignments.len());
+                for a in &assignments {
+                    let status = if a.enabled { "on" } else { "off" };
+                    shell_println!("  {:20} {} [{}] (plays: {})", a.event.label(), a.sound_path, status, a.play_count);
+                }
+            }
+        }
+        "play" => {
+            let event_name = parts.get(1).copied().unwrap_or("");
+            let event = match parse_sound_event(event_name) {
+                Some(e) => e,
+                None => { shell_println!("Unknown event '{}'. Use: startup, shutdown, login, logout, lock, unlock, notification, error, warning, info, device_connect, device_disconnect, recycle_bin, message_send, message_receive, screenshot, volume, low_battery", event_name); return; }
+            };
+            match systemsounds::play(event) {
+                Ok(Some(path)) => shell_println!("Playing: {}", path),
+                Ok(None) => shell_println!("Sound disabled or not assigned."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "set" => {
+            let event_name = parts.get(1).copied().unwrap_or("");
+            let path = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
+            let event = match parse_sound_event(event_name) {
+                Some(e) => e,
+                None => { shell_println!("Unknown event. Use: startup, shutdown, notification, error, etc."); return; }
+            };
+            if path.is_empty() { shell_println!("Usage: systemsounds set <event> <path>"); return; }
+            match systemsounds::set_sound(event, &path) {
+                Ok(()) => shell_println!("Sound for {} set to '{}'.", event.label(), path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => {
+            let event_name = parts.get(1).copied().unwrap_or("");
+            if event_name.is_empty() {
+                match systemsounds::set_global_enabled(true) {
+                    Ok(()) => shell_println!("System sounds enabled globally."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let event = match parse_sound_event(event_name) {
+                    Some(e) => e,
+                    None => { shell_println!("Unknown event."); return; }
+                };
+                match systemsounds::set_event_enabled(event, true) {
+                    Ok(()) => shell_println!("Sound for {} enabled.", event.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "disable" => {
+            let event_name = parts.get(1).copied().unwrap_or("");
+            if event_name.is_empty() {
+                match systemsounds::set_global_enabled(false) {
+                    Ok(()) => shell_println!("System sounds disabled globally."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let event = match parse_sound_event(event_name) {
+                    Some(e) => e,
+                    None => { shell_println!("Unknown event."); return; }
+                };
+                match systemsounds::set_event_enabled(event, false) {
+                    Ok(()) => shell_println!("Sound for {} disabled.", event.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "scheme" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Active: {}", systemsounds::active_scheme());
+                shell_println!("Available: {:?}", systemsounds::list_schemes());
+            } else {
+                match systemsounds::set_scheme(name) {
+                    Ok(()) => shell_println!("Scheme set to '{}'.", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "stats" => {
+            let (schemes, events, plays, ops) = systemsounds::stats();
+            shell_println!("System sounds stats:");
+            shell_println!("  Scheme count: {}", schemes);
+            shell_println!("  Event count:  {}", events);
+            shell_println!("  Total plays:  {}", plays);
+            shell_println!("  Operations:   {}", ops);
+        }
+        "test" => systemsounds::self_test(),
+        _ => {
+            shell_println!("Usage: systemsounds <subcommand>");
+            shell_println!("  show                  Current assignments");
+            shell_println!("  play <event>          Play event sound");
+            shell_println!("  set <event> <path>    Set sound for event");
+            shell_println!("  enable [event]        Enable sound/all");
+            shell_println!("  disable [event]       Disable sound/all");
+            shell_println!("  scheme [name]         Show/switch scheme");
+            shell_println!("  stats / test / init");
+            shell_println!("  Events: startup shutdown login logout lock unlock notification");
+            shell_println!("          error warning info device_connect device_disconnect");
+            shell_println!("          recycle_bin message_send message_receive screenshot");
+            shell_println!("          volume low_battery");
+        }
+    }
+}
+
+/// Parse a sound event name string into a SoundEvent enum.
+fn parse_sound_event(name: &str) -> Option<crate::fs::systemsounds::SoundEvent> {
+    use crate::fs::systemsounds::SoundEvent;
+    match name {
+        "startup" => Some(SoundEvent::Startup),
+        "shutdown" => Some(SoundEvent::Shutdown),
+        "login" => Some(SoundEvent::Login),
+        "logout" => Some(SoundEvent::Logout),
+        "lock" => Some(SoundEvent::LockScreen),
+        "unlock" => Some(SoundEvent::UnlockScreen),
+        "notification" | "notif" => Some(SoundEvent::Notification),
+        "error" => Some(SoundEvent::Error),
+        "warning" | "warn" => Some(SoundEvent::Warning),
+        "info" | "information" => Some(SoundEvent::Information),
+        "device_connect" | "connect" => Some(SoundEvent::DeviceConnect),
+        "device_disconnect" | "disconnect" => Some(SoundEvent::DeviceDisconnect),
+        "recycle_bin" | "recycle" => Some(SoundEvent::EmptyRecycleBin),
+        "message_send" | "send" => Some(SoundEvent::MessageSend),
+        "message_receive" | "receive" => Some(SoundEvent::MessageReceive),
+        "screenshot" => Some(SoundEvent::Screenshot),
+        "volume" | "volume_change" => Some(SoundEvent::VolumeChange),
+        "low_battery" | "battery" => Some(SoundEvent::LowBattery),
+        _ => None,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -46195,7 +46749,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

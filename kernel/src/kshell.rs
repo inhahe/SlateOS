@@ -3455,6 +3455,7 @@ const COMMANDS: &[&str] = &[
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "usbpolicy", "usbpol", "applaunch", "alaunch", "sysprofiler", "sprof", "clipsync", "clsync",
     "netusage", "nusage", "touchscreen", "tscreen", "diskquota", "dquota", "appdefaults", "adef",
+    "policyengine", "pengine", "fontpreview", "fprev", "wifiscan", "wifi", "splitview", "split",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4951,6 +4952,10 @@ fn dispatch(line: &str) {
         "touchscreen" | "tscreen" => cmd_touchscreen(args),
         "diskquota" | "dquota" => cmd_diskquota(args),
         "appdefaults" | "adef" => cmd_appdefaults(args),
+        "policyengine" | "pengine" => cmd_policyengine(args),
+        "fontpreview" | "fprev" => cmd_fontpreview(args),
+        "wifiscan" | "wifi" => cmd_wifiscan(args),
+        "splitview" | "split" => cmd_splitview(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -43084,6 +43089,585 @@ fn cmd_appdefaults(args: &str) {
     }
 }
 
+/// `policyengine` / `pengine` — system-wide policy enforcement.
+fn cmd_policyengine(args: &str) {
+    use crate::fs::policyengine;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "eval" | "evaluate" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: policyengine eval <subject> <action> <resource>");
+                return;
+            }
+            match policyengine::evaluate(parts[1], parts[2], parts[3]) {
+                Ok(effect) => shell_println!("Result: {} (subject={} action={} resource={})", effect.label(), parts[1], parts[2], parts[3]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" => {
+            if parts.len() < 7 {
+                shell_println!("Usage: policyengine add <name> <category> <subject> <action> <resource> <effect> [priority]");
+                return;
+            }
+            let cat = parse_policy_category(parts[2]);
+            let effect = parse_policy_effect(parts[6]);
+            let priority = parts.get(7).and_then(|s| s.parse::<u32>().ok()).unwrap_or(50);
+            match policyengine::add_rule(parts[1], cat, parts[3], parts[4], parts[5], effect, priority) {
+                Ok(id) => shell_println!("Added rule #{}: {} [{}] → {}", id, parts[1], cat.label(), effect.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match policyengine::remove_rule(id) {
+                        Ok(()) => shell_println!("Removed rule #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid rule ID");
+                }
+            } else {
+                shell_println!("Usage: policyengine remove <id>");
+            }
+        }
+        "list" => {
+            let rules = policyengine::list_rules();
+            if rules.is_empty() {
+                shell_println!("No policy rules");
+            } else {
+                for r in &rules {
+                    let en = if r.enabled { "ON" } else { "OFF" };
+                    shell_println!("  #{}: {} [{}] [{}] p={} hits={}", r.id, r.name, r.category.label(), en, r.priority, r.hit_count);
+                    shell_println!("     {} {} {} → {}", r.subject, r.action, r.resource, r.effect.label());
+                }
+            }
+        }
+        "audit" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let log = policyengine::get_audit_log(max);
+            if log.is_empty() {
+                shell_println!("No audit entries");
+            } else {
+                for e in &log {
+                    let rule = e.rule_id.map_or(String::from("default"), |id| format!("rule#{}", id));
+                    shell_println!("  {} {} {} → {} ({})", e.subject, e.action, e.resource, e.effect.label(), rule);
+                }
+            }
+        }
+        "enforce" => {
+            if let Some(v) = parts.get(1) {
+                let on = *v == "on" || *v == "true" || *v == "yes";
+                match policyengine::set_enforcement(on) {
+                    Ok(()) => shell_println!("Enforcement: {}", if on { "ON" } else { "OFF" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: policyengine enforce <on|off>");
+            }
+        }
+        "default" => {
+            if let Some(v) = parts.get(1) {
+                let effect = parse_policy_effect(v);
+                match policyengine::set_default(effect) {
+                    Ok(()) => shell_println!("Default effect: {}", effect.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: policyengine default <allow|deny|audit>");
+            }
+        }
+        "stats" => {
+            let (rules, audit, evals, denials, audits, ops) = policyengine::stats();
+            shell_println!("Policy Engine: {} rules, {} audit entries", rules, audit);
+            shell_println!("  Evaluations: {} | Denials: {} | Audits: {} | Ops: {}", evals, denials, audits, ops);
+        }
+        "test" => {
+            policyengine::self_test();
+            shell_println!("policyengine self-test complete");
+        }
+        "init" => {
+            policyengine::init_defaults();
+            shell_println!("policyengine initialised");
+        }
+        _ => {
+            shell_println!("policyengine — system-wide policy enforcement");
+            shell_println!("  eval <subject> <action> <resource>  Evaluate policy");
+            shell_println!("  add <name> <cat> <subj> <act> <res> <effect> [pri]");
+            shell_println!("  remove <id>              Remove rule");
+            shell_println!("  list                     List rules");
+            shell_println!("  audit [n]                Show audit log");
+            shell_println!("  enforce <on|off>         Toggle enforcement");
+            shell_println!("  default <effect>         Set default effect");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_policy_category(s: &str) -> crate::fs::policyengine::PolicyCategory {
+    use crate::fs::policyengine::PolicyCategory;
+    match s.to_lowercase().as_str() {
+        "security" | "sec" => PolicyCategory::Security,
+        "privacy" | "priv" => PolicyCategory::Privacy,
+        "network" | "net" => PolicyCategory::Network,
+        "application" | "app" => PolicyCategory::Application,
+        "hardware" | "hw" => PolicyCategory::Hardware,
+        "storage" | "stor" => PolicyCategory::Storage,
+        "system" | "sys" => PolicyCategory::System,
+        _ => PolicyCategory::System,
+    }
+}
+
+fn parse_policy_effect(s: &str) -> crate::fs::policyengine::Effect {
+    use crate::fs::policyengine::Effect;
+    match s.to_lowercase().as_str() {
+        "allow" => Effect::Allow,
+        "deny" | "block" => Effect::Deny,
+        "audit" | "log" => Effect::Audit,
+        "allowaudit" | "allow+audit" => Effect::AllowWithAudit,
+        _ => Effect::Allow,
+    }
+}
+
+/// `fontpreview` / `fprev` — font preview and comparison.
+fn cmd_fontpreview(args: &str) {
+    use crate::fs::fontpreview;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "preview" | "show" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    let size = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(16);
+                    let sample = if parts.len() > 3 { Some(parts[3..].join(" ")) } else { None };
+                    match fontpreview::preview(id, sample.as_deref(), size) {
+                        Ok(p) => {
+                            shell_println!("  {} {} @ {}pt", p.family, p.style.label(), p.size_pt);
+                            shell_println!("  \"{}\"", p.sample_text);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid font ID");
+                }
+            } else {
+                shell_println!("Usage: fontpreview preview <id> [size] [sample_text]");
+            }
+        }
+        "compare" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fontpreview compare <id1,id2,...> [size]");
+                return;
+            }
+            let ids: Vec<u32> = parts[1].split(',').filter_map(|s| s.parse::<u32>().ok()).collect();
+            let size = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(14);
+            match fontpreview::compare(&ids, None, size) {
+                Ok(results) => {
+                    for r in &results {
+                        shell_println!("  #{}: {} {} @ {}pt", r.font_id, r.family, r.style.label(), r.size_pt);
+                        shell_println!("     \"{}\"", r.sample_text);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "search" => {
+            if let Some(q) = parts.get(1) {
+                let results = fontpreview::search(q);
+                if results.is_empty() {
+                    shell_println!("No fonts matching '{}'", q);
+                } else {
+                    for f in &results {
+                        shell_println!("  #{}: {} {} [{}] ({} glyphs)", f.id, f.family, f.style.label(), f.category.label(), f.glyph_count);
+                    }
+                }
+            } else {
+                shell_println!("Usage: fontpreview search <query>");
+            }
+        }
+        "category" | "cat" => {
+            if let Some(c) = parts.get(1) {
+                let cat = parse_font_category(c);
+                let fonts = fontpreview::by_category(cat);
+                if fonts.is_empty() {
+                    shell_println!("No {} fonts", cat.label());
+                } else {
+                    for f in &fonts {
+                        shell_println!("  #{}: {} {}", f.id, f.family, f.style.label());
+                    }
+                }
+            } else {
+                shell_println!("Usage: fontpreview category <sans|serif|mono|display|hand|symbol>");
+            }
+        }
+        "list" => {
+            let fonts = fontpreview::list_fonts();
+            if fonts.is_empty() {
+                shell_println!("No fonts registered");
+            } else {
+                for f in &fonts {
+                    shell_println!("  #{}: {} {} [{}] {} v{} ({} glyphs, {} previews)", f.id, f.family, f.style.label(), f.category.label(), f.file_path, f.version, f.glyph_count, f.preview_count);
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: fontpreview add <family> <style> <category> <path> [version] [glyphs]");
+                return;
+            }
+            let style = parse_font_style(parts[2]);
+            let cat = parse_font_category(parts[3]);
+            let path = parts[4];
+            let version = parts.get(5).copied().unwrap_or("1.0");
+            let glyphs = parts.get(6).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            match fontpreview::add_font(parts[1], style, cat, path, version, glyphs) {
+                Ok(id) => shell_println!("Added font #{}: {} {}", id, parts[1], style.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "sample" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fontpreview sample <text...>");
+                return;
+            }
+            let text = parts[1..].join(" ");
+            match fontpreview::set_sample(&text) {
+                Ok(()) => shell_println!("Default sample: \"{}\"", text),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (fonts, previews, comparisons, ops) = fontpreview::stats();
+            shell_println!("Font Preview: {} fonts, {} previews, {} comparisons, {} ops", fonts, previews, comparisons, ops);
+        }
+        "test" => {
+            fontpreview::self_test();
+            shell_println!("fontpreview self-test complete");
+        }
+        "init" => {
+            fontpreview::init_defaults();
+            shell_println!("fontpreview initialised");
+        }
+        _ => {
+            shell_println!("fontpreview — font preview and comparison");
+            shell_println!("  preview <id> [size] [text]   Preview a font");
+            shell_println!("  compare <id1,id2> [size]     Compare fonts");
+            shell_println!("  search <query>               Search fonts");
+            shell_println!("  category <type>              Browse by category");
+            shell_println!("  list                         List all fonts");
+            shell_println!("  add <family> <style> <cat> <path>  Add font");
+            shell_println!("  sample <text>                Set default sample");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_font_style(s: &str) -> crate::fs::fontpreview::FontStyle {
+    use crate::fs::fontpreview::FontStyle;
+    match s.to_lowercase().as_str() {
+        "regular" | "r" => FontStyle::Regular,
+        "bold" | "b" => FontStyle::Bold,
+        "italic" | "i" => FontStyle::Italic,
+        "bolditalic" | "bi" => FontStyle::BoldItalic,
+        "light" | "l" => FontStyle::Light,
+        "medium" | "m" => FontStyle::Medium,
+        "semibold" | "sb" => FontStyle::SemiBold,
+        "extrabold" | "eb" => FontStyle::ExtraBold,
+        _ => FontStyle::Regular,
+    }
+}
+
+fn parse_font_category(s: &str) -> crate::fs::fontpreview::FontCategory {
+    use crate::fs::fontpreview::FontCategory;
+    match s.to_lowercase().as_str() {
+        "sans" | "sansserif" => FontCategory::SansSerif,
+        "serif" => FontCategory::Serif,
+        "mono" | "monospace" => FontCategory::Monospace,
+        "display" => FontCategory::Display,
+        "hand" | "handwriting" => FontCategory::Handwriting,
+        "symbol" | "sym" => FontCategory::Symbol,
+        _ => FontCategory::SansSerif,
+    }
+}
+
+/// `wifiscan` / `wifi` — Wi-Fi network scanning and management.
+fn cmd_wifiscan(args: &str) {
+    use crate::fs::wifiscan;
+    use alloc::format;
+    use alloc::string::String;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "scan" => {
+            match wifiscan::scan() {
+                Ok(count) => shell_println!("Scan complete: {} networks visible", count),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "discover" => {
+            if parts.len() < 6 {
+                shell_println!("Usage: wifiscan discover <ssid> <bssid> <security> <band> <channel> [signal]");
+                return;
+            }
+            let security = parse_wifi_security(parts[3]);
+            let band = parse_wifi_band(parts[4]);
+            let channel = parts[5].parse::<u8>().unwrap_or(1);
+            let signal = parts.get(6).and_then(|s| s.parse::<i32>().ok()).unwrap_or(-60);
+            match wifiscan::discover(parts[1], parts[2], security, band, channel, signal) {
+                Ok(id) => shell_println!("Network #{}: {} ({} {} ch{} {}dBm)", id, parts[1], security.label(), band.label(), channel, signal),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "connect" => {
+            if let Some(ssid) = parts.get(1) {
+                match wifiscan::connect(ssid) {
+                    Ok(()) => shell_println!("Connected to '{}'", ssid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: wifiscan connect <ssid>");
+            }
+        }
+        "disconnect" => {
+            match wifiscan::disconnect() {
+                Ok(()) => shell_println!("Disconnected"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "forget" => {
+            if let Some(ssid) = parts.get(1) {
+                match wifiscan::forget(ssid) {
+                    Ok(()) => shell_println!("Forgot '{}'", ssid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: wifiscan forget <ssid>");
+            }
+        }
+        "status" => {
+            let state = wifiscan::get_state();
+            let ssid = wifiscan::connected_ssid().unwrap_or_else(|| String::from("none"));
+            shell_println!("Wi-Fi: {} ({})", state.label(), ssid);
+        }
+        "list" | "networks" => {
+            let nets = wifiscan::list_networks();
+            if nets.is_empty() {
+                shell_println!("No networks discovered");
+            } else {
+                for n in &nets {
+                    let known = if n.known { "★" } else { " " };
+                    shell_println!("  {} #{}: {} [{}] {} ch{} {}dBm", known, n.id, n.ssid, n.security.label(), n.band.label(), n.channel, n.signal_dbm);
+                }
+            }
+        }
+        "saved" => {
+            let saved = wifiscan::list_saved();
+            if saved.is_empty() {
+                shell_println!("No saved networks");
+            } else {
+                for s in &saved {
+                    let auto = if s.auto_connect { "auto" } else { "manual" };
+                    shell_println!("  {} [{}] {} (connected {} times)", s.ssid, s.security.label(), auto, s.connect_count);
+                }
+            }
+        }
+        "stats" => {
+            let (nets, saved, scans, conns, fails, ops) = wifiscan::stats();
+            shell_println!("Wi-Fi: {} networks, {} saved", nets, saved);
+            shell_println!("  Scans: {} | Connections: {} | Failures: {} | Ops: {}", scans, conns, fails, ops);
+        }
+        "test" => {
+            wifiscan::self_test();
+            shell_println!("wifiscan self-test complete");
+        }
+        "init" => {
+            wifiscan::init_defaults();
+            shell_println!("wifiscan initialised");
+        }
+        _ => {
+            shell_println!("wifiscan — Wi-Fi network management");
+            shell_println!("  scan                                      Scan for networks");
+            shell_println!("  discover <ssid> <bssid> <sec> <band> <ch> Add network");
+            shell_println!("  connect <ssid>                            Connect");
+            shell_println!("  disconnect                                Disconnect");
+            shell_println!("  forget <ssid>                             Forget saved");
+            shell_println!("  status                                    Show status");
+            shell_println!("  list                                      List networks");
+            shell_println!("  saved                                     Saved networks");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_wifi_security(s: &str) -> crate::fs::wifiscan::SecurityType {
+    use crate::fs::wifiscan::SecurityType;
+    match s.to_lowercase().as_str() {
+        "open" | "none" => SecurityType::Open,
+        "wep" => SecurityType::Wep,
+        "wpa" | "wpapsk" => SecurityType::WpaPsk,
+        "wpa2" | "wpa2psk" => SecurityType::Wpa2Psk,
+        "wpa3" | "wpa3psk" | "sae" => SecurityType::Wpa3Psk,
+        "wpa2e" | "wpa2enterprise" => SecurityType::Wpa2Enterprise,
+        "wpa3e" | "wpa3enterprise" => SecurityType::Wpa3Enterprise,
+        _ => SecurityType::Wpa2Psk,
+    }
+}
+
+fn parse_wifi_band(s: &str) -> crate::fs::wifiscan::Band {
+    use crate::fs::wifiscan::Band;
+    match s.to_lowercase().as_str() {
+        "2.4" | "2g" | "24" | "24ghz" => Band::Band24Ghz,
+        "5" | "5g" | "5ghz" => Band::Band5Ghz,
+        "6" | "6g" | "6ghz" | "6e" => Band::Band6Ghz,
+        _ => Band::Band5Ghz,
+    }
+}
+
+/// `splitview` / `split` — multi-pane window management.
+fn cmd_splitview(args: &str) {
+    use crate::fs::splitview;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "create" => {
+            let orient = if parts.get(1).copied().unwrap_or("h") == "v" {
+                splitview::Orientation::Vertical
+            } else {
+                splitview::Orientation::Horizontal
+            };
+            match splitview::create_split(orient) {
+                Ok(id) => shell_println!("Created split #{} ({})", id, orient.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match splitview::remove_split(id) {
+                        Ok(()) => shell_println!("Removed split #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid split ID");
+                }
+            } else {
+                shell_println!("Usage: splitview remove <split_id>");
+            }
+        }
+        "add" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: splitview add <split_id> [window_id]");
+                return;
+            }
+            let split_id = parts[1].parse::<u32>().unwrap_or(0);
+            let win_id = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            match splitview::add_pane(split_id, win_id) {
+                Ok(pane_id) => shell_println!("Added pane #{} to split #{}", pane_id, split_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rmpane" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: splitview rmpane <split_id> <pane_id>");
+                return;
+            }
+            let split_id = parts[1].parse::<u32>().unwrap_or(0);
+            let pane_id = parts[2].parse::<u32>().unwrap_or(0);
+            match splitview::remove_pane(split_id, pane_id) {
+                Ok(()) => shell_println!("Removed pane #{} from split #{}", pane_id, split_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "resize" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: splitview resize <split_id> <pane_id> <ratio>");
+                return;
+            }
+            let split_id = parts[1].parse::<u32>().unwrap_or(0);
+            let pane_id = parts[2].parse::<u32>().unwrap_or(0);
+            let ratio = parts[3].parse::<u32>().unwrap_or(50);
+            match splitview::resize_pane(split_id, pane_id, ratio) {
+                Ok(()) => shell_println!("Resized pane #{} to {}%", pane_id, ratio),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "focus" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: splitview focus <split_id> <pane_id>");
+                return;
+            }
+            let split_id = parts[1].parse::<u32>().unwrap_or(0);
+            let pane_id = parts[2].parse::<u32>().unwrap_or(0);
+            match splitview::focus_pane(split_id, pane_id) {
+                Ok(()) => shell_println!("Focused pane #{}", pane_id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "orient" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: splitview orient <split_id> <h|v>");
+                return;
+            }
+            let split_id = parts[1].parse::<u32>().unwrap_or(0);
+            let orient = if parts[2] == "v" {
+                splitview::Orientation::Vertical
+            } else {
+                splitview::Orientation::Horizontal
+            };
+            match splitview::set_orientation(split_id, orient) {
+                Ok(()) => shell_println!("Split #{}: {}", split_id, orient.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" => {
+            let splits = splitview::list_splits();
+            if splits.is_empty() {
+                shell_println!("No splits");
+            } else {
+                let active = splitview::active_split();
+                for s in &splits {
+                    let marker = if active == Some(s.id) { "→" } else { " " };
+                    shell_println!("{} Split #{} ({}, {} panes)", marker, s.id, s.orientation.label(), s.panes.len());
+                    for p in &s.panes {
+                        let f = if p.focused { "★" } else { " " };
+                        let win = p.window_id.map_or(String::from("empty"), |w| format!("win#{}", w));
+                        shell_println!("    {} Pane #{}: {} ({}%)", f, p.id, win, p.ratio);
+                    }
+                }
+            }
+        }
+        "stats" => {
+            let (splits, created, panes, resizes, ops) = splitview::stats();
+            shell_println!("Split View: {} splits, {} created total", splits, created);
+            shell_println!("  Panes added: {} | Resizes: {} | Ops: {}", panes, resizes, ops);
+        }
+        "test" => {
+            splitview::self_test();
+            shell_println!("splitview self-test complete");
+        }
+        "init" => {
+            splitview::init_defaults();
+            shell_println!("splitview initialised");
+        }
+        _ => {
+            shell_println!("splitview — multi-pane window management");
+            shell_println!("  create <h|v>                     Create split");
+            shell_println!("  remove <split_id>                Remove split");
+            shell_println!("  add <split_id> [window_id]       Add pane");
+            shell_println!("  rmpane <split_id> <pane_id>      Remove pane");
+            shell_println!("  resize <split> <pane> <ratio>    Resize pane");
+            shell_println!("  focus <split_id> <pane_id>       Focus pane");
+            shell_println!("  orient <split_id> <h|v>          Set orientation");
+            shell_println!("  list                             List splits");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -51680,7 +52264,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

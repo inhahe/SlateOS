@@ -871,6 +871,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Touchscreen (fs::touchscreen): touchscreen input settings with 9 gesture types, device calibration, sensitivity (1-100), palm rejection, touch sound/vibration, custom gesture bindings; `touchscreen`/`tscreen` kshell command; /proc/touchscreen; 8 self-tests
   - [x] Disk Quota (fs::diskquota): per-user/group storage limits with soft/hard byte and file limits, grace periods, quota status tracking, usage delta updates; `diskquota`/`dquota` kshell command; /proc/diskquota; 8 self-tests
   - [x] App Defaults (fs::appdefaults): per-application settings registry with string/int/bool value types, auto-type detection, per-app read/write tracking, reset/remove operations; `appdefaults`/`adef` kshell command; /proc/appdefaults; 8 self-tests
+  - [x] Policy Engine (fs::policyengine): system-wide policy enforcement with subject/action/resource matching, wildcard and prefix patterns, priority-based rule evaluation, audit logging, 7 policy categories; `policyengine`/`pengine` kshell command; /proc/policyengine; 8 self-tests
+  - [x] Font Preview (fs::fontpreview): font browsing/comparison with 8 styles, 6 categories, search, preview with custom sample text, side-by-side comparison, font metadata; `fontpreview`/`fprev` kshell command; /proc/fontpreview; 8 self-tests
+  - [x] Wi-Fi Scanner (fs::wifiscan): wireless network scanning with 7 security types, 3 bands, signal-sorted listing, connect/disconnect, saved network profiles, auto-connect; `wifiscan`/`wifi` kshell command; /proc/wifiscan; 8 self-tests
+  - [x] Split View (fs::splitview): multi-pane window management with horizontal/vertical splits, dynamic pane addition/removal, ratio-based resizing, focus tracking, window assignment; `splitview`/`split` kshell command; /proc/splitview; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

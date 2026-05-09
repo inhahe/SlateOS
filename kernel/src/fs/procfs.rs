@@ -345,6 +345,10 @@ const ROOT_FILES: &[&str] = &[
     "touchscreen",
     "diskquota",
     "appdefaults",
+    "policyengine",
+    "fontpreview",
+    "wifiscan",
+    "splitview",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7029,6 +7033,63 @@ fn gen_appdefaults() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_policyengine() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (rule_count, audit_size, total_evals, total_denials, total_audits, ops) = super::policyengine::stats();
+    out.push_str("subsystem: policyengine\n");
+    out.push_str(&format!("rule_count: {}\n", rule_count));
+    out.push_str(&format!("audit_log_size: {}\n", audit_size));
+    out.push_str(&format!("total_evaluations: {}\n", total_evals));
+    out.push_str(&format!("total_denials: {}\n", total_denials));
+    out.push_str(&format!("total_audits: {}\n", total_audits));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_fontpreview() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (font_count, total_previews, total_comparisons, ops) = super::fontpreview::stats();
+    out.push_str("subsystem: fontpreview\n");
+    out.push_str(&format!("font_count: {}\n", font_count));
+    out.push_str(&format!("total_previews: {}\n", total_previews));
+    out.push_str(&format!("total_comparisons: {}\n", total_comparisons));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_wifiscan() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (network_count, saved_count, total_scans, total_connections, total_failures, ops) = super::wifiscan::stats();
+    out.push_str("subsystem: wifiscan\n");
+    out.push_str(&format!("network_count: {}\n", network_count));
+    out.push_str(&format!("saved_count: {}\n", saved_count));
+    out.push_str(&format!("total_scans: {}\n", total_scans));
+    out.push_str(&format!("total_connections: {}\n", total_connections));
+    out.push_str(&format!("total_failures: {}\n", total_failures));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_splitview() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (split_count, total_created, total_panes, total_resizes, ops) = super::splitview::stats();
+    out.push_str("subsystem: splitview\n");
+    out.push_str(&format!("split_count: {}\n", split_count));
+    out.push_str(&format!("total_created: {}\n", total_created));
+    out.push_str(&format!("total_panes_added: {}\n", total_panes));
+    out.push_str(&format!("total_resizes: {}\n", total_resizes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7539,6 +7600,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "touchscreen" => Ok(gen_touchscreen()),
         "diskquota" => Ok(gen_diskquota()),
         "appdefaults" => Ok(gen_appdefaults()),
+        "policyengine" => Ok(gen_policyengine()),
+        "fontpreview" => Ok(gen_fontpreview()),
+        "wifiscan" => Ok(gen_wifiscan()),
+        "splitview" => Ok(gen_splitview()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

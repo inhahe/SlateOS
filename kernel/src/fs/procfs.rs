@@ -223,6 +223,7 @@ const ROOT_FILES: &[&str] = &[
     "bluetooth",
     "printmgr",
     "screenrec",
+    "datausage",
     "columnview",
     "pathbar",
     "viewstate",
@@ -4981,6 +4982,37 @@ fn gen_screenrec() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_datausage() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (apps, daily, rx, tx, limits, ops) = super::datausage::stats();
+    out.push_str(&format!("apps_tracked: {}\n", apps));
+    out.push_str(&format!("daily_records: {}\n", daily));
+    out.push_str(&format!("total_rx: {}\n", rx));
+    out.push_str(&format!("total_tx: {}\n", tx));
+    out.push_str(&format!("total_rx_human: {}\n", super::datausage::format_bytes(rx)));
+    out.push_str(&format!("total_tx_human: {}\n", super::datausage::format_bytes(tx)));
+    out.push_str(&format!("limits: {}\n", limits));
+    out.push_str(&format!("metered: {}\n", super::datausage::metered_status().label()));
+    out.push_str(&format!("restrict_background: {}\n", super::datausage::should_restrict_background()));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let top_apps = super::datausage::app_usage();
+    if !top_apps.is_empty() {
+        out.push_str("top_apps:\n");
+        for app in top_apps.iter().take(10) {
+            out.push_str(&format!("  {}: rx={} tx={} total={}\n",
+                app.app_id,
+                super::datausage::format_bytes(app.rx_bytes),
+                super::datausage::format_bytes(app.tx_bytes),
+                super::datausage::format_bytes(app.total_bytes())));
+        }
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5369,6 +5401,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "bluetooth" => Ok(gen_bluetooth()),
         "printmgr" => Ok(gen_printmgr()),
         "screenrec" => Ok(gen_screenrec()),
+        "datausage" => Ok(gen_datausage()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -58,6 +58,7 @@ pub mod contextmenu;
 pub mod cpio;
 pub mod credentials;
 pub mod cursorsettings;
+pub mod datausage;
 pub mod dedup;
 pub mod deskicons;
 pub mod detailcols;

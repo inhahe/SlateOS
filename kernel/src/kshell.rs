@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4827,6 +4827,7 @@ fn dispatch(line: &str) {
         "bluetooth" | "bt" => cmd_bluetooth(args),
         "printmgr" | "lp" => cmd_printmgr(args),
         "screenrec" | "srec" => cmd_screenrec(args),
+        "datausage" | "dusage" => cmd_datausage(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -26967,6 +26968,263 @@ fn format_size_helper(bytes: u64) -> alloc::string::String {
     }
 }
 
+/// `datausage` / `dusage` — network data usage monitoring.
+fn cmd_datausage(args: &str) {
+    use crate::fs::datausage;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (apps, daily, rx, tx, limits, ops) = datausage::stats();
+            let metered = datausage::metered_status();
+            shell_println!("=== Data Usage Monitor ===");
+            shell_println!("  Apps tracked   : {}", apps);
+            shell_println!("  Daily records  : {}", daily);
+            shell_println!("  Total received : {}", datausage::format_bytes(rx));
+            shell_println!("  Total sent     : {}", datausage::format_bytes(tx));
+            shell_println!("  Total          : {}", datausage::format_bytes(rx.saturating_add(tx)));
+            shell_println!("  Limits         : {}", limits);
+            shell_println!("  Metered        : {}", metered.label());
+            shell_println!("  Restrict bg    : {}", datausage::should_restrict_background());
+            shell_println!("  Operations     : {}", ops);
+        }
+        "apps" => {
+            let apps = datausage::app_usage();
+            if apps.is_empty() {
+                shell_println!("No app usage recorded.");
+            } else {
+                shell_println!("{:<20} {:>12} {:>12} {:>12} {:>6}",
+                    "APP", "RECEIVED", "SENT", "TOTAL", "CONNS");
+                for app in &apps {
+                    shell_println!("{:<20} {:>12} {:>12} {:>12} {:>6}",
+                        app.app_id,
+                        datausage::format_bytes(app.rx_bytes),
+                        datausage::format_bytes(app.tx_bytes),
+                        datausage::format_bytes(app.total_bytes()),
+                        app.connection_count);
+                }
+            }
+        }
+        "app" => {
+            if let Some(name) = parts.get(1) {
+                match datausage::usage_for_app(name) {
+                    Ok(app) => {
+                        shell_println!("App: {}", app.app_id);
+                        shell_println!("  Received    : {}", datausage::format_bytes(app.rx_bytes));
+                        shell_println!("  Sent        : {}", datausage::format_bytes(app.tx_bytes));
+                        shell_println!("  Total       : {}", datausage::format_bytes(app.total_bytes()));
+                        shell_println!("  Connections : {}", app.connection_count);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: datausage app <app_id>");
+            }
+        }
+        "record" => {
+            // datausage record <app_id> <rx> <tx>
+            if parts.len() >= 4 {
+                let app_id = parts[1];
+                let rx: u64 = parts[2].parse().unwrap_or(0);
+                let tx: u64 = parts[3].parse().unwrap_or(0);
+                match datausage::record_usage(app_id, rx, tx) {
+                    Ok(()) => shell_println!("Recorded {} rx={} tx={}", app_id,
+                        datausage::format_bytes(rx), datausage::format_bytes(tx)),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: datausage record <app_id> <rx_bytes> <tx_bytes>");
+            }
+        }
+        "summary" => {
+            let period = match parts.get(1).copied().unwrap_or("all") {
+                "today" => datausage::UsagePeriod::Today,
+                "week" => datausage::UsagePeriod::ThisWeek,
+                "month" => datausage::UsagePeriod::ThisMonth,
+                "30d" | "30days" => datausage::UsagePeriod::Last30Days,
+                _ => datausage::UsagePeriod::AllTime,
+            };
+            let s = datausage::usage_summary(period);
+            shell_println!("=== {} Usage Summary ===", s.period.label());
+            shell_println!("  Received : {}", datausage::format_bytes(s.rx_bytes));
+            shell_println!("  Sent     : {}", datausage::format_bytes(s.tx_bytes));
+            shell_println!("  Total    : {}", datausage::format_bytes(s.rx_bytes.saturating_add(s.tx_bytes)));
+            shell_println!("  Apps     : {}", s.app_count);
+            if !s.top_apps.is_empty() {
+                shell_println!("  Top apps:");
+                for (name, total) in &s.top_apps {
+                    shell_println!("    {}: {}", name, datausage::format_bytes(*total));
+                }
+            }
+        }
+        "daily" => {
+            let history = datausage::daily_history();
+            if history.is_empty() {
+                shell_println!("No daily records.");
+            } else {
+                shell_println!("{:>6} {:>12} {:>12} {:>12} {:>4}",
+                    "DAY", "RECEIVED", "SENT", "TOTAL", "APPS");
+                for d in &history {
+                    shell_println!("{:>6} {:>12} {:>12} {:>12} {:>4}",
+                        d.day,
+                        datausage::format_bytes(d.rx_bytes),
+                        datausage::format_bytes(d.tx_bytes),
+                        datausage::format_bytes(d.rx_bytes.saturating_add(d.tx_bytes)),
+                        d.apps.len());
+                }
+            }
+        }
+        "metered" => {
+            match parts.get(1).copied() {
+                Some("on") | Some("yes") => {
+                    match datausage::set_metered(datausage::MeteredStatus::Metered) {
+                        Ok(()) => shell_println!("Connection set to metered."),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                Some("off") | Some("no") => {
+                    match datausage::set_metered(datausage::MeteredStatus::Unmetered) {
+                        Ok(()) => shell_println!("Connection set to unmetered."),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                Some("roaming") => {
+                    match datausage::set_metered(datausage::MeteredStatus::Roaming) {
+                        Ok(()) => shell_println!("Connection set to roaming."),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                _ => {
+                    shell_println!("Metered: {}", datausage::metered_status().label());
+                    shell_println!("Usage: datausage metered <on|off|roaming>");
+                }
+            }
+        }
+        "limit" => {
+            match parts.get(1).copied() {
+                Some("add") => {
+                    // datausage limit add <name> <bytes> [days]
+                    if parts.len() >= 4 {
+                        let name = parts[2];
+                        let bytes: u64 = parts[3].parse().unwrap_or(0);
+                        let days: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
+                        match datausage::add_limit(name, bytes, days) {
+                            Ok(()) => shell_println!("Limit '{}' added: {} over {} days",
+                                name, datausage::format_bytes(bytes), days),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: datausage limit add <name> <bytes> [days]");
+                    }
+                }
+                Some("rm") | Some("remove") => {
+                    if let Some(name) = parts.get(2) {
+                        match datausage::remove_limit(name) {
+                            Ok(()) => shell_println!("Limit '{}' removed.", name),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: datausage limit rm <name>");
+                    }
+                }
+                Some("block") => {
+                    // datausage limit block <name> <on|off>
+                    if parts.len() >= 4 {
+                        let name = parts[2];
+                        let block = matches!(parts[3], "on" | "yes" | "true");
+                        match datausage::set_block_on_exceed(name, block) {
+                            Ok(()) => shell_println!("Block-on-exceed for '{}': {}", name, block),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: datausage limit block <name> <on|off>");
+                    }
+                }
+                Some("alert") => {
+                    // datausage limit alert <name> <pct>
+                    if parts.len() >= 4 {
+                        let name = parts[2];
+                        let pct: u8 = parts[3].parse().unwrap_or(80);
+                        match datausage::set_alert_threshold(name, pct) {
+                            Ok(()) => shell_println!("Alert threshold for '{}': {}%", name, pct),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: datausage limit alert <name> <pct>");
+                    }
+                }
+                _ => {
+                    let limits = datausage::list_limits();
+                    if limits.is_empty() {
+                        shell_println!("No data limits configured.");
+                    } else {
+                        shell_println!("{:<20} {:>12} {:>6} {:>5} {:>7} {:>5}",
+                            "NAME", "LIMIT", "DAYS", "ALERT", "EXCEED", "BLOCK");
+                        for l in &limits {
+                            shell_println!("{:<20} {:>12} {:>6} {:>4}% {:>7} {:>5}",
+                                l.name,
+                                datausage::format_bytes(l.limit_bytes),
+                                l.period_days,
+                                l.alert_pct,
+                                if l.exceeded { "YES" } else { "no" },
+                                if l.block_on_exceed { "YES" } else { "no" });
+                        }
+                    }
+                }
+            }
+        }
+        "reset" => {
+            match datausage::reset_usage() {
+                Ok(()) => shell_println!("Usage counters reset."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (apps, daily, rx, tx, limits, ops) = datausage::stats();
+            shell_println!("Data usage stats:");
+            shell_println!("  Apps tracked   : {}", apps);
+            shell_println!("  Daily records  : {}", daily);
+            shell_println!("  Total RX       : {} ({} bytes)", datausage::format_bytes(rx), rx);
+            shell_println!("  Total TX       : {} ({} bytes)", datausage::format_bytes(tx), tx);
+            shell_println!("  Limits         : {}", limits);
+            shell_println!("  Operations     : {}", ops);
+        }
+        "test" => {
+            datausage::self_test();
+            shell_println!("datausage: self-tests completed (see serial).");
+        }
+        "init" => {
+            datausage::init_defaults();
+            shell_println!("Data usage monitoring initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("datausage (dusage) — network data usage monitoring");
+            shell_println!("  show               Show current usage overview");
+            shell_println!("  apps               List all app usage (sorted)");
+            shell_println!("  app <id>           Show usage for specific app");
+            shell_println!("  record <id> <rx> <tx>  Record usage for an app");
+            shell_println!("  summary [period]   Usage summary (today/week/month/30d/all)");
+            shell_println!("  daily              Show daily usage history");
+            shell_println!("  metered <on|off|roaming>  Set metered status");
+            shell_println!("  limit              List limits");
+            shell_println!("  limit add <name> <bytes> [days]  Add limit");
+            shell_println!("  limit rm <name>    Remove limit");
+            shell_println!("  limit block <name> <on|off>  Block on exceed");
+            shell_println!("  limit alert <name> <pct>     Set alert threshold");
+            shell_println!("  reset              Reset all usage counters");
+            shell_println!("  stats              Show raw stats");
+            shell_println!("  test               Run self-tests");
+            shell_println!("  init               Initialize subsystem");
+        }
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Try 'datausage help'.", sub);
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -35563,7 +35821,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

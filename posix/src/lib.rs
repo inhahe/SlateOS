@@ -48,6 +48,11 @@
 //!   `sin`, `cos`, `tan`, `atan2`, `frexp`, `ldexp`, `modf`,
 //!   `isnan`, `isinf`, `isfinite`, `copysign`, `fmin`, `fmax`
 //!   (and `f32` variants)
+//! - **Wide Characters**: `mblen`, `mbtowc`, `wctomb`, `mbstowcs`,
+//!   `wcstombs`, `btowc`, `wctob`, `mbsinit`, `mbrtowc`, `wcrtomb`,
+//!   `wcwidth`, `wcswidth`, `iswalnum`..`iswxdigit`, `towlower`,
+//!   `towupper`, `wcscpy`, `wcslen`, `wcscmp`, `wcscat`, `wcschr`,
+//!   `wcsrchr`, `wmemcpy`, `wmemset`, `wmemcmp`, `nl_langinfo`
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`, `pathconf`, `confstr`
@@ -144,4 +149,5 @@ pub mod resource;
 pub mod unistd;
 pub mod utsname;
 pub mod wait;
+pub mod wchar;
 pub mod dirent;

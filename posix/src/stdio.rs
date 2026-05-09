@@ -4,7 +4,8 @@
 //! `getchar`, `getc`, `putc`, `ungetc`, `fwrite`, `fread`, `fgets`,
 //! `fopen`, `fdopen`, `freopen`, `fclose`, `fflush`, `fseek`, `ftell`,
 //! `rewind`, `fileno`, `feof`, `ferror`, `clearerr`, `perror`,
-//! `remove`, `tmpnam`, `setvbuf`, `setbuf`, `popen`, `pclose`.
+//! `remove`, `tmpnam`, `setvbuf`, `setbuf`, `popen`, `pclose`,
+//! `getline`, `getdelim`.
 //!
 //! printf/fprintf/sprintf/snprintf are in the `printf` module (via
 //! assembly trampoline).
@@ -628,6 +629,121 @@ pub static stderr: usize = STDERR_FILENO;
 
 #[unsafe(no_mangle)]
 pub static stdin: usize = 0;
+
+// ---------------------------------------------------------------------------
+// getline / getdelim — POSIX dynamic line reading
+// ---------------------------------------------------------------------------
+
+/// Read a delimited record from a stream.
+///
+/// Reads until `delimiter` is found or EOF.  The buffer `*lineptr`
+/// is reallocated via `malloc`/`realloc` as needed.  `*n` holds the
+/// current buffer size.
+///
+/// Returns the number of characters read (including the delimiter),
+/// or -1 on error/EOF with no characters read.
+///
+/// # Safety
+///
+/// `lineptr`, `n`, and `stream` must be valid pointers.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn getdelim(
+    lineptr: *mut *mut u8,
+    n: *mut usize,
+    delimiter: i32,
+    stream: *mut u8,
+) -> isize {
+    if lineptr.is_null() || n.is_null() || stream.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    let fd = stream as usize as i32;
+    let mut buf = unsafe { *lineptr };
+    let mut cap = unsafe { *n };
+    let mut pos: usize = 0;
+
+    // Ensure initial allocation.
+    if buf.is_null() || cap == 0 {
+        cap = 128;
+        buf = crate::malloc::malloc(cap).cast::<u8>();
+        if buf.is_null() {
+            crate::errno::set_errno(crate::errno::ENOMEM);
+            return -1;
+        }
+        unsafe {
+            *lineptr = buf;
+            *n = cap;
+        }
+    }
+
+    loop {
+        let c = fgetc_fd(fd);
+        if c == EOF {
+            if pos == 0 {
+                return -1; // EOF with no data.
+            }
+            break;
+        }
+
+        // Grow buffer if needed (leave room for null terminator).
+        if pos >= cap.wrapping_sub(1) {
+            let new_cap = cap.wrapping_mul(2);
+            // SAFETY: realloc is unsafe extern "C".
+            let new_buf = unsafe {
+                crate::malloc::realloc(buf.cast::<u8>(), new_cap)
+            };
+            if new_buf.is_null() {
+                crate::errno::set_errno(crate::errno::ENOMEM);
+                return -1;
+            }
+            buf = new_buf.cast::<u8>();
+            cap = new_cap;
+            unsafe {
+                *lineptr = buf;
+                *n = cap;
+            }
+        }
+
+        // SAFETY: pos < cap-1, buf is valid for cap bytes.
+        unsafe { *buf.add(pos) = c as u8; }
+        pos = pos.wrapping_add(1);
+
+        if c == delimiter {
+            break;
+        }
+    }
+
+    // Null-terminate.
+    unsafe { *buf.add(pos) = 0; }
+    pos as isize
+}
+
+/// Read a line from a stream (up to and including newline).
+///
+/// Equivalent to `getdelim(lineptr, n, '\n', stream)`.
+///
+/// # Safety
+///
+/// `lineptr`, `n`, and `stream` must be valid pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getline(
+    lineptr: *mut *mut u8,
+    n: *mut usize,
+    stream: *mut u8,
+) -> isize {
+    unsafe { getdelim(lineptr, n, i32::from(b'\n'), stream) }
+}
+
+/// Read a single character from a raw fd (internal helper for getdelim).
+///
+/// Returns EOF (-1) on end-of-file or error.
+fn fgetc_fd(fd: i32) -> i32 {
+    let mut byte: u8 = 0;
+    let n = crate::file::read(fd, &raw mut byte, 1);
+    if n <= 0 { EOF } else { i32::from(byte) }
+}
 
 // ---------------------------------------------------------------------------
 // Internal helper

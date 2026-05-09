@@ -892,6 +892,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] string additions: strtok_r (reentrant tokenizer), memccpy (copy-until-byte), strcoll/strxfrm (locale stubs), strerror_r (thread-safe error strings)
   - [x] time additions: clock (CPU time via CLOCK_MONOTONIC proxy), strptime (parse time strings — %Y/%m/%d/%H/%M/%S/%j/%n/%t/%%), CLOCKS_PER_SEC
   - [x] scanf: sscanf via assembly trampoline — %d/%i/%u/%x/%o/%s/%c/%f/%lf/%n, width limits, assignment suppression (%*), length modifiers (l/ll/h/hh), literal matching
+  - [x] stdio additions: getline/getdelim (dynamic line reading with malloc/realloc buffer growth)
+  - [x] wchar: mblen/mbtowc/wctomb/mbstowcs/wcstombs (ASCII-only), btowc/wctob, mbsinit/mbrtowc/wcrtomb (restartable), wcwidth/wcswidth (CJK-aware display width), wctype classification (iswalpha..iswxdigit, towlower/towupper), wide string ops (wcscpy/wcsncpy/wcslen/wcscmp/wcsncmp/wcscat/wcschr/wcsrchr, wmemcpy/wmemset/wmemcmp), nl_langinfo (locale info stubs)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

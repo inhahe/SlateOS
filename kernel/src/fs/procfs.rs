@@ -309,6 +309,10 @@ const ROOT_FILES: &[&str] = &[
     "notifbadge",
     "lockwallpaper",
     "systemsounds",
+    "hotcorners",
+    "dynlock",
+    "snaplayout",
+    "haptfeedback",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6382,6 +6386,62 @@ fn gen_systemsounds() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_hotcorners() -> Vec<u8> {
+    use alloc::format;
+    use super::hotcorners;
+    let (enabled, triggers, ops) = hotcorners::stats();
+    let all = hotcorners::get_all();
+    let mut out = String::from("enabled_corners: ");
+    out.push_str(&format!("{}\n", enabled));
+    for c in &all {
+        out.push_str(&format!("{}: {} (delay={}ms, enabled={})\n", c.corner.label(), c.action.label(), c.delay_ms, c.enabled));
+    }
+    out.push_str(&format!("total_triggers: {}\n", triggers));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_dynlock() -> Vec<u8> {
+    use alloc::format;
+    use super::dynlock;
+    let (devs, locks, unlocks, ops) = dynlock::stats();
+    let mut out = String::from("state: ");
+    out.push_str(dynlock::lock_state().label());
+    out.push('\n');
+    out.push_str(&format!("device_count: {}\n", devs));
+    out.push_str(&format!("total_locks: {}\n", locks));
+    out.push_str(&format!("total_unlocks: {}\n", unlocks));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_snaplayout() -> Vec<u8> {
+    use alloc::format;
+    use super::snaplayout;
+    let (layouts, groups, snaps, ops) = snaplayout::stats();
+    let active = snaplayout::get_active();
+    let mut out = String::from("active_layout: ");
+    out.push_str(&active.map_or_else(|| String::from("none"), |a| a.name));
+    out.push('\n');
+    out.push_str(&format!("layout_count: {}\n", layouts));
+    out.push_str(&format!("group_count: {}\n", groups));
+    out.push_str(&format!("total_snaps: {}\n", snaps));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_haptfeedback() -> Vec<u8> {
+    use alloc::format;
+    use super::haptfeedback;
+    let (devs, maps, fires, ops) = haptfeedback::stats();
+    let mut out = String::from("device_count: ");
+    out.push_str(&format!("{}\n", devs));
+    out.push_str(&format!("mapping_count: {}\n", maps));
+    out.push_str(&format!("total_fires: {}\n", fires));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6856,6 +6916,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "notifbadge" => Ok(gen_notifbadge()),
         "lockwallpaper" => Ok(gen_lockwallpaper()),
         "systemsounds" => Ok(gen_systemsounds()),
+        "hotcorners" => Ok(gen_hotcorners()),
+        "dynlock" => Ok(gen_dynlock()),
+        "snaplayout" => Ok(gen_snaplayout()),
+        "haptfeedback" => Ok(gen_haptfeedback()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

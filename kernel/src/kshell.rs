@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4913,6 +4913,10 @@ fn dispatch(line: &str) {
         "notifbadge" | "nbadge" => cmd_notifbadge(args),
         "lockwallpaper" | "lwp" => cmd_lockwallpaper(args),
         "systemsounds" | "ssounds" => cmd_systemsounds(args),
+        "hotcorners" | "hcorn" => cmd_hotcorners(args),
+        "dynlock" | "dlock" => cmd_dynlock(args),
+        "snaplayout" | "snlayout" => cmd_snaplayout(args),
+        "haptfeedback" | "haptic" => cmd_haptfeedback(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -38153,6 +38157,496 @@ fn parse_sound_event(name: &str) -> Option<crate::fs::systemsounds::SoundEvent> 
     }
 }
 
+/// `hotcorners` / `hcorn` — hot corner screen actions.
+fn cmd_hotcorners(args: &str) {
+    use crate::fs::hotcorners;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { hotcorners::init_defaults(); shell_println!("Hot corners initialised."); }
+        "show" | "" => {
+            hotcorners::init_defaults();
+            let all = hotcorners::get_all();
+            shell_println!("Hot Corners:");
+            for c in &all {
+                let status = if c.enabled { "on" } else { "off" };
+                let modifier = if c.require_modifier { " (modifier required)" } else { "" };
+                shell_println!("  {:12} → {:20} delay={}ms [{}]{}",
+                    c.corner.label(), c.action.label(), c.delay_ms, status, modifier);
+            }
+        }
+        "set" => {
+            let corner_name = parts.get(1).copied().unwrap_or("");
+            let action_name = parts.get(2).copied().unwrap_or("");
+            let corner = match parse_corner(corner_name) {
+                Some(c) => c,
+                None => { shell_println!("Corner: tl, tr, bl, br"); return; }
+            };
+            let action = match parse_corner_action(action_name) {
+                Some(a) => a,
+                None => { shell_println!("Actions: none, windows, desktop, screensaver, lock, notifications, quicksettings, next, prev, launcher, disable"); return; }
+            };
+            match hotcorners::set_action(corner, action) {
+                Ok(()) => shell_println!("{} set to {}.", corner.label(), action.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delay" => {
+            let corner_name = parts.get(1).copied().unwrap_or("");
+            let ms = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            let corner = match parse_corner(corner_name) {
+                Some(c) => c,
+                None => { shell_println!("Usage: hotcorners delay <tl|tr|bl|br> <ms>"); return; }
+            };
+            match ms {
+                Some(d) => match hotcorners::set_delay(corner, d) {
+                    Ok(()) => shell_println!("{} delay set to {}ms.", corner.label(), d),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: hotcorners delay <corner> <ms>"),
+            }
+        }
+        "trigger" => {
+            let corner_name = parts.get(1).copied().unwrap_or("");
+            let corner = match parse_corner(corner_name) {
+                Some(c) => c,
+                None => { shell_println!("Usage: hotcorners trigger <tl|tr|bl|br>"); return; }
+            };
+            match hotcorners::trigger(corner) {
+                Ok(action) => shell_println!("Triggered: {}", action.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => match hotcorners::set_global_enabled(true) {
+            Ok(()) => shell_println!("Hot corners enabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "disable" => match hotcorners::set_global_enabled(false) {
+            Ok(()) => shell_println!("Hot corners disabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (enabled, triggers, ops) = hotcorners::stats();
+            shell_println!("Hot corners stats:");
+            shell_println!("  Enabled corners: {}", enabled);
+            shell_println!("  Total triggers:  {}", triggers);
+            shell_println!("  Operations:      {}", ops);
+        }
+        "test" => hotcorners::self_test(),
+        _ => {
+            shell_println!("Usage: hotcorners <subcommand>");
+            shell_println!("  show                  Current config");
+            shell_println!("  set <corner> <action>  Set action");
+            shell_println!("  delay <corner> <ms>    Set delay");
+            shell_println!("  trigger <corner>       Test trigger");
+            shell_println!("  enable / disable       Toggle globally");
+            shell_println!("  Corners: tl, tr, bl, br");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_corner(s: &str) -> Option<crate::fs::hotcorners::Corner> {
+    use crate::fs::hotcorners::Corner;
+    match s {
+        "tl" | "top-left" | "topleft" => Some(Corner::TopLeft),
+        "tr" | "top-right" | "topright" => Some(Corner::TopRight),
+        "bl" | "bottom-left" | "bottomleft" => Some(Corner::BottomLeft),
+        "br" | "bottom-right" | "bottomright" => Some(Corner::BottomRight),
+        _ => None,
+    }
+}
+
+fn parse_corner_action(s: &str) -> Option<crate::fs::hotcorners::CornerAction> {
+    use crate::fs::hotcorners::CornerAction;
+    match s {
+        "none" => Some(CornerAction::None),
+        "windows" | "all" => Some(CornerAction::ShowAllWindows),
+        "desktop" | "show-desktop" => Some(CornerAction::ShowDesktop),
+        "screensaver" | "saver" => Some(CornerAction::StartScreensaver),
+        "lock" => Some(CornerAction::LockScreen),
+        "notifications" | "notif" => Some(CornerAction::OpenNotifications),
+        "quicksettings" | "qs" => Some(CornerAction::OpenQuickSettings),
+        "next" | "next-desktop" => Some(CornerAction::NextDesktop),
+        "prev" | "prev-desktop" => Some(CornerAction::PrevDesktop),
+        "launcher" | "start" => Some(CornerAction::OpenLauncher),
+        "disable" | "disable-screen" => Some(CornerAction::DisableScreen),
+        _ => None,
+    }
+}
+
+/// `dynlock` / `dlock` — dynamic proximity-based screen lock.
+fn cmd_dynlock(args: &str) {
+    use crate::fs::dynlock;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { dynlock::init_defaults(); shell_println!("Dynamic lock initialised."); }
+        "show" | "" => {
+            dynlock::init_defaults();
+            shell_println!("Dynamic Lock:");
+            shell_println!("  State: {}", dynlock::lock_state().label());
+            let devs = dynlock::list_devices();
+            if devs.is_empty() {
+                shell_println!("  No paired devices.");
+            } else {
+                shell_println!("  Devices ({}):", devs.len());
+                for d in &devs {
+                    let status = if d.enabled { d.status.label() } else { "Disabled" };
+                    shell_println!("    {} [{}] — {} (locks: {})", d.name, d.address, status, d.lock_count);
+                }
+            }
+        }
+        "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let addr = parts.get(2).copied().unwrap_or("");
+            if name.is_empty() || addr.is_empty() {
+                shell_println!("Usage: dynlock add <name> <bt_address>");
+                return;
+            }
+            match dynlock::add_device(name, addr) {
+                Ok(()) => shell_println!("Device '{}' [{}] added.", name, addr),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let addr = parts.get(1).copied().unwrap_or("");
+            if addr.is_empty() { shell_println!("Usage: dynlock remove <bt_address>"); return; }
+            match dynlock::remove_device(addr) {
+                Ok(()) => shell_println!("Device removed."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => match dynlock::set_enabled(true) {
+            Ok(()) => shell_println!("Dynamic lock enabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "disable" => match dynlock::set_enabled(false) {
+            Ok(()) => shell_println!("Dynamic lock disabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "grace" => {
+            let secs = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match secs {
+                Some(s) => match dynlock::set_grace(s) {
+                    Ok(()) => shell_println!("Grace period set to {}s.", s),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: dynlock grace <seconds>"),
+            }
+        }
+        "autounlock" => {
+            let val = parts.get(1).copied().unwrap_or("");
+            match val {
+                "on" | "true" => match dynlock::set_auto_unlock(true) {
+                    Ok(()) => shell_println!("Auto-unlock enabled."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                "off" | "false" => match dynlock::set_auto_unlock(false) {
+                    Ok(()) => shell_println!("Auto-unlock disabled."),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Usage: dynlock autounlock <on|off>"),
+            }
+        }
+        "check" => {
+            match dynlock::check_proximity() {
+                Ok(true) => shell_println!("Lock triggered: no device in range."),
+                Ok(false) => shell_println!("No lock needed."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unlock" => match dynlock::manual_unlock() {
+            Ok(()) => shell_println!("Manually unlocked."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (devs, locks, unlocks, ops) = dynlock::stats();
+            shell_println!("Dynamic lock stats:");
+            shell_println!("  Devices:       {}", devs);
+            shell_println!("  Total locks:   {}", locks);
+            shell_println!("  Total unlocks: {}", unlocks);
+            shell_println!("  Operations:    {}", ops);
+        }
+        "test" => dynlock::self_test(),
+        _ => {
+            shell_println!("Usage: dynlock <subcommand>");
+            shell_println!("  show                  Current status");
+            shell_println!("  add <name> <addr>     Add paired device");
+            shell_println!("  remove <addr>         Remove device");
+            shell_println!("  enable / disable      Toggle dynamic lock");
+            shell_println!("  grace <seconds>       Set grace period");
+            shell_println!("  autounlock <on|off>   Auto-unlock on return");
+            shell_println!("  check                 Check proximity now");
+            shell_println!("  unlock                Manual unlock");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `snaplayout` / `snlayout` — snap layout zones and templates.
+fn cmd_snaplayout(args: &str) {
+    use crate::fs::snaplayout;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { snaplayout::init_defaults(); shell_println!("Snap layouts initialised."); }
+        "show" | "" | "list" => {
+            snaplayout::init_defaults();
+            let layouts = snaplayout::list_layouts();
+            let active = snaplayout::get_active();
+            shell_println!("Snap Layouts ({}):", layouts.len());
+            for l in &layouts {
+                let marker = if active.as_ref().map_or(false, |a| a.id == l.id) { " *" } else { "" };
+                shell_println!("  [{}] {} ({} zones, used {} times){}",
+                    l.id, l.name, l.zones.len(), l.use_count, marker);
+            }
+        }
+        "active" => {
+            match snaplayout::get_active() {
+                Some(layout) => {
+                    shell_println!("Active: {} (id={})", layout.name, layout.id);
+                    for z in &layout.zones {
+                        shell_println!("  Zone {}: x={}% y={}% w={}% h={}%", z.id, z.x_pct, z.y_pct, z.w_pct, z.h_pct);
+                    }
+                }
+                None => shell_println!("No active layout."),
+            }
+        }
+        "use" | "switch" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match snaplayout::set_active(i) {
+                    Ok(()) => shell_println!("Active layout set to id {}.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: snaplayout use <id>"),
+            }
+        }
+        "snap" => {
+            let win_id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            let zone_id = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            match (win_id, zone_id) {
+                (Some(w), Some(z)) => match snaplayout::snap_to_zone(w, z) {
+                    Ok(zone) => shell_println!("Window {} snapped to zone {} (x={}% y={}% w={}% h={}%).",
+                        w, z, zone.x_pct, zone.y_pct, zone.w_pct, zone.h_pct),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Usage: snaplayout snap <window_id> <zone_id>"),
+            }
+        }
+        "suggest" => {
+            let count = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(2);
+            match snaplayout::suggest_layout(count) {
+                Some(l) => shell_println!("Suggested: {} ({} zones) for {} windows.", l.name, l.zones.len(), count),
+                None => shell_println!("No layouts available."),
+            }
+        }
+        "remove" | "rm" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match snaplayout::remove_layout(i) {
+                    Ok(()) => shell_println!("Layout {} removed.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: snaplayout remove <id>"),
+            }
+        }
+        "groups" => {
+            let groups = snaplayout::list_groups();
+            if groups.is_empty() {
+                shell_println!("No snap groups.");
+            } else {
+                shell_println!("Snap groups ({}):", groups.len());
+                for g in &groups {
+                    shell_println!("  Group {} (layout {}): {} windows", g.group_id, g.layout_id, g.assignments.len());
+                }
+            }
+        }
+        "stats" => {
+            let (layouts, groups, snaps, ops) = snaplayout::stats();
+            shell_println!("Snap layout stats:");
+            shell_println!("  Layouts:     {}", layouts);
+            shell_println!("  Groups:      {}", groups);
+            shell_println!("  Total snaps: {}", snaps);
+            shell_println!("  Operations:  {}", ops);
+        }
+        "test" => snaplayout::self_test(),
+        _ => {
+            shell_println!("Usage: snaplayout <subcommand>");
+            shell_println!("  show / list           List layouts");
+            shell_println!("  active                Show active layout zones");
+            shell_println!("  use <id>              Switch active layout");
+            shell_println!("  snap <win> <zone>     Snap window to zone");
+            shell_println!("  suggest <count>       Suggest layout for N windows");
+            shell_println!("  remove <id>           Remove custom layout");
+            shell_println!("  groups                List snap groups");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `haptfeedback` / `haptic` — haptic feedback settings.
+fn cmd_haptfeedback(args: &str) {
+    use crate::fs::haptfeedback;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => { haptfeedback::init_defaults(); shell_println!("Haptic feedback initialised."); }
+        "show" | "" => {
+            haptfeedback::init_defaults();
+            let devs = haptfeedback::list_devices();
+            let mappings = haptfeedback::list_mappings();
+            if devs.is_empty() {
+                shell_println!("No haptic devices.");
+            } else {
+                shell_println!("Haptic Devices ({}):", devs.len());
+                for d in &devs {
+                    let status = if d.enabled { "on" } else { "off" };
+                    shell_println!("  [{}] {} ({}) intensity={} [{}] fires={}",
+                        d.id, d.name, d.device_type.label(), d.intensity, status, d.fire_count);
+                }
+            }
+            shell_println!("Event Mappings ({}):", mappings.len());
+            for m in &mappings {
+                let status = if m.enabled { "on" } else { "off" };
+                shell_println!("  {:20} → {:12} [{}]", m.event.label(), m.pattern.label(), status);
+            }
+        }
+        "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let dtype_str = parts.get(2).copied().unwrap_or("trackpad");
+            if name.is_empty() { shell_println!("Usage: haptfeedback add <name> [trackpad|controller|touchscreen|stylus]"); return; }
+            let dtype = match dtype_str {
+                "trackpad" | "tp" => haptfeedback::DeviceType::Trackpad,
+                "controller" | "gc" => haptfeedback::DeviceType::GameController,
+                "touchscreen" | "ts" => haptfeedback::DeviceType::Touchscreen,
+                "stylus" | "pen" => haptfeedback::DeviceType::Stylus,
+                _ => { shell_println!("Types: trackpad, controller, touchscreen, stylus"); return; }
+            };
+            match haptfeedback::add_device(name, dtype) {
+                Ok(id) => shell_println!("Device '{}' added with id {}.", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" | "rm" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            match id {
+                Some(i) => match haptfeedback::remove_device(i) {
+                    Ok(()) => shell_println!("Device {} removed.", i),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                None => shell_println!("Usage: haptfeedback remove <id>"),
+            }
+        }
+        "intensity" | "int" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+            let val = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            match (id, val) {
+                (Some(i), Some(v)) => match haptfeedback::set_intensity(i, v) {
+                    Ok(()) => shell_println!("Intensity for device {} set to {}.", i, v),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                },
+                _ => shell_println!("Usage: haptfeedback intensity <device_id> <0-100>"),
+            }
+        }
+        "pattern" => {
+            let event_name = parts.get(1).copied().unwrap_or("");
+            let pattern_name = parts.get(2).copied().unwrap_or("");
+            let event = match parse_haptic_event(event_name) {
+                Some(e) => e,
+                None => { shell_println!("Events: click, doubleclick, longpress, swipe, scroll, selection, dragstart, dragend, error, success, warning, keypress"); return; }
+            };
+            let pattern = match parse_haptic_pattern(pattern_name) {
+                Some(p) => p,
+                None => { shell_println!("Patterns: none, tap, doubletap, buzz, impact, rumble, rising, falling, heartbeat"); return; }
+            };
+            match haptfeedback::set_event_pattern(event, pattern) {
+                Ok(()) => shell_println!("{} pattern set to {}.", event.label(), pattern.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "fire" => {
+            let event_name = parts.get(1).copied().unwrap_or("");
+            let event = match parse_haptic_event(event_name) {
+                Some(e) => e,
+                None => { shell_println!("Usage: haptfeedback fire <event>"); return; }
+            };
+            match haptfeedback::fire(event) {
+                Ok(p) => shell_println!("Fired: {}", p.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => match haptfeedback::set_global_enabled(true) {
+            Ok(()) => shell_println!("Haptic feedback enabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "disable" => match haptfeedback::set_global_enabled(false) {
+            Ok(()) => shell_println!("Haptic feedback disabled."),
+            Err(e) => shell_println!("Error: {:?}", e),
+        },
+        "stats" => {
+            let (devs, maps, fires, ops) = haptfeedback::stats();
+            shell_println!("Haptic feedback stats:");
+            shell_println!("  Devices:       {}", devs);
+            shell_println!("  Mappings:      {}", maps);
+            shell_println!("  Total fires:   {}", fires);
+            shell_println!("  Operations:    {}", ops);
+        }
+        "test" => haptfeedback::self_test(),
+        _ => {
+            shell_println!("Usage: haptfeedback <subcommand>");
+            shell_println!("  show                  Devices & mappings");
+            shell_println!("  add <name> [type]     Add device");
+            shell_println!("  remove <id>           Remove device");
+            shell_println!("  intensity <id> <0-100> Set intensity");
+            shell_println!("  pattern <event> <pat> Set event pattern");
+            shell_println!("  fire <event>          Test fire event");
+            shell_println!("  enable / disable      Toggle globally");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_haptic_event(s: &str) -> Option<crate::fs::haptfeedback::HapticEvent> {
+    use crate::fs::haptfeedback::HapticEvent;
+    match s {
+        "click" => Some(HapticEvent::Click),
+        "doubleclick" | "dblclick" => Some(HapticEvent::DoubleClick),
+        "longpress" | "long" => Some(HapticEvent::LongPress),
+        "swipe" => Some(HapticEvent::Swipe),
+        "scroll" | "scrolltick" => Some(HapticEvent::ScrollTick),
+        "selection" | "select" => Some(HapticEvent::SelectionChange),
+        "dragstart" | "drag" => Some(HapticEvent::DragStart),
+        "dragend" | "drop" => Some(HapticEvent::DragEnd),
+        "error" => Some(HapticEvent::Error),
+        "success" => Some(HapticEvent::Success),
+        "warning" | "warn" => Some(HapticEvent::Warning),
+        "keypress" | "key" => Some(HapticEvent::KeyPress),
+        _ => None,
+    }
+}
+
+fn parse_haptic_pattern(s: &str) -> Option<crate::fs::haptfeedback::HapticPattern> {
+    use crate::fs::haptfeedback::HapticPattern;
+    match s {
+        "none" => Some(HapticPattern::None),
+        "tap" => Some(HapticPattern::Tap),
+        "doubletap" | "dtap" => Some(HapticPattern::DoubleTap),
+        "buzz" => Some(HapticPattern::Buzz),
+        "impact" => Some(HapticPattern::Impact),
+        "rumble" => Some(HapticPattern::Rumble),
+        "rising" => Some(HapticPattern::Rising),
+        "falling" => Some(HapticPattern::Falling),
+        "heartbeat" | "hb" => Some(HapticPattern::Heartbeat),
+        _ => None,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -46749,7 +47243,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4901,6 +4901,10 @@ fn dispatch(line: &str) {
         "screensaver" | "ssaver" => cmd_screensaver(args),
         "colortemp" | "ctemp" => cmd_colortemp(args),
         "gamemode" | "gmode" => cmd_gamemode(args),
+        "dpiscaling" | "dpi" => cmd_dpiscaling(args),
+        "netprofile" | "nprof" => cmd_netprofile(args),
+        "apppermissions" | "apperm" => cmd_apppermissions(args),
+        "kbshortcuts" | "kbsc" => cmd_kbshortcuts(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -36777,6 +36781,462 @@ fn cmd_gamemode(args: &str) {
     }
 }
 
+/// `dpiscaling` / `dpi` — display scaling management.
+fn cmd_dpiscaling(args: &str) {
+    use crate::fs::dpiscaling;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            dpiscaling::init_defaults();
+            shell_println!("DPI scaling initialized");
+        }
+        "list" => {
+            let displays = dpiscaling::list_displays();
+            if displays.is_empty() {
+                shell_println!("No displays");
+            } else {
+                for d in &displays {
+                    shell_println!("#{}: {} — {}% (rec: {}%), {}dpi physical, {}dpi effective, {}",
+                        d.id, d.display_name, d.scale_percent, d.recommended_percent,
+                        d.physical_dpi, d.effective_dpi, d.method.label());
+                }
+            }
+        }
+        "set" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let pct: u32 = parts.get(2).unwrap_or(&"100").parse().unwrap_or(100);
+            match dpiscaling::set_scale(id, pct) {
+                Ok(()) => shell_println!("Scale: {}%", pct.clamp(50, 500)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "method" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let m = match parts.get(2).copied().unwrap_or("fractional") {
+                "integer" | "int" => dpiscaling::ScalingMethod::Integer,
+                "resize" | "intresize" => dpiscaling::ScalingMethod::IntegerThenResize,
+                _ => dpiscaling::ScalingMethod::Fractional,
+            };
+            match dpiscaling::set_method(id, m) {
+                Ok(()) => shell_println!("Method: {}", m.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "register" => {
+            let name = parts.get(1).copied().unwrap_or("Monitor");
+            let dpi: u32 = parts.get(2).unwrap_or(&"96").parse().unwrap_or(96);
+            match dpiscaling::register_display(name, dpi) {
+                Ok(id) => shell_println!("Registered display #{}: {} ({}dpi)", id, name, dpi),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "override" => {
+            let app = parts.get(1).copied().unwrap_or("app");
+            let awareness = match parts.get(2).copied().unwrap_or("system") {
+                "unaware" => dpiscaling::DpiAwareness::Unaware,
+                "permonitor" | "pm" => dpiscaling::DpiAwareness::PerMonitorAware,
+                "permonitorv2" | "pmv2" => dpiscaling::DpiAwareness::PerMonitorAwareV2,
+                _ => dpiscaling::DpiAwareness::SystemAware,
+            };
+            let pct: u32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
+            match dpiscaling::set_app_override(app, awareness, pct) {
+                Ok(()) => shell_println!("Override for {}: {} {}%", app, awareness.label(), pct),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "overrides" => {
+            let overrides = dpiscaling::list_overrides();
+            if overrides.is_empty() {
+                shell_println!("No app DPI overrides");
+            } else {
+                for o in &overrides {
+                    shell_println!("  {}: {} ({}%)", o.app_name, o.awareness.label(), o.override_percent);
+                }
+            }
+        }
+        "stats" => {
+            let (displays, overrides, changes, ops) = dpiscaling::stats();
+            shell_println!("Displays: {}, Overrides: {}, Changes: {}, Ops: {}", displays, overrides, changes, ops);
+        }
+        "test" => dpiscaling::self_test(),
+        _ => {
+            shell_println!("Usage: dpiscaling <command>");
+            shell_println!("  list                   List displays");
+            shell_println!("  set <id> <percent>     Set scale (50-500%)");
+            shell_println!("  method <id> <method>   Scaling method");
+            shell_println!("  register <name> <dpi>  Register display");
+            shell_println!("  override <app> <aware> [%]  App override");
+            shell_println!("  overrides              List overrides");
+            shell_println!("  Methods: integer fractional resize");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `netprofile` / `nprof` — network profile management.
+fn cmd_netprofile(args: &str) {
+    use crate::fs::netprofile;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            netprofile::init_defaults();
+            shell_println!("Network profiles initialized");
+        }
+        "list" => {
+            let profiles = netprofile::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No network profiles");
+            } else {
+                let active = netprofile::active_id();
+                for p in &profiles {
+                    let marker = if p.id == active { " *" } else { "" };
+                    shell_println!("#{}: {} ({}/{}) [{}] metered: {}{}",
+                        p.id, p.name, p.network_type.label(), p.connection_type.label(),
+                        if p.ssid.is_empty() { "(any)" } else { &p.ssid },
+                        p.metered, marker);
+                    if !p.auto_vpn.is_empty() {
+                        shell_println!("    Auto VPN: {}", p.auto_vpn);
+                    }
+                    if !p.dns_servers.is_empty() {
+                        shell_println!("    DNS: {}", p.dns_servers.join(", "));
+                    }
+                }
+            }
+        }
+        "create" => {
+            let name = parts.get(1).copied().unwrap_or("Network");
+            let ssid = parts.get(2).copied().unwrap_or("");
+            let ntype = match parts.get(3).copied().unwrap_or("private") {
+                "public" => netprofile::NetworkType::Public,
+                "domain" => netprofile::NetworkType::Domain,
+                "trusted" => netprofile::NetworkType::Trusted,
+                _ => netprofile::NetworkType::Private,
+            };
+            match netprofile::create_profile(name, ssid, ntype, netprofile::ConnectionType::WiFi) {
+                Ok(id) => shell_println!("Created profile #{}: {}", id, name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "apply" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            match netprofile::apply_profile(id) {
+                Ok(()) => shell_println!("Applied profile #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "type" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let ntype = match parts.get(2).copied().unwrap_or("private") {
+                "public" => netprofile::NetworkType::Public,
+                "domain" => netprofile::NetworkType::Domain,
+                "trusted" => netprofile::NetworkType::Trusted,
+                "untrusted" => netprofile::NetworkType::Untrusted,
+                _ => netprofile::NetworkType::Private,
+            };
+            match netprofile::set_network_type(id, ntype) {
+                Ok(()) => shell_println!("Type: {}", ntype.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "metered" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let m = parts.get(2).copied().unwrap_or("on") != "off";
+            match netprofile::set_metered(id, m) {
+                Ok(()) => shell_println!("Metered: {}", m),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "vpn" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let vpn = parts.get(2).copied().unwrap_or("");
+            match netprofile::set_auto_vpn(id, vpn) {
+                Ok(()) => shell_println!("Auto VPN: {}", if vpn.is_empty() { "(none)" } else { vpn }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            match netprofile::remove_profile(id) {
+                Ok(()) => shell_println!("Removed profile #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "find" => {
+            let ssid = parts.get(1).copied().unwrap_or("");
+            match netprofile::find_by_ssid(ssid) {
+                Some(id) => shell_println!("Found profile #{} for SSID '{}'", id, ssid),
+                None => shell_println!("No profile for SSID '{}'", ssid),
+            }
+        }
+        "stats" => {
+            let (count, active, switches, ops) = netprofile::stats();
+            shell_println!("Profiles: {}, Active: #{}, Switches: {}, Ops: {}", count, active, switches, ops);
+        }
+        "test" => netprofile::self_test(),
+        _ => {
+            shell_println!("Usage: netprofile <command>");
+            shell_println!("  list                   List profiles");
+            shell_println!("  create <name> [ssid] [type]  Create profile");
+            shell_println!("  apply <id>             Activate profile");
+            shell_println!("  type <id> <type>       Set network type");
+            shell_println!("  metered <id> [on|off]  Set metered");
+            shell_println!("  vpn <id> <name>        Auto-connect VPN");
+            shell_println!("  find <ssid>            Find by SSID");
+            shell_println!("  remove <id>            Remove profile");
+            shell_println!("  Types: private public domain trusted untrusted");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `apppermissions` / `apperm` — app permission management.
+fn cmd_apppermissions(args: &str) {
+    use crate::fs::apppermissions;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    let parse_perm = |s: &str| -> apppermissions::Permission {
+        match s {
+            "camera" | "cam" => apppermissions::Permission::Camera,
+            "microphone" | "mic" => apppermissions::Permission::Microphone,
+            "location" | "loc" => apppermissions::Permission::Location,
+            "notifications" | "notif" => apppermissions::Permission::Notifications,
+            "contacts" => apppermissions::Permission::Contacts,
+            "calendar" | "cal" => apppermissions::Permission::Calendar,
+            "storage" => apppermissions::Permission::Storage,
+            "network" | "net" => apppermissions::Permission::Network,
+            "bluetooth" | "bt" => apppermissions::Permission::Bluetooth,
+            "background" | "bg" => apppermissions::Permission::BackgroundActivity,
+            "settings" | "sys" => apppermissions::Permission::SystemSettings,
+            "a11y" | "accessibility" => apppermissions::Permission::Accessibility,
+            _ => apppermissions::Permission::Storage,
+        }
+    };
+
+    match sub {
+        "init" => {
+            apppermissions::init_defaults();
+            shell_println!("App permissions initialized");
+        }
+        "check" => {
+            let app = parts.get(1).copied().unwrap_or("app");
+            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            let d = apppermissions::check(app, perm);
+            shell_println!("{} → {}: {}", app, perm.label(), d.label());
+        }
+        "grant" => {
+            let app = parts.get(1).copied().unwrap_or("app");
+            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            match apppermissions::grant(app, perm) {
+                Ok(()) => shell_println!("Granted {} to {}", perm.label(), app),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "deny" => {
+            let app = parts.get(1).copied().unwrap_or("app");
+            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            match apppermissions::deny(app, perm) {
+                Ok(()) => shell_println!("Denied {} to {}", perm.label(), app),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "revoke" => {
+            let app = parts.get(1).copied().unwrap_or("app");
+            match apppermissions::revoke_all(app) {
+                Ok(n) => shell_println!("Revoked {} permissions from {}", n, app),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "app" => {
+            let app = parts.get(1).copied().unwrap_or("app");
+            let perms = apppermissions::list_app_permissions(app);
+            if perms.is_empty() {
+                shell_println!("No permissions for {}", app);
+            } else {
+                for p in &perms {
+                    shell_println!("  {}: {} (requests: {})", p.permission.label(), p.decision.label(), p.request_count);
+                }
+            }
+        }
+        "perm" => {
+            let perm = parse_perm(parts.get(1).copied().unwrap_or("camera"));
+            let apps = apppermissions::list_by_permission(perm);
+            if apps.is_empty() {
+                shell_println!("No apps with {} permission", perm.label());
+            } else {
+                for a in &apps {
+                    shell_println!("  {}: {}", a.app_name, a.decision.label());
+                }
+            }
+        }
+        "log" => {
+            let count: usize = parts.get(1).unwrap_or(&"10").parse().unwrap_or(10);
+            let log = apppermissions::list_log(count);
+            if log.is_empty() {
+                shell_println!("No permission log entries");
+            } else {
+                for l in &log {
+                    shell_println!("  {} → {}: {}", l.app_name, l.permission.label(),
+                        if l.granted { "granted" } else { "denied" });
+                }
+            }
+        }
+        "stats" => {
+            let (entries, checks, grants, denials, ops) = apppermissions::stats();
+            shell_println!("Entries: {}, Checks: {}, Grants: {}, Denials: {}, Ops: {}", entries, checks, grants, denials, ops);
+        }
+        "test" => apppermissions::self_test(),
+        _ => {
+            shell_println!("Usage: apppermissions <command>");
+            shell_println!("  check <app> <perm>  Check permission");
+            shell_println!("  grant <app> <perm>  Grant permission");
+            shell_println!("  deny <app> <perm>   Deny permission");
+            shell_println!("  revoke <app>        Revoke all");
+            shell_println!("  app <app>           List app's perms");
+            shell_println!("  perm <perm>         List apps with perm");
+            shell_println!("  log [count]         Permission log");
+            shell_println!("  Perms: camera mic location notif contacts");
+            shell_println!("         calendar storage net bt bg settings a11y");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `kbshortcuts` / `kbsc` — keyboard shortcut management.
+fn cmd_kbshortcuts(args: &str) {
+    use crate::fs::kbshortcuts;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            kbshortcuts::init_defaults();
+            shell_println!("Keyboard shortcuts initialized");
+        }
+        "list" => {
+            let all = kbshortcuts::list_shortcuts();
+            if all.is_empty() {
+                shell_println!("No shortcuts");
+            } else {
+                for s in &all {
+                    shell_println!("#{}: {}+{} → {} [{}] {} (used: {})",
+                        s.id, s.modifiers.label(), s.key, s.action,
+                        s.category.label(),
+                        if s.enabled { "ON" } else { "OFF" },
+                        s.use_count);
+                }
+            }
+        }
+        "bind" => {
+            // bind <mods> <key> <action> [desc]
+            let mods_str = parts.get(1).copied().unwrap_or("ctrl");
+            let key = parts.get(2).copied().unwrap_or("A");
+            let action = parts.get(3).copied().unwrap_or("action");
+            let desc = parts.get(4).copied().unwrap_or(action);
+            let mods = kbshortcuts::Modifiers {
+                ctrl: mods_str.contains("ctrl"),
+                alt: mods_str.contains("alt"),
+                shift: mods_str.contains("shift"),
+                super_key: mods_str.contains("super"),
+            };
+            match kbshortcuts::bind(mods, key, action, desc, kbshortcuts::ShortcutCategory::Custom) {
+                Ok(id) => shell_println!("Bound #{}: {}+{} → {}", id, mods.label(), key, action),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unbind" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid shortcut ID"); return; }
+            };
+            match kbshortcuts::unbind(id) {
+                Ok(()) => shell_println!("Unbound #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "trigger" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid shortcut ID"); return; }
+            };
+            match kbshortcuts::trigger(id) {
+                Ok(action) => shell_println!("Triggered: {}", action),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid shortcut ID"); return; }
+            };
+            let enabled = sub == "enable";
+            match kbshortcuts::set_enabled(id, enabled) {
+                Ok(()) => shell_println!("Shortcut #{}: {}", id, if enabled { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "category" | "cat" => {
+            let cat = match parts.get(1).copied().unwrap_or("system") {
+                "nav" | "navigation" => kbshortcuts::ShortcutCategory::Navigation,
+                "window" | "wm" => kbshortcuts::ShortcutCategory::WindowManagement,
+                "app" | "application" => kbshortcuts::ShortcutCategory::Application,
+                "a11y" | "accessibility" => kbshortcuts::ShortcutCategory::Accessibility,
+                "media" => kbshortcuts::ShortcutCategory::Media,
+                "custom" => kbshortcuts::ShortcutCategory::Custom,
+                _ => kbshortcuts::ShortcutCategory::System,
+            };
+            let shortcuts = kbshortcuts::list_by_category(cat);
+            shell_println!("{} shortcuts:", cat.label());
+            for s in &shortcuts {
+                shell_println!("  #{}: {}+{} → {}", s.id, s.modifiers.label(), s.key, s.action);
+            }
+        }
+        "stats" => {
+            let (count, binds, triggers, ops) = kbshortcuts::stats();
+            shell_println!("Shortcuts: {}, Binds: {}, Triggers: {}, Ops: {}", count, binds, triggers, ops);
+        }
+        "test" => kbshortcuts::self_test(),
+        _ => {
+            shell_println!("Usage: kbshortcuts <command>");
+            shell_println!("  list                  List shortcuts");
+            shell_println!("  bind <mods> <key> <action> [desc]");
+            shell_println!("  unbind <id>           Remove shortcut");
+            shell_println!("  trigger <id>          Trigger shortcut");
+            shell_println!("  enable/disable <id>   Toggle shortcut");
+            shell_println!("  category <cat>        Filter by category");
+            shell_println!("  Mods: ctrl alt shift super (combine: ctrl+alt)");
+            shell_println!("  Categories: system nav window app a11y media custom");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -45373,7 +45833,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

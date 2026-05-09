@@ -297,6 +297,10 @@ const ROOT_FILES: &[&str] = &[
     "screensaver",
     "colortemp",
     "gamemode",
+    "dpiscaling",
+    "netprofile",
+    "apppermissions",
+    "kbshortcuts",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6215,6 +6219,55 @@ fn gen_gamemode() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_dpiscaling() -> Vec<u8> {
+    use alloc::format;
+    use super::dpiscaling;
+    let (display_count, override_count, total_changes, ops) = dpiscaling::stats();
+    let mut out = String::from("display_count: ");
+    out.push_str(&format!("{}\n", display_count));
+    out.push_str(&format!("override_count: {}\n", override_count));
+    out.push_str(&format!("total_changes: {}\n", total_changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_netprofile() -> Vec<u8> {
+    use alloc::format;
+    use super::netprofile;
+    let (profile_count, active_id, total_switches, ops) = netprofile::stats();
+    let mut out = String::from("profile_count: ");
+    out.push_str(&format!("{}\n", profile_count));
+    out.push_str(&format!("active_profile_id: {}\n", active_id));
+    out.push_str(&format!("total_switches: {}\n", total_switches));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_apppermissions() -> Vec<u8> {
+    use alloc::format;
+    use super::apppermissions;
+    let (entries, checks, grants, denials, ops) = apppermissions::stats();
+    let mut out = String::from("entry_count: ");
+    out.push_str(&format!("{}\n", entries));
+    out.push_str(&format!("total_checks: {}\n", checks));
+    out.push_str(&format!("total_grants: {}\n", grants));
+    out.push_str(&format!("total_denials: {}\n", denials));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_kbshortcuts() -> Vec<u8> {
+    use alloc::format;
+    use super::kbshortcuts;
+    let (count, binds, triggers, ops) = kbshortcuts::stats();
+    let mut out = String::from("shortcut_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("total_binds: {}\n", binds));
+    out.push_str(&format!("total_triggers: {}\n", triggers));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6677,6 +6730,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "screensaver" => Ok(gen_screensaver()),
         "colortemp" => Ok(gen_colortemp()),
         "gamemode" => Ok(gen_gamemode()),
+        "dpiscaling" => Ok(gen_dpiscaling()),
+        "netprofile" => Ok(gen_netprofile()),
+        "apppermissions" => Ok(gen_apppermissions()),
+        "kbshortcuts" => Ok(gen_kbshortcuts()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

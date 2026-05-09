@@ -177,6 +177,46 @@ pub extern "C" fn wait4(
 }
 
 // ---------------------------------------------------------------------------
+// waitid
+// ---------------------------------------------------------------------------
+
+/// Identifer type for `waitid`.
+pub const P_PID: i32 = 1;
+/// Wait for any child.
+pub const P_ALL: i32 = 0;
+/// Wait for a process group.
+pub const P_PGID: i32 = 2;
+
+/// Extended wait for a child process.
+///
+/// Stub: delegates to `waitpid` internally.  The `infop` parameter
+/// is not filled in (would need `siginfo_t` support).
+#[unsafe(no_mangle)]
+pub extern "C" fn waitid(
+    idtype: i32,
+    id: PidT,
+    _infop: *mut core::ffi::c_void,
+    options: i32,
+) -> i32 {
+    let pid = match idtype {
+        P_PID => id,
+        P_ALL => -1,
+        P_PGID => {
+            // We don't really support process groups.
+            errno::set_errno(errno::ENOSYS);
+            return -1;
+        }
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    };
+
+    let ret = waitpid(pid, core::ptr::null_mut(), options);
+    if ret < 0 { -1 } else { 0 }
+}
+
+// ---------------------------------------------------------------------------
 // fork / exec
 // ---------------------------------------------------------------------------
 

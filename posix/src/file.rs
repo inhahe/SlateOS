@@ -1346,6 +1346,64 @@ pub extern "C" fn sendfile(
 }
 
 // ---------------------------------------------------------------------------
+// copy_file_range
+// ---------------------------------------------------------------------------
+
+/// Copy data between two files (in-kernel optimization).
+///
+/// Like `sendfile` but works between any two regular files.  `flags`
+/// is reserved and must be 0.
+///
+/// Stub: performs userspace read+write copy (no kernel optimization).
+#[unsafe(no_mangle)]
+pub extern "C" fn copy_file_range(
+    fd_in: Fd,
+    off_in: *mut i64,
+    fd_out: Fd,
+    off_out: *mut i64,
+    len: usize,
+    _flags: u32,
+) -> isize {
+    // Seek input if offset provided.
+    if !off_in.is_null() {
+        // SAFETY: off_in is valid.
+        let off = unsafe { *off_in };
+        if lseek(fd_in, off, 0) < 0 { return -1; }
+    }
+    // Seek output if offset provided.
+    if !off_out.is_null() {
+        let off = unsafe { *off_out };
+        if lseek(fd_out, off, 0) < 0 { return -1; }
+    }
+
+    let mut buf = [0u8; 4096];
+    let mut total: usize = 0;
+
+    while total < len {
+        let remaining = len.wrapping_sub(total);
+        let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+
+        let nr = read(fd_in, buf.as_mut_ptr(), chunk);
+        if nr <= 0 { break; }
+
+        let nw = write(fd_out, buf.as_ptr(), nr as usize);
+        if nw < 0 { if total > 0 { break; } return -1; }
+
+        total = total.wrapping_add(nw as usize);
+    }
+
+    // Update offsets if provided.
+    if !off_in.is_null() {
+        unsafe { *off_in = (*off_in).wrapping_add(total as i64); }
+    }
+    if !off_out.is_null() {
+        unsafe { *off_out = (*off_out).wrapping_add(total as i64); }
+    }
+
+    total as isize
+}
+
+// ---------------------------------------------------------------------------
 // utimes / futimes / utimensat / futimens — timestamps (stubs)
 // ---------------------------------------------------------------------------
 

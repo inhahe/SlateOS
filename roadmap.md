@@ -986,6 +986,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] __ctype_b_loc/__ctype_tolower_loc/__ctype_toupper_loc: glibc ctype lookup tables (384-entry compile-time arrays)
   - [x] program_invocation_name/program_invocation_short_name/__progname/__progname_full: program name globals
   - [x] dirent additions: rewinddir, seekdir/telldir, dirfd (-1 stub), alphasort comparator
+  - [x] waitid: extended wait (P_PID/P_ALL/P_PGID, delegates to waitpid)
+  - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
+  - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

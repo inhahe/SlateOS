@@ -128,6 +128,7 @@ pub mod crt;
 pub mod ctype;
 pub mod dlfcn;
 pub mod environ;
+pub mod epoll;
 pub mod err;
 pub mod errno;
 pub mod fcntl;

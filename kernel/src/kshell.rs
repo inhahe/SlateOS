@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4843,6 +4843,10 @@ fn dispatch(line: &str) {
         "crashreport" | "crash" => cmd_crashreport(args),
         "netproxy" | "proxy" => cmd_netproxy(args),
         "fileversion" | "fver" => cmd_fileversion(args),
+        "devicemgr" | "devmgr" => cmd_devicemgr(args),
+        "location" | "loc" => cmd_location(args),
+        "diskencrypt" | "dencrypt" => cmd_diskencrypt(args),
+        "pkgmgr" | "pkg" => cmd_pkgmgr(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -29908,6 +29912,642 @@ fn cmd_fileversion(args: &str) {
     }
 }
 
+/// `devicemgr` / `devmgr` — hardware device management.
+fn cmd_devicemgr(args: &str) {
+    use crate::fs::devicemgr;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let devices = devicemgr::list_devices();
+            if devices.is_empty() {
+                shell_println!("No devices.");
+            } else {
+                shell_println!("{:<4} {:<24} {:<10} {:<10} {:<10} {}", "ID", "Name", "Bus", "Class", "Status", "Driver");
+                for d in &devices {
+                    let drv = if d.driver.is_empty() { "-" } else { &d.driver };
+                    shell_println!("{:<4} {:<24} {:<10} {:<10} {:<10} {}",
+                        d.id, d.name, d.bus.label(), d.class.label(),
+                        d.status.label(), drv);
+                }
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: devmgr info <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match devicemgr::get_device(id) {
+                Ok(d) => {
+                    shell_println!("Device {}: {}", d.id, d.name);
+                    shell_println!("  Bus:      {} ({})", d.bus.label(), d.bus_address);
+                    shell_println!("  Class:    {}", d.class.label());
+                    shell_println!("  Vendor:   {} (0x{:04X})", d.vendor_name, d.vendor_id);
+                    shell_println!("  Product:  0x{:04X}", d.product_id);
+                    shell_println!("  Status:   {}", d.status.label());
+                    shell_println!("  Driver:   {}", if d.driver.is_empty() { "none" } else { &d.driver });
+                    shell_println!("  Enabled:  {}", d.enabled);
+                    shell_println!("  Hotplug:  {}", d.hotplugged);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: devmgr add <name> <bus> <class> [vendor] [address]");
+                shell_println!("  bus:   pci|usb|acpi|platform|i2c|spi|bluetooth|virtual");
+                shell_println!("  class: display|audio|network|storage|input|usb|bt|other");
+                return;
+            }
+            let name = parts[1];
+            let bus = match parts[2] {
+                "pci" => devicemgr::BusType::Pci,
+                "usb" => devicemgr::BusType::Usb,
+                "acpi" => devicemgr::BusType::Acpi,
+                "platform" => devicemgr::BusType::Platform,
+                "i2c" => devicemgr::BusType::I2c,
+                "spi" => devicemgr::BusType::Spi,
+                "bluetooth" | "bt" => devicemgr::BusType::Bluetooth,
+                "virtual" => devicemgr::BusType::Virtual,
+                _ => { shell_println!("Unknown bus: {}", parts[2]); return; }
+            };
+            let class = match parts[3] {
+                "display" => devicemgr::DeviceClass::Display,
+                "audio" => devicemgr::DeviceClass::Audio,
+                "network" | "net" => devicemgr::DeviceClass::Network,
+                "storage" => devicemgr::DeviceClass::Storage,
+                "input" => devicemgr::DeviceClass::Input,
+                "usb" => devicemgr::DeviceClass::Usb,
+                "bt" | "bluetooth" => devicemgr::DeviceClass::Bluetooth,
+                "printer" => devicemgr::DeviceClass::Printer,
+                _ => devicemgr::DeviceClass::Other,
+            };
+            let vendor = if parts.len() > 4 { parts[4] } else { "Generic" };
+            let addr = if parts.len() > 5 { parts[5] } else { "auto" };
+            match devicemgr::register_device(name, bus, class, 0, 0, vendor, addr, true) {
+                Ok(id) => shell_println!("Registered device '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: devmgr remove <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match devicemgr::remove_device(id) {
+                Ok(()) => shell_println!("Removed device {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "bind" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: devmgr bind <id> <driver> [version]");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            let version = if parts.len() > 3 { parts[3] } else { "1.0" };
+            match devicemgr::bind_driver(id, parts[2], version) {
+                Ok(()) => shell_println!("Bound driver '{}' to device {}.", parts[2], id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unbind" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: devmgr unbind <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match devicemgr::unbind_driver(id) {
+                Ok(()) => shell_println!("Driver unbound from device {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: devmgr {} <id>", sub);
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            let on = sub == "enable";
+            match devicemgr::set_enabled(id, on) {
+                Ok(()) => shell_println!("Device {} {}.", id, if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "nodriver" => {
+            let count = devicemgr::devices_needing_driver();
+            shell_println!("{} device(s) without a driver.", count);
+        }
+        "stats" => {
+            let (total, ok, no_drv, hotplug, ops) = devicemgr::stats();
+            shell_println!("Devices: {}  OK: {}  No driver: {}  Hotplug events: {}  Ops: {}",
+                total, ok, no_drv, hotplug, ops);
+        }
+        "test" => {
+            devicemgr::self_test();
+            shell_println!("Device manager self-test complete.");
+        }
+        "init" => {
+            devicemgr::init_defaults();
+            shell_println!("Device manager initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("devicemgr (devmgr) — hardware device management");
+            shell_println!("  show                       List devices");
+            shell_println!("  info <id>                  Device details");
+            shell_println!("  add <name> <bus> <class>   Register device");
+            shell_println!("  remove <id>                Remove device");
+            shell_println!("  bind <id> <driver>         Bind driver");
+            shell_println!("  unbind <id>                Unbind driver");
+            shell_println!("  enable/disable <id>        Toggle device");
+            shell_println!("  nodriver                   Count undriven");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'devmgr help' for usage.");
+        }
+    }
+}
+
+/// `location` / `loc` — location services and permissions.
+fn cmd_location(args: &str) {
+    use crate::fs::location;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (enabled, perm_count, requests, denied, hist_len, ops) = location::stats();
+            shell_println!("Location Services");
+            shell_println!("  Enabled:   {}", enabled);
+            shell_println!("  Apps:      {} with permissions", perm_count);
+            shell_println!("  Requests:  {} total ({} denied)", requests, denied);
+            shell_println!("  History:   {} entries", hist_len);
+            if let Some(fix) = location::current_location() {
+                let lat_deg = fix.latitude_ud / 1_000_000;
+                let lat_frac = (fix.latitude_ud % 1_000_000).unsigned_abs();
+                let lon_deg = fix.longitude_ud / 1_000_000;
+                let lon_frac = (fix.longitude_ud % 1_000_000).unsigned_abs();
+                shell_println!("  Current:   {}.{:06}, {}.{:06} ±{}m ({})",
+                    lat_deg, lat_frac, lon_deg, lon_frac, fix.accuracy_m, fix.source.label());
+            } else {
+                shell_println!("  Current:   unavailable");
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match location::set_enabled(on) {
+                Ok(()) => shell_println!("Location services {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "update" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: loc update <lat_ud> <lon_ud> <accuracy_m> [source]");
+                shell_println!("  lat/lon in microdegrees (e.g., 47606209 for 47.606209°)");
+                return;
+            }
+            let lat: i64 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid latitude"); return; } };
+            let lon: i64 = match parts[2].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid longitude"); return; } };
+            let acc: u32 = match parts[3].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid accuracy"); return; } };
+            let src = if parts.len() > 4 {
+                match parts[4] {
+                    "gps" => location::LocationSource::Gps,
+                    "wifi" => location::LocationSource::Wifi,
+                    "cell" => location::LocationSource::CellTower,
+                    "ip" => location::LocationSource::IpBased,
+                    "manual" => location::LocationSource::Manual,
+                    _ => location::LocationSource::Manual,
+                }
+            } else {
+                location::LocationSource::Manual
+            };
+            match location::update_location(lat, lon, 0, acc, src) {
+                Ok(()) => shell_println!("Location updated."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "perm" => {
+            if parts.len() < 3 {
+                let perms = location::list_app_permissions();
+                if perms.is_empty() {
+                    shell_println!("No app permissions set.");
+                } else {
+                    for p in &perms {
+                        shell_println!("  {}: {} (requests: {})", p.app_id, p.permission.label(), p.request_count);
+                    }
+                }
+                return;
+            }
+            let app_id = parts[1];
+            let perm = match parts[2] {
+                "allow" => location::LocationPermission::Allow,
+                "while" | "inuse" => location::LocationPermission::WhileInUse,
+                "deny" => location::LocationPermission::Deny,
+                "ask" => location::LocationPermission::AskNextTime,
+                _ => { shell_println!("Unknown permission: {} (allow|while|deny|ask)", parts[2]); return; }
+            };
+            match location::set_app_permission(app_id, perm) {
+                Ok(()) => shell_println!("Permission for '{}' set to {}.", app_id, perm.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "history" => {
+            if parts.len() > 1 && parts[1] == "clear" {
+                match location::clear_history() {
+                    Ok(n) => shell_println!("Cleared {} history entries.", n),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else if parts.len() > 1 && (parts[1] == "on" || parts[1] == "off") {
+                let on = parts[1] == "on";
+                match location::set_record_history(on) {
+                    Ok(()) => shell_println!("History recording {}.", if on { "enabled" } else { "disabled" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let hist = location::get_history();
+                if hist.is_empty() {
+                    shell_println!("No history recorded.");
+                } else {
+                    for h in hist.iter().rev().take(10) {
+                        let lat_deg = h.latitude_ud / 1_000_000;
+                        let lat_frac = (h.latitude_ud % 1_000_000).unsigned_abs();
+                        let lon_deg = h.longitude_ud / 1_000_000;
+                        let lon_frac = (h.longitude_ud % 1_000_000).unsigned_abs();
+                        shell_println!("  {}.{:06}, {}.{:06} ±{}m ({})",
+                            lat_deg, lat_frac, lon_deg, lon_frac, h.accuracy_m, h.source.label());
+                    }
+                }
+            }
+        }
+        "stats" => {
+            let (enabled, perms, requests, denied, hist, ops) = location::stats();
+            shell_println!("Enabled: {}  Apps: {}  Requests: {}  Denied: {}  History: {}  Ops: {}",
+                enabled, perms, requests, denied, hist, ops);
+        }
+        "test" => {
+            location::self_test();
+            shell_println!("Location self-test complete.");
+        }
+        "init" => {
+            location::init_defaults();
+            shell_println!("Location services initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("location (loc) — location services");
+            shell_println!("  show                         Overview");
+            shell_println!("  enable/disable               Toggle services");
+            shell_println!("  update <lat> <lon> <acc>     Update location");
+            shell_println!("  perm [app_id permission]     App permissions");
+            shell_println!("  history [on|off|clear]       History management");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'loc help' for usage.");
+        }
+    }
+}
+
+/// `diskencrypt` / `dencrypt` — disk encryption management.
+fn cmd_diskencrypt(args: &str) {
+    use crate::fs::diskencrypt;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let vols = diskencrypt::list_volumes();
+            if vols.is_empty() {
+                shell_println!("No volumes.");
+            } else {
+                shell_println!("{:<4} {:<12} {:<14} {:<16} {:<10} {}", "ID", "Label", "Device", "Algorithm", "Status", "Slots");
+                for v in &vols {
+                    shell_println!("{:<4} {:<12} {:<14} {:<16} {:<10} {}",
+                        v.id, v.label, v.device, v.algorithm.label(),
+                        v.status.label(), v.key_slots.len());
+                }
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: dencrypt info <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match diskencrypt::get_volume(id) {
+                Ok(v) => {
+                    shell_println!("Volume {}: {}", v.id, v.label);
+                    shell_println!("  Device:    {}", v.device);
+                    shell_println!("  Algorithm: {}", v.algorithm.label());
+                    shell_println!("  Status:    {}", v.status.label());
+                    shell_println!("  Size:      {} bytes", v.size_bytes);
+                    shell_println!("  Mount:     {}", if v.mount_point.is_empty() { "-" } else { &v.mount_point });
+                    shell_println!("  Recovery:  {}", v.has_recovery_key);
+                    shell_println!("  TPM:       {}", v.tpm_sealed);
+                    if !v.key_slots.is_empty() {
+                        shell_println!("  Key slots:");
+                        for s in &v.key_slots {
+                            let act = if s.active { "active" } else { "inactive" };
+                            shell_println!("    #{}: {} ({}) [{}]", s.slot, s.label, s.kdf.label(), act);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unlock" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dencrypt unlock <id> <passphrase>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match diskencrypt::unlock_volume(id, parts[2]) {
+                Ok(()) => shell_println!("Volume {} unlocked.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "lock" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: dencrypt lock <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match diskencrypt::lock_volume(id) {
+                Ok(()) => shell_println!("Volume {} locked.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "encrypt" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: dencrypt encrypt <id> [algorithm]");
+                shell_println!("  algorithms: aes256|aes128|serpent|twofish|chacha20");
+                return;
+            }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            let alg = if parts.len() > 2 {
+                match parts[2] {
+                    "aes256" => diskencrypt::EncryptAlgorithm::Aes256Xts,
+                    "aes128" => diskencrypt::EncryptAlgorithm::Aes128Xts,
+                    "serpent" => diskencrypt::EncryptAlgorithm::Serpent256Xts,
+                    "twofish" => diskencrypt::EncryptAlgorithm::Twofish256Xts,
+                    "chacha20" => diskencrypt::EncryptAlgorithm::ChaCha20,
+                    _ => { shell_println!("Unknown algorithm"); return; }
+                }
+            } else {
+                diskencrypt::EncryptAlgorithm::Aes256Xts
+            };
+            match diskencrypt::start_encryption(id, alg) {
+                Ok(()) => shell_println!("Started encryption of volume {} with {}.", id, alg.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "recovery" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: dencrypt recovery <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match diskencrypt::generate_recovery_key(id) {
+                Ok(key) => {
+                    shell_println!("Recovery key generated for volume {}:", id);
+                    shell_println!("  {}", key);
+                    shell_println!("  *** SAVE THIS KEY SECURELY ***");
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "addslot" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dencrypt addslot <id> <label> [kdf]");
+                return;
+            }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            let kdf = if parts.len() > 3 {
+                match parts[3] {
+                    "argon2id" | "argon2" => diskencrypt::Kdf::Argon2id,
+                    "pbkdf2" => diskencrypt::Kdf::Pbkdf2,
+                    "scrypt" => diskencrypt::Kdf::Scrypt,
+                    _ => diskencrypt::Kdf::Argon2id,
+                }
+            } else {
+                diskencrypt::Kdf::Argon2id
+            };
+            match diskencrypt::add_key_slot(id, kdf, parts[2]) {
+                Ok(slot) => shell_println!("Added key slot #{} to volume {}.", slot, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (total, encrypted, unlocked, failed, ops) = diskencrypt::stats();
+            shell_println!("Volumes: {}  Encrypted: {}  Unlocked: {}  Failed unlocks: {}  Ops: {}",
+                total, encrypted, unlocked, failed, ops);
+        }
+        "test" => {
+            diskencrypt::self_test();
+            shell_println!("Disk encryption self-test complete.");
+        }
+        "init" => {
+            diskencrypt::init_defaults();
+            shell_println!("Disk encryption initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("diskencrypt (dencrypt) — disk encryption management");
+            shell_println!("  show                  List volumes");
+            shell_println!("  info <id>             Volume details");
+            shell_println!("  unlock <id> <pass>    Unlock volume");
+            shell_println!("  lock <id>             Lock volume");
+            shell_println!("  encrypt <id> [alg]    Start encryption");
+            shell_println!("  recovery <id>         Generate recovery key");
+            shell_println!("  addslot <id> <label>  Add key slot");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'dencrypt help' for usage.");
+        }
+    }
+}
+
+/// `pkgmgr` / `pkg` — package management.
+fn cmd_pkgmgr(args: &str) {
+    use crate::fs::pkgmgr;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (installed, available, upgradeable, repos, _) = pkgmgr::stats();
+            shell_println!("Package Manager");
+            shell_println!("  Installed:    {}", installed);
+            shell_println!("  Available:    {}", available);
+            shell_println!("  Upgradeable:  {}", upgradeable);
+            shell_println!("  Repositories: {}", repos);
+            shell_println!("  Total size:   {} bytes", pkgmgr::total_installed_size());
+        }
+        "list" => {
+            let packages = pkgmgr::list_installed();
+            if packages.is_empty() {
+                shell_println!("No packages installed.");
+            } else {
+                shell_println!("{:<20} {:<10} {:<12} {}", "Name", "Version", "Section", "Status");
+                for p in &packages {
+                    shell_println!("{:<20} {:<10} {:<12} {}", p.name, p.version, p.section.label(), p.status.label());
+                }
+            }
+        }
+        "install" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: pkg install <name> [version] [description]");
+                return;
+            }
+            let name = parts[1];
+            let version = if parts.len() > 2 { parts[2] } else { "1.0.0" };
+            let desc = if parts.len() > 3 { parts[3..].join(" ") } else { String::from("User package") };
+            match pkgmgr::install(name, version, &desc, pkgmgr::PkgSection::Other, 1024 * 1024) {
+                Ok(()) => shell_println!("Installed '{}' v{}.", name, version),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: pkg remove <name>");
+                return;
+            }
+            match pkgmgr::remove(parts[1]) {
+                Ok(()) => shell_println!("Removed '{}'.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: pkg info <name>");
+                return;
+            }
+            match pkgmgr::get_package(parts[1]) {
+                Ok(p) => {
+                    shell_println!("Package: {}", p.name);
+                    shell_println!("  Version:   {}", p.version);
+                    shell_println!("  Available: {}", p.available_version);
+                    shell_println!("  Section:   {}", p.section.label());
+                    shell_println!("  Status:    {}", p.status.label());
+                    shell_println!("  Size:      {} bytes", p.installed_size);
+                    shell_println!("  Repo:      {}", p.repo);
+                    shell_println!("  Desc:      {}", p.description);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "search" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: pkg search <query>");
+                return;
+            }
+            let results = pkgmgr::search(parts[1]);
+            if results.is_empty() {
+                shell_println!("No matches for '{}'.", parts[1]);
+            } else {
+                for p in &results {
+                    shell_println!("  {} {} — {} [{}]", p.name, p.version, p.description, p.status.label());
+                }
+            }
+        }
+        "upgrade" => {
+            if parts.len() > 1 {
+                match pkgmgr::upgrade(parts[1]) {
+                    Ok(()) => shell_println!("Upgraded '{}'.", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                match pkgmgr::upgrade_all() {
+                    Ok(n) => shell_println!("Upgraded {} packages.", n),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "upgradeable" => {
+            let packages = pkgmgr::list_upgradeable();
+            if packages.is_empty() {
+                shell_println!("All packages up to date.");
+            } else {
+                for p in &packages {
+                    shell_println!("  {} {} → {}", p.name, p.version, p.available_version);
+                }
+            }
+        }
+        "repos" => {
+            let repos = pkgmgr::list_repos();
+            if repos.is_empty() {
+                shell_println!("No repositories.");
+            } else {
+                for r in &repos {
+                    let en = if r.enabled { "" } else { " [disabled]" };
+                    shell_println!("  {}: {}{}", r.name, r.url, en);
+                }
+            }
+        }
+        "addrepo" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: pkg addrepo <name> <url>");
+                return;
+            }
+            match pkgmgr::add_repo(parts[1], parts[2]) {
+                Ok(()) => shell_println!("Added repository '{}'.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (installed, available, upgradeable, repos, ops) = pkgmgr::stats();
+            shell_println!("Installed: {}  Available: {}  Upgradeable: {}  Repos: {}  Ops: {}",
+                installed, available, upgradeable, repos, ops);
+        }
+        "test" => {
+            pkgmgr::self_test();
+            shell_println!("Package manager self-test complete.");
+        }
+        "init" => {
+            pkgmgr::init_defaults();
+            shell_println!("Package manager initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("pkgmgr (pkg) — package management");
+            shell_println!("  show                  Overview");
+            shell_println!("  list                  Installed packages");
+            shell_println!("  install <name> [ver]  Install package");
+            shell_println!("  remove <name>         Remove package");
+            shell_println!("  info <name>           Package details");
+            shell_println!("  search <query>        Search packages");
+            shell_println!("  upgrade [name]        Upgrade one or all");
+            shell_println!("  upgradeable           List available upgrades");
+            shell_println!("  repos / addrepo       Repository management");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'pkg help' for usage.");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -38504,7 +39144,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

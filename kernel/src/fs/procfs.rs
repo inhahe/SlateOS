@@ -239,6 +239,10 @@ const ROOT_FILES: &[&str] = &[
     "crashreport",
     "netproxy",
     "fileversion",
+    "devicemgr",
+    "location",
+    "diskencrypt",
+    "pkgmgr",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5353,6 +5357,98 @@ fn gen_fileversion() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_devicemgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, ok, no_drv, hotplug, ops) = super::devicemgr::stats();
+    out.push_str(&format!("devices: {}\n", total));
+    out.push_str(&format!("ok: {}\n", ok));
+    out.push_str(&format!("no_driver: {}\n", no_drv));
+    out.push_str(&format!("hotplug_events: {}\n", hotplug));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let devices = super::devicemgr::list_devices();
+    for d in &devices {
+        let drv = if d.driver.is_empty() { "no driver" } else { &d.driver };
+        out.push_str(&format!("{}: {} [{}] {} ({})\n",
+            d.id, d.name, d.bus.label(), d.status.label(), drv));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_location() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (enabled, perm_count, requests, denied, hist_len, ops) = super::location::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("app_permissions: {}\n", perm_count));
+    out.push_str(&format!("total_requests: {}\n", requests));
+    out.push_str(&format!("total_denied: {}\n", denied));
+    out.push_str(&format!("history_entries: {}\n", hist_len));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Some(fix) = super::location::current_location() {
+        let lat = fix.latitude_ud as f64 / 1_000_000.0;
+        let lon = fix.longitude_ud as f64 / 1_000_000.0;
+        // Use integer division to show approximate coordinates without float formatting.
+        let lat_deg = fix.latitude_ud / 1_000_000;
+        let lat_frac = (fix.latitude_ud % 1_000_000).unsigned_abs();
+        let lon_deg = fix.longitude_ud / 1_000_000;
+        let lon_frac = (fix.longitude_ud % 1_000_000).unsigned_abs();
+        out.push_str(&format!("current: {}.{:06},{}.{:06} ±{}m ({})\n",
+            lat_deg, lat_frac, lon_deg, lon_frac, fix.accuracy_m, fix.source.label()));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_diskencrypt() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, encrypted, unlocked, failed, ops) = super::diskencrypt::stats();
+    out.push_str(&format!("volumes: {}\n", total));
+    out.push_str(&format!("encrypted: {}\n", encrypted));
+    out.push_str(&format!("unlocked: {}\n", unlocked));
+    out.push_str(&format!("failed_unlocks: {}\n", failed));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let vols = super::diskencrypt::list_volumes();
+    for v in &vols {
+        out.push_str(&format!("{}: {} ({}) {} [{}]\n",
+            v.id, v.label, v.device, v.algorithm.label(), v.status.label()));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_pkgmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (installed, available, upgradeable, repos, ops) = super::pkgmgr::stats();
+    out.push_str(&format!("installed: {}\n", installed));
+    out.push_str(&format!("available: {}\n", available));
+    out.push_str(&format!("upgradeable: {}\n", upgradeable));
+    out.push_str(&format!("repositories: {}\n", repos));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let packages = super::pkgmgr::list_installed();
+    for p in &packages {
+        let up = if p.status == super::pkgmgr::PkgStatus::Upgradeable {
+            format!(" → {}", p.available_version)
+        } else {
+            String::new()
+        };
+        out.push_str(&format!("{} {} [{}]{}\n", p.name, p.version, p.section.label(), up));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5757,6 +5853,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "crashreport" => Ok(gen_crashreport()),
         "netproxy" => Ok(gen_netproxy()),
         "fileversion" => Ok(gen_fileversion()),
+        "devicemgr" => Ok(gen_devicemgr()),
+        "location" => Ok(gen_location()),
+        "diskencrypt" => Ok(gen_diskencrypt()),
+        "pkgmgr" => Ok(gen_pkgmgr()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

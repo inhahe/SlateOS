@@ -11,22 +11,34 @@
 //! function signatures to our native syscalls with minimal overhead:
 //!
 //! - **File I/O**: `open`, `close`, `read`, `write`, `lseek`, `stat`,
-//!   `fstat`, `unlink`, `mkdir`, `rmdir`, `rename`, `dup`, `dup2`
-//! - **Process**: `_exit`, `getpid`, `getppid`, `fork` (via spawn),
+//!   `fstat`, `unlink`, `mkdir`, `rmdir`, `rename`, `dup`, `dup2`,
+//!   `access`, `chmod`, `chown`, `umask`, `truncate`, `ftruncate`,
+//!   `fsync`, `link`, `symlink`, `readlink`
+//! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
+//!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
+//!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
+//!   `freeaddrinfo`, `gethostbyname`, `htons`, `htonl`, `inet_addr`,
+//!   `inet_ntoa`
+//! - **I/O Multiplexing**: `poll`, `select`, `pselect`
+//! - **Terminal**: `ioctl` (TIOCGWINSZ, TCGETS, FIONBIO, etc.),
+//!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, termios flags
+//! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
 //!   `execve`, `waitpid`, `sleep`, `nanosleep`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`
-//! - **Signals**: Translated to native IPC messages (partial)
-//! - **Misc**: `getcwd`, `chdir`, `errno` thread-local
+//! - **Pipes**: `pipe`, `pipe2`
+//! - **Signals**: Stub constants and handlers (partial)
+//! - **Threads**: `pthread` stubs, working mutex ops
+//! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
+//!   `setjmp`/`longjmp`, `qsort`, `bsearch`, `atoi`/`strtol`,
+//!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
+//! - **Misc**: `getcwd`, `chdir`, `errno`, `sysconf`, `getenv`/`setenv`
 //!
 //! ## Error Handling
 //!
 //! POSIX functions return -1 on error and set `errno`.  Our native
 //! syscalls return negative error codes.  The translation layer converts
-//! native error codes to POSIX errno values.
-//!
-//! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
-//!   `setjmp`/`longjmp`, `qsort`, `bsearch`, `atoi`/`strtol`,
-//!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
+//! native error codes to POSIX errno values (70+ constants matching
+//! Linux x86_64).
 //!
 //! ## What This Is NOT
 //!

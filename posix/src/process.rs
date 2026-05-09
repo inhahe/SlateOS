@@ -141,6 +141,41 @@ pub extern "C" fn wait(status: *mut i32) -> PidT {
     waitpid(-1, status, 0)
 }
 
+/// Wait for a child process with resource usage.
+///
+/// Like `waitpid(-1, status, options)` but also fills `rusage` with
+/// resource usage data (zeroed — no kernel accounting yet).
+#[unsafe(no_mangle)]
+pub extern "C" fn wait3(
+    status: *mut i32,
+    options: i32,
+    rusage: *mut crate::resource::Rusage,
+) -> PidT {
+    // Zero the rusage if provided.
+    if !rusage.is_null() {
+        // SAFETY: Caller guarantees rusage is valid.
+        unsafe { core::ptr::write_bytes(rusage, 0, 1); }
+    }
+    waitpid(-1, status, options)
+}
+
+/// Wait for a specific child process with resource usage.
+///
+/// Like `waitpid` but also fills `rusage`.
+#[unsafe(no_mangle)]
+pub extern "C" fn wait4(
+    pid: PidT,
+    status: *mut i32,
+    options: i32,
+    rusage: *mut crate::resource::Rusage,
+) -> PidT {
+    if !rusage.is_null() {
+        // SAFETY: Caller guarantees rusage is valid.
+        unsafe { core::ptr::write_bytes(rusage, 0, 1); }
+    }
+    waitpid(pid, status, options)
+}
+
 // ---------------------------------------------------------------------------
 // fork / exec
 // ---------------------------------------------------------------------------

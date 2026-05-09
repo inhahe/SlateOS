@@ -352,6 +352,116 @@ pub extern "C" fn rand() -> i32 {
 pub static RAND_MAX: i32 = 0x7FFF_FFFF;
 
 // ---------------------------------------------------------------------------
+// Temporary files
+// ---------------------------------------------------------------------------
+
+/// Counter for generating unique temporary filenames.
+static mut MKSTEMP_COUNTER: u32 = 0;
+
+/// Create a unique temporary file.
+///
+/// The `template` string must end with exactly six 'X' characters
+/// (e.g., `"/tmp/fileXXXXXX"`).  These are replaced with unique
+/// characters and the file is created atomically.
+///
+/// Returns an open file descriptor on success, or -1 on error.
+///
+/// # Safety
+///
+/// `template` must be a writable null-terminated string with at least
+/// 6 trailing 'X' characters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
+    if template.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    let len = unsafe { crate::string::strlen(template) };
+    if len < 6 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    // Verify the last 6 characters are 'X'.
+    let suffix_start = len.wrapping_sub(6);
+    let mut i: usize = 0;
+    while i < 6 {
+        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Try up to 100 unique names.
+    let mut attempt: u32 = 0;
+    while attempt < 100 {
+        // Generate a unique suffix using counter + pid + attempt.
+        let counter = unsafe { *core::ptr::addr_of!(MKSTEMP_COUNTER) };
+        unsafe { core::ptr::addr_of_mut!(MKSTEMP_COUNTER).write(counter.wrapping_add(1)); }
+
+        let pid = crate::process::getpid() as u32;
+        let seed = counter
+            .wrapping_mul(31)
+            .wrapping_add(pid)
+            .wrapping_mul(17)
+            .wrapping_add(attempt);
+
+        // Fill the 6 X's with alphanumeric characters derived from seed.
+        let mut val = seed;
+        let mut j: usize = 0;
+        while j < 6 {
+            let idx = (val % 36) as u8;
+            let ch = if idx < 10 {
+                b'0'.wrapping_add(idx)
+            } else {
+                b'a'.wrapping_add(idx.wrapping_sub(10))
+            };
+            // SAFETY: suffix_start + j < len, template is writable.
+            unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+            val = val.wrapping_div(36).wrapping_add(1);
+            j = j.wrapping_add(1);
+        }
+
+        // Try to create the file exclusively.
+        let flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
+        let fd = crate::file::open(template, flags, 0o600);
+        if fd >= 0 {
+            return fd;
+        }
+
+        // If EEXIST, try again.  Any other error, bail.
+        if crate::errno::get_errno() != crate::errno::EEXIST {
+            return -1;
+        }
+
+        attempt = attempt.wrapping_add(1);
+    }
+
+    crate::errno::set_errno(crate::errno::EEXIST);
+    -1
+}
+
+/// Create a temporary file.
+///
+/// Returns a FILE* stream for a unique temporary file opened in "w+b"
+/// mode, or null on error.  The file is automatically deleted when
+/// closed.
+///
+/// Note: Automatic deletion is not implemented (no unlink-on-close
+/// support yet).  The file persists until manually removed.
+#[unsafe(no_mangle)]
+pub extern "C" fn tmpfile() -> *mut u8 {
+    let mut template: [u8; 20] = *b"/tmp/tmpXXXXXX\0\0\0\0\0\0";
+    let fd = unsafe { mkstemp(template.as_mut_ptr()) };
+    if fd < 0 {
+        return core::ptr::null_mut();
+    }
+    fd as usize as *mut u8
+}
+
+// ---------------------------------------------------------------------------
 // Character classification (internal helpers)
 // ---------------------------------------------------------------------------
 

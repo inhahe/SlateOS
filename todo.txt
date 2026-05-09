@@ -138,6 +138,28 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   stat() gets file size, mmap allocates exactly that, munmap frees after
   spawn/exec.  No longer limited to 512 KiB.
 
+- Socket dup is not supported.  dup(tcp_fd) returns ENOSYS.  Same reason
+  as pipe dup — no kernel-level handle duplication for sockets.
+
+- poll/select report all valid fds as ready (optimistic readiness).  This
+  works correctly for files (POSIX says always ready) and is conservative
+  for pipes/sockets (programs handle blocking on I/O).  A proper kernel
+  event notification mechanism (eventfd/completion ports) would allow
+  accurate readiness reporting.
+
+- getaddrinfo() uses static storage (no heap) and returns at most one
+  result.  Not re-entrant — same as POSIX gethostbyname().
+
+- ioctl TCSETS/TCGETS are accepted but don't actually change terminal
+  behavior (no line discipline).  Programs that set raw mode work via
+  VT100 escape sequences.  Will need real terminal mode support when
+  porting interactive programs (vim, less, etc.).
+
+- Unit tests exist in #[cfg(test)] modules but can't run on the host
+  because the crate targets x86_64-unknown-none.  Need a QEMU-based
+  test runner or a separate host-testable crate that extracts pure
+  logic functions.
+
 ## Cross-Zone Bug Reports
 
 - (FIXED) rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics

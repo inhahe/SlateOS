@@ -396,6 +396,10 @@ const ROOT_FILES: &[&str] = &[
     "groupmgr",
     "sysrq",
     "telemetry",
+    "fscache",
+    "nameservice",
+    "oomkiller",
+    "blktrace",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7811,6 +7815,80 @@ fn gen_telemetry() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_fscache() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== FS Cache ===\n");
+    let (devs, flushes, readaheads, evictions, ops) = crate::fs::fscache::stats();
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("total_flushes: {}\n", flushes));
+    out.push_str(&format!("total_readaheads: {}\n", readaheads));
+    out.push_str(&format!("total_evictions: {}\n", evictions));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::fscache::list_devices() {
+        out.push_str(&format!("  {} policy={} ra={} dirty={}/{} cached={}\n",
+            d.device_name, d.policy.label(), d.readahead_pages,
+            d.dirty_pages, d.dirty_ratio_pct, d.cached_pages));
+    }
+    out.into_bytes()
+}
+
+fn gen_nameservice() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Name Service ===\n");
+    let hostname = crate::fs::nameservice::get_hostname();
+    let domain = crate::fs::nameservice::get_domain();
+    out.push_str(&format!("hostname: {}\n", hostname));
+    out.push_str(&format!("domain: {}\n", domain));
+    let (hosts, lookups, hits, misses, ops) = crate::fs::nameservice::stats();
+    out.push_str(&format!("hosts: {}\n", hosts));
+    out.push_str(&format!("total_lookups: {}\n", lookups));
+    out.push_str(&format!("cache_hits: {}\n", hits));
+    out.push_str(&format!("cache_misses: {}\n", misses));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_oomkiller() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== OOM Killer ===\n");
+    let policy = crate::fs::oomkiller::get_policy();
+    let (count, kills, freed, invocations, ops) = crate::fs::oomkiller::stats();
+    out.push_str(&format!("policy: {}\n", policy.label()));
+    out.push_str(&format!("processes: {}\n", count));
+    out.push_str(&format!("total_kills: {}\n", kills));
+    out.push_str(&format!("memory_freed: {}\n", freed));
+    out.push_str(&format!("invocations: {}\n", invocations));
+    out.push_str(&format!("ops: {}\n", ops));
+    for s in crate::fs::oomkiller::list_scores() {
+        let eff = (s.score + s.adj).max(0);
+        let ex = if s.exempt { " [EXEMPT]" } else { "" };
+        out.push_str(&format!("  pid={} {} score={} adj={} eff={}{}\n",
+            s.pid, s.process_name, s.score, s.adj, eff, ex));
+    }
+    out.into_bytes()
+}
+
+fn gen_blktrace() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Block Trace ===\n");
+    let (devs, events, bytes, active, ops) = crate::fs::blktrace::stats();
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("active: {}\n", active));
+    out.push_str(&format!("total_events: {}\n", events));
+    out.push_str(&format!("total_bytes: {}\n", bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::blktrace::list_devices() {
+        let st = if d.active { "ACTIVE" } else { "STOPPED" };
+        out.push_str(&format!("  {} [{}] events={} bytes={}\n",
+            d.device, st, d.total_events, d.total_bytes));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8372,6 +8450,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "groupmgr" => Ok(gen_groupmgr()),
         "sysrq" => Ok(gen_sysrq()),
         "telemetry" => Ok(gen_telemetry()),
+        "fscache" => Ok(gen_fscache()),
+        "nameservice" => Ok(gen_nameservice()),
+        "oomkiller" => Ok(gen_oomkiller()),
+        "blktrace" => Ok(gen_blktrace()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

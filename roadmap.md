@@ -922,6 +922,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Group Manager (fs::groupmgr): User group management with 3 types, member add/remove, user lookup; `groupmgr`/`grp` kshell command; /proc/groupmgr; 8 self-tests
   - [x] SysRq (fs::sysrq): Magic SysRq key handlers with 7 categories, trigger/register/unregister, category mask; `sysrq` kshell command; /proc/sysrq; 8 self-tests
   - [x] Telemetry (fs::telemetry): System metrics collection with 4 types, 6 categories, register/record/query/export; `telemetry`/`telem` kshell command; /proc/telemetry; 8 self-tests
+  - [x] FS Cache (fs::fscache): Per-device cache policy (write-back/through/around), read-ahead, dirty ratio, flush; `fscache`/`fcache` kshell command; /proc/fscache; 8 self-tests
+  - [x] Name Service (fs::nameservice): Hostname/DNS resolution with static hosts, resolve cache, cache flush; `nameservice`/`nsvc` kshell command; /proc/nameservice; 8 self-tests
+  - [x] OOM Killer (fs::oomkiller): OOM scoring with 4 policies, per-process adj/exempt, victim selection, kill history; `oomkiller`/`oom` kshell command; /proc/oomkiller; 8 self-tests
+  - [x] Block Trace (fs::blktrace): Per-device I/O tracing with 5 op types, start/stop/dump/clear, event filtering; `blktrace`/`btrace` kshell command; /proc/blktrace; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

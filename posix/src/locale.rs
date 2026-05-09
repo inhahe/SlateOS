@@ -1,11 +1,15 @@
 //! C locale functions.
 //!
-//! Implements a minimal `<locale.h>` with C locale only.
-//! `setlocale` always returns `"C"` and `localeconv` returns
-//! a static lconv struct with C locale defaults.
+//! Implements a minimal `<locale.h>` and POSIX extended locale
+//! (`<xlocale.h>`) with C locale only.
 //!
-//! This is sufficient for programs that call setlocale during
-//! initialization but don't actually need locale-aware behavior.
+//! Functions: `setlocale`, `localeconv`, `newlocale`, `duplocale`,
+//! `freelocale`, `uselocale`.
+//!
+//! All locale functions return the C locale — our OS doesn't support
+//! other locales.  This is sufficient for programs that call
+//! `setlocale(LC_ALL, "")` during initialization and for libraries
+//! that use the POSIX 2008 extended locale functions.
 
 /// Locale categories.
 pub const LC_CTYPE: i32 = 0;
@@ -84,3 +88,75 @@ pub extern "C" fn setlocale(_category: i32, _locale: *const u8) -> *const u8 {
 pub extern "C" fn localeconv() -> *const Lconv {
     &raw const C_LCONV
 }
+
+// ---------------------------------------------------------------------------
+// POSIX 2008 extended locale (xlocale)
+// ---------------------------------------------------------------------------
+
+/// Opaque locale type for POSIX 2008 extended locale functions.
+///
+/// We use a simple tag value (1 = C locale).  A real implementation
+/// would point to a locale data structure.
+pub type LocaleT = usize;
+
+/// The global locale (special value for `uselocale`).
+pub const LC_GLOBAL_LOCALE: LocaleT = usize::MAX;
+
+/// Sentinel value for the C locale.
+const C_LOCALE_TAG: LocaleT = 1;
+
+/// Create a new locale object.
+///
+/// Always returns a handle for the C locale regardless of the
+/// `locale` string.  `base` is ignored.
+#[unsafe(no_mangle)]
+pub extern "C" fn newlocale(
+    _category_mask: i32,
+    _locale: *const u8,
+    _base: LocaleT,
+) -> LocaleT {
+    C_LOCALE_TAG
+}
+
+/// Duplicate a locale object.
+///
+/// Returns a handle to the C locale.
+#[unsafe(no_mangle)]
+pub extern "C" fn duplocale(_locobj: LocaleT) -> LocaleT {
+    C_LOCALE_TAG
+}
+
+/// Free a locale object.
+///
+/// No-op — our locale objects are static tags with no heap allocation.
+#[unsafe(no_mangle)]
+pub extern "C" fn freelocale(_locobj: LocaleT) {}
+
+/// Set the thread-local locale.
+///
+/// Returns the previous locale.  Always returns the C locale
+/// (thread-local locale storage is not implemented).
+#[unsafe(no_mangle)]
+pub extern "C" fn uselocale(_newloc: LocaleT) -> LocaleT {
+    C_LOCALE_TAG
+}
+
+// ---------------------------------------------------------------------------
+// Category masks for newlocale
+// ---------------------------------------------------------------------------
+
+/// Mask for `LC_CTYPE`.
+pub const LC_CTYPE_MASK: i32 = 1 << LC_CTYPE;
+/// Mask for `LC_NUMERIC`.
+pub const LC_NUMERIC_MASK: i32 = 1 << LC_NUMERIC;
+/// Mask for `LC_TIME`.
+pub const LC_TIME_MASK: i32 = 1 << LC_TIME;
+/// Mask for `LC_COLLATE`.
+pub const LC_COLLATE_MASK: i32 = 1 << LC_COLLATE;
+/// Mask for `LC_MONETARY`.
+pub const LC_MONETARY_MASK: i32 = 1 << LC_MONETARY;
+/// Mask for `LC_MESSAGES`.
+pub const LC_MESSAGES_MASK: i32 = 1 << LC_MESSAGES;
+/// Mask for all categories.
+#[allow(clippy::cast_possible_truncation)]
+pub const LC_ALL_MASK: i32 = (1 << (LC_ALL + 1)) - 1;

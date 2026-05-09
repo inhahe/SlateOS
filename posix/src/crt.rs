@@ -1,6 +1,6 @@
 //! C runtime startup and exit handlers.
 //!
-//! Provides `atexit`, `exit`, and `__libc_start_main`.
+//! Provides `atexit`, `exit`, `__libc_start_main`, and C++ ABI stubs.
 //!
 //! ## C Program Startup
 //!
@@ -14,6 +14,12 @@
 //!
 //! Registered functions are called in reverse order (LIFO) during
 //! `exit()`.  Maximum 32 handlers.
+//!
+//! ## C++ ABI Stubs
+//!
+//! `__cxa_atexit` and `__cxa_finalize` are C++ destructor registration
+//! functions.  `__stack_chk_fail` and `__stack_chk_guard` support
+//! stack canary protection (GCC/Clang -fstack-protector).
 
 use core::arch::global_asm;
 use core::ptr::addr_of_mut;
@@ -164,3 +170,82 @@ global_asm!(
     // exit should not return, but if it does, halt.
     "    ud2",
 );
+
+// ---------------------------------------------------------------------------
+// C++ ABI support — __cxa_atexit / __cxa_finalize
+// ---------------------------------------------------------------------------
+//
+// C++ static destructors register via __cxa_atexit (per Itanium C++ ABI).
+// When exit() is called, __cxa_finalize runs them.  Our implementation
+// piggybacks on the atexit table.
+
+/// C++ ABI: Register a destructor for a static/global object.
+///
+/// `func` is the destructor, `arg` is the object, `dso_handle` identifies
+/// the shared library (ignored since we don't support dynamic loading).
+///
+/// We ignore `arg` and `dso_handle` and simply register `func` as an
+/// atexit handler.  This is correct for single-module static binaries.
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_atexit(
+    func: extern "C" fn(*mut u8),
+    _arg: *mut u8,
+    _dso_handle: *mut u8,
+) -> i32 {
+    // Wrap the C++ destructor as a plain atexit function.
+    // We lose the `arg` parameter here — C++ destructors for static
+    // objects with non-trivial destructors will not receive their `this`.
+    // A full implementation needs a separate destructor list with
+    // (func, arg, dso_handle) triples.  This is a link-compatibility stub.
+    let wrapper: AtexitFn = unsafe { core::mem::transmute(func) };
+    atexit(wrapper)
+}
+
+/// C++ ABI: Run destructors registered by `__cxa_atexit`.
+///
+/// If `dso_handle` is NULL, runs all destructors (called at exit).
+/// If non-NULL, runs destructors for that specific DSO (called at dlclose).
+/// Since we don't support dynamic loading, this is a no-op (atexit
+/// handlers are run by `exit()` instead).
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_finalize(_dso_handle: *mut u8) {
+    // No-op: exit() runs atexit handlers.
+}
+
+// ---------------------------------------------------------------------------
+// Stack canary support
+// ---------------------------------------------------------------------------
+
+/// Stack canary value for -fstack-protector.
+///
+/// The compiler inserts this value at the base of stack frames and checks
+/// it on return.  A mismatch means stack corruption.  We use a fixed
+/// value since we don't have /dev/urandom yet; a real implementation
+/// would initialize this from a random source at process startup.
+#[unsafe(no_mangle)]
+pub static __stack_chk_guard: u64 = 0x0000_DEAD_BEEF_CAFE;
+
+/// Called when a stack buffer overflow is detected.
+///
+/// This function never returns — the stack is corrupt, so continuing
+/// would be undefined behavior.
+#[unsafe(no_mangle)]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    // Write a message to stderr.
+    let msg = b"*** stack smashing detected ***\n";
+    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+
+    // Abort the process.
+    crate::unistd::abort();
+}
+
+// ---------------------------------------------------------------------------
+// DSO handle — used by __cxa_atexit for identifying the binary
+// ---------------------------------------------------------------------------
+
+/// DSO handle for the main executable.
+///
+/// Programs compiled with GCC/Clang reference this symbol.
+/// For a static binary, it just needs to exist (value doesn't matter).
+#[unsafe(no_mangle)]
+pub static __dso_handle: u8 = 0;

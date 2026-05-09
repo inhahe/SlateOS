@@ -142,6 +142,7 @@ pub mod printf;
 pub mod pthread;
 pub mod regex;
 pub mod scanf;
+pub mod sched;
 pub mod semaphore;
 pub mod process;
 pub mod pwd;

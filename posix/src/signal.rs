@@ -350,3 +350,45 @@ pub unsafe extern "C" fn psignal(signum: i32, s: *const u8) {
     let nl = b'\n';
     let _ = crate::file::write(2, &raw const nl, 1);
 }
+
+// ---------------------------------------------------------------------------
+// sigwait / sigtimedwait / sigqueue — stubs
+// ---------------------------------------------------------------------------
+
+/// Wait for a signal from a set.
+///
+/// Stub: our OS doesn't deliver signals.  Sleeps for 1 second then
+/// returns `EAGAIN` (no signal delivered).
+#[unsafe(no_mangle)]
+pub extern "C" fn sigwait(_set: *const u64, sig: *mut i32) -> i32 {
+    // Sleep briefly so callers in a loop don't spin.
+    let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000_000_u64);
+    if !sig.is_null() {
+        // SAFETY: sig is valid if non-null (caller contract).
+        unsafe { *sig = 0; }
+    }
+    crate::errno::EAGAIN
+}
+
+/// Wait for a signal with a timeout.
+///
+/// Stub: returns -1 with `EAGAIN`.  The `timeout` parameter is ignored
+/// since we don't have signal delivery.
+#[unsafe(no_mangle)]
+pub extern "C" fn sigtimedwait(
+    _set: *const u64,
+    _info: *mut core::ffi::c_void,
+    _timeout: *const crate::stat::Timespec,
+) -> i32 {
+    crate::errno::set_errno(crate::errno::EAGAIN);
+    -1
+}
+
+/// Queue a signal to a process.
+///
+/// Stub: returns -1 with `ENOSYS` (no signal delivery mechanism).
+#[unsafe(no_mangle)]
+pub extern "C" fn sigqueue(_pid: crate::types::PidT, _sig: i32, _value: usize) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}

@@ -941,6 +941,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] posix_fadvise/posix_fallocate stubs (advisory, always succeed)
   - [x] sigsetjmp/siglongjmp/_setjmp/_longjmp: assembly aliases (jmp to setjmp/longjmp), SigjmpBuf type alias
   - [x] daemon: best-effort daemonize (chdir /, close fds, setsid — no fork), getloadavg stub (returns 0.0)
+  - [x] inet_pton/inet_ntop: IPv4 text↔binary address conversion (AF_INET only, AF_INET6 returns EAFNOSUPPORT)
+  - [x] execv: exec without environment (delegates to execve), vfork stub (returns ENOSYS like fork)
+  - [x] flockfile/funlockfile/ftrylockfile: thread-safe stdio locking stubs; getc_unlocked/putc_unlocked/getchar_unlocked/putchar_unlocked
+  - [x] sigwait/sigtimedwait/sigqueue: signal waiting/queuing stubs (no signal delivery)
+  - [x] sync/sethostname/chroot: system stubs (sync no-op, sethostname EPERM, chroot ENOSYS)
+  - [x] utimes/futimes/utimensat/futimens: file timestamp stubs (always succeed), UTIME_NOW/UTIME_OMIT constants
+  - [x] settimeofday: stub (returns EPERM)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

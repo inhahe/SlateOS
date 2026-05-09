@@ -676,6 +676,40 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
+// sync / sethostname / chroot
+// ---------------------------------------------------------------------------
+
+/// Commit all filesystem caches to stable storage.
+///
+/// Stub: no-op.  Our filesystem doesn't have a write-back cache yet,
+/// so there is nothing to flush.  Always succeeds (void return per
+/// POSIX).
+#[unsafe(no_mangle)]
+pub extern "C" fn sync() {
+    // No-op: filesystem writes are synchronous.
+}
+
+/// Set the system hostname.
+///
+/// Stub: returns -1 with `EPERM`.  Hostname is currently hardcoded
+/// to "localhost" in `gethostname()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sethostname(_name: *const u8, _len: usize) -> i32 {
+    errno::set_errno(errno::EPERM);
+    -1
+}
+
+/// Change the root directory.
+///
+/// Stub: returns -1 with `ENOSYS`.  Filesystem namespaces are not
+/// yet implemented.
+#[unsafe(no_mangle)]
+pub extern "C" fn chroot(_path: *const u8) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // daemon
 // ---------------------------------------------------------------------------
 

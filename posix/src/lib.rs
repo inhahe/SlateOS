@@ -13,25 +13,28 @@
 //! - **File I/O**: `open`, `close`, `read`, `write`, `lseek`, `stat`,
 //!   `fstat`, `unlink`, `mkdir`, `rmdir`, `rename`, `dup`, `dup2`,
 //!   `access`, `chmod`, `chown`, `umask`, `truncate`, `ftruncate`,
-//!   `fsync`, `link`, `symlink`, `readlink`
+//!   `fsync`, `link`, `symlink`, `readlink`, `utimes`, `futimes`,
+//!   `utimensat`, `futimens`
 //! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
 //!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
 //!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
 //!   `freeaddrinfo`, `gethostbyname`, `htons`, `htonl`, `inet_addr`,
-//!   `inet_ntoa`
+//!   `inet_ntoa`, `inet_pton`, `inet_ntop`
 //! - **I/O Multiplexing**: `poll`, `select`, `pselect`
 //! - **Terminal**: `ioctl` (TIOCGWINSZ, TCGETS, FIONBIO, etc.),
 //!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, termios flags
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
-//!   `posix_spawnp`, `execve`, `execvp`, `waitpid`, `sleep`,
-//!   `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`
+//!   `posix_spawnp`, `execve`, `execvp`, `execv`, `vfork`, `waitpid`,
+//!   `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`
 //! - **Pipes**: `pipe`, `pipe2`
-//! - **Signals**: Stub constants and handlers (partial)
+//! - **Signals**: Stub constants and handlers (partial), `sigwait`,
+//!   `sigtimedwait`, `sigqueue`
 //! - **Threads**: `pthread` stubs, working mutex ops
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
 //!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`,
-//!   `setjmp`/`longjmp`, `qsort`, `bsearch`, `atoi`/`strtol`,
+//!   `setjmp`/`longjmp`/`sigsetjmp`/`siglongjmp`, `qsort`, `bsearch`,
+//!   `atoi`/`strtol`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
 //! - **Formatted Output**: `printf`, `fprintf`, `sprintf`, `snprintf`
 //!   (via assembly trampoline for C variadic capture)
@@ -65,7 +68,8 @@
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,
 //!   `pathconf`, `confstr`, `strlcpy`, `strlcat`, `mkdtemp`, `flock`,
-//!   `daemon`, `getloadavg`
+//!   `daemon`, `getloadavg`, `sync`, `sethostname`, `chroot`,
+//!   `flockfile`/`funlockfile`/`ftrylockfile`
 //!
 //! ## Error Handling
 //!

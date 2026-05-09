@@ -1,6 +1,7 @@
 //! POSIX process spawning functions.
 //!
-//! Implements `posix_spawn`, `posix_spawnp`, `execve`, and `execvp`.
+//! Implements `posix_spawn`, `posix_spawnp`, `execve`, `execvp`, and
+//! `execv`.
 //!
 //! ## How It Works
 //!
@@ -222,6 +223,24 @@ pub extern "C" fn execvp(
     }
 
     execve(found.as_ptr(), argv, core::ptr::null())
+}
+
+// ---------------------------------------------------------------------------
+// execv
+// ---------------------------------------------------------------------------
+
+/// Replace the current process image with a new program.
+///
+/// Like `execve` but inherits the current environment (the `envp`
+/// parameter is omitted).
+///
+/// On success, does not return.  On failure, returns -1 with errno set.
+#[unsafe(no_mangle)]
+pub extern "C" fn execv(
+    path: *const u8,
+    argv: *const *const u8,
+) -> i32 {
+    execve(path, argv, core::ptr::null())
 }
 
 // ---------------------------------------------------------------------------

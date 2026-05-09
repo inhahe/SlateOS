@@ -1255,6 +1255,62 @@ pub extern "C" fn flock(_fd: Fd, _operation: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// utimes / futimes / utimensat / futimens — timestamps (stubs)
+// ---------------------------------------------------------------------------
+
+/// `struct timeval` for `utimes` — seconds + microseconds.
+#[repr(C)]
+pub struct Timeval {
+    /// Seconds.
+    pub tv_sec: i64,
+    /// Microseconds.
+    pub tv_usec: i64,
+}
+
+/// Set file access and modification times (microsecond precision).
+///
+/// Stub: always returns 0.  Our filesystem doesn't track per-file
+/// timestamps yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn utimes(_path: *const u8, _times: *const Timeval) -> i32 {
+    0
+}
+
+/// Set file access and modification times on an open fd.
+///
+/// Stub: always returns 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn futimes(_fd: Fd, _times: *const Timeval) -> i32 {
+    0
+}
+
+/// `UTIME_NOW` — set timestamp to current time.
+pub const UTIME_NOW: i64 = (1 << 30) - 1;
+/// `UTIME_OMIT` — leave timestamp unchanged.
+pub const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+/// Set file timestamps with nanosecond precision (relative to dirfd).
+///
+/// Stub: always returns 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn utimensat(
+    _dirfd: Fd,
+    _path: *const u8,
+    _times: *const crate::stat::Timespec,
+    _flags: i32,
+) -> i32 {
+    0
+}
+
+/// Set file timestamps with nanosecond precision on an open fd.
+///
+/// Stub: always returns 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn futimens(_fd: Fd, _times: *const crate::stat::Timespec) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 

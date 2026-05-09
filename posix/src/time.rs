@@ -207,6 +207,19 @@ pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) ->
     0
 }
 
+/// Set the system clock.
+///
+/// Stub: returns -1 with `EPERM`.  The kernel clock cannot be adjusted
+/// from userspace yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn settimeofday(
+    _tv: *const Timeval,
+    _tz: *const core::ffi::c_void,
+) -> i32 {
+    errno::set_errno(errno::EPERM);
+    -1
+}
+
 /// Return approximate time in seconds since epoch.
 ///
 /// Uses monotonic clock (not true wall clock).

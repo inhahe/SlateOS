@@ -41,6 +41,8 @@ use crate::syscall::*;
 
 /// IPv4 Internet protocols.
 pub const AF_INET: i32 = 2;
+/// IPv6 Internet protocols.
+pub const AF_INET6: i32 = 10;
 /// IPv4 (alias).
 pub const PF_INET: i32 = AF_INET;
 
@@ -352,6 +354,184 @@ fn write_u8_decimal(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
     }
     #[allow(clippy::arithmetic_side_effects)]
     write_byte(buf, pos, b'0' + val % 10);
+}
+
+// ---------------------------------------------------------------------------
+// inet_pton
+// ---------------------------------------------------------------------------
+
+/// Convert an address from presentation (text) to network format.
+///
+/// `af` must be `AF_INET`.  `src` is a null-terminated dotted-decimal
+/// string.  `dst` must point to a `struct in_addr` (4 bytes for IPv4).
+///
+/// Returns 1 on success, 0 if `src` is not a valid address for `af`,
+/// or -1 with errno set to `EAFNOSUPPORT` if `af` is unsupported.
+///
+/// `AF_INET6` is recognised but not supported (returns -1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
+    if af == AF_INET6 {
+        // Recognised but not implemented.
+        errno::set_errno(errno::EAFNOSUPPORT);
+        return -1;
+    }
+    if af != AF_INET {
+        errno::set_errno(errno::EAFNOSUPPORT);
+        return -1;
+    }
+    if src.is_null() || dst.is_null() {
+        return 0;
+    }
+
+    // Parse four decimal octets separated by '.'.
+    // SAFETY: src is a valid null-terminated string (caller contract).
+    let addr = unsafe { inet_addr(src) };
+
+    // inet_addr returns INADDR_NONE (0xFFFFFFFF) on failure.
+    // Unfortunately 255.255.255.255 is also 0xFFFFFFFF, but that's a
+    // broadcast address that inet_pton should accept.  We check for
+    // parse failure by re-scanning for valid characters.
+    if addr == 0xFFFF_FFFF && !unsafe { is_valid_ipv4(src) } {
+        return 0;
+    }
+
+    // Store in network byte order (inet_addr already returns NBO).
+    let bytes = addr.to_ne_bytes();
+    // SAFETY: dst points to at least 4 bytes (caller contract).
+    unsafe {
+        *dst = bytes[0];
+        *dst.add(1) = bytes[1];
+        *dst.add(2) = bytes[2];
+        *dst.add(3) = bytes[3];
+    }
+    1
+}
+
+/// Check if a C string is a syntactically valid IPv4 dotted-decimal.
+///
+/// # Safety
+///
+/// `s` must be a valid null-terminated string.
+unsafe fn is_valid_ipv4(s: *const u8) -> bool {
+    let mut dots: u32 = 0;
+    let mut digits: u32 = 0;
+    let mut val: u32 = 0;
+    let mut i: usize = 0;
+
+    loop {
+        // SAFETY: s is null-terminated.
+        let c = unsafe { *s.add(i) };
+        if c == 0 {
+            break;
+        }
+        if c == b'.' {
+            if digits == 0 {
+                return false;
+            }
+            dots = dots.wrapping_add(1);
+            digits = 0;
+            val = 0;
+        } else if c.is_ascii_digit() {
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                val = val.wrapping_mul(10).wrapping_add(u32::from(c - b'0'));
+            }
+            digits = digits.wrapping_add(1);
+            if val > 255 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    dots == 3 && digits > 0 && val <= 255
+}
+
+// ---------------------------------------------------------------------------
+// inet_ntop
+// ---------------------------------------------------------------------------
+
+/// Convert an address from network format to presentation (text).
+///
+/// `af` must be `AF_INET`.  `src` points to a `struct in_addr` (4
+/// bytes in network byte order).  `dst` is the output buffer of at
+/// least `size` bytes.
+///
+/// Returns `dst` on success, or null with errno set.
+#[unsafe(no_mangle)]
+pub extern "C" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
+    if af == AF_INET6 {
+        errno::set_errno(errno::EAFNOSUPPORT);
+        return core::ptr::null();
+    }
+    if af != AF_INET {
+        errno::set_errno(errno::EAFNOSUPPORT);
+        return core::ptr::null();
+    }
+    if src.is_null() || dst.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return core::ptr::null();
+    }
+
+    // Read 4 octets from src (network byte order).
+    // SAFETY: src points to at least 4 bytes (caller contract).
+    let octets: [u8; 4] = unsafe { [*src, *src.add(1), *src.add(2), *src.add(3)] };
+
+    // Format into a stack buffer first, then check if it fits.
+    let mut tmp = [0u8; 16]; // max "255.255.255.255\0"
+    let mut pos: usize = 0;
+    for (idx, &octet) in octets.iter().enumerate() {
+        if idx > 0 {
+            write_byte_ntop(&mut tmp, &mut pos, b'.');
+        }
+        write_u8_dec_ntop(&mut tmp, &mut pos, octet);
+    }
+
+    let needed = pos.wrapping_add(1); // +null
+    if (size as usize) < needed {
+        errno::set_errno(errno::ENOSPC);
+        return core::ptr::null();
+    }
+
+    // Copy to destination.
+    // SAFETY: dst is valid for at least size bytes; needed <= size.
+    unsafe {
+        let mut j: usize = 0;
+        while j < pos {
+            if let Some(&b) = tmp.get(j) {
+                *dst.add(j) = b;
+            }
+            j = j.wrapping_add(1);
+        }
+        *dst.add(pos) = 0; // null terminate
+    }
+
+    dst.cast_const()
+}
+
+/// Write a single byte to a 16-byte buffer (inet_ntop helper).
+fn write_byte_ntop(buf: &mut [u8; 16], pos: &mut usize, b: u8) {
+    if let Some(slot) = buf.get_mut(*pos) {
+        *slot = b;
+        *pos = pos.wrapping_add(1);
+    }
+}
+
+/// Write a u8 as decimal digits (inet_ntop helper).
+fn write_u8_dec_ntop(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
+    if val >= 100 {
+        #[allow(clippy::arithmetic_side_effects)]
+        write_byte_ntop(buf, pos, b'0' + val / 100);
+    }
+    if val >= 10 {
+        #[allow(clippy::arithmetic_side_effects)]
+        write_byte_ntop(buf, pos, b'0' + (val / 10) % 10);
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    write_byte_ntop(buf, pos, b'0' + val % 10);
 }
 
 // ---------------------------------------------------------------------------

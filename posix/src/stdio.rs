@@ -771,3 +771,64 @@ fn mode_to_flags(mode: *const u8) -> i32 {
         _ => -1,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Thread-safe stdio locking (stubs)
+// ---------------------------------------------------------------------------
+
+/// Lock a FILE stream for exclusive thread access.
+///
+/// Stub: no-op.  Our stdio is not buffered and file operations are
+/// already serialised by the kernel.
+#[unsafe(no_mangle)]
+pub extern "C" fn flockfile(_file: *mut core::ffi::c_void) {
+    // No-op: single-threaded per-fd access.
+}
+
+/// Try to lock a FILE stream without blocking.
+///
+/// Stub: always succeeds (returns 0).
+#[unsafe(no_mangle)]
+pub extern "C" fn ftrylockfile(_file: *mut core::ffi::c_void) -> i32 {
+    0
+}
+
+/// Unlock a FILE stream.
+///
+/// Stub: no-op (matches `flockfile`).
+#[unsafe(no_mangle)]
+pub extern "C" fn funlockfile(_file: *mut core::ffi::c_void) {
+    // No-op.
+}
+
+/// Non-locking version of `getc`.
+///
+/// Stub: equivalent to `fgetc` since we don't have internal locks.
+#[unsafe(no_mangle)]
+pub extern "C" fn getc_unlocked(stream: *mut u8) -> i32 {
+    fgetc(stream)
+}
+
+/// Non-locking version of `getchar`.
+///
+/// Reads from stdin (fd 0) without locking.
+#[unsafe(no_mangle)]
+pub extern "C" fn getchar_unlocked() -> i32 {
+    fgetc(core::ptr::null_mut()) // null → fd 0 (stdin) via stream_to_fd
+}
+
+/// Non-locking version of `putc`.
+///
+/// Stub: equivalent to `fputc` since we don't have internal locks.
+#[unsafe(no_mangle)]
+pub extern "C" fn putc_unlocked(c: i32, stream: *mut u8) -> i32 {
+    fputc(c, stream)
+}
+
+/// Non-locking version of `putchar`.
+///
+/// Writes to stdout (fd 1) without locking.
+#[unsafe(no_mangle)]
+pub extern "C" fn putchar_unlocked(c: i32) -> i32 {
+    fputc(c, STDOUT_FILENO as *mut u8)
+}

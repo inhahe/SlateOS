@@ -199,6 +199,19 @@ pub extern "C" fn fork() -> PidT {
 
 // execve is implemented in spawn.rs with real ELF loading.
 
+/// Equivalent to `fork()` (stub — returns -1 with `ENOSYS`).
+///
+/// In a proper implementation, `vfork()` would suspend the parent until
+/// the child calls `exec*()` or `_exit()`.  Since we don't have fork at
+/// all, this has the same behavior as our `fork()` stub.
+///
+/// Programs should use `posix_spawn()` instead.
+#[unsafe(no_mangle)]
+pub extern "C" fn vfork() -> PidT {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
 /// Get the task/thread ID (Linux-specific, but commonly used).
 #[unsafe(no_mangle)]
 pub extern "C" fn gettid() -> PidT {

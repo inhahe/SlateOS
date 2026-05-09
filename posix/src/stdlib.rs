@@ -764,6 +764,92 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
+// mkdtemp — create a unique temporary directory
+// ---------------------------------------------------------------------------
+
+/// Create a unique temporary directory.
+///
+/// Modifies `template` in-place (replacing the trailing 6 'X' chars
+/// with a unique suffix) and creates the directory with mode 0700.
+/// Returns `template` on success, or null on error.
+///
+/// # Safety
+///
+/// `template` must be a writable null-terminated string with at least
+/// 6 trailing 'X' characters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
+    if template.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    let len = unsafe { crate::string::strlen(template) };
+    if len < 6 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    // Verify the last 6 characters are 'X'.
+    let suffix_start = len.wrapping_sub(6);
+    let mut i: usize = 0;
+    while i < 6 {
+        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return core::ptr::null_mut();
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Try up to 100 unique names.
+    let mut attempt: u32 = 0;
+    while attempt < 100 {
+        // Generate a unique suffix (reuse mkstemp's counter).
+        let counter = unsafe { *core::ptr::addr_of!(MKSTEMP_COUNTER) };
+        unsafe { core::ptr::addr_of_mut!(MKSTEMP_COUNTER).write(counter.wrapping_add(1)); }
+
+        let pid = crate::process::getpid() as u32;
+        let seed = counter
+            .wrapping_mul(31)
+            .wrapping_add(pid)
+            .wrapping_mul(17)
+            .wrapping_add(attempt)
+            .wrapping_add(1000); // Offset from mkstemp to avoid collisions.
+
+        let mut val = seed;
+        let mut j: usize = 0;
+        while j < 6 {
+            let idx = (val % 36) as u8;
+            let ch = if idx < 10 {
+                b'0'.wrapping_add(idx)
+            } else {
+                b'a'.wrapping_add(idx.wrapping_sub(10))
+            };
+            // SAFETY: suffix_start + j < len, template is writable.
+            unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+            val = val.wrapping_div(36).wrapping_add(1);
+            j = j.wrapping_add(1);
+        }
+
+        // Try to create the directory.
+        let ret = crate::file::mkdir(template, 0o700);
+        if ret == 0 {
+            return template;
+        }
+
+        // If EEXIST, try again.
+        if crate::errno::get_errno() != crate::errno::EEXIST {
+            return core::ptr::null_mut();
+        }
+
+        attempt = attempt.wrapping_add(1);
+    }
+
+    crate::errno::set_errno(crate::errno::EEXIST);
+    core::ptr::null_mut()
+}
+
+// ---------------------------------------------------------------------------
 // system — execute a shell command
 // ---------------------------------------------------------------------------
 

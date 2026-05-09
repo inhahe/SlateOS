@@ -10,7 +10,7 @@
 //! `strcat`, `strncat`, `strstr`, `strspn`, `strcspn`, `strpbrk`,
 //! `strtok`, `strtok_r`, `strsep`, `strerror`, `strerror_r`,
 //! `strdup`, `strndup`, `bcopy`, `bzero`, `strcasecmp`, `strncasecmp`,
-//! `strcoll`, `strxfrm`, `strverscmp`
+//! `strcoll`, `strxfrm`, `strverscmp`, `strlcpy`, `strlcat`
 //!
 //! Exported as `extern "C"` with standard names so the linker finds
 //! them when C code calls `memcpy`, `memset`, `strlen`, etc.
@@ -1051,4 +1051,70 @@ pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) ->
     } else {
         0
     }
+}
+
+// ---------------------------------------------------------------------------
+// BSD safe string functions
+// ---------------------------------------------------------------------------
+
+/// Copy a string with guaranteed NUL termination.
+///
+/// Copies up to `size - 1` bytes from `src` to `dst` and always
+/// NUL-terminates (unless `size` is 0).  Returns the total length
+/// of `src` (not including NUL) — if the return value >= `size`,
+/// truncation occurred.
+///
+/// This is the BSD `strlcpy`, widely used as a safer `strncpy`.
+///
+/// # Safety
+///
+/// `dst` must be valid for `size` bytes.  `src` must be a valid
+/// NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlcpy(dst: *mut u8, src: *const u8, size: SizeT) -> SizeT {
+    let src_len = unsafe { strlen(src) };
+
+    if size > 0 {
+        let copy_len = if src_len < size { src_len } else { size.wrapping_sub(1) };
+        // SAFETY: dst valid for `size` bytes, src valid for src_len.
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, copy_len); }
+        unsafe { *dst.add(copy_len) = 0; }
+    }
+
+    src_len
+}
+
+/// Append a string with guaranteed NUL termination.
+///
+/// Appends `src` to `dst`, writing at most `size - strlen(dst) - 1`
+/// bytes.  Always NUL-terminates (unless `size <= strlen(dst)`).
+/// Returns `strlen(dst) + strlen(src)` — if the return value >= `size`,
+/// truncation occurred.
+///
+/// This is the BSD `strlcat`, widely used as a safer `strncat`.
+///
+/// # Safety
+///
+/// `dst` must be valid for `size` bytes and contain a NUL-terminated
+/// string.  `src` must be a valid NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlcat(dst: *mut u8, src: *const u8, size: SizeT) -> SizeT {
+    let dst_len = unsafe { strnlen(dst, size) };
+    let src_len = unsafe { strlen(src) };
+
+    if dst_len >= size {
+        // dst already fills the buffer — no room even for NUL.
+        return size.wrapping_add(src_len);
+    }
+
+    let remaining = size.wrapping_sub(dst_len).wrapping_sub(1);
+    let copy_len = if src_len < remaining { src_len } else { remaining };
+
+    // SAFETY: dst_len < size, so dst.add(dst_len) is within bounds.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst.add(dst_len), copy_len);
+        *dst.add(dst_len.wrapping_add(copy_len)) = 0;
+    }
+
+    dst_len.wrapping_add(src_len)
 }

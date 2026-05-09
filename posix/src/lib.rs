@@ -57,9 +57,13 @@
 //!   `wcwidth`, `wcswidth`, `iswalnum`..`iswxdigit`, `towlower`,
 //!   `towupper`, `wcscpy`, `wcslen`, `wcscmp`, `wcscat`, `wcschr`,
 //!   `wcsrchr`, `wmemcpy`, `wmemset`, `wmemcmp`, `nl_langinfo`
+//! - **File Tree Walk**: `ftw`, `nftw` (recursive directory traversal)
+//! - **BSD Error Functions**: `err`, `errx`, `warn`, `warnx` (and `v*`
+//!   variants)
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
-//!   `basename`, `dirname`, `getopt`, `pathconf`, `confstr`
+//!   `basename`, `dirname`, `getopt`, `pathconf`, `confstr`,
+//!   `strlcpy`, `strlcat`, `mkdtemp`
 //!
 //! ## Error Handling
 //!
@@ -113,10 +117,12 @@ pub mod crt;
 pub mod ctype;
 pub mod dlfcn;
 pub mod environ;
+pub mod err;
 pub mod errno;
 pub mod fcntl;
 pub mod fcntl_ops;
 pub mod fnmatch;
+pub mod ftw;
 pub mod getopt;
 pub mod glob;
 pub mod iconv;

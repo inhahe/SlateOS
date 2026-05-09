@@ -313,6 +313,10 @@ const ROOT_FILES: &[&str] = &[
     "dynlock",
     "snaplayout",
     "haptfeedback",
+    "eyeprotect",
+    "pinnedapps",
+    "inputmethod",
+    "storagesense",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6442,6 +6446,64 @@ fn gen_haptfeedback() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_eyeprotect() -> Vec<u8> {
+    use alloc::format;
+    use super::eyeprotect;
+    let (profiles, breaks, snoozes, skips, ops) = eyeprotect::stats();
+    let active = eyeprotect::get_active();
+    let mut out = String::from("state: ");
+    out.push_str(eyeprotect::break_state().label());
+    out.push('\n');
+    out.push_str(&format!("active_profile: {}\n", active.map_or_else(|| String::from("none"), |a| a.name)));
+    out.push_str(&format!("profile_count: {}\n", profiles));
+    out.push_str(&format!("total_breaks: {}\n", breaks));
+    out.push_str(&format!("total_snoozes: {}\n", snoozes));
+    out.push_str(&format!("total_skips: {}\n", skips));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_pinnedapps() -> Vec<u8> {
+    use alloc::format;
+    use super::pinnedapps;
+    let (total, taskbar, start, launches, ops) = pinnedapps::stats();
+    let mut out = String::from("total_pinned: ");
+    out.push_str(&format!("{}\n", total));
+    out.push_str(&format!("taskbar_pins: {}\n", taskbar));
+    out.push_str(&format!("startmenu_pins: {}\n", start));
+    out.push_str(&format!("total_launches: {}\n", launches));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_inputmethod() -> Vec<u8> {
+    use alloc::format;
+    use super::inputmethod;
+    let (engines, commits, switches, ops) = inputmethod::stats();
+    let mut out = String::from("active_engine: ");
+    out.push_str(&inputmethod::active_engine_name());
+    out.push('\n');
+    out.push_str(&format!("engine_count: {}\n", engines));
+    out.push_str(&format!("total_commits: {}\n", commits));
+    out.push_str(&format!("total_switches: {}\n", switches));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_storagesense() -> Vec<u8> {
+    use alloc::format;
+    use super::storagesense;
+    let (policies, runs, freed, ops) = storagesense::stats();
+    let mut out = String::from("schedule: ");
+    out.push_str(storagesense::get_schedule().label());
+    out.push('\n');
+    out.push_str(&format!("policy_count: {}\n", policies));
+    out.push_str(&format!("total_runs: {}\n", runs));
+    out.push_str(&format!("total_freed: {}\n", storagesense::format_bytes(freed)));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6920,6 +6982,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dynlock" => Ok(gen_dynlock()),
         "snaplayout" => Ok(gen_snaplayout()),
         "haptfeedback" => Ok(gen_haptfeedback()),
+        "eyeprotect" => Ok(gen_eyeprotect()),
+        "pinnedapps" => Ok(gen_pinnedapps()),
+        "inputmethod" => Ok(gen_inputmethod()),
+        "storagesense" => Ok(gen_storagesense()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

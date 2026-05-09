@@ -1,10 +1,16 @@
 //! POSIX signal stubs.
 //!
 //! Our OS uses IPC messages instead of Unix signals.  This module
-//! provides the POSIX signal constants and stub functions so that
-//! C programs that reference signal names and `signal()` can link.
+//! provides the POSIX signal constants, handler registration, signal
+//! sets, and `sigaction` so that C programs can link and run.
 //!
-//! The stubs set errno to ENOSYS and return SIG_ERR.
+//! ## Design
+//!
+//! `signal()` and `sigaction()` store handlers in a static table but
+//! signals are never actually delivered (our OS uses IPC messages for
+//! process control).  This means `signal(SIGPIPE, SIG_IGN)` succeeds
+//! (many programs do this at startup), but no handler ever fires.
+//! `kill()` and `sigprocmask()` remain stubs returning ENOSYS.
 
 use crate::errno;
 
@@ -53,16 +59,102 @@ pub const SIG_ERR: SighandlerT = usize::MAX;
 // Signal functions (stubs)
 // ---------------------------------------------------------------------------
 
+/// Registered signal handlers.
+///
+/// Index 0 unused (signals are 1-based).  Initialized to SIG_DFL.
+static mut HANDLERS: [SighandlerT; NSIG as usize] = [SIG_DFL; NSIG as usize];
+
 /// Install a signal handler.
 ///
-/// Stub: always returns SIG_ERR and sets errno to ENOSYS.
-/// Our OS uses IPC messages instead of Unix signals.
+/// Stores the handler and returns the previous one.  Handlers are
+/// never actually invoked since our OS doesn't deliver Unix signals.
 #[unsafe(no_mangle)]
 pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
-    let _ = signum;
-    let _ = handler;
-    errno::set_errno(errno::ENOSYS);
-    SIG_ERR
+    if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
+        errno::set_errno(errno::EINVAL);
+        return SIG_ERR;
+    }
+
+    // SAFETY: Single-threaded access. signum range checked above.
+    let idx = signum as usize;
+    let handlers = unsafe { core::ptr::addr_of_mut!(HANDLERS).as_mut() };
+    let Some(handlers) = handlers else {
+        errno::set_errno(errno::EINVAL);
+        return SIG_ERR;
+    };
+    let Some(slot) = handlers.get_mut(idx) else {
+        errno::set_errno(errno::EINVAL);
+        return SIG_ERR;
+    };
+    let old = *slot;
+    *slot = handler;
+    old
+}
+
+/// `sigaction` structure for `sigaction()`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Sigaction {
+    /// Signal handler (sa_handler or sa_sigaction).
+    pub sa_handler: SighandlerT,
+    /// Additional signals to block during handler.
+    pub sa_mask: u64,
+    /// Flags (SA_RESTART, SA_NOCLDSTOP, etc.).
+    pub sa_flags: i32,
+    /// Restore handler (unused).
+    pub sa_restorer: usize,
+}
+
+/// Flags for sigaction.
+pub const SA_NOCLDSTOP: i32 = 1;
+pub const SA_NOCLDWAIT: i32 = 2;
+pub const SA_SIGINFO: i32 = 4;
+pub const SA_RESTART: i32 = 0x1000_0000;
+pub const SA_NODEFER: i32 = 0x4000_0000;
+
+/// Examine and change a signal action.
+///
+/// Stores the new action (if provided) and returns the old action.
+/// Handlers are never actually invoked.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigaction(
+    signum: i32,
+    act: *const Sigaction,
+    oldact: *mut Sigaction,
+) -> i32 {
+    if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Return old handler via oldact.
+    if !oldact.is_null() {
+        let idx = signum as usize;
+        let handler = unsafe {
+            let handlers = core::ptr::addr_of!(HANDLERS);
+            (*handlers).get(idx).copied().unwrap_or(SIG_DFL)
+        };
+        unsafe {
+            (*oldact).sa_handler = handler;
+            (*oldact).sa_mask = 0;
+            (*oldact).sa_flags = 0;
+            (*oldact).sa_restorer = 0;
+        }
+    }
+
+    // Store new handler from act.
+    if !act.is_null() {
+        let new_handler = unsafe { (*act).sa_handler };
+        let idx = signum as usize;
+        let handlers = unsafe { core::ptr::addr_of_mut!(HANDLERS).as_mut() };
+        if let Some(handlers) = handlers
+            && let Some(slot) = handlers.get_mut(idx)
+        {
+            *slot = new_handler;
+        }
+    }
+
+    0
 }
 
 /// Send a signal to a process.
@@ -90,24 +182,43 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 
 /// Examine and change blocked signals.
 ///
-/// Stub: sets errno to ENOSYS and returns -1.
+/// Stub: succeeds silently (stores nothing).  Many programs call
+/// `sigprocmask(SIG_BLOCK, &set, &oldset)` during initialization
+/// and expect success.
 #[unsafe(no_mangle)]
 pub extern "C" fn sigprocmask(
     _how: i32,
     _set: *const u64,
-    _oldset: *mut u64,
+    oldset: *mut u64,
 ) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    // Return empty old set if requested.
+    if !oldset.is_null() {
+        unsafe { *oldset = 0; }
+    }
+    0 // Succeed silently.
 }
 
 /// Wait for a signal.
 ///
-/// Stub: sets errno to ENOSYS and returns -1.
+/// Stub: sets errno to EINTR and returns -1 (POSIX specifies
+/// sigsuspend always returns -1 with errno=EINTR).
 #[unsafe(no_mangle)]
 pub extern "C" fn sigsuspend(_mask: *const u64) -> i32 {
-    errno::set_errno(errno::ENOSYS);
+    errno::set_errno(errno::EINTR);
     -1
+}
+
+/// Examine pending signals.
+///
+/// Stub: returns empty set (no signals pending).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigpending(set: *mut u64) -> i32 {
+    if set.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    unsafe { *set = 0; }
+    0
 }
 
 /// Initialize a signal set to empty.

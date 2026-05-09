@@ -896,6 +896,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] wchar: mblen/mbtowc/wctomb/mbstowcs/wcstombs (ASCII-only), btowc/wctob, mbsinit/mbrtowc/wcrtomb (restartable), wcwidth/wcswidth (CJK-aware display width), wctype classification (iswalpha..iswxdigit, towlower/towupper), wide string ops (wcscpy/wcsncpy/wcslen/wcscmp/wcsncmp/wcscat/wcschr/wcsrchr, wmemcpy/wmemset/wmemcmp), nl_langinfo (locale info stubs)
   - [x] resource additions: nice/getpriority/setpriority (stored locally, clamped to [-20,19], not kernel-enforced), PRIO_PROCESS/PRIO_PGRP/PRIO_USER constants
   - [x] stdlib additions: system() stub (returns ENOSYS — no shell yet)
+  - [x] signal improvements: signal() now stores handlers (was returning SIG_ERR), sigaction struct and function (examine/change signal actions), sigprocmask succeeds silently (was ENOSYS), sigsuspend returns EINTR (correct POSIX), sigpending (empty set), SA_RESTART/SA_NOCLDSTOP/SA_SIGINFO flags
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

@@ -918,6 +918,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kernel Modules (fs::kmod): Loadable module management with 6 types, dependencies, parameters, ref counting, load/unload lifecycle; `kmod` kshell command; /proc/kmod; 8 self-tests
   - [x] Entropy Pool (fs::entropy): System entropy management with 8 source types, pool quality tracking, drain/reseed, source enable/disable; `entropy`/`epool` kshell command; /proc/entropy; 8 self-tests
   - [x] I/O Scheduler (fs::iosched): Per-device I/O scheduling with 6 algorithms, queue depth, merge control, deadline expiry; `iosched`/`ioq` kshell command; /proc/iosched; 8 self-tests
+  - [x] Network Monitor (fs::netmon): Active connection tracking with 6 protocols, 11 TCP states, per-process filtering; `netmon`/`nmon` kshell command; /proc/netmon; 8 self-tests
+  - [x] Group Manager (fs::groupmgr): User group management with 3 types, member add/remove, user lookup; `groupmgr`/`grp` kshell command; /proc/groupmgr; 8 self-tests
+  - [x] SysRq (fs::sysrq): Magic SysRq key handlers with 7 categories, trigger/register/unregister, category mask; `sysrq` kshell command; /proc/sysrq; 8 self-tests
+  - [x] Telemetry (fs::telemetry): System metrics collection with 4 types, 6 categories, register/record/query/export; `telemetry`/`telem` kshell command; /proc/telemetry; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

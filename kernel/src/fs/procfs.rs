@@ -392,6 +392,10 @@ const ROOT_FILES: &[&str] = &[
     "kmod",
     "entropy",
     "iosched",
+    "netmon",
+    "groupmgr",
+    "sysrq",
+    "telemetry",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7733,6 +7737,80 @@ fn gen_iosched() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netmon() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Network Monitor ===\n");
+    let (active, created, closed, sent, recv, ops) = crate::fs::netmon::stats();
+    out.push_str(&format!("active_connections: {}\n", active));
+    out.push_str(&format!("total_created: {}\n", created));
+    out.push_str(&format!("total_closed: {}\n", closed));
+    out.push_str(&format!("total_bytes_sent: {}\n", sent));
+    out.push_str(&format!("total_bytes_recv: {}\n", recv));
+    out.push_str(&format!("ops: {}\n", ops));
+    for c in crate::fs::netmon::list_connections() {
+        out.push_str(&format!("  {} {}:{} → {}:{} [{}] pid={} ({})\n",
+            c.protocol.label(), c.local_addr, c.local_port,
+            c.remote_addr, c.remote_port, c.state.label(),
+            c.pid, c.process_name));
+    }
+    out.into_bytes()
+}
+
+fn gen_groupmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Group Manager ===\n");
+    let (count, created, deleted, member_ops, ops) = crate::fs::groupmgr::stats();
+    out.push_str(&format!("groups: {}\n", count));
+    out.push_str(&format!("total_created: {}\n", created));
+    out.push_str(&format!("total_deleted: {}\n", deleted));
+    out.push_str(&format!("total_member_ops: {}\n", member_ops));
+    out.push_str(&format!("ops: {}\n", ops));
+    for g in crate::fs::groupmgr::list_groups() {
+        let members: Vec<_> = g.members.iter().map(|m| format!("{}", m)).collect();
+        out.push_str(&format!("  {}({}) [{}] members=[{}]\n",
+            g.name, g.gid, g.group_type.label(), members.join(",")));
+    }
+    out.into_bytes()
+}
+
+fn gen_sysrq() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== SysRq ===\n");
+    let (count, triggers, blocked, mask, ops) = crate::fs::sysrq::stats();
+    out.push_str(&format!("handlers: {}\n", count));
+    out.push_str(&format!("total_triggers: {}\n", triggers));
+    out.push_str(&format!("total_blocked: {}\n", blocked));
+    out.push_str(&format!("enabled_mask: 0x{:x}\n", mask));
+    out.push_str(&format!("ops: {}\n", ops));
+    for h in crate::fs::sysrq::list_handlers() {
+        let en = if h.enabled { "ON" } else { "OFF" };
+        out.push_str(&format!("  '{}' [{}] {} — {} (triggers={})\n",
+            h.key, en, h.category.label(), h.description, h.trigger_count));
+    }
+    out.into_bytes()
+}
+
+fn gen_telemetry() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Telemetry ===\n");
+    let (count, samples, exports, enabled, ops) = crate::fs::telemetry::stats();
+    out.push_str(&format!("metrics: {}\n", count));
+    out.push_str(&format!("total_samples: {}\n", samples));
+    out.push_str(&format!("total_exports: {}\n", exports));
+    out.push_str(&format!("collection_enabled: {}\n", enabled));
+    out.push_str(&format!("ops: {}\n", ops));
+    for m in crate::fs::telemetry::list_metrics() {
+        let avg = if m.sample_count > 0 { m.total_sum / m.sample_count } else { 0 };
+        out.push_str(&format!("  {} [{}] = {} {} (avg={}, samples={})\n",
+            m.name, m.metric_type.label(), m.value, m.unit, avg, m.sample_count));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8290,6 +8368,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kmod" => Ok(gen_kmod()),
         "entropy" => Ok(gen_entropy()),
         "iosched" => Ok(gen_iosched()),
+        "netmon" => Ok(gen_netmon()),
+        "groupmgr" => Ok(gen_groupmgr()),
+        "sysrq" => Ok(gen_sysrq()),
+        "telemetry" => Ok(gen_telemetry()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

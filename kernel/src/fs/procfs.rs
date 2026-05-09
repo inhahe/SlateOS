@@ -293,6 +293,10 @@ const ROOT_FILES: &[&str] = &[
     "oobe",
     "hdrdisplay",
     "surroundsound",
+    "audioeq",
+    "screensaver",
+    "colortemp",
+    "gamemode",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6163,6 +6167,54 @@ fn gen_surroundsound() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_audioeq() -> Vec<u8> {
+    use alloc::format;
+    use super::audioeq;
+    let (config_count, total_adj, total_presets, ops) = audioeq::stats();
+    let mut out = String::from("config_count: ");
+    out.push_str(&format!("{}\n", config_count));
+    out.push_str(&format!("total_adjustments: {}\n", total_adj));
+    out.push_str(&format!("total_preset_changes: {}\n", total_presets));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_screensaver() -> Vec<u8> {
+    use alloc::format;
+    use super::screensaver;
+    let (saver_count, total_acts, total_deacts, ops) = screensaver::stats();
+    let mut out = String::from("saver_count: ");
+    out.push_str(&format!("{}\n", saver_count));
+    out.push_str(&format!("total_activations: {}\n", total_acts));
+    out.push_str(&format!("total_deactivations: {}\n", total_deacts));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_colortemp() -> Vec<u8> {
+    use alloc::format;
+    use super::colortemp;
+    let (profile_count, active_id, total_adj, ops) = colortemp::stats();
+    let mut out = String::from("profile_count: ");
+    out.push_str(&format!("{}\n", profile_count));
+    out.push_str(&format!("active_profile_id: {}\n", active_id));
+    out.push_str(&format!("total_adjustments: {}\n", total_adj));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_gamemode() -> Vec<u8> {
+    use alloc::format;
+    use super::gamemode;
+    let (game_count, total_acts, active, ops) = gamemode::stats();
+    let mut out = String::from("game_count: ");
+    out.push_str(&format!("{}\n", game_count));
+    out.push_str(&format!("total_activations: {}\n", total_acts));
+    out.push_str(&format!("active: {}\n", active));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6621,6 +6673,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "oobe" => Ok(gen_oobe()),
         "hdrdisplay" => Ok(gen_hdrdisplay()),
         "surroundsound" => Ok(gen_surroundsound()),
+        "audioeq" => Ok(gen_audioeq()),
+        "screensaver" => Ok(gen_screensaver()),
+        "colortemp" => Ok(gen_colortemp()),
+        "gamemode" => Ok(gen_gamemode()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

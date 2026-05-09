@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4897,6 +4897,10 @@ fn dispatch(line: &str) {
         "oobe" | "setup" => cmd_oobe(args),
         "hdrdisplay" | "hdr" => cmd_hdrdisplay(args),
         "surroundsound" | "ssound" => cmd_surroundsound(args),
+        "audioeq" | "aeq" => cmd_audioeq(args),
+        "screensaver" | "ssaver" => cmd_screensaver(args),
+        "colortemp" | "ctemp" => cmd_colortemp(args),
+        "gamemode" | "gmode" => cmd_gamemode(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -36287,6 +36291,492 @@ fn cmd_surroundsound(args: &str) {
     }
 }
 
+/// `audioeq` / `aeq` — audio equalizer management.
+fn cmd_audioeq(args: &str) {
+    use crate::fs::audioeq;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            audioeq::init_defaults();
+            shell_println!("Audio EQ initialized");
+        }
+        "list" => {
+            let configs = audioeq::list_configs();
+            if configs.is_empty() {
+                shell_println!("No EQ configs");
+            } else {
+                for c in &configs {
+                    shell_println!("#{}: {} — {} [{}] preamp: {} cb",
+                        c.id, c.device_name, c.preset.label(),
+                        if c.enabled { "ON" } else { "OFF" }, c.preamp_cb);
+                    let gains: Vec<alloc::string::String> = c.bands.iter()
+                        .map(|b| format!("{}Hz:{}", b.freq_hz, b.gain_cb))
+                        .collect();
+                    shell_println!("    Bands: {}", gains.join(", "));
+                }
+            }
+        }
+        "preset" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            let preset = match parts.get(2).copied().unwrap_or("flat") {
+                "rock" => audioeq::EqPreset::Rock,
+                "pop" => audioeq::EqPreset::Pop,
+                "jazz" => audioeq::EqPreset::Jazz,
+                "classical" => audioeq::EqPreset::Classical,
+                "hiphop" | "hip-hop" => audioeq::EqPreset::HipHop,
+                "electronic" | "edm" => audioeq::EqPreset::Electronic,
+                "vocal" => audioeq::EqPreset::Vocal,
+                "bass" => audioeq::EqPreset::Bass,
+                "treble" => audioeq::EqPreset::Treble,
+                _ => audioeq::EqPreset::Flat,
+            };
+            match audioeq::set_preset(id, preset) {
+                Ok(()) => shell_println!("EQ #{} → {}", id, preset.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "band" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            let band: usize = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0);
+            let gain: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
+            match audioeq::set_band_gain(id, band, gain) {
+                Ok(()) => shell_println!("Band {} gain: {} cb", band, gain.clamp(-1200, 1200)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "preamp" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            let gain: i32 = parts.get(2).unwrap_or(&"0").parse().unwrap_or(0);
+            match audioeq::set_preamp(id, gain) {
+                Ok(()) => shell_println!("Preamp: {} cb", gain.clamp(-1200, 1200)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "on" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            match audioeq::set_enabled(id, true) {
+                Ok(()) => shell_println!("EQ #{} enabled", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" | "off" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            match audioeq::set_enabled(id, false) {
+                Ok(()) => shell_println!("EQ #{} disabled", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "create" => {
+            let name = parts.get(1).copied().unwrap_or("Device");
+            match audioeq::create_config(name) {
+                Ok(id) => shell_println!("Created EQ #{}: {}", id, name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            match audioeq::remove_config(id) {
+                Ok(()) => shell_println!("Removed EQ #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, adj, presets, ops) = audioeq::stats();
+            shell_println!("Configs: {}, Adjustments: {}, Preset changes: {}, Ops: {}", count, adj, presets, ops);
+        }
+        "test" => audioeq::self_test(),
+        _ => {
+            shell_println!("Usage: audioeq <command>");
+            shell_println!("  list                List configs");
+            shell_println!("  preset <id> <name>  Apply preset");
+            shell_println!("  band <id> <n> <cb>  Set band gain");
+            shell_println!("  preamp <id> <cb>    Set preamp gain");
+            shell_println!("  enable/disable <id> Toggle EQ");
+            shell_println!("  create <name>       New config");
+            shell_println!("  remove <id>         Remove config");
+            shell_println!("  Presets: flat rock pop jazz classical");
+            shell_println!("           hiphop electronic vocal bass treble");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `screensaver` / `ssaver` — screen saver management.
+fn cmd_screensaver(args: &str) {
+    use crate::fs::screensaver;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            screensaver::init_defaults();
+            shell_println!("Screen saver initialized");
+        }
+        "list" => {
+            let savers = screensaver::list_savers();
+            if savers.is_empty() {
+                shell_println!("No screen savers");
+            } else {
+                let active_id = screensaver::active_saver_id();
+                for s in &savers {
+                    let marker = if s.id == active_id { " *" } else { "" };
+                    shell_println!("#{}: {} ({}) — {}s timeout, pw: {}, {}{}",
+                        s.id, s.name, s.saver_type.label(),
+                        s.timeout_secs, s.password_required,
+                        if s.enabled { "enabled" } else { "disabled" },
+                        marker);
+                }
+            }
+        }
+        "activate" => {
+            match screensaver::activate() {
+                Ok(()) => shell_println!("Screen saver activated"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "deactivate" | "dismiss" => {
+            match screensaver::deactivate() {
+                Ok(()) => shell_println!("Screen saver deactivated"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "preview" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid saver ID"); return; }
+            };
+            match screensaver::preview(id) {
+                Ok(()) => shell_println!("Previewing saver #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "set" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid saver ID"); return; }
+            };
+            match screensaver::set_active(id) {
+                Ok(()) => shell_println!("Active saver set to #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "timeout" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid saver ID"); return; }
+            };
+            let secs: u32 = parts.get(2).unwrap_or(&"300").parse().unwrap_or(300);
+            match screensaver::set_timeout(id, secs) {
+                Ok(()) => shell_println!("Timeout: {}s", secs.clamp(30, 7200)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "password" | "pw" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid saver ID"); return; }
+            };
+            let required = parts.get(2).copied().unwrap_or("on") != "off";
+            match screensaver::set_password_required(id, required) {
+                Ok(()) => shell_println!("Password on wake: {}", required),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "register" => {
+            let name = parts.get(1).copied().unwrap_or("Custom");
+            let stype = match parts.get(2).copied().unwrap_or("blank") {
+                "starfield" | "stars" => screensaver::SaverType::Starfield,
+                "matrix" => screensaver::SaverType::Matrix,
+                "bouncing" | "bounce" => screensaver::SaverType::Bouncing,
+                "clock" => screensaver::SaverType::Clock,
+                "slideshow" | "photos" => screensaver::SaverType::Slideshow,
+                "bubbles" => screensaver::SaverType::Bubbles,
+                _ => screensaver::SaverType::Blank,
+            };
+            match screensaver::register_saver(name, stype) {
+                Ok(id) => shell_println!("Registered saver #{}: {} ({})", id, name, stype.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, acts, deacts, ops) = screensaver::stats();
+            shell_println!("Savers: {}, Activations: {}, Deactivations: {}, Ops: {}", count, acts, deacts, ops);
+        }
+        "test" => screensaver::self_test(),
+        _ => {
+            shell_println!("Usage: screensaver <command>");
+            shell_println!("  list                List savers");
+            shell_println!("  activate            Start saver");
+            shell_println!("  deactivate          Dismiss saver");
+            shell_println!("  preview <id>        Preview saver");
+            shell_println!("  set <id>            Set active saver");
+            shell_println!("  timeout <id> <s>    Set idle timeout");
+            shell_println!("  password <id> [on|off]  Password on wake");
+            shell_println!("  register <name> <type>  Register saver");
+            shell_println!("  Types: blank starfield matrix bouncing clock slideshow bubbles");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `colortemp` / `ctemp` — color temperature scheduling.
+fn cmd_colortemp(args: &str) {
+    use crate::fs::colortemp;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            colortemp::init_defaults();
+            shell_println!("Color temperature initialized");
+        }
+        "list" => {
+            let profiles = colortemp::list_profiles();
+            if profiles.is_empty() {
+                shell_println!("No color temp profiles");
+            } else {
+                let active_id = colortemp::active_profile_id();
+                for p in &profiles {
+                    let marker = if p.id == active_id { " *" } else { "" };
+                    shell_println!("#{}: {} — {} {}K [{}]{}",
+                        p.id, p.name, p.mode.label(), p.current_kelvin,
+                        if p.enabled { "ON" } else { "OFF" }, marker);
+                    if p.mode == colortemp::TempMode::Scheduled || p.mode == colortemp::TempMode::SunSync {
+                        shell_println!("    Day: {}K, Night: {}K, Sunset: {:02}:{:02}, Sunrise: {:02}:{:02}",
+                            p.day_kelvin, p.night_kelvin,
+                            p.sunset_min / 60, p.sunset_min % 60,
+                            p.sunrise_min / 60, p.sunrise_min % 60);
+                    }
+                }
+            }
+        }
+        "set" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let kelvin: u32 = parts.get(2).unwrap_or(&"4000").parse().unwrap_or(4000);
+            match colortemp::set_temperature(id, kelvin) {
+                Ok(()) => shell_println!("Temperature: {}K", kelvin.clamp(1000, 10000)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mode" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let mode = match parts.get(2).copied().unwrap_or("off") {
+                "manual" => colortemp::TempMode::Manual,
+                "scheduled" | "sched" => colortemp::TempMode::Scheduled,
+                "sunsync" | "sun" => colortemp::TempMode::SunSync,
+                _ => colortemp::TempMode::Off,
+            };
+            match colortemp::set_mode(id, mode) {
+                Ok(()) => shell_println!("Mode: {}", mode.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "daynight" | "dn" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let day: u32 = parts.get(2).unwrap_or(&"6500").parse().unwrap_or(6500);
+            let night: u32 = parts.get(3).unwrap_or(&"3400").parse().unwrap_or(3400);
+            match colortemp::set_day_night(id, day, night) {
+                Ok(()) => shell_println!("Day: {}K, Night: {}K", day.clamp(1000, 10000), night.clamp(1000, 10000)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "schedule" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let sunset: u16 = parts.get(2).unwrap_or(&"1200").parse().unwrap_or(1200);
+            let sunrise: u16 = parts.get(3).unwrap_or(&"420").parse().unwrap_or(420);
+            let trans: u16 = parts.get(4).unwrap_or(&"30").parse().unwrap_or(30);
+            match colortemp::set_schedule_times(id, sunset, sunrise, trans) {
+                Ok(()) => shell_println!("Sunset: {:02}:{:02}, Sunrise: {:02}:{:02}, Transition: {}m",
+                    sunset / 60, sunset % 60, sunrise / 60, sunrise % 60, trans),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "update" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            let time: u16 = parts.get(2).unwrap_or(&"720").parse().unwrap_or(720);
+            match colortemp::update_for_time(id, time) {
+                Ok(k) => shell_println!("Temperature at {:02}:{:02}: {}K", time / 60, time % 60, k),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "create" => {
+            let name = parts.get(1).copied().unwrap_or("Profile");
+            match colortemp::create_profile(name) {
+                Ok(id) => shell_println!("Created profile #{}: {}", id, name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "active" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid profile ID"); return; }
+            };
+            match colortemp::set_active(id) {
+                Ok(()) => shell_println!("Active profile: #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, active, adj, ops) = colortemp::stats();
+            shell_println!("Profiles: {}, Active: #{}, Adjustments: {}, Ops: {}", count, active, adj, ops);
+        }
+        "test" => colortemp::self_test(),
+        _ => {
+            shell_println!("Usage: colortemp <command>");
+            shell_println!("  list                   List profiles");
+            shell_println!("  set <id> <kelvin>      Set temperature");
+            shell_println!("  mode <id> <mode>       Set mode");
+            shell_println!("  daynight <id> <d> <n>  Day/night Kelvin");
+            shell_println!("  schedule <id> <sunset> <sunrise> <trans>");
+            shell_println!("  update <id> <minutes>  Update for time");
+            shell_println!("  create <name>          New profile");
+            shell_println!("  active <id>            Set active profile");
+            shell_println!("  Modes: off manual scheduled sunsync");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `gamemode` / `gmode` — gaming performance optimization.
+fn cmd_gamemode(args: &str) {
+    use crate::fs::gamemode;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            gamemode::init_defaults();
+            shell_println!("Game mode initialized");
+        }
+        "status" => {
+            let state = gamemode::current_state();
+            shell_println!("Game mode: {}", state.label());
+            let games = gamemode::list_games();
+            shell_println!("Registered games: {}", games.len());
+        }
+        "on" | "activate" => {
+            let gid: u32 = parts.get(1).unwrap_or(&"0").parse().unwrap_or(0);
+            match gamemode::activate(gid) {
+                Ok(()) => shell_println!("Game mode activated"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "off" | "deactivate" => {
+            match gamemode::deactivate() {
+                Ok(()) => shell_println!("Game mode deactivated"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "register" => {
+            let name = parts.get(1).copied().unwrap_or("Game");
+            let proc_name = parts.get(2).copied().unwrap_or("game.exe");
+            match gamemode::register_game(name, proc_name) {
+                Ok(id) => shell_println!("Registered game #{}: {} ({})", id, name, proc_name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unregister" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid game ID"); return; }
+            };
+            match gamemode::unregister_game(id) {
+                Ok(()) => shell_println!("Unregistered game #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "games" | "list" => {
+            let games = gamemode::list_games();
+            if games.is_empty() {
+                shell_println!("No registered games");
+            } else {
+                for g in &games {
+                    shell_println!("#{}: {} ({}) — {} sessions, {} secs played",
+                        g.id, g.name, g.process_name, g.total_sessions, g.total_play_secs);
+                }
+            }
+        }
+        "sessions" | "history" => {
+            let count: usize = parts.get(1).unwrap_or(&"10").parse().unwrap_or(10);
+            let sessions = gamemode::list_sessions(count);
+            if sessions.is_empty() {
+                shell_println!("No game sessions");
+            } else {
+                for s in &sessions {
+                    shell_println!("  {} — {} secs", s.game_name, s.duration_secs);
+                }
+            }
+        }
+        "fps" => {
+            let enabled = parts.get(1).copied().unwrap_or("on") != "off";
+            match gamemode::set_fps_overlay(enabled) {
+                Ok(()) => shell_println!("FPS overlay: {}", if enabled { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "autodetect" | "auto" => {
+            let enabled = parts.get(1).copied().unwrap_or("on") != "off";
+            match gamemode::set_auto_detect(enabled) {
+                Ok(()) => shell_println!("Auto-detect: {}", if enabled { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (games, acts, active, ops) = gamemode::stats();
+            shell_println!("Games: {}, Activations: {}, Active: {}, Ops: {}", games, acts, active, ops);
+        }
+        "test" => gamemode::self_test(),
+        _ => {
+            shell_println!("Usage: gamemode <command>");
+            shell_println!("  status              Current state");
+            shell_println!("  on [game_id]        Activate game mode");
+            shell_println!("  off                 Deactivate game mode");
+            shell_println!("  register <name> <proc>  Register game");
+            shell_println!("  unregister <id>     Remove game");
+            shell_println!("  games               List registered games");
+            shell_println!("  sessions [count]    Recent sessions");
+            shell_println!("  fps [on|off]        FPS overlay");
+            shell_println!("  auto [on|off]       Auto-detection");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -44883,7 +45373,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

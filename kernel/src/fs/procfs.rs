@@ -357,6 +357,10 @@ const ROOT_FILES: &[&str] = &[
     "energysaver",
     "filerules",
     "secureboot",
+    "eventlog",
+    "systemimage",
+    "raidmgr",
+    "networkbridge",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7211,6 +7215,59 @@ fn gen_secureboot() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_eventlog() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Event Log ===\n");
+    let (event_count, total_logged, total_cleared, total_queries, ops) = crate::fs::eventlog::stats();
+    out.push_str(&format!("event_count: {}\n", event_count));
+    out.push_str(&format!("total_logged: {}\n", total_logged));
+    out.push_str(&format!("total_cleared: {}\n", total_cleared));
+    out.push_str(&format!("total_queries: {}\n", total_queries));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_systemimage() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== System Image ===\n");
+    let (image_count, total_created, total_restored, total_verified, total_bytes, ops) = crate::fs::systemimage::stats();
+    out.push_str(&format!("image_count: {}\n", image_count));
+    out.push_str(&format!("total_created: {}\n", total_created));
+    out.push_str(&format!("total_restored: {}\n", total_restored));
+    out.push_str(&format!("total_verified: {}\n", total_verified));
+    out.push_str(&format!("total_bytes: {}\n", total_bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_raidmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== RAID Manager ===\n");
+    let (array_count, total_created, total_rebuilds, total_failures, ops) = crate::fs::raidmgr::stats();
+    out.push_str(&format!("array_count: {}\n", array_count));
+    out.push_str(&format!("total_created: {}\n", total_created));
+    out.push_str(&format!("total_rebuilds: {}\n", total_rebuilds));
+    out.push_str(&format!("total_failures: {}\n", total_failures));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_networkbridge() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Network Bridge ===\n");
+    let (bridge_count, total_created, total_ifaces, total_forwarded, ops) = crate::fs::networkbridge::stats();
+    out.push_str(&format!("bridge_count: {}\n", bridge_count));
+    out.push_str(&format!("total_created: {}\n", total_created));
+    out.push_str(&format!("total_ifaces_added: {}\n", total_ifaces));
+    out.push_str(&format!("total_packets_forwarded: {}\n", total_forwarded));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7733,6 +7790,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "energysaver" => Ok(gen_energysaver()),
         "filerules" => Ok(gen_filerules()),
         "secureboot" => Ok(gen_secureboot()),
+        "eventlog" => Ok(gen_eventlog()),
+        "systemimage" => Ok(gen_systemimage()),
+        "raidmgr" => Ok(gen_raidmgr()),
+        "networkbridge" => Ok(gen_networkbridge()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

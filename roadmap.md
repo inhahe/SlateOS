@@ -883,6 +883,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Energy Saver (fs::energysaver): power optimization with 5 energy modes, per-mode profiles (brightness/CPU/WiFi/BT/animations), app throttling with CPU limits, auto-switch on battery threshold, battery estimation; `energysaver`/`esaver` kshell command; /proc/energysaver; 8 self-tests
   - [x] File Rules (fs::filerules): automatic file organization with 7 match conditions (extension/name/size/directory), 8 rule actions (move/copy/rename/tag/compress/delete/notify), 3 default rules, enable/disable per-rule; `filerules`/`frules` kshell command; /proc/filerules; 8 self-tests
   - [x] Secure Boot (fs::secureboot): secure boot verification with 4 boot states, 5 key types (PK/KEK/db/dbx/MOK), key enrollment/removal, image verification against enrolled keys, verification records; `secureboot`/`sboot` kshell command; /proc/secureboot; 8 self-tests
+  - [x] Event Log (fs::eventlog): centralized system event logging with 5 severity levels, 8 event categories, query by severity/source/category, 5000-entry buffer with rotation, severity counting; `eventlog`/`elog` kshell command; /proc/eventlog; 8 self-tests
+  - [x] System Image (fs::systemimage): full system snapshot management with 5 image types (full/incremental/differential/boot/userdata), 6 status states, create/restore/verify/delete, integrity checking, base image chaining; `systemimage`/`simg` kshell command; /proc/systemimage; 8 self-tests
+  - [x] RAID Manager (fs::raidmgr): software RAID array management with 6 RAID levels (0/1/5/6/10/JBOD), disk add/remove/fail, spare disk management, rebuild with progress, usable capacity calculation; `raidmgr`/`raid` kshell command; /proc/raidmgr; 8 self-tests
+  - [x] Network Bridge (fs::networkbridge): virtual network bridge management with 4 bridge modes (transparent/NAT/routed/isolated), 5 interface types, IP/MTU/STP configuration, interface attach/detach; `networkbridge`/`nbridge` kshell command; /proc/networkbridge; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

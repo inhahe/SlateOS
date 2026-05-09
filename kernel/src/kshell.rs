@@ -3458,6 +3458,7 @@ const COMMANDS: &[&str] = &[
     "policyengine", "pengine", "fontpreview", "fprev", "wifiscan", "wifi", "splitview", "split",
     "iotdevice", "iot", "prochistory", "phist", "notiffilter", "nfilter", "colorblind", "cvd",
     "clipaction", "caction", "energysaver", "esaver", "filerules", "frules", "secureboot", "sboot",
+    "eventlog", "elog", "systemimage", "simg", "raidmgr", "raid", "networkbridge", "nbridge",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4966,6 +4967,10 @@ fn dispatch(line: &str) {
         "energysaver" | "esaver" => cmd_energysaver(args),
         "filerules" | "frules" => cmd_filerules(args),
         "secureboot" | "sboot" => cmd_secureboot(args),
+        "eventlog" | "elog" => cmd_eventlog(args),
+        "systemimage" | "simg" => cmd_systemimage(args),
+        "raidmgr" | "raid" => cmd_raidmgr(args),
+        "networkbridge" | "nbridge" => cmd_networkbridge(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -44655,6 +44660,566 @@ fn parse_sboot_key_type(s: &str) -> crate::fs::secureboot::KeyType {
     }
 }
 
+/// `eventlog` / `elog` — centralized system event logging.
+fn cmd_eventlog(args: &str) {
+    use crate::fs::eventlog;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "log" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: eventlog log <severity> <category> <source> [message...]");
+                return;
+            }
+            let sev = parse_event_severity(parts[1]);
+            let cat = parse_event_category(parts[2]);
+            let source = parts[3];
+            let msg = if parts.len() > 4 { parts[4..].join(" ") } else { String::from("(no message)") };
+            match eventlog::log_event(sev, cat, source, &msg) {
+                Ok(id) => shell_println!("Logged event #{} [{}] {}: {}", id, sev.label(), source, msg),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "recent" => {
+            let max: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+            let events = eventlog::recent(max);
+            if events.is_empty() {
+                shell_println!("No events");
+            } else {
+                for e in &events {
+                    shell_println!("  #{} [{}] {} ({}): {}", e.id, e.severity.label(), e.source, e.category.label(), e.message);
+                }
+            }
+        }
+        "errors" => {
+            let max: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let events = eventlog::query_by_severity(crate::fs::eventlog::Severity::Error, max);
+            if events.is_empty() {
+                shell_println!("No errors");
+            } else {
+                shell_println!("{} error(s):", events.len());
+                for e in &events {
+                    shell_println!("  #{} [{}] {}: {}", e.id, e.severity.label(), e.source, e.message);
+                }
+            }
+        }
+        "source" => {
+            let src = match parts.get(1) {
+                Some(s) => *s,
+                None => { shell_println!("Usage: eventlog source <name>"); return; }
+            };
+            let max: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let events = eventlog::query_by_source(src, max);
+            if events.is_empty() {
+                shell_println!("No events from '{}'", src);
+            } else {
+                for e in &events {
+                    shell_println!("  #{} [{}] {}: {}", e.id, e.severity.label(), e.source, e.message);
+                }
+            }
+        }
+        "category" => {
+            let cat = match parts.get(1) {
+                Some(c) => parse_event_category(c),
+                None => { shell_println!("Usage: eventlog category <name>"); return; }
+            };
+            let max: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let events = eventlog::query_by_category(cat, max);
+            if events.is_empty() {
+                shell_println!("No events in category '{}'", cat.label());
+            } else {
+                for e in &events {
+                    shell_println!("  #{} [{}] {}: {}", e.id, e.severity.label(), e.source, e.message);
+                }
+            }
+        }
+        "clear" => {
+            if let Some(src) = parts.get(1) {
+                match eventlog::clear_source(src) {
+                    Ok(n) => shell_println!("Cleared {} events from '{}'", n, src),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                match eventlog::clear_all() {
+                    Ok(n) => shell_println!("Cleared {} events", n),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "counts" => {
+            let c = eventlog::severity_counts();
+            shell_println!("Severity counts: DEBUG={} INFO={} WARN={} ERROR={} CRIT={}", c[0], c[1], c[2], c[3], c[4]);
+        }
+        "stats" => {
+            let (count, logged, cleared, queries, ops) = eventlog::stats();
+            shell_println!("Event Log: events={} logged={} cleared={} queries={} ops={}", count, logged, cleared, queries, ops);
+        }
+        "init" => { eventlog::init_defaults(); shell_println!("Event log initialized"); }
+        "test" => eventlog::self_test(),
+        _ => {
+            shell_println!("Usage: eventlog <log|recent|errors|source|category|clear|counts|stats|init|test>");
+            shell_println!("Aliases: elog");
+        }
+    }
+}
+
+fn parse_event_severity(s: &str) -> crate::fs::eventlog::Severity {
+    use crate::fs::eventlog::Severity;
+    match s.to_lowercase().as_str() {
+        "debug" | "dbg" => Severity::Debug,
+        "info" => Severity::Info,
+        "warning" | "warn" => Severity::Warning,
+        "error" | "err" => Severity::Error,
+        "critical" | "crit" => Severity::Critical,
+        _ => Severity::Info,
+    }
+}
+
+fn parse_event_category(s: &str) -> crate::fs::eventlog::EventCategory {
+    use crate::fs::eventlog::EventCategory;
+    match s.to_lowercase().as_str() {
+        "system" | "sys" => EventCategory::System,
+        "security" | "sec" => EventCategory::Security,
+        "application" | "app" => EventCategory::Application,
+        "hardware" | "hw" => EventCategory::Hardware,
+        "network" | "net" => EventCategory::Network,
+        "storage" | "stor" => EventCategory::Storage,
+        "driver" | "drv" => EventCategory::Driver,
+        "service" | "svc" => EventCategory::Service,
+        _ => EventCategory::System,
+    }
+}
+
+/// `systemimage` / `simg` — system image snapshot management.
+fn cmd_systemimage(args: &str) {
+    use crate::fs::systemimage;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let images = systemimage::list_images();
+            if images.is_empty() {
+                shell_println!("No system images");
+            } else {
+                shell_println!("{} image(s):", images.len());
+                for img in &images {
+                    let base = img.base_image_id.map_or(String::from("-"), |b| format!("{}", b));
+                    shell_println!("  [{}] {} ({}) [{}] {}B base={}", img.id, img.name, img.image_type.label(), img.status.label(), img.size_bytes, base);
+                }
+            }
+        }
+        "create" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: systemimage create <name> <type> [description] [size] [base_id]");
+                return;
+            }
+            let name = parts[1];
+            let itype = parse_image_type(parts[2]);
+            let desc = if parts.len() > 3 { parts[3..].join(" ") } else { String::from("System image") };
+            let size: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000_000);
+            let base: Option<u32> = parts.get(5).and_then(|s| s.parse().ok());
+            match systemimage::create_image(name, itype, &desc, size, base) {
+                Ok(id) => shell_println!("Created image '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: systemimage delete <id>"); return; }
+            };
+            match systemimage::delete_image(id) {
+                Ok(()) => shell_println!("Deleted image {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "restore" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: systemimage restore <id>"); return; }
+            };
+            match systemimage::restore_image(id) {
+                Ok(()) => shell_println!("Restored from image {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "verify" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: systemimage verify <id>"); return; }
+            };
+            match systemimage::verify_image(id) {
+                Ok(true) => shell_println!("Image {} verified OK", id),
+                Ok(false) => shell_println!("Image {} CORRUPTED", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: systemimage info <id>"); return; }
+            };
+            match systemimage::get_image(id) {
+                Some(img) => {
+                    shell_println!("Image #{}: {}", img.id, img.name);
+                    shell_println!("  Type: {}", img.image_type.label());
+                    shell_println!("  Status: {}", img.status.label());
+                    shell_println!("  Size: {} bytes", img.size_bytes);
+                    shell_println!("  Description: {}", img.description);
+                    shell_println!("  Checksum: {}", img.checksum);
+                    if let Some(base) = img.base_image_id {
+                        shell_println!("  Base image: {}", base);
+                    }
+                }
+                None => shell_println!("Image {} not found", id),
+            }
+        }
+        "stats" => {
+            let (count, created, restored, verified, bytes, ops) = systemimage::stats();
+            shell_println!("System Image: images={} created={} restored={} verified={} bytes={} ops={}", count, created, restored, verified, bytes, ops);
+        }
+        "init" => { systemimage::init_defaults(); shell_println!("System image initialized"); }
+        "test" => systemimage::self_test(),
+        _ => {
+            shell_println!("Usage: systemimage <list|create|delete|restore|verify|info|stats|init|test>");
+            shell_println!("Aliases: simg");
+        }
+    }
+}
+
+fn parse_image_type(s: &str) -> crate::fs::systemimage::ImageType {
+    use crate::fs::systemimage::ImageType;
+    match s.to_lowercase().as_str() {
+        "full" => ImageType::Full,
+        "incremental" | "inc" => ImageType::Incremental,
+        "differential" | "diff" => ImageType::Differential,
+        "boot" | "bootpart" => ImageType::BootPartition,
+        "userdata" | "user" => ImageType::UserData,
+        _ => ImageType::Full,
+    }
+}
+
+/// `raidmgr` / `raid` — software RAID array management.
+fn cmd_raidmgr(args: &str) {
+    use crate::fs::raidmgr;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let arrays = raidmgr::list_arrays();
+            if arrays.is_empty() {
+                shell_println!("No RAID arrays");
+            } else {
+                shell_println!("{} array(s):", arrays.len());
+                for a in &arrays {
+                    shell_println!("  [{}] {} ({}) [{}] disks={} usable={}B stripe={}KB",
+                        a.id, a.name, a.level.label(), a.status.label(),
+                        a.disks.len(), a.usable_bytes, a.stripe_size_kb);
+                }
+            }
+        }
+        "create" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: raidmgr create <name> <level> <disk1,disk2,...> [disk_size] [stripe_kb]");
+                return;
+            }
+            let name = parts[1];
+            let level = parse_raid_level(parts[2]);
+            let disk_ids: Vec<&str> = parts[3].split(',').collect();
+            let size: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000_000);
+            let stripe: u32 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(64);
+            match raidmgr::create_array(name, level, &disk_ids, size, stripe) {
+                Ok(id) => shell_println!("Created {} array '{}' (id={})", level.label(), name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: raidmgr delete <id>"); return; }
+            };
+            match raidmgr::delete_array(id) {
+                Ok(()) => shell_println!("Deleted array {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: raidmgr add <array_id> <disk_id> [size] [spare]");
+                return;
+            }
+            let aid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid array ID"); return; }
+            };
+            let disk = parts[2];
+            let size: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1_000_000_000);
+            let spare = parts.get(4).map_or(false, |s| *s == "spare");
+            match raidmgr::add_disk(aid, disk, size, spare) {
+                Ok(()) => shell_println!("Added {} to array {} as {}", disk, aid, if spare { "spare" } else { "active" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: raidmgr remove <array_id> <disk_id>");
+                return;
+            }
+            let aid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid array ID"); return; }
+            };
+            match raidmgr::remove_disk(aid, parts[2]) {
+                Ok(()) => shell_println!("Removed {} from array {}", parts[2], aid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "fail" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: raidmgr fail <array_id> <disk_id>");
+                return;
+            }
+            let aid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid array ID"); return; }
+            };
+            match raidmgr::fail_disk(aid, parts[2]) {
+                Ok(()) => shell_println!("Marked {} as failed in array {}", parts[2], aid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rebuild" => {
+            let aid: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: raidmgr rebuild <array_id>"); return; }
+            };
+            match raidmgr::start_rebuild(aid) {
+                Ok(()) => shell_println!("Rebuild started on array {}", aid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            let aid: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: raidmgr info <array_id>"); return; }
+            };
+            match raidmgr::get_array(aid) {
+                Some(a) => {
+                    shell_println!("Array #{}: {} ({})", a.id, a.name, a.level.label());
+                    shell_println!("  Status: {}", a.status.label());
+                    shell_println!("  Total: {}B, Usable: {}B", a.total_bytes, a.usable_bytes);
+                    shell_println!("  Stripe: {}KB", a.stripe_size_kb);
+                    shell_println!("  Disks:");
+                    for d in &a.disks {
+                        shell_println!("    {} [{}] {}B", d.disk_id, d.role.label(), d.size_bytes);
+                    }
+                }
+                None => shell_println!("Array {} not found", aid),
+            }
+        }
+        "stats" => {
+            let (count, created, rebuilds, failures, ops) = raidmgr::stats();
+            shell_println!("RAID: arrays={} created={} rebuilds={} failures={} ops={}", count, created, rebuilds, failures, ops);
+        }
+        "init" => { raidmgr::init_defaults(); shell_println!("RAID manager initialized"); }
+        "test" => raidmgr::self_test(),
+        _ => {
+            shell_println!("Usage: raidmgr <list|create|delete|add|remove|fail|rebuild|info|stats|init|test>");
+            shell_println!("Aliases: raid");
+        }
+    }
+}
+
+fn parse_raid_level(s: &str) -> crate::fs::raidmgr::RaidLevel {
+    use crate::fs::raidmgr::RaidLevel;
+    match s.to_lowercase().as_str() {
+        "0" | "raid0" | "stripe" => RaidLevel::Raid0,
+        "1" | "raid1" | "mirror" => RaidLevel::Raid1,
+        "5" | "raid5" => RaidLevel::Raid5,
+        "6" | "raid6" => RaidLevel::Raid6,
+        "10" | "raid10" => RaidLevel::Raid10,
+        "jbod" => RaidLevel::Jbod,
+        _ => RaidLevel::Raid1,
+    }
+}
+
+/// `networkbridge` / `nbridge` — network bridge management.
+fn cmd_networkbridge(args: &str) {
+    use crate::fs::networkbridge;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let bridges = networkbridge::list_bridges();
+            if bridges.is_empty() {
+                shell_println!("No bridges");
+            } else {
+                shell_println!("{} bridge(s):", bridges.len());
+                for br in &bridges {
+                    let ip = br.ip_address.as_deref().unwrap_or("-");
+                    shell_println!("  [{}] {} ({}) [{}] ifaces={} ip={} mtu={}",
+                        br.id, br.name, br.mode.label(), br.state.label(),
+                        br.interfaces.len(), ip, br.mtu);
+                }
+            }
+        }
+        "create" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: networkbridge create <name> [mode]");
+                return;
+            }
+            let name = parts[1];
+            let mode = parts.get(2).map_or(crate::fs::networkbridge::BridgeMode::Transparent, |m| parse_bridge_mode(m));
+            match networkbridge::create_bridge(name, mode) {
+                Ok(id) => shell_println!("Created bridge '{}' (id={}) mode={}", name, id, mode.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: networkbridge delete <id>"); return; }
+            };
+            match networkbridge::delete_bridge(id) {
+                Ok(()) => shell_println!("Deleted bridge {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: networkbridge add <bridge_id> <iface> <type> [mac]");
+                return;
+            }
+            let bid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid bridge ID"); return; }
+            };
+            let iface = parts[2];
+            let itype = parse_iface_type(parts[3]);
+            let mac = parts.get(4).copied().unwrap_or("00:00:00:00:00:00");
+            match networkbridge::add_interface(bid, iface, itype, mac) {
+                Ok(()) => shell_println!("Added {} to bridge {}", iface, bid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: networkbridge remove <bridge_id> <iface>");
+                return;
+            }
+            let bid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid bridge ID"); return; }
+            };
+            match networkbridge::remove_interface(bid, parts[2]) {
+                Ok(()) => shell_println!("Removed {} from bridge {}", parts[2], bid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "up" | "down" => {
+            let bid: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: networkbridge {} <bridge_id>", sub); return; }
+            };
+            let st = if sub == "up" { crate::fs::networkbridge::BridgeState::Up } else { crate::fs::networkbridge::BridgeState::Down };
+            match networkbridge::set_state(bid, st) {
+                Ok(()) => shell_println!("Bridge {} set to {}", bid, st.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "ip" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: networkbridge ip <bridge_id> <ip> <mask>");
+                return;
+            }
+            let bid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid bridge ID"); return; }
+            };
+            match networkbridge::set_ip(bid, parts[2], parts[3]) {
+                Ok(()) => shell_println!("Bridge {} IP set to {}/{}", bid, parts[2], parts[3]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mtu" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: networkbridge mtu <bridge_id> <mtu>");
+                return;
+            }
+            let bid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid bridge ID"); return; }
+            };
+            let mtu: u32 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid MTU"); return; }
+            };
+            match networkbridge::set_mtu(bid, mtu) {
+                Ok(()) => shell_println!("Bridge {} MTU set to {}", bid, mtu),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            let bid: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: networkbridge info <bridge_id>"); return; }
+            };
+            match networkbridge::get_bridge(bid) {
+                Some(br) => {
+                    shell_println!("Bridge #{}: {} ({})", br.id, br.name, br.mode.label());
+                    shell_println!("  State: {}", br.state.label());
+                    let ip = br.ip_address.as_deref().unwrap_or("-");
+                    let mask = br.subnet_mask.as_deref().unwrap_or("-");
+                    shell_println!("  IP: {}/{}", ip, mask);
+                    shell_println!("  MTU: {}, STP: {}", br.mtu, br.stp_enabled);
+                    shell_println!("  Interfaces:");
+                    for iface in &br.interfaces {
+                        shell_println!("    {} ({}) mac={}", iface.name, iface.iface_type.label(), iface.mac_address);
+                    }
+                }
+                None => shell_println!("Bridge {} not found", bid),
+            }
+        }
+        "stats" => {
+            let (count, created, ifaces, forwarded, ops) = networkbridge::stats();
+            shell_println!("Network Bridge: bridges={} created={} ifaces_added={} forwarded={} ops={}", count, created, ifaces, forwarded, ops);
+        }
+        "init" => { networkbridge::init_defaults(); shell_println!("Network bridge initialized"); }
+        "test" => networkbridge::self_test(),
+        _ => {
+            shell_println!("Usage: networkbridge <list|create|delete|add|remove|up|down|ip|mtu|info|stats|init|test>");
+            shell_println!("Aliases: nbridge");
+        }
+    }
+}
+
+fn parse_bridge_mode(s: &str) -> crate::fs::networkbridge::BridgeMode {
+    use crate::fs::networkbridge::BridgeMode;
+    match s.to_lowercase().as_str() {
+        "transparent" | "l2" => BridgeMode::Transparent,
+        "nat" => BridgeMode::Nat,
+        "routed" | "l3" => BridgeMode::Routed,
+        "isolated" => BridgeMode::Isolated,
+        _ => BridgeMode::Transparent,
+    }
+}
+
+fn parse_iface_type(s: &str) -> crate::fs::networkbridge::IfaceType {
+    use crate::fs::networkbridge::IfaceType;
+    match s.to_lowercase().as_str() {
+        "physical" | "phys" => IfaceType::Physical,
+        "virtual" | "virt" => IfaceType::Virtual,
+        "vlan" => IfaceType::VlanTag,
+        "loopback" | "lo" => IfaceType::Loopback,
+        "tap" => IfaceType::Tap,
+        _ => IfaceType::Physical,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -53251,7 +53816,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

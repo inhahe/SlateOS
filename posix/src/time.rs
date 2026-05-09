@@ -1,6 +1,13 @@
 //! POSIX time functions.
 //!
-//! Implements `sleep`, `nanosleep`, `clock_gettime`, `gettimeofday`.
+//! Implements `sleep`, `nanosleep`, `clock_gettime`, `gettimeofday`,
+//! `time`, `difftime`, `localtime`, `gmtime`, `mktime`, `asctime`,
+//! `ctime`, `strftime`.
+//!
+//! ## Timezone
+//!
+//! Our OS doesn't have timezone support.  All conversions assume UTC.
+//! `localtime` and `gmtime` produce identical results.
 
 use crate::errno;
 use crate::stat::Timespec;
@@ -175,4 +182,456 @@ pub extern "C" fn time(tloc: *mut TimeT) -> TimeT {
     }
 
     secs
+}
+
+/// Compute the difference between two time_t values.
+#[unsafe(no_mangle)]
+#[allow(clippy::cast_precision_loss)]
+// Precision loss is acceptable for difftime — POSIX defines it as
+// returning double, and time differences rarely need 52-bit precision.
+pub extern "C" fn difftime(time1: TimeT, time0: TimeT) -> f64 {
+    (time1.wrapping_sub(time0)) as f64
+}
+
+// ---------------------------------------------------------------------------
+// Broken-down time
+// ---------------------------------------------------------------------------
+
+/// Broken-down time (struct tm).
+#[repr(C)]
+pub struct Tm {
+    /// Seconds [0, 60] (60 for leap second).
+    pub tm_sec: i32,
+    /// Minutes [0, 59].
+    pub tm_min: i32,
+    /// Hours [0, 23].
+    pub tm_hour: i32,
+    /// Day of month [1, 31].
+    pub tm_mday: i32,
+    /// Month [0, 11] (January = 0).
+    pub tm_mon: i32,
+    /// Years since 1900.
+    pub tm_year: i32,
+    /// Day of week [0, 6] (Sunday = 0).
+    pub tm_wday: i32,
+    /// Day of year [0, 365].
+    pub tm_yday: i32,
+    /// Daylight saving flag (0 = not in effect).
+    pub tm_isdst: i32,
+}
+
+/// Static storage for gmtime/localtime (not thread-safe per POSIX).
+static mut TM_RESULT: Tm = Tm {
+    tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0,
+    tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0,
+    tm_isdst: 0,
+};
+
+/// Convert time_t to broken-down UTC time.
+///
+/// Returns a pointer to a static Tm (not thread-safe).
+#[unsafe(no_mangle)]
+pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
+    if timep.is_null() {
+        return core::ptr::null_mut();
+    }
+    let secs = unsafe { *timep };
+    // SAFETY: Single-threaded access to static storage.
+    let tm = unsafe { &mut *core::ptr::addr_of_mut!(TM_RESULT) };
+    secs_to_tm(secs, tm);
+    core::ptr::addr_of_mut!(*tm)
+}
+
+/// Convert time_t to broken-down local time.
+///
+/// We don't have timezone support, so this returns UTC.
+#[unsafe(no_mangle)]
+pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
+    // No timezone — UTC is local time.
+    gmtime(timep)
+}
+
+/// Convert broken-down time to time_t.
+///
+/// Normalizes the Tm fields and returns seconds since epoch.
+#[unsafe(no_mangle)]
+pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
+    if tm.is_null() {
+        return -1;
+    }
+    let t = unsafe { &mut *tm };
+    tm_to_secs(t)
+}
+
+/// Convert broken-down time to string.
+///
+/// Returns a pointer to a static string in the format
+/// "Wed Jun 30 21:49:08 1993\n\0".
+#[unsafe(no_mangle)]
+pub extern "C" fn asctime(tm: *const Tm) -> *const u8 {
+    if tm.is_null() {
+        return c"??? ??? ?? ??:??:?? ????\n".as_ptr().cast::<u8>();
+    }
+
+    let t = unsafe { &*tm };
+
+    // SAFETY: Single-threaded access to static buffer.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(ASCTIME_BUF) };
+    let len = format_asctime(t, buf);
+    let _ = len; // We always null-terminate.
+    buf.as_ptr()
+}
+
+/// Static buffer for asctime.
+static mut ASCTIME_BUF: [u8; 32] = [0u8; 32];
+
+/// Convert time_t to string.
+///
+/// Equivalent to `asctime(localtime(timep))`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ctime(timep: *const TimeT) -> *const u8 {
+    asctime(localtime(timep))
+}
+
+/// Format time according to a format string.
+///
+/// Supports a subset of strftime conversions:
+/// `%Y` (year), `%m` (month), `%d` (day), `%H` (hour), `%M` (minute),
+/// `%S` (second), `%A`/`%a` (weekday), `%B`/`%b` (month name),
+/// `%c` (date+time), `%p` (AM/PM), `%j` (day of year), `%n` (newline),
+/// `%t` (tab), `%%` (percent).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)]
+pub unsafe extern "C" fn strftime(
+    buf: *mut u8,
+    maxsize: usize,
+    fmt: *const u8,
+    tm: *const Tm,
+) -> usize {
+    if buf.is_null() || fmt.is_null() || tm.is_null() || maxsize == 0 {
+        return 0;
+    }
+
+    let t = unsafe { &*tm };
+    let mut pos: usize = 0;
+    let mut fpos: usize = 0;
+    let limit = maxsize.wrapping_sub(1); // Reserve space for null terminator.
+
+    loop {
+        let ch = unsafe { *fmt.add(fpos) };
+        if ch == 0 {
+            break;
+        }
+
+        if ch != b'%' {
+            if pos < limit {
+                unsafe { *buf.add(pos) = ch; }
+            }
+            pos = pos.wrapping_add(1);
+            fpos = fpos.wrapping_add(1);
+            continue;
+        }
+
+        fpos = fpos.wrapping_add(1);
+        let spec = unsafe { *fmt.add(fpos) };
+        if spec == 0 {
+            break;
+        }
+        fpos = fpos.wrapping_add(1);
+
+        match spec {
+            b'Y' => pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900)),
+            b'm' => pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1)),
+            b'd' => pos = write_dec2(buf, limit, pos, t.tm_mday),
+            b'H' => pos = write_dec2(buf, limit, pos, t.tm_hour),
+            b'M' => pos = write_dec2(buf, limit, pos, t.tm_min),
+            b'S' => pos = write_dec2(buf, limit, pos, t.tm_sec),
+            b'j' => pos = write_dec3(buf, limit, pos, t.tm_yday.wrapping_add(1)),
+            b'A' => pos = write_str(buf, limit, pos, wday_full(t.tm_wday)),
+            b'a' => pos = write_str(buf, limit, pos, wday_abbr(t.tm_wday)),
+            b'B' => pos = write_str(buf, limit, pos, mon_full(t.tm_mon)),
+            b'b' | b'h' => pos = write_str(buf, limit, pos, mon_abbr(t.tm_mon)),
+            b'p' => {
+                let label = if t.tm_hour < 12 { b"AM" } else { b"PM" };
+                pos = write_str(buf, limit, pos, label);
+            }
+            b'c' => {
+                // "Thu Jan  1 00:00:00 1970" format.
+                pos = write_str(buf, limit, pos, wday_abbr(t.tm_wday));
+                pos = write_char(buf, limit, pos, b' ');
+                pos = write_str(buf, limit, pos, mon_abbr(t.tm_mon));
+                pos = write_char(buf, limit, pos, b' ');
+                pos = write_dec2(buf, limit, pos, t.tm_mday);
+                pos = write_char(buf, limit, pos, b' ');
+                pos = write_dec2(buf, limit, pos, t.tm_hour);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_min);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_sec);
+                pos = write_char(buf, limit, pos, b' ');
+                pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900));
+            }
+            b'n' => {
+                pos = write_char(buf, limit, pos, b'\n');
+            }
+            b't' => {
+                pos = write_char(buf, limit, pos, b'\t');
+            }
+            b'%' => {
+                pos = write_char(buf, limit, pos, b'%');
+            }
+            _ => {
+                // Unknown — pass through.
+                pos = write_char(buf, limit, pos, b'%');
+                pos = write_char(buf, limit, pos, spec);
+            }
+        }
+    }
+
+    // Null-terminate.
+    let term = if pos < maxsize { pos } else { limit };
+    unsafe { *buf.add(term) = 0; }
+
+    if pos > limit { 0 } else { pos }
+}
+
+// ---------------------------------------------------------------------------
+// Time conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Days in each month (non-leap year).
+const DAYS_IN_MONTH: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/// Check if a year is a leap year.
+#[inline]
+fn is_leap(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Days in a given month (1-indexed month, with leap year check).
+#[inline]
+fn days_in_month(mon: i32, year: i32) -> i32 {
+    if mon == 1 && is_leap(year) {
+        29
+    } else {
+        DAYS_IN_MONTH.get(mon as usize).copied().unwrap_or(30)
+    }
+}
+
+/// Convert seconds since epoch (1970-01-01 00:00:00 UTC) to broken-down time.
+#[allow(clippy::arithmetic_side_effects)]
+fn secs_to_tm(secs: TimeT, tm: &mut Tm) {
+    let mut rem = secs;
+
+    // Seconds, minutes, hours.
+    tm.tm_sec = (rem % 60) as i32;
+    rem /= 60;
+    tm.tm_min = (rem % 60) as i32;
+    rem /= 60;
+    tm.tm_hour = (rem % 24) as i32;
+    rem /= 24;
+
+    // rem is now days since epoch.
+    // 1970-01-01 was a Thursday (wday=4).
+    tm.tm_wday = ((rem + 4) % 7) as i32;
+    if tm.tm_wday < 0 {
+        tm.tm_wday += 7;
+    }
+
+    // Compute year and day-of-year.
+    let mut year: i32 = 1970;
+    loop {
+        let days_this_year = if is_leap(year) { 366 } else { 365 };
+        if rem < i64::from(days_this_year) {
+            break;
+        }
+        rem -= i64::from(days_this_year);
+        year += 1;
+    }
+
+    tm.tm_year = year - 1900;
+    tm.tm_yday = rem as i32;
+
+    // Compute month and day.
+    let mut mon: i32 = 0;
+    let mut remaining_days = rem as i32;
+    while mon < 11 {
+        let dim = days_in_month(mon, year);
+        if remaining_days < dim {
+            break;
+        }
+        remaining_days -= dim;
+        mon += 1;
+    }
+
+    tm.tm_mon = mon;
+    tm.tm_mday = remaining_days + 1;
+    tm.tm_isdst = 0;
+}
+
+/// Convert broken-down time to seconds since epoch.
+#[allow(clippy::arithmetic_side_effects)]
+fn tm_to_secs(tm: &mut Tm) -> TimeT {
+    let year = tm.tm_year + 1900;
+
+    // Count days from 1970 to the start of `year`.
+    let mut days: i64 = 0;
+    if year > 1970 {
+        let mut y = 1970;
+        while y < year {
+            days += if is_leap(y) { 366 } else { 365 };
+            y += 1;
+        }
+    }
+
+    // Add days for months.
+    let mut mon = 0;
+    while mon < tm.tm_mon {
+        days += i64::from(days_in_month(mon, year));
+        mon += 1;
+    }
+
+    // Day of month (1-based).
+    days += i64::from(tm.tm_mday - 1);
+
+    // Update tm_yday and tm_wday.
+    tm.tm_yday = 0;
+    let mut m2 = 0;
+    while m2 < tm.tm_mon {
+        tm.tm_yday += days_in_month(m2, year);
+        m2 += 1;
+    }
+    tm.tm_yday += tm.tm_mday - 1;
+
+    tm.tm_wday = ((days + 4) % 7) as i32;
+    if tm.tm_wday < 0 {
+        tm.tm_wday += 7;
+    }
+
+    days * 86400 + i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec)
+}
+
+/// Format asctime output into buffer.
+fn format_asctime(tm: &Tm, buf: &mut [u8; 32]) -> usize {
+    let mut pos: usize = 0;
+    let limit = buf.len().wrapping_sub(1);
+
+    pos = write_str(buf.as_mut_ptr(), limit, pos, wday_abbr(tm.tm_wday));
+    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
+    pos = write_str(buf.as_mut_ptr(), limit, pos, mon_abbr(tm.tm_mon));
+    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
+    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_mday);
+    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
+    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_hour);
+    pos = write_char(buf.as_mut_ptr(), limit, pos, b':');
+    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_min);
+    pos = write_char(buf.as_mut_ptr(), limit, pos, b':');
+    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_sec);
+    pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
+    pos = write_dec4(buf.as_mut_ptr(), limit, pos, tm.tm_year.wrapping_add(1900));
+    pos = write_char(buf.as_mut_ptr(), limit, pos, b'\n');
+
+    if pos < buf.len() {
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = 0;
+        }
+    } else if let Some(slot) = buf.last_mut() {
+        *slot = 0;
+    }
+
+    pos
+}
+
+// ---------------------------------------------------------------------------
+// String tables
+// ---------------------------------------------------------------------------
+
+fn wday_abbr(wday: i32) -> &'static [u8] {
+    match wday {
+        0 => b"Sun", 1 => b"Mon", 2 => b"Tue", 3 => b"Wed",
+        4 => b"Thu", 5 => b"Fri", 6 => b"Sat", _ => b"???",
+    }
+}
+
+fn wday_full(wday: i32) -> &'static [u8] {
+    match wday {
+        0 => b"Sunday", 1 => b"Monday", 2 => b"Tuesday",
+        3 => b"Wednesday", 4 => b"Thursday", 5 => b"Friday",
+        6 => b"Saturday", _ => b"???",
+    }
+}
+
+fn mon_abbr(mon: i32) -> &'static [u8] {
+    match mon {
+        0 => b"Jan", 1 => b"Feb", 2 => b"Mar", 3 => b"Apr",
+        4 => b"May", 5 => b"Jun", 6 => b"Jul", 7 => b"Aug",
+        8 => b"Sep", 9 => b"Oct", 10 => b"Nov", 11 => b"Dec",
+        _ => b"???",
+    }
+}
+
+fn mon_full(mon: i32) -> &'static [u8] {
+    match mon {
+        0 => b"January", 1 => b"February", 2 => b"March",
+        3 => b"April", 4 => b"May", 5 => b"June",
+        6 => b"July", 7 => b"August", 8 => b"September",
+        9 => b"October", 10 => b"November", 11 => b"December",
+        _ => b"???",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// strftime helpers
+// ---------------------------------------------------------------------------
+
+/// Write a single character to a buffer.
+fn write_char(buf: *mut u8, limit: usize, pos: usize, ch: u8) -> usize {
+    if pos < limit {
+        unsafe { *buf.add(pos) = ch; }
+    }
+    pos.wrapping_add(1)
+}
+
+/// Write a byte slice to a buffer.
+fn write_str(buf: *mut u8, limit: usize, mut pos: usize, data: &[u8]) -> usize {
+    for &byte in data {
+        if pos < limit {
+            unsafe { *buf.add(pos) = byte; }
+        }
+        pos = pos.wrapping_add(1);
+    }
+    pos
+}
+
+/// Write a 2-digit zero-padded decimal.
+fn write_dec2(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
+    let v = if val < 0 { 0 } else { val as u32 };
+    let d1 = b'0'.wrapping_add((v.wrapping_div(10) % 10) as u8);
+    let d0 = b'0'.wrapping_add((v % 10) as u8);
+    let p1 = write_char(buf, limit, pos, d1);
+    write_char(buf, limit, p1, d0)
+}
+
+/// Write a 3-digit zero-padded decimal.
+fn write_dec3(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
+    let v = if val < 0 { 0 } else { val as u32 };
+    let d2 = b'0'.wrapping_add((v.wrapping_div(100) % 10) as u8);
+    let d1 = b'0'.wrapping_add((v.wrapping_div(10) % 10) as u8);
+    let d0 = b'0'.wrapping_add((v % 10) as u8);
+    let p2 = write_char(buf, limit, pos, d2);
+    let p1 = write_char(buf, limit, p2, d1);
+    write_char(buf, limit, p1, d0)
+}
+
+/// Write a 4-digit zero-padded year.
+fn write_dec4(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
+    let v = if val < 0 { 0 } else { val as u32 };
+    let d3 = b'0'.wrapping_add((v.wrapping_div(1000) % 10) as u8);
+    let d2 = b'0'.wrapping_add((v.wrapping_div(100) % 10) as u8);
+    let d1 = b'0'.wrapping_add((v.wrapping_div(10) % 10) as u8);
+    let d0 = b'0'.wrapping_add((v % 10) as u8);
+    let p3 = write_char(buf, limit, pos, d3);
+    let p2 = write_char(buf, limit, p3, d2);
+    let p1 = write_char(buf, limit, p2, d1);
+    write_char(buf, limit, p1, d0)
 }

@@ -877,6 +877,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] uid/gid: setuid/seteuid/setgid/setegid/setreuid/setregid (stubs — single-user OS), getgroups
   - [x] unistd additions: gethostname ("localhost"), alarm (stub), pause (sleep 1s + EINTR)
   - [x] shm: shm_open/shm_unlink stubs (ENOSYS)
+  - [x] statvfs: statvfs/fstatvfs with reasonable defaults (10 GiB total, 1 GiB free, 4K blocks)
+  - [x] wait: C-callable WIFEXITED/WEXITSTATUS/WIFSIGNALED/WTERMSIG/WIFSTOPPED/WSTOPSIG/WCOREDUMP, WNOHANG/WUNTRACED/WCONTINUED constants
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

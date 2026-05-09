@@ -16,24 +16,47 @@
 //!   currently be reclaimed (known limitation — needs kernel-level
 //!   cleanup notification or a reaper thread).
 //!
-//! ## Mutexes
+//! ## Synchronization Primitives
 //!
-//! Mutexes use atomic compare-and-swap for thread safety.  Under
-//! contention the lock spins briefly then yields via `SYS_SLEEP`.
-//! A futex-based implementation would be more efficient but requires
-//! wiring up the kernel's futex syscall to userspace.
+//! - **Mutexes**: atomic CAS with spin-yield.  Attributes accepted
+//!   (normal/recursive/error-checking) but type is always normal.
+//! - **Condition variables**: generation counter with spin-yield wait.
+//! - **Read-write locks**: atomic state (0=unlocked, N=readers, -1=writer).
+//! - **Barriers**: arrival counter with generation-based release.
+//! - **Spinlocks**: pure atomic CAS busy-wait.
+//!
+//! ## Features
+//!
+//! - Thread: `pthread_create`, `pthread_join`, `pthread_detach`,
+//!   `pthread_self`, `pthread_equal`, `pthread_exit`
+//! - Attributes: `pthread_attr_init`/`destroy`/`setstacksize`/
+//!   `getstacksize`/`setdetachstate`/`getdetachstate`
+//! - Mutex: `pthread_mutex_init`/`destroy`/`lock`/`trylock`/`unlock`
+//! - Mutex attributes: `pthread_mutexattr_init`/`destroy`/`settype`/
+//!   `gettype`
+//! - Condition: `pthread_cond_init`/`destroy`/`wait`/`timedwait`/
+//!   `signal`/`broadcast`
+//! - RW lock: `pthread_rwlock_init`/`destroy`/`rdlock`/`tryrdlock`/
+//!   `wrlock`/`trywrlock`/`unlock`
+//! - Barrier: `pthread_barrier_init`/`destroy`/`wait`
+//! - Spinlock: `pthread_spin_init`/`destroy`/`lock`/`trylock`/`unlock`
+//! - Cancel stubs: `pthread_setcancelstate`/`setcanceltype`/
+//!   `testcancel`/`cancel`
+//! - Once: `pthread_once`
+//! - TSD: `pthread_key_create`/`delete`/`getspecific`/`setspecific`
+//! - Yield: `sched_yield`
 //!
 //! ## Limitations
 //!
 //! - Thread-specific data (TSD) uses a **global** array, not per-thread
 //!   storage.  Proper TLS requires kernel support for the FS/GS segment.
 //! - Detached thread stacks are leaked (no cleanup notification).
-//! - `pthread_cancel` is not implemented.
+//! - `pthread_cancel` accepted but never actually cancels a thread.
 //! - Mutex is a spinlock (no futex-based blocking).
 //! - Condition variables use spin-yield (1ms intervals) watching a
 //!   generation counter.  Correct but not efficient.
-//! - Thread attributes (`pthread_attr_t`) are ignored; stack size is
-//!   fixed at 64 KiB.
+//! - Recursive/error-checking mutex types are accepted but behave
+//!   as normal mutexes.
 
 use crate::errno;
 use crate::syscall;
@@ -879,5 +902,383 @@ pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn sched_yield() -> i32 {
     let _ = syscall::syscall1(syscall::SYS_SLEEP, 0);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Thread attributes
+// ---------------------------------------------------------------------------
+
+/// Initialize a thread attribute object to default values.
+///
+/// Defaults: joinable (not detached), stack size = `DEFAULT_THREAD_STACK_SIZE`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
+    if attr.is_null() {
+        return errno::EINVAL;
+    }
+    // Zero the entire attribute structure.
+    // SAFETY: attr is non-null and is `[u8; 64]` — all-zero is a valid state.
+    unsafe {
+        core::ptr::write_bytes(attr.cast::<u8>(), 0, core::mem::size_of::<PthreadAttrT>());
+    }
+    // Store default stack size in bytes [0..8).
+    // SAFETY: attr is non-null and 64 bytes; writing 8 bytes at offset 0 is safe.
+    // Use write_unaligned because PthreadAttrT is a [u8; 64] with align(1).
+    unsafe {
+        core::ptr::write_unaligned(attr.cast::<usize>(), DEFAULT_THREAD_STACK_SIZE);
+    }
+    0
+}
+
+/// Destroy a thread attribute object.
+///
+/// No-op — no resources to release.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_attr_destroy(_attr: *mut PthreadAttrT) -> i32 {
+    0
+}
+
+/// Set the stack size in a thread attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_attr_setstacksize(attr: *mut PthreadAttrT, stacksize: usize) -> i32 {
+    if attr.is_null() || stacksize < 4096 {
+        return errno::EINVAL;
+    }
+    // Store stack size at bytes [0..8).
+    // SAFETY: attr is non-null, 64 bytes — we only write 8 bytes.
+    // Use write_unaligned because PthreadAttrT has align(1).
+    unsafe {
+        core::ptr::write_unaligned(attr.cast::<usize>(), stacksize);
+    }
+    0
+}
+
+/// Get the stack size from a thread attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_attr_getstacksize(attr: *const PthreadAttrT, stacksize: *mut usize) -> i32 {
+    if attr.is_null() || stacksize.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: both pointers verified non-null.
+    // Use read_unaligned because PthreadAttrT has align(1).
+    unsafe {
+        let stored = core::ptr::read_unaligned(attr.cast::<usize>());
+        let sz = if stored == 0 { DEFAULT_THREAD_STACK_SIZE } else { stored };
+        *stacksize = sz;
+    }
+    0
+}
+
+/// Detach-state constants for `pthread_attr_setdetachstate`.
+pub const PTHREAD_CREATE_JOINABLE: i32 = 0;
+pub const PTHREAD_CREATE_DETACHED: i32 = 1;
+
+/// Set the detach state in a thread attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_attr_setdetachstate(attr: *mut PthreadAttrT, detachstate: i32) -> i32 {
+    if attr.is_null() || (detachstate != PTHREAD_CREATE_JOINABLE && detachstate != PTHREAD_CREATE_DETACHED) {
+        return errno::EINVAL;
+    }
+    // Store detach state at byte offset 8.
+    // SAFETY: attr is non-null and 64 bytes.
+    // Use write_unaligned because attr+8 may not be i32-aligned.
+    unsafe {
+        core::ptr::write_unaligned(attr.cast::<u8>().add(8).cast::<i32>(), detachstate);
+    }
+    0
+}
+
+/// Get the detach state from a thread attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_attr_getdetachstate(attr: *const PthreadAttrT, detachstate: *mut i32) -> i32 {
+    if attr.is_null() || detachstate.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: both pointers verified non-null.
+    // Use read_unaligned because attr+8 may not be i32-aligned.
+    unsafe {
+        *detachstate = core::ptr::read_unaligned(attr.cast::<u8>().add(8).cast::<i32>());
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Pthread barriers
+// ---------------------------------------------------------------------------
+
+/// Pthread barrier type.
+///
+/// Uses an atomic counter to track how many threads have arrived.
+/// When the count reaches the threshold, all threads are released.
+#[repr(C)]
+pub struct PthreadBarrierT {
+    /// Number of threads that must call `pthread_barrier_wait`.
+    count: u32,
+    /// Current number of waiting threads.
+    current: AtomicI32,
+    /// Generation counter — incremented when the barrier trips.
+    generation: AtomicI32,
+    /// Padding for alignment.
+    _pad: [u8; 44],
+}
+
+/// Pthread barrier attribute type.
+pub type PthreadBarrierattrT = [u8; 8];
+
+/// Return value for the one thread designated as the "serial thread".
+pub const PTHREAD_BARRIER_SERIAL_THREAD: i32 = -1;
+
+/// Initialize a barrier.
+///
+/// `count` is the number of threads that must call `pthread_barrier_wait`
+/// before any of them successfully return.  Must be > 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_barrier_init(
+    barrier: *mut PthreadBarrierT,
+    _attr: *const PthreadBarrierattrT,
+    count: u32,
+) -> i32 {
+    if barrier.is_null() || count == 0 {
+        return errno::EINVAL;
+    }
+    // SAFETY: barrier is non-null.
+    unsafe {
+        (*barrier).count = count;
+        (*barrier).current = AtomicI32::new(0);
+        (*barrier).generation = AtomicI32::new(0);
+    }
+    0
+}
+
+/// Destroy a barrier.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_barrier_destroy(_barrier: *mut PthreadBarrierT) -> i32 {
+    0
+}
+
+/// Wait at a barrier.
+///
+/// Blocks until `count` threads have called this function on the same
+/// barrier.  Exactly one thread returns `PTHREAD_BARRIER_SERIAL_THREAD`;
+/// all others return 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_barrier_wait(barrier: *mut PthreadBarrierT) -> i32 {
+    if barrier.is_null() {
+        return errno::EINVAL;
+    }
+
+    let b = unsafe { &*barrier };
+    let my_gen = b.generation.load(Ordering::Acquire);
+
+    // Increment arrival count.
+    let arrived = b.current.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+
+    if arrived as u32 == b.count {
+        // Last thread to arrive — reset counter and bump generation.
+        b.current.store(0, Ordering::Release);
+        b.generation.fetch_add(1, Ordering::Release);
+        return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+
+    // Not the last — spin-yield until the generation changes.
+    while b.generation.load(Ordering::Acquire) == my_gen {
+        core::hint::spin_loop();
+        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000);
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Pthread spinlocks
+// ---------------------------------------------------------------------------
+
+/// Pthread spinlock type.
+pub type PthreadSpinlockT = AtomicI32;
+
+/// Initialize a spinlock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_spin_init(lock: *mut PthreadSpinlockT, _pshared: i32) -> i32 {
+    if lock.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: lock is non-null.
+    unsafe {
+        core::ptr::addr_of_mut!(*lock).write(AtomicI32::new(0));
+    }
+    0
+}
+
+/// Destroy a spinlock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_spin_destroy(_lock: *mut PthreadSpinlockT) -> i32 {
+    0
+}
+
+/// Acquire a spinlock.
+///
+/// Busy-waits until the lock is acquired.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_spin_lock(lock: *mut PthreadSpinlockT) -> i32 {
+    if lock.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: lock is non-null.
+    let atomic = unsafe { &*lock };
+    while atomic
+        .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    0
+}
+
+/// Try to acquire a spinlock without blocking.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_spin_trylock(lock: *mut PthreadSpinlockT) -> i32 {
+    if lock.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: lock is non-null.
+    let atomic = unsafe { &*lock };
+    if atomic
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        0
+    } else {
+        errno::EBUSY
+    }
+}
+
+/// Release a spinlock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_spin_unlock(lock: *mut PthreadSpinlockT) -> i32 {
+    if lock.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: lock is non-null.
+    let atomic = unsafe { &*lock };
+    atomic.store(0, Ordering::Release);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Pthread cancel stubs
+// ---------------------------------------------------------------------------
+//
+// Our OS doesn't support thread cancellation.  These stubs allow programs
+// that call `pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old)` at
+// startup to link and run.
+
+/// Cancel type: deferred (default).
+pub const PTHREAD_CANCEL_DEFERRED: i32 = 0;
+/// Cancel type: asynchronous.
+pub const PTHREAD_CANCEL_ASYNCHRONOUS: i32 = 1;
+/// Cancel state: enabled (default).
+pub const PTHREAD_CANCEL_ENABLE: i32 = 0;
+/// Cancel state: disabled.
+pub const PTHREAD_CANCEL_DISABLE: i32 = 1;
+
+/// Set the calling thread's cancellation state.
+///
+/// Stub: succeeds silently, stores the old state.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_setcancelstate(state: i32, oldstate: *mut i32) -> i32 {
+    if !oldstate.is_null() {
+        // Report that cancellation was enabled (harmless default).
+        // SAFETY: caller guarantees oldstate is valid if non-null.
+        unsafe { *oldstate = PTHREAD_CANCEL_ENABLE; }
+    }
+    let _ = state;
+    0
+}
+
+/// Set the calling thread's cancellation type.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_setcanceltype(cancel_type: i32, oldtype: *mut i32) -> i32 {
+    if !oldtype.is_null() {
+        // SAFETY: caller guarantees oldtype is valid if non-null.
+        unsafe { *oldtype = PTHREAD_CANCEL_DEFERRED; }
+    }
+    let _ = cancel_type;
+    0
+}
+
+/// Create a cancellation point.
+///
+/// Stub: no-op (cancellation is not supported).
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_testcancel() {}
+
+/// Cancel a thread.
+///
+/// Stub: returns ENOSYS (cancellation is not supported).
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cancel(_thread: PthreadT) -> i32 {
+    errno::ENOSYS
+}
+
+// ---------------------------------------------------------------------------
+// Mutex attributes
+// ---------------------------------------------------------------------------
+
+/// Mutex type: normal (default).
+pub const PTHREAD_MUTEX_NORMAL: i32 = 0;
+/// Mutex type: recursive.
+pub const PTHREAD_MUTEX_RECURSIVE: i32 = 1;
+/// Mutex type: error-checking.
+pub const PTHREAD_MUTEX_ERRORCHECK: i32 = 2;
+/// Mutex type: default (alias for normal).
+pub const PTHREAD_MUTEX_DEFAULT: i32 = 0;
+
+/// Initialize a mutex attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_mutexattr_init(attr: *mut PthreadMutexattrT) -> i32 {
+    if attr.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: attr is non-null.
+    unsafe { core::ptr::write_bytes(attr.cast::<u8>(), 0, core::mem::size_of::<PthreadMutexattrT>()); }
+    0
+}
+
+/// Destroy a mutex attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_mutexattr_destroy(_attr: *mut PthreadMutexattrT) -> i32 {
+    0
+}
+
+/// Set the mutex type attribute.
+///
+/// Our implementation only supports normal mutexes.  Setting recursive
+/// or error-checking type is accepted but has no effect.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: i32) -> i32 {
+    if attr.is_null() {
+        return errno::EINVAL;
+    }
+    if !(0..=2).contains(&kind) {
+        return errno::EINVAL;
+    }
+    // Store kind in first 4 bytes.
+    // SAFETY: attr is non-null and 8 bytes.
+    // Use write_unaligned because PthreadMutexattrT is [u8; 8] with align(1).
+    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), kind); }
+    0
+}
+
+/// Get the mutex type attribute.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind: *mut i32) -> i32 {
+    if attr.is_null() || kind.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: both pointers verified non-null.
+    // Use read_unaligned because PthreadMutexattrT is [u8; 8] with align(1).
+    unsafe { *kind = core::ptr::read_unaligned(attr.cast::<i32>()); }
     0
 }

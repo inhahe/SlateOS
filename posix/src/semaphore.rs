@@ -1,4 +1,4 @@
-//! POSIX semaphore stubs.
+//! POSIX semaphore implementation.
 //!
 //! Implements unnamed semaphores using atomic operations.
 //! Named semaphores (`sem_open`/`sem_unlink`) are stubs returning ENOSYS.
@@ -8,6 +8,10 @@
 //! Unnamed semaphores use a simple atomic counter with spin-yield
 //! waiting.  This is sufficient for single-process multi-threaded
 //! programs but doesn't support cross-process semaphores.
+//!
+//! Functions: `sem_init`, `sem_destroy`, `sem_wait`, `sem_trywait`,
+//! `sem_timedwait`, `sem_post`, `sem_getvalue`, `sem_open` (stub),
+//! `sem_close` (stub), `sem_unlink` (stub).
 
 use crate::errno;
 
@@ -137,6 +141,52 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
     let atomic = unsafe { &(*sem).value };
     atomic.fetch_add(1, core::sync::atomic::Ordering::Release);
     0
+}
+
+/// Lock a semaphore with a timeout.
+///
+/// Like `sem_wait` but returns `ETIMEDOUT` if the absolute time
+/// `abstime` passes before the semaphore can be decremented.
+#[unsafe(no_mangle)]
+pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Timespec) -> i32 {
+    if sem.is_null() || abstime.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let atomic = unsafe { &(*sem).value };
+
+    loop {
+        // Try to decrement.
+        let current = atomic.load(core::sync::atomic::Ordering::Acquire);
+        if current > 0
+            && atomic
+                .compare_exchange_weak(
+                    current,
+                    current.wrapping_sub(1),
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            return 0;
+        }
+
+        // Check timeout.
+        let mut now = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
+        let deadline = unsafe { &*abstime };
+        if now.tv_sec > deadline.tv_sec
+            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)
+        {
+            errno::set_errno(errno::ETIMEDOUT);
+            return -1;
+        }
+
+        // Yield briefly.
+        core::hint::spin_loop();
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000);
+    }
 }
 
 /// Get the current value of a semaphore.

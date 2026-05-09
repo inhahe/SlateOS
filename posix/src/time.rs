@@ -3,12 +3,20 @@
 //! Implements `sleep`, `nanosleep`, `usleep`, `clock_gettime`,
 //! `clock_getres`, `clock`, `gettimeofday`, `time`, `difftime`,
 //! `localtime`, `gmtime`, `mktime`, `asctime`, `ctime`, `strftime`,
-//! `strptime`.
+//! `strptime`, `timer_create`, `timer_settime`, `timer_gettime`,
+//! `timer_delete`, `timer_getoverrun`.
 //!
 //! ## Timezone
 //!
 //! Our OS doesn't have timezone support.  All conversions assume UTC.
 //! `localtime` and `gmtime` produce identical results.
+//!
+//! ## POSIX Timers
+//!
+//! Timer functions (`timer_create`, etc.) are stubs because our OS
+//! does not deliver Unix signals.  Programs that create timers will
+//! not get callbacks, but the API succeeds so programs that probe
+//! for timer support don't fail at startup.
 
 use crate::errno;
 use crate::stat::Timespec;
@@ -849,4 +857,200 @@ fn parse_int(buf: *const u8, off: usize, max_digits: usize) -> (i32, usize) {
         count = count.wrapping_add(1);
     }
     (val, count)
+}
+
+// ---------------------------------------------------------------------------
+// POSIX per-process timers (stubs)
+// ---------------------------------------------------------------------------
+//
+// Our OS does not deliver Unix signals, so timer expiration callbacks
+// never fire.  These stubs allow programs that create timers at
+// startup (e.g., for profiling or heartbeat) to link and run.
+
+/// Timer ID type.
+pub type TimerT = i32;
+
+/// Timer specification (interval + initial expiration).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Itimerspec {
+    /// Interval for periodic timer (0 = one-shot).
+    pub it_interval: Timespec,
+    /// Initial expiration time.
+    pub it_value: Timespec,
+}
+
+/// Signal event specification for `timer_create`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Sigevent {
+    /// Notification value.
+    pub sigev_value: usize,
+    /// Signal number to deliver.
+    pub sigev_signo: i32,
+    /// Notification method (SIGEV_NONE, SIGEV_SIGNAL, etc.).
+    pub sigev_notify: i32,
+    /// Padding for ABI compatibility.
+    _pad: [u8; 48],
+}
+
+/// No notification on timer expiration.
+pub const SIGEV_NONE: i32 = 1;
+/// Deliver a signal on timer expiration.
+pub const SIGEV_SIGNAL: i32 = 0;
+/// Start a thread on timer expiration.
+pub const SIGEV_THREAD: i32 = 2;
+
+/// Maximum number of timers per process.
+const MAX_TIMERS: usize = 32;
+
+/// Timer state table.
+///
+/// Each slot holds the timer's itimerspec (or zeros if unused).
+/// Timer IDs are indices into this table.
+static mut TIMER_TABLE: [Option<Itimerspec>; MAX_TIMERS] = [None; MAX_TIMERS];
+
+/// Create a per-process timer.
+///
+/// Allocates a timer ID and stores it in `*timerid`.  The timer
+/// never actually fires (no signal delivery), but the API succeeds.
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_create(
+    _clockid: ClockidT,
+    _sevp: *const Sigevent,
+    timerid: *mut TimerT,
+) -> i32 {
+    if timerid.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Find a free slot.
+    // SAFETY: single-threaded access by convention.
+    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let Some(table) = table else {
+        errno::set_errno(errno::ENOMEM);
+        return -1;
+    };
+
+    for (idx, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(Itimerspec {
+                it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+                it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            });
+            // SAFETY: timerid verified non-null above; idx fits in i32.
+            unsafe { *timerid = idx as TimerT; }
+            return 0;
+        }
+    }
+
+    errno::set_errno(errno::EAGAIN);
+    -1
+}
+
+/// Arm or disarm a per-process timer.
+///
+/// Stores the new value and returns the old value (if `old_value` is
+/// non-null).  The timer never actually fires.
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_settime(
+    timerid: TimerT,
+    _flags: i32,
+    new_value: *const Itimerspec,
+    old_value: *mut Itimerspec,
+) -> i32 {
+    if new_value.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let Some(table) = table else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    let Some(slot) = table.get_mut(timerid as usize) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    let Some(ref current) = *slot else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    // Return old value if requested.
+    if !old_value.is_null() {
+        // SAFETY: old_value verified non-null.
+        unsafe { *old_value = *current; }
+    }
+
+    // Store new value.
+    // SAFETY: new_value verified non-null.
+    *slot = Some(unsafe { *new_value });
+    0
+}
+
+/// Get the remaining time on a timer.
+///
+/// Always returns zeros (timers don't actually run).
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) -> i32 {
+    if curr_value.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let Some(table) = table else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    let Some(slot) = table.get(timerid as usize) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    if let Some(ref its) = *slot {
+        // SAFETY: curr_value verified non-null.
+        unsafe { *curr_value = *its; }
+    } else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    0
+}
+
+/// Delete a per-process timer.
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
+    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let Some(table) = table else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    let Some(slot) = table.get_mut(timerid as usize) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    if slot.is_none() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    *slot = None;
+    0
+}
+
+/// Get the overrun count for a timer.
+///
+/// Always returns 0 (timers don't actually fire).
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_getoverrun(_timerid: TimerT) -> i32 {
+    0
 }

@@ -37,8 +37,12 @@
 //! - **Formatted Input**: `sscanf` (string scanning with `%d`/`%u`/`%x`/
 //!   `%o`/`%s`/`%c`/`%f`/`%n`, width limits, assignment suppression)
 //! - **Pattern Matching**: `fnmatch` (shell wildcards), `glob`/`globfree`
-//!   (pathname expansion)
+//!   (pathname expansion), `wordexp`/`wordfree` (word expansion)
+//! - **Character Encoding**: `iconv_open`, `iconv`, `iconv_close`
+//!   (UTF-8/ASCII conversions)
 //! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`
+//! - **Timers**: `timer_create`, `timer_settime`, `timer_gettime`,
+//!   `timer_delete`, `timer_getoverrun` (stubs — no signal delivery)
 //! - **System**: `uname`
 //! - **Logging**: `openlog`, `syslog`, `closelog`, `setlogmask`
 //! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,
@@ -115,6 +119,7 @@ pub mod fcntl_ops;
 pub mod fnmatch;
 pub mod getopt;
 pub mod glob;
+pub mod iconv;
 pub mod libgen;
 pub mod limits;
 pub mod ioctl;
@@ -151,4 +156,5 @@ pub mod unistd;
 pub mod utsname;
 pub mod wait;
 pub mod wchar;
+pub mod wordexp;
 pub mod dirent;

@@ -168,3 +168,74 @@ pub unsafe extern "C" fn sigismember(set: *const u64, signum: i32) -> i32 {
     let val = unsafe { *set };
     i32::from(val & (1u64 << (signum.wrapping_sub(1) as u32)) != 0)
 }
+
+// ---------------------------------------------------------------------------
+// strsignal / psignal
+// ---------------------------------------------------------------------------
+
+/// Signal name table.
+///
+/// Index by signal number.  Covers the standard Linux x86_64 signals.
+static SIGNAL_NAMES: [&[u8]; 21] = [
+    b"Unknown signal 0\0",  // 0
+    b"Hangup\0",            // 1  SIGHUP
+    b"Interrupt\0",         // 2  SIGINT
+    b"Quit\0",              // 3  SIGQUIT
+    b"Illegal instruction\0", // 4  SIGILL
+    b"Trace/breakpoint trap\0", // 5  SIGTRAP
+    b"Aborted\0",           // 6  SIGABRT
+    b"Bus error\0",         // 7  SIGBUS
+    b"Floating point exception\0", // 8  SIGFPE
+    b"Killed\0",            // 9  SIGKILL
+    b"User defined signal 1\0", // 10 SIGUSR1
+    b"Segmentation fault\0", // 11 SIGSEGV
+    b"User defined signal 2\0", // 12 SIGUSR2
+    b"Broken pipe\0",       // 13 SIGPIPE
+    b"Alarm clock\0",       // 14 SIGALRM
+    b"Terminated\0",        // 15 SIGTERM
+    b"Unknown signal 16\0", // 16 (unused on Linux x86_64)
+    b"Child exited\0",      // 17 SIGCHLD
+    b"Continued\0",         // 18 SIGCONT
+    b"Stopped (signal)\0",  // 19 SIGSTOP
+    b"Stopped\0",           // 20 SIGTSTP
+];
+
+/// Unknown signal message buffer.
+///
+/// Used when the signal number is out of range.  Not reentrant but
+/// matches POSIX specification.
+static UNKNOWN_SIGNAL: [u8; 32] = *b"Unknown signal\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+/// Return a string describing a signal number.
+///
+/// The returned pointer is valid until the next call to `strsignal`.
+/// Not thread-safe (matches POSIX spec).
+#[unsafe(no_mangle)]
+pub extern "C" fn strsignal(signum: i32) -> *const u8 {
+    if signum >= 0
+        && (signum as usize) < SIGNAL_NAMES.len()
+        && let Some(name) = SIGNAL_NAMES.get(signum as usize)
+    {
+        return name.as_ptr();
+    }
+    UNKNOWN_SIGNAL.as_ptr()
+}
+
+/// Print a signal description to stderr.
+///
+/// If `s` is non-null and non-empty, prints "s: signal_desc\n".
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn psignal(signum: i32, s: *const u8) {
+    if !s.is_null() && unsafe { *s } != 0 {
+        let slen = unsafe { crate::string::strlen(s) };
+        let _ = crate::file::write(2, s, slen);
+        let _ = crate::file::write(2, c": ".as_ptr().cast::<u8>(), 2);
+    }
+
+    let msg = strsignal(signum);
+    let mlen = unsafe { crate::string::strlen(msg) };
+    let _ = crate::file::write(2, msg, mlen);
+
+    let nl = b'\n';
+    let _ = crate::file::write(2, &raw const nl, 1);
+}

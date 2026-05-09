@@ -91,6 +91,8 @@ pub mod environ;
 pub mod errno;
 pub mod fcntl;
 pub mod fcntl_ops;
+pub mod fnmatch;
+pub mod getopt;
 pub mod libgen;
 pub mod ioctl;
 pub mod malloc;

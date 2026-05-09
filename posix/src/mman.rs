@@ -112,3 +112,67 @@ pub extern "C" fn mprotect(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) 
     let ret = syscall3(SYS_MPROTECT, addr as u64, len as u64, prot as u64);
     errno::translate(ret) as i32
 }
+
+// ---------------------------------------------------------------------------
+// mlock / munlock / msync / madvise (stubs)
+// ---------------------------------------------------------------------------
+
+/// Flags for msync.
+pub const MS_ASYNC: i32 = 1;
+pub const MS_SYNC: i32 = 4;
+pub const MS_INVALIDATE: i32 = 2;
+
+/// Flags for madvise.
+pub const MADV_NORMAL: i32 = 0;
+pub const MADV_RANDOM: i32 = 1;
+pub const MADV_SEQUENTIAL: i32 = 2;
+pub const MADV_WILLNEED: i32 = 3;
+pub const MADV_DONTNEED: i32 = 4;
+
+/// Lock pages in memory.
+///
+/// Stub: succeeds silently.  No kernel page-pinning support yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn mlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
+    0
+}
+
+/// Unlock pages in memory.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn munlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
+    0
+}
+
+/// Lock all pages in the process address space.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn mlockall(_flags: i32) -> i32 {
+    0
+}
+
+/// Unlock all pages.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn munlockall() -> i32 {
+    0
+}
+
+/// Synchronize a mapped region to its backing store.
+///
+/// Stub: succeeds silently.  We don't have file-backed mmap yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn msync(_addr: *mut core::ffi::c_void, _length: SizeT, _flags: i32) -> i32 {
+    0
+}
+
+/// Give advice about use of memory.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn madvise(_addr: *mut core::ffi::c_void, _length: SizeT, _advice: i32) -> i32 {
+    0
+}

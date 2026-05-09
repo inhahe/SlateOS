@@ -430,6 +430,83 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// pathconf / fpathconf / confstr
+// ---------------------------------------------------------------------------
+
+/// POSIX _PC_* constants for pathconf.
+pub const PC_LINK_MAX: i32 = 0;
+pub const PC_MAX_CANON: i32 = 1;
+pub const PC_MAX_INPUT: i32 = 2;
+pub const PC_NAME_MAX: i32 = 3;
+pub const PC_PATH_MAX: i32 = 4;
+pub const PC_PIPE_BUF: i32 = 5;
+
+/// Get configurable pathname variables.
+///
+/// Returns the value of the named limit for `path`, or -1 if the
+/// limit is indeterminate or the name is invalid.
+#[unsafe(no_mangle)]
+pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
+    // Return the same values regardless of path — we don't have
+    // per-filesystem limits yet.
+    match name {
+        PC_LINK_MAX => 127,                                 // Max hard links.
+        PC_MAX_CANON | PC_MAX_INPUT | PC_NAME_MAX => 255,   // Terminal/filename limits.
+        PC_PATH_MAX => PATH_MAX as i64,
+        PC_PIPE_BUF => 4096,                                // Atomic pipe write size.
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
+}
+
+/// Get configurable pathname variables for an open file.
+///
+/// Same as pathconf but takes a file descriptor.
+#[unsafe(no_mangle)]
+pub extern "C" fn fpathconf(_fd: i32, name: i32) -> i64 {
+    pathconf(core::ptr::null(), name)
+}
+
+/// _CS_* constants for confstr.
+pub const CS_PATH: i32 = 0;
+
+/// Get configuration-defined string values.
+///
+/// If `buf` is non-null and `len` > 0, copies the string into `buf`
+/// (null-terminated).  Returns the total length needed (including
+/// null), or 0 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
+    let value: &[u8] = if name == CS_PATH {
+        b"/bin:/usr/bin"
+    } else {
+        errno::set_errno(errno::EINVAL);
+        return 0;
+    };
+
+    // Total size including null.
+    let needed = value.len().wrapping_add(1);
+
+    if !buf.is_null() && len > 0 {
+        let copy_len = if value.len() < len { value.len() } else { len.wrapping_sub(1) };
+        let mut i: usize = 0;
+        while i < copy_len {
+            if let Some(&b) = value.get(i) {
+                // SAFETY: i < copy_len <= len, buf is valid for len bytes.
+                unsafe { *buf.add(i) = b; }
+            }
+            i = i.wrapping_add(1);
+        }
+        // Null-terminate.
+        unsafe { *buf.add(i) = 0; }
+    }
+
+    needed
+}
+
+// ---------------------------------------------------------------------------
 // realpath
 // ---------------------------------------------------------------------------
 

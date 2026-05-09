@@ -1,12 +1,13 @@
-//! Basic C standard I/O functions.
+//! C standard I/O functions.
 //!
-//! Implements a minimal subset of `<stdio.h>`: `putchar`, `puts`,
-//! `fputs`, `fputc`, `fwrite`, `fread`, `perror`.
+//! Implements `<stdio.h>`: `putchar`, `puts`, `fputs`, `fputc`, `fgetc`,
+//! `getchar`, `getc`, `putc`, `ungetc`, `fwrite`, `fread`, `fgets`,
+//! `fopen`, `fdopen`, `freopen`, `fclose`, `fflush`, `fseek`, `ftell`,
+//! `rewind`, `fileno`, `feof`, `ferror`, `clearerr`, `perror`,
+//! `remove`, `tmpnam`, `setvbuf`, `setbuf`, `popen`, `pclose`.
 //!
-//! Full `printf`/`snprintf` with C variadic args requires either the
-//! nightly `c_variadic` feature or assembly trampolines.  Those will
-//! be provided when we port musl.  This module covers the non-variadic
-//! output functions that are most commonly needed.
+//! printf/fprintf/sprintf/snprintf are in the `printf` module (via
+//! assembly trampoline).
 
 /// File number for stdin.
 const STDIN: i32 = 0;
@@ -96,6 +97,10 @@ pub extern "C" fn fputc(c: i32, stream: *mut u8) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn fgetc(stream: *mut u8) -> i32 {
     let fd = stream_to_fd(stream);
+    // Check for a pushed-back byte from ungetc.
+    if let Some(ch) = consume_ungetc(fd) {
+        return i32::from(ch);
+    }
     let mut byte: u8 = 0;
     let ret = crate::file::read(fd, &raw mut byte, 1);
     if ret <= 0 { EOF } else { i32::from(byte) }
@@ -410,6 +415,201 @@ pub extern "C" fn stdio_rename(old: *const u8, new: *const u8) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn tmpnam(_s: *mut u8) -> *mut u8 {
     core::ptr::null_mut()
+}
+
+// ---------------------------------------------------------------------------
+// Additional FILE operations
+// ---------------------------------------------------------------------------
+
+/// Associate a stream with an existing file descriptor.
+///
+/// Returns a FILE* (which is just the fd cast to a pointer in our
+/// implementation), or NULL on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fdopen(fd: i32, _mode: *const u8) -> *mut u8 {
+    // In our implementation, FILE* IS the fd.
+    // We just verify the fd is valid (non-negative).
+    if fd < 0 {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return core::ptr::null_mut();
+    }
+    fd as usize as *mut u8
+}
+
+/// Reopen a stream with a different file or mode.
+///
+/// If `path` is non-null, closes the old stream and opens the new path.
+/// If `path` is null, attempts to change the mode (not fully supported).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn freopen(
+    path: *const u8,
+    mode: *const u8,
+    stream: *mut u8,
+) -> *mut u8 {
+    if mode.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    let old_fd = stream as usize as i32;
+
+    if path.is_null() {
+        // Mode change only — not supported, return the same stream.
+        return stream;
+    }
+
+    // Close the old fd (unless it's stdin/stdout/stderr, which we keep).
+    if old_fd > STDERR {
+        crate::file::close(old_fd);
+    }
+
+    // Open the new file.
+    let flags = mode_to_flags(mode);
+    if flags < 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    let new_fd = crate::file::open(path, flags, 0o666);
+    if new_fd < 0 {
+        return core::ptr::null_mut();
+    }
+
+    // If the caller wants the new file on the old fd number (e.g.,
+    // freopen on stdout), dup2 it.
+    if new_fd != old_fd && old_fd <= STDERR {
+        let duped = crate::file::dup2(new_fd, old_fd);
+        crate::file::close(new_fd);
+        if duped < 0 {
+            return core::ptr::null_mut();
+        }
+        return old_fd as usize as *mut u8;
+    }
+
+    new_fd as usize as *mut u8
+}
+
+/// Push a character back onto the input stream.
+///
+/// In our unbuffered implementation, we use a static one-byte buffer
+/// per fd (up to 16 fds can have an ungetc'd character).
+#[unsafe(no_mangle)]
+pub extern "C" fn ungetc(ch: i32, stream: *mut u8) -> i32 {
+    if ch == EOF {
+        return EOF;
+    }
+    let fd = stream as usize as i32;
+    if fd < 0 {
+        return EOF;
+    }
+
+    // Store the pushed-back byte for this fd.
+    let idx = fd as usize;
+    if idx >= UNGETC_SLOTS {
+        return EOF;
+    }
+
+    // SAFETY: Single-threaded access.
+    unsafe {
+        if let Some(slot) = (*core::ptr::addr_of_mut!(UNGETC_BUF)).get_mut(idx) {
+            *slot = (ch & 0xFF) as i16;
+        }
+    }
+    ch & 0xFF
+}
+
+/// Number of ungetc slots (max fd for ungetc support).
+const UNGETC_SLOTS: usize = 64;
+
+/// Per-fd ungetc buffer.  -1 means no pushed-back byte.
+static mut UNGETC_BUF: [i16; UNGETC_SLOTS] = [-1; UNGETC_SLOTS];
+
+/// Check for and consume an ungetc'd byte.
+fn consume_ungetc(fd: i32) -> Option<u8> {
+    let idx = fd as usize;
+    if idx >= UNGETC_SLOTS {
+        return None;
+    }
+    // SAFETY: Single-threaded access.
+    let val = unsafe { (*core::ptr::addr_of!(UNGETC_BUF)).get(idx).copied().unwrap_or(-1) };
+    if val < 0 {
+        return None;
+    }
+    unsafe {
+        if let Some(slot) = (*core::ptr::addr_of_mut!(UNGETC_BUF)).get_mut(idx) {
+            *slot = -1; // Consume it.
+        }
+    }
+    Some(val as u8)
+}
+
+/// Read a character from a stream (function version of getc macro).
+#[unsafe(no_mangle)]
+pub extern "C" fn getc(stream: *mut u8) -> i32 {
+    fgetc(stream)
+}
+
+/// Write a character to a stream (function version of putc macro).
+#[unsafe(no_mangle)]
+pub extern "C" fn putc(ch: i32, stream: *mut u8) -> i32 {
+    fputc(ch, stream)
+}
+
+/// Set stream buffering mode.
+///
+/// Stub: Our FILE* streams are unbuffered (direct fd I/O), so
+/// this accepts all parameters but doesn't change behavior.
+///
+/// Returns 0 (success) always.
+#[unsafe(no_mangle)]
+pub extern "C" fn setvbuf(
+    _stream: *mut u8,
+    _buf: *mut u8,
+    _mode: i32,
+    _size: usize,
+) -> i32 {
+    0 // Silently accept — we don't buffer.
+}
+
+/// Set stream buffering (simplified version of setvbuf).
+///
+/// Stub: accepts but doesn't change behavior.
+#[unsafe(no_mangle)]
+pub extern "C" fn setbuf(_stream: *mut u8, _buf: *mut u8) {
+    // No-op: we don't buffer.
+}
+
+/// Buffering mode constants.
+///
+/// We don't actually use these since our I/O is unbuffered,
+/// but programs reference them.
+#[unsafe(no_mangle)]
+pub static _IONBF: i32 = 2;
+#[unsafe(no_mangle)]
+pub static _IOLBF: i32 = 1;
+#[unsafe(no_mangle)]
+pub static _IOFBF: i32 = 0;
+
+/// Size constant for setvbuf.
+#[unsafe(no_mangle)]
+pub static BUFSIZ: i32 = 8192;
+
+/// Open a process pipe.
+///
+/// Stub: returns null.  Proper implementation requires fork+exec
+/// or posix_spawn with pipe redirection.
+#[unsafe(no_mangle)]
+pub extern "C" fn popen(_command: *const u8, _mode: *const u8) -> *mut u8 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    core::ptr::null_mut()
+}
+
+/// Close a process pipe.
+///
+/// Stub: returns -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn pclose(_stream: *mut u8) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
 }
 
 // ---------------------------------------------------------------------------

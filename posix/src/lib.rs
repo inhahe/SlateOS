@@ -113,6 +113,7 @@ pub mod pipe;
 pub mod poll;
 pub mod printf;
 pub mod pthread;
+pub mod regex;
 pub mod process;
 pub mod pwd;
 pub mod setjmp;

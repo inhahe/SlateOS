@@ -973,6 +973,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] sched_getaffinity/sched_setaffinity: CPU affinity stubs (single-CPU mask), CpuSetT struct
   - [x] mkostemp: mkstemp with additional open flags (flags accepted, not enforced)
   - [x] posix_spawn_file_actions: init/destroy/addclose/adddup2/addopen stubs; posix_spawnattr: init/destroy/setflags/getflags stubs
+  - [x] pseudo-terminal stubs: posix_openpt (ENOSYS), grantpt/unlockpt (succeed), ptsname/ptsname_r (null/ENOSYS)
+  - [x] dladdr: symbol lookup stub (returns 0=failure), DlInfo struct
+  - [x] mqueue: POSIX message queue stubs (mq_open/close/unlink/send/receive/getattr/setattr — all ENOSYS)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

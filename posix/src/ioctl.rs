@@ -637,3 +637,49 @@ mod tests {
         assert_eq!(FIONREAD, 0x541B);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pseudo-terminal stubs
+// ---------------------------------------------------------------------------
+
+/// Open a pseudo-terminal master device.
+///
+/// Stub: returns -1 with ENOSYS.  PTY support requires kernel /dev/ptmx.
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_openpt(_oflag: i32) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
+/// Grant access to the slave pseudo-terminal device.
+///
+/// Stub: returns 0 (success) since we don't enforce PTY permissions.
+#[unsafe(no_mangle)]
+pub extern "C" fn grantpt(_fd: i32) -> i32 {
+    0
+}
+
+/// Unlock a pseudo-terminal master/slave pair.
+///
+/// Stub: returns 0 (success).
+#[unsafe(no_mangle)]
+pub extern "C" fn unlockpt(_fd: i32) -> i32 {
+    0
+}
+
+/// Get the name of the slave pseudo-terminal device.
+///
+/// Stub: returns null (no PTY support).
+#[unsafe(no_mangle)]
+pub extern "C" fn ptsname(_fd: i32) -> *mut u8 {
+    core::ptr::null_mut()
+}
+
+/// Thread-safe version of `ptsname`.
+///
+/// Stub: returns ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn ptsname_r(_fd: i32, _buf: *mut u8, _buflen: usize) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}

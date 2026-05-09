@@ -88,3 +88,27 @@ pub extern "C" fn dlerror() -> *const u8 {
     unsafe { core::ptr::addr_of_mut!(DL_ERROR).write(core::ptr::null()); }
     err
 }
+
+/// Information about a dynamically loaded symbol.
+#[repr(C)]
+pub struct DlInfo {
+    /// Pathname of the shared object.
+    pub dli_fname: *const u8,
+    /// Address at which the shared object is loaded.
+    pub dli_fbase: *mut core::ffi::c_void,
+    /// Name of the nearest symbol.
+    pub dli_sname: *const u8,
+    /// Exact value of the nearest symbol.
+    pub dli_saddr: *mut core::ffi::c_void,
+}
+
+/// Get information about a dynamically loaded symbol.
+///
+/// Stub: returns 0 (failure) since we don't support dynamic linking.
+#[unsafe(no_mangle)]
+pub extern "C" fn dladdr(
+    _addr: *const core::ffi::c_void,
+    _info: *mut DlInfo,
+) -> i32 {
+    0 // 0 = failure for dladdr (unlike most POSIX functions).
+}

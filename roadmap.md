@@ -761,6 +761,14 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Network file sharing (fs::fileshare): ShareProtocol (Smb/Nfs/WebDav/Sftp), local shares with access control and guest access, remote share mounting with auto-mount, per-share enable/browseable settings, connected user tracking; `fileshare`/`share` kshell command; /proc/fileshare; 11 self-tests
   - [x] Parental controls (fs::parental): child account management with FilterLevel (None/Light/Moderate/Strict), AppRestrictionMode (AllowAll/AllowList/BlockAll), web filtering, per-day schedule with start/end hours and max minutes, daily time limits with usage tracking, check_app_allowed/check_time_allowed/check_web_allowed enforcement hooks; `parental`/`pctl` kshell command; /proc/parental; 11 self-tests
   - [x] Audio device management (fs::audiodevice): input/output/duplex device tracking, AudioDeviceType (Speakers/Microphone/Headphones/Usb/Bluetooth/Hdmi/Virtual/ExternalDac), SampleRate/BitDepth/Channels/Latency per device, default device selection with auto-switch on hotplug, volume/mute per device; `audiodevice`/`adev` kshell command; /proc/audiodevice; 11 self-tests
+  - [x] Session manager (fs::sessionmgr): multi-user sessions with login/logout, session switching, screen lock/unlock, idle timeout auto-lock, lock-on-suspend/lid-close config, guest session support; `sessionmgr`/`session` kshell command; /proc/sessionmgr; 11 self-tests
+  - [x] Crash reporter (fs::crashreport): crash capture with CrashSignal (Segfault/BusError/IllegalInstruction/FloatingPoint/Abort/StackOverflow/OOM/Panic/Hang), CrashSeverity, stack traces, loaded modules, auto-submit config, report lifecycle (Local→Queued→Submitted); `crashreport`/`crash` kshell command; /proc/crashreport; 11 self-tests
+  - [x] Network proxy (fs::netproxy): HTTP/HTTPS/SOCKS4/SOCKS5/FTP proxy config with ProxyMode (None/Manual/Auto/SystemDetect), PAC URL support, bypass rules with wildcard matching, per-app overrides, HTTPS→HTTP fallback, resolve_proxy() for network stack integration; `netproxy`/`proxy` kshell command; /proc/netproxy; 11 self-tests
+  - [x] File versioning (fs::fileversion): automatic version snapshots with FNV dedup, VersionPolicy (KeepAll/KeepLast/KeepHours/Disabled), watched directories, per-version comments, restore tracking, version purge; `fileversion`/`fver` kshell command; /proc/fileversion; 11 self-tests
+  - [x] Device manager (fs::devicemgr): hardware device tree with BusType (PCI/USB/ACPI/Platform/I2C/SPI/Bluetooth/Virtual), DeviceClass (16 types), driver binding/unbinding, hotplug events, device enable/disable; `devicemgr`/`devmgr` kshell command; /proc/devicemgr; 11 self-tests
+  - [x] Location services (fs::location): privacy-aware geolocation with per-app permissions (Allow/WhileInUse/Deny/AskNextTime), AccuracyLevel, LocationSource (GPS/WiFi/CellTower/IP/Manual), location history with recording toggle, microdegree integer coordinates; `location`/`loc` kshell command; /proc/location; 11 self-tests
+  - [x] Disk encryption (fs::diskencrypt): volume encryption management with EncryptAlgorithm (AES-256-XTS/AES-128-XTS/Serpent/Twofish/ChaCha20), KDF (Argon2id/PBKDF2/scrypt), key slots (up to 8), recovery key generation, TPM sealing, encryption progress tracking; `diskencrypt`/`dencrypt` kshell command; /proc/diskencrypt; 11 self-tests
+  - [x] Package manager (fs::pkgmgr): software installation/removal with PkgSection (11 categories), version tracking, dependency and reverse-dependency lists, repository management, upgrade lifecycle, search, total installed size tracking; `pkgmgr`/`pkg` kshell command; /proc/pkgmgr; 11 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)
@@ -841,6 +849,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pathconf/fpathconf: LINK_MAX, NAME_MAX, PATH_MAX, PIPE_BUF configuration queries
   - [x] confstr: CS_PATH → /bin:/usr/bin
   - [x] mlock/munlock/mlockall/munlockall/msync/madvise: memory management stubs (accept silently)
+  - [x] pwd: getpwnam/getpwuid/getgrnam/getgrgid (single "root" user/group), getpwent/setpwent/endpwent, getgrent/setgrent/endgrent, getlogin/getlogin_r
+  - [x] wait3/wait4: waitpid wrappers with zeroed rusage
+  - [x] mkstemp/tmpfile: temporary file creation with unique name generation
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

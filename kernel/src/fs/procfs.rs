@@ -416,6 +416,10 @@ const ROOT_FILES: &[&str] = &[
     "slabstat",
     "timerq",
     "fdtable",
+    "rcustat",
+    "kconsole",
+    "signalq",
+    "memcg",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8117,6 +8121,72 @@ fn gen_fdtable() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_rcustat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, gp, total_gp, total_cb, stalls, ops) = crate::fs::rcustat::stats();
+    out.push_str(&format!("cpus: {}\n", cpus));
+    out.push_str(&format!("current_gp: {}\n", gp));
+    out.push_str(&format!("total_gp: {}\n", total_gp));
+    out.push_str(&format!("total_callbacks: {}\n", total_cb));
+    out.push_str(&format!("total_stalls: {}\n", stalls));
+    out.push_str(&format!("ops: {}\n", ops));
+    for cs in crate::fs::rcustat::cpu_stats() {
+        out.push_str(&format!("cpu{}: pending={} invoked={} qs={}\n",
+            cs.cpu_id, cs.callbacks_pending, cs.callbacks_invoked, cs.quiescent_states));
+    }
+    out.into_bytes()
+}
+
+fn gen_kconsole() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (count, active_id, switches, writes, ops) = crate::fs::kconsole::stats();
+    out.push_str(&format!("consoles: {}\n", count));
+    out.push_str(&format!("active_id: {}\n", active_id));
+    out.push_str(&format!("total_switches: {}\n", switches));
+    out.push_str(&format!("total_writes: {}\n", writes));
+    out.push_str(&format!("ops: {}\n", ops));
+    for c in crate::fs::kconsole::list() {
+        out.push_str(&format!("{}: {} type={} {}x{} active={} written={}\n",
+            c.id, c.name, c.console_type.label(), c.cols, c.rows, c.active, c.bytes_written));
+    }
+    out.into_bytes()
+}
+
+fn gen_signalq() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (procs, sent, delivered, dropped, ops) = crate::fs::signalq::stats();
+    out.push_str(&format!("processes: {}\n", procs));
+    out.push_str(&format!("total_sent: {}\n", sent));
+    out.push_str(&format!("total_delivered: {}\n", delivered));
+    out.push_str(&format!("total_dropped: {}\n", dropped));
+    out.push_str(&format!("ops: {}\n", ops));
+    for ps in crate::fs::signalq::list_processes() {
+        out.push_str(&format!("pid={}: pending={} delivered={} blocked_mask={:#x}\n",
+            ps.pid, ps.pending.len(), ps.total_delivered, ps.blocked_mask));
+    }
+    out.into_bytes()
+}
+
+fn gen_memcg() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (groups, charges, uncharges, failures, oom, ops) = crate::fs::memcg::stats();
+    out.push_str(&format!("groups: {}\n", groups));
+    out.push_str(&format!("total_charges: {}\n", charges));
+    out.push_str(&format!("total_uncharges: {}\n", uncharges));
+    out.push_str(&format!("total_failures: {}\n", failures));
+    out.push_str(&format!("total_oom: {}\n", oom));
+    out.push_str(&format!("ops: {}\n", ops));
+    for g in crate::fs::memcg::list() {
+        out.push_str(&format!("{}: usage={} limit={} swap={} oom_kills={}\n",
+            g.path, g.usage_bytes, g.limit_bytes, g.swap_usage, g.oom_kills));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8698,6 +8768,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "slabstat" => Ok(gen_slabstat()),
         "timerq" => Ok(gen_timerq()),
         "fdtable" => Ok(gen_fdtable()),
+        "rcustat" => Ok(gen_rcustat()),
+        "kconsole" => Ok(gen_kconsole()),
+        "signalq" => Ok(gen_signalq()),
+        "memcg" => Ok(gen_memcg()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

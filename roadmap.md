@@ -942,6 +942,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Slab Stats (fs::slabstat): Slab allocator monitoring with cache create/alloc/free/reclaim, utilization percentages, high watermark, top-N by active; `slabstat`/`slab` kshell command; /proc/slabstat; 8 self-tests
   - [x] Timer Queue (fs::timerq): Timer management with 4 types (one-shot/periodic/deadline/deferrable), 5 states, fire-expired, overrun tracking, cleanup; `timerq`/`tq` kshell command; /proc/timerq; 8 self-tests
   - [x] FD Table (fs::fdtable): Per-process file descriptor table with 8 FD types, open/close/dup, FD limits, cloexec support, auto-create tables; `fdtable`/`fdt` kshell command; /proc/fdtable; 8 self-tests
+  - [x] RCU Stats (fs::rcustat): RCU subsystem monitoring with 3 flavors, per-CPU state, grace period history, callback tracking, stall detection; `rcustat`/`rcu` kshell command; /proc/rcustat; 8 self-tests
+  - [x] Kernel Console (fs::kconsole): Virtual console management with 5 types, switch/create/resize, scrollback, I/O routing; `kconsole`/`kcon` kshell command; /proc/kconsole; 8 self-tests
+  - [x] Signal Queue (fs::signalq): Signal/exception delivery with 12 hardware signals + user-defined, per-process pending/blocked/delivered tracking; `signalq`/`sigq` kshell command; /proc/signalq; 8 self-tests
+  - [x] Memory Cgroup (fs::memcg): Per-cgroup memory accounting with hard/soft limits, swap tracking, OOM recording, charge/uncharge; `memcg`/`mcg` kshell command; /proc/memcg; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

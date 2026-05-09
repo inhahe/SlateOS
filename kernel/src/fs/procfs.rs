@@ -333,6 +333,10 @@ const ROOT_FILES: &[&str] = &[
     "voicecontrol",
     "devpair",
     "notifgroup",
+    "playmedia",
+    "kbmacro",
+    "sysresource",
+    "faceunlock",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6821,6 +6825,89 @@ fn gen_notifgroup() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_playmedia() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Play Media ===\n");
+    if let Some(np) = super::playmedia::get_now_playing() {
+        out.push_str(&format!("now_playing: {} — {} ({})\n", np.artist, np.title, np.album));
+        out.push_str(&format!("state: {}\n", np.state.label()));
+        out.push_str(&format!("app: {} ({})\n", np.app_name, np.media_type.label()));
+        out.push_str(&format!("shuffle: {}, repeat: {}\n", np.shuffle, np.repeat.label()));
+    } else {
+        out.push_str("now_playing: none\n");
+    }
+    let (sessions, plays, tracks, ops) = super::playmedia::stats();
+    out.push_str(&format!("sessions: {}\n", sessions));
+    out.push_str(&format!("play_commands: {}\n", plays));
+    out.push_str(&format!("track_changes: {}\n", tracks));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_kbmacro() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Keyboard Macros ===\n");
+    let recording = super::kbmacro::is_recording();
+    out.push_str(&format!("recording: {}\n", recording));
+    let (macros, plays, recorded, ops) = super::kbmacro::stats();
+    out.push_str(&format!("macros: {}\n", macros));
+    out.push_str(&format!("total_plays: {}\n", plays));
+    out.push_str(&format!("total_recorded: {}\n", recorded));
+    let list = super::kbmacro::list_macros();
+    for m in &list {
+        let hk = m.hotkey.as_deref().unwrap_or("none");
+        out.push_str(&format!("  [{}] {} — {} events, hotkey={}, plays={}\n",
+            m.id, m.name, m.events.len(), hk, m.play_count));
+    }
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_sysresource() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== System Resources ===\n");
+    if let Some(snap) = super::sysresource::get_current() {
+        out.push_str(&format!("cpu: {}%\n", snap.cpu_percent));
+        out.push_str(&format!("memory: {}/{} KB\n", snap.memory_used_kb, snap.memory_total_kb));
+        out.push_str(&format!("swap: {}/{} KB\n", snap.swap_used_kb, snap.swap_total_kb));
+        out.push_str(&format!("disk_io: {}KB/s read, {}KB/s write\n", snap.disk_read_kb_s, snap.disk_write_kb_s));
+        out.push_str(&format!("net_io: {}KB/s rx, {}KB/s tx\n", snap.net_rx_kb_s, snap.net_tx_kb_s));
+        out.push_str(&format!("gpu: {}%\n", snap.gpu_percent));
+        out.push_str(&format!("processes: {}, threads: {}\n", snap.process_count, snap.thread_count));
+    }
+    let (samples, hist_size, alerts, total_alerts, ops) = super::sysresource::stats();
+    out.push_str(&format!("total_samples: {}\n", samples));
+    out.push_str(&format!("history_size: {}\n", hist_size));
+    out.push_str(&format!("total_alerts: {}\n", total_alerts));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_faceunlock() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Face Unlock ===\n");
+    let enabled = super::faceunlock::is_enabled();
+    let security = super::faceunlock::get_security();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("security: {}\n", security.label()));
+    let enrollments = super::faceunlock::list_enrollments();
+    out.push_str(&format!("enrollments: {}\n", enrollments.len()));
+    for e in &enrollments {
+        out.push_str(&format!("  user {} ({}) — verified={}, failed={}\n",
+            e.user_id, e.user_name, e.verify_count, e.fail_count));
+    }
+    let (enr, verifications, matches, rejections, ops) = super::faceunlock::stats();
+    out.push_str(&format!("total_verifications: {}\n", verifications));
+    out.push_str(&format!("total_matches: {}\n", matches));
+    out.push_str(&format!("total_rejections: {}\n", rejections));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7319,6 +7406,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "voicecontrol" => Ok(gen_voicecontrol()),
         "devpair" => Ok(gen_devpair()),
         "notifgroup" => Ok(gen_notifgroup()),
+        "playmedia" => Ok(gen_playmedia()),
+        "kbmacro" => Ok(gen_kbmacro()),
+        "sysresource" => Ok(gen_sysresource()),
+        "faceunlock" => Ok(gen_faceunlock()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

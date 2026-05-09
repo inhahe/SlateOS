@@ -859,6 +859,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Voice Control (fs::voicecontrol): voice command system with 7 command categories, 10 default commands, wake word, confidence filtering (High/Medium/Low/Rejected), recognition history, custom command registration; `voicecontrol`/`vctl` kshell command; /proc/voicecontrol; 8 self-tests
   - [x] Device Pairing (fs::devpair): Bluetooth/WiFi device pairing workflow with 7 pair states, 10 device types, scan/pair/confirm/trust lifecycle, auto-connect for trusted devices, forget/disconnect; `devpair`/`dpair` kshell command; /proc/devpair; 8 self-tests
   - [x] Notification Grouping (fs::notifgroup): notification bundling with 4 grouping modes (ByApp/ByCategory/ByConversation/None), 4 priority levels, expand/collapse groups, mute/unmute, mark read, dismiss group/all; `notifgroup`/`ngroup` kshell command; /proc/notifgroup; 8 self-tests
+  - [x] Play Media (fs::playmedia): system-wide media playback controls with 4 playback states, 6 media types, session registration, track info, shuffle/repeat, play/pause/next/prev, now-playing aggregation; `playmedia`/`pmedia` kshell command; /proc/playmedia; 8 self-tests
+  - [x] Keyboard Macros (fs::kbmacro): keyboard/mouse macro recording and playback with 7 event types (KeyDown/KeyUp/TypeText/Delay/MouseMove/MouseDown/MouseUp), hotkey triggers, repeat counts, enable/disable; `kbmacro`/`macro` kshell command; /proc/kbmacro; 8 self-tests
+  - [x] System Resources (fs::sysresource): resource monitoring dashboard with CPU/memory/swap/disk/network/GPU tracking, alert thresholds with auto-trigger, 300-sample history, average CPU calculation; `sysresource`/`sres` kshell command; /proc/sysresource; 8 self-tests
+  - [x] Face Unlock (fs::faceunlock): facial recognition authentication with 4 security levels, liveness detection, attention requirement, multi-user enrollment, verify/match/reject tracking; `faceunlock`/`face` kshell command; /proc/faceunlock; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

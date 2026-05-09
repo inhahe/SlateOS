@@ -922,6 +922,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] POSIX timers: timer_create/settime/gettime/delete/getoverrun stubs (timer IDs allocated, never fire — no signal delivery)
   - [x] iconv: character encoding conversion (iconv_open/iconv/iconv_close) — UTF-8/ASCII pairs only, lossy UTF-8→ASCII replaces non-ASCII with '?'
   - [x] wordexp: word expansion (wordexp/wordfree) — field splitting, quote removal, $VAR expansion, command substitution detection (WRDE_NOCMD)
+  - [x] strlcpy/strlcat: BSD safe string functions — copy/append with NUL termination guarantee, truncation detection via return value
+  - [x] mkdtemp: create unique temporary directory (modeled after mkstemp with mkdir)
+  - [x] err/warn: BSD error functions — err/errx/warn/warnx/verr/verrx/vwarn/vwarnx for formatted error messages to stderr
+  - [x] ftw/nftw: file tree walk — recursive directory traversal with user callback, FTW_DEPTH/FTW_PHYS flags, FTW struct with base offset and depth
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

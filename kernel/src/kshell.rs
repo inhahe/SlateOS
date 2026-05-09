@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4861,6 +4861,10 @@ fn dispatch(line: &str) {
         "gestures" | "gesture" => cmd_gestures(args),
         "soundevents" | "sevents" => cmd_soundevents(args),
         "usbmgr" | "usb" => cmd_usbmgr(args),
+        "cliphistory" | "cliphist" => cmd_cliphistory(args),
+        "displaycolor" | "dcolor" => cmd_displaycolor(args),
+        "syslog" | "slog" => cmd_syslog(args),
+        "inputa11y" | "ia11y" => cmd_inputa11y(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -32002,6 +32006,409 @@ fn cmd_usbmgr(args: &str) {
     }
 }
 
+/// `cliphistory` / `cliphist` — clipboard history.
+fn cmd_cliphistory(args: &str) {
+    use crate::fs::cliphistory;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (entries, pinned, copies, pastes, size, _) = cliphistory::stats();
+            shell_println!("Clipboard History");
+            shell_println!("  Entries: {} ({} pinned)", entries, pinned);
+            shell_println!("  Copies:  {}", copies);
+            shell_println!("  Pastes:  {}", pastes);
+            shell_println!("  Size:    {} KiB", size / 1024);
+        }
+        "list" => {
+            let count: usize = if parts.len() > 1 { parts[1].parse().unwrap_or(10) } else { 10 };
+            let entries = cliphistory::list(count);
+            if entries.is_empty() {
+                shell_println!("Clipboard history is empty.");
+            } else {
+                for e in &entries {
+                    let preview: String = e.content.chars().take(60).collect();
+                    let pin = if e.pinned { " [pinned]" } else { "" };
+                    shell_println!("  #{} [{}] {}{}", e.id, e.clip_type.label(), preview, pin);
+                }
+            }
+        }
+        "paste" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: cliphist paste <id>");
+                return;
+            }
+            let id: u64 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID."); return; } };
+            match cliphistory::paste(id) {
+                Ok(content) => shell_println!("{}", content),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pin" => {
+            if parts.len() < 2 { shell_println!("Usage: cliphist pin <id>"); return; }
+            let id: u64 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID."); return; } };
+            match cliphistory::pin(id) {
+                Ok(()) => shell_println!("Entry #{} pinned.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unpin" => {
+            if parts.len() < 2 { shell_println!("Usage: cliphist unpin <id>"); return; }
+            let id: u64 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID."); return; } };
+            match cliphistory::unpin(id) {
+                Ok(()) => shell_println!("Entry #{} unpinned.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            if parts.len() < 2 { shell_println!("Usage: cliphist delete <id>"); return; }
+            let id: u64 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID."); return; } };
+            match cliphistory::delete(id) {
+                Ok(()) => shell_println!("Entry #{} deleted.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "search" => {
+            if parts.len() < 2 { shell_println!("Usage: cliphist search <query>"); return; }
+            let query = parts[1..].join(" ");
+            let results = cliphistory::search(&query);
+            if results.is_empty() {
+                shell_println!("No matches for '{}'.", query);
+            } else {
+                for e in &results {
+                    let preview: String = e.content.chars().take(60).collect();
+                    shell_println!("  #{} [{}] {}", e.id, e.clip_type.label(), preview);
+                }
+            }
+        }
+        "clear" => {
+            match cliphistory::clear() {
+                Ok(n) => shell_println!("Cleared {} entries (pinned entries kept).", n),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (entries, pinned, copies, pastes, size, ops) = cliphistory::stats();
+            shell_println!("Entries: {}  Pinned: {}  Copies: {}  Pastes: {}  Size: {} B  Ops: {}",
+                entries, pinned, copies, pastes, size, ops);
+        }
+        "test" => { cliphistory::self_test(); shell_println!("Clipboard history self-test complete."); }
+        "init" => { cliphistory::init_defaults(); shell_println!("Clipboard history initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("cliphistory (cliphist) — clipboard history");
+            shell_println!("  show               Overview");
+            shell_println!("  list [n]           Recent entries");
+            shell_println!("  paste <id>          Paste from history");
+            shell_println!("  pin/unpin <id>      Pin/unpin entry");
+            shell_println!("  delete <id>         Delete entry");
+            shell_println!("  search <query>      Search history");
+            shell_println!("  clear              Clear non-pinned entries");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'cliphist help' for usage."); }
+    }
+}
+
+/// `displaycolor` / `dcolor` — ICC color profile management.
+fn cmd_displaycolor(args: &str) {
+    use crate::fs::displaycolor;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (profiles, displays, calibrated, cals, _) = displaycolor::stats();
+            shell_println!("Display Color Management");
+            shell_println!("  Profiles:      {}", profiles);
+            shell_println!("  Displays:      {}", displays);
+            shell_println!("  Calibrated:    {}", calibrated);
+            shell_println!("  Calibrations:  {}", cals);
+        }
+        "profiles" => {
+            let profiles = displaycolor::list_profiles();
+            shell_println!("{:<4} {:<28} {:<12} {:<8} {}",
+                "ID", "Name", "Space", "WP(K)", "Default");
+            for p in &profiles {
+                shell_println!("{:<4} {:<28} {:<12} {:<8} {}",
+                    p.id, p.name, p.color_space.label(), p.white_point_k,
+                    if p.is_default { "*" } else { "" });
+            }
+        }
+        "displays" => {
+            let assigns = displaycolor::list_assignments();
+            shell_println!("{:<4} {:<20} {:<10} {}",
+                "ID", "Display", "Profile", "Calibrated");
+            for a in &assigns {
+                shell_println!("{:<4} {:<20} {:<10} {}",
+                    a.display_id, a.display_name, a.profile_id,
+                    if a.calibrated { "yes" } else { "no" });
+            }
+        }
+        "assign" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: dcolor assign <display-id> <profile-id>");
+                return;
+            }
+            let did: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid display ID."); return; } };
+            let pid: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid profile ID."); return; } };
+            match displaycolor::assign_profile(did, pid) {
+                Ok(()) => shell_println!("Assigned profile #{} to display #{}.", pid, did),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "calibrate" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: dcolor calibrate <display-id>");
+                return;
+            }
+            let did: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid display ID."); return; } };
+            match displaycolor::mark_calibrated(did) {
+                Ok(()) => shell_println!("Display #{} marked as calibrated.", did),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (profiles, displays, calibrated, cals, ops) = displaycolor::stats();
+            shell_println!("Profiles: {}  Displays: {}  Calibrated: {}  Cals: {}  Ops: {}",
+                profiles, displays, calibrated, cals, ops);
+        }
+        "test" => { displaycolor::self_test(); shell_println!("Display color self-test complete."); }
+        "init" => { displaycolor::init_defaults(); shell_println!("Display color initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("displaycolor (dcolor) — color profile management");
+            shell_println!("  show               Overview");
+            shell_println!("  profiles           List color profiles");
+            shell_println!("  displays           List display assignments");
+            shell_println!("  assign <d> <p>      Assign profile to display");
+            shell_println!("  calibrate <d>       Mark display calibrated");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'dcolor help' for usage."); }
+    }
+}
+
+/// `syslog` / `slog` — system log viewer.
+fn cmd_syslog(args: &str) {
+    use crate::fs::syslog;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (entries, total, dropped, errors, crits, _) = syslog::stats();
+            shell_println!("System Log");
+            shell_println!("  Entries:  {}", entries);
+            shell_println!("  Total:    {}", total);
+            shell_println!("  Dropped:  {}", dropped);
+            shell_println!("  Errors:   {}", errors);
+            shell_println!("  Critical: {}", crits);
+        }
+        "tail" => {
+            let count: usize = if parts.len() > 1 { parts[1].parse().unwrap_or(20) } else { 20 };
+            let entries = syslog::tail(count);
+            for e in &entries {
+                let ts_secs = e.timestamp_ns / 1_000_000_000;
+                shell_println!("[{:>8}s] {:<6} {}: {}",
+                    ts_secs, e.severity.label(), e.source, e.message);
+            }
+        }
+        "errors" => {
+            let filter = syslog::LogFilter {
+                min_severity: Some(syslog::Severity::Error),
+                limit: Some(20),
+                ..Default::default()
+            };
+            let entries = syslog::query(&filter);
+            if entries.is_empty() {
+                shell_println!("No errors in log.");
+            } else {
+                for e in &entries {
+                    let ts_secs = e.timestamp_ns / 1_000_000_000;
+                    shell_println!("[{:>8}s] {:<6} {}: {}",
+                        ts_secs, e.severity.label(), e.source, e.message);
+                }
+            }
+        }
+        "grep" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: slog grep <text>");
+                return;
+            }
+            let query = parts[1..].join(" ");
+            let filter = syslog::LogFilter {
+                message: Some(String::from(&query)),
+                limit: Some(20),
+                ..Default::default()
+            };
+            let entries = syslog::query(&filter);
+            if entries.is_empty() {
+                shell_println!("No matches for '{}'.", query);
+            } else {
+                for e in &entries {
+                    shell_println!("[{}] {:<6} {}: {}", e.id, e.severity.label(), e.source, e.message);
+                }
+            }
+        }
+        "log" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: slog log <severity> <message...>");
+                return;
+            }
+            let sev = match syslog::Severity::from_str(parts[1]) {
+                Some(s) => s,
+                None => { shell_println!("Unknown severity: {}", parts[1]); return; }
+            };
+            let msg = parts[2..].join(" ");
+            match syslog::log(sev, "kshell", &msg) {
+                Ok(id) => shell_println!("Logged #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clear" => {
+            match syslog::clear() {
+                Ok(n) => shell_println!("Cleared {} log entries.", n),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "counts" => {
+            let counts = syslog::count_by_severity();
+            for (sev, count) in &counts {
+                shell_println!("  {:<8} {}", sev.label(), count);
+            }
+        }
+        "stats" => {
+            let (entries, total, dropped, errors, crits, ops) = syslog::stats();
+            shell_println!("Entries: {}  Total: {}  Dropped: {}  Errors: {}  Critical: {}  Ops: {}",
+                entries, total, dropped, errors, crits, ops);
+        }
+        "test" => { syslog::self_test(); shell_println!("System log self-test complete."); }
+        "init" => { syslog::init_defaults(); shell_println!("System log initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("syslog (slog) — system log viewer");
+            shell_println!("  show               Overview");
+            shell_println!("  tail [n]           Recent entries");
+            shell_println!("  errors             Show errors only");
+            shell_println!("  grep <text>         Search messages");
+            shell_println!("  log <sev> <msg>     Write a log entry");
+            shell_println!("  clear              Clear all entries");
+            shell_println!("  counts             Count by severity");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'slog help' for usage."); }
+    }
+}
+
+/// `inputa11y` / `ia11y` — input accessibility features.
+fn cmd_inputa11y(args: &str) {
+    use crate::fs::inputa11y;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (sticky, filter, toggle, mouse, keys, filtered, _) = inputa11y::stats();
+            shell_println!("Input Accessibility");
+            shell_println!("  Sticky keys:  {}", if sticky { "on" } else { "off" });
+            shell_println!("  Filter keys:  {}", if filter { "on" } else { "off" });
+            shell_println!("  Toggle keys:  {}", if toggle { "on" } else { "off" });
+            shell_println!("  Mouse keys:   {}", if mouse { "on" } else { "off" });
+            shell_println!("  Keys processed: {}", keys);
+            shell_println!("  Keys filtered:  {}", filtered);
+
+            if sticky {
+                let states = inputa11y::get_sticky_states();
+                for (m, s) in &states {
+                    if *s != inputa11y::StickyState::Off {
+                        shell_println!("  {} = {}", m.label(), s.label());
+                    }
+                }
+            }
+        }
+        "sticky" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ia11y sticky <on|off>");
+                return;
+            }
+            let on = parts[1] == "on" || parts[1] == "true";
+            match inputa11y::set_sticky_keys(on) {
+                Ok(()) => shell_println!("Sticky keys {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "filter" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ia11y filter <on|off>");
+                return;
+            }
+            let on = parts[1] == "on" || parts[1] == "true";
+            match inputa11y::set_filter_keys(on) {
+                Ok(()) => shell_println!("Filter keys {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "toggle" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ia11y toggle <on|off>");
+                return;
+            }
+            let on = parts[1] == "on" || parts[1] == "true";
+            match inputa11y::set_toggle_keys(on) {
+                Ok(()) => shell_println!("Toggle keys {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mouse" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ia11y mouse <on|off> [speed]");
+                return;
+            }
+            let on = parts[1] == "on" || parts[1] == "true";
+            match inputa11y::set_mouse_keys(on) {
+                Ok(()) => {
+                    shell_println!("Mouse keys {}.", if on { "enabled" } else { "disabled" });
+                    if on && parts.len() > 2 {
+                        if let Ok(speed) = parts[2].parse::<u32>() {
+                            inputa11y::set_mouse_speed(speed).ok();
+                            shell_println!("Mouse speed set to {}.", speed);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "bounce" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: ia11y bounce <on|off>");
+                return;
+            }
+            let on = parts[1] == "on" || parts[1] == "true";
+            match inputa11y::set_bounce_keys(on) {
+                Ok(()) => shell_println!("Bounce keys {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (sticky, filter, toggle, mouse, keys, filtered, ops) = inputa11y::stats();
+            shell_println!("Sticky: {}  Filter: {}  Toggle: {}  Mouse: {}  Keys: {}  Filtered: {}  Ops: {}",
+                sticky, filter, toggle, mouse, keys, filtered, ops);
+        }
+        "test" => { inputa11y::self_test(); shell_println!("Input a11y self-test complete."); }
+        "init" => { inputa11y::init_defaults(); shell_println!("Input a11y initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("inputa11y (ia11y) — input accessibility");
+            shell_println!("  show               Overview");
+            shell_println!("  sticky <on|off>     Sticky keys");
+            shell_println!("  filter <on|off>     Filter keys");
+            shell_println!("  toggle <on|off>     Toggle keys");
+            shell_println!("  mouse <on|off>      Mouse keys");
+            shell_println!("  bounce <on|off>     Bounce keys");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'ia11y help' for usage."); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -40598,7 +41005,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

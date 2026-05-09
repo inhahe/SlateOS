@@ -257,6 +257,10 @@ const ROOT_FILES: &[&str] = &[
     "gestures",
     "soundevents",
     "usbmgr",
+    "cliphistory",
+    "displaycolor",
+    "syslog",
+    "inputa11y",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5688,6 +5692,66 @@ fn gen_usbmgr() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_cliphistory() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (entries, pinned, copies, pastes, size, ops) = super::cliphistory::stats();
+    out.push_str(&format!("entries: {}\n", entries));
+    out.push_str(&format!("pinned: {}\n", pinned));
+    out.push_str(&format!("total_copies: {}\n", copies));
+    out.push_str(&format!("total_pastes: {}\n", pastes));
+    out.push_str(&format!("size_bytes: {}\n", size));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_displaycolor() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (profiles, displays, calibrated, cals, ops) = super::displaycolor::stats();
+    out.push_str(&format!("profiles: {}\n", profiles));
+    out.push_str(&format!("displays: {}\n", displays));
+    out.push_str(&format!("calibrated: {}\n", calibrated));
+    out.push_str(&format!("total_calibrations: {}\n", cals));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_syslog() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (entries, total, dropped, errors, crits, ops) = super::syslog::stats();
+    out.push_str(&format!("entries: {}\n", entries));
+    out.push_str(&format!("total_logged: {}\n", total));
+    out.push_str(&format!("dropped: {}\n", dropped));
+    out.push_str(&format!("errors: {}\n", errors));
+    out.push_str(&format!("critical: {}\n", crits));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_inputa11y() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (sticky, filter, toggle, mouse, keys, filtered, ops) = super::inputa11y::stats();
+    out.push_str(&format!("sticky_keys: {}\n", sticky));
+    out.push_str(&format!("filter_keys: {}\n", filter));
+    out.push_str(&format!("toggle_keys: {}\n", toggle));
+    out.push_str(&format!("mouse_keys: {}\n", mouse));
+    out.push_str(&format!("total_keys: {}\n", keys));
+    out.push_str(&format!("filtered: {}\n", filtered));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6110,6 +6174,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "gestures" => Ok(gen_gestures()),
         "soundevents" => Ok(gen_soundevents()),
         "usbmgr" => Ok(gen_usbmgr()),
+        "cliphistory" => Ok(gen_cliphistory()),
+        "displaycolor" => Ok(gen_displaycolor()),
+        "syslog" => Ok(gen_syslog()),
+        "inputa11y" => Ok(gen_inputa11y()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

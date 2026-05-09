@@ -400,6 +400,10 @@ const ROOT_FILES: &[&str] = &[
     "nameservice",
     "oomkiller",
     "blktrace",
+    "cgroupfs",
+    "secpolicy",
+    "procstat",
+    "kernparam",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7889,6 +7893,60 @@ fn gen_blktrace() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_cgroupfs() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (count, created, deleted, changes, ops) = crate::fs::cgroupfs::stats();
+    out.push_str(&format!("groups: {}\ncreated: {}\ndeleted: {}\nlimit_changes: {}\nops: {}\n",
+        count, created, deleted, changes, ops));
+    for g in crate::fs::cgroupfs::list_groups() {
+        out.push_str(&format!("  {} cpu_w={} mem_max={} pids={}/{} procs={}\n",
+            g.path, g.cpu_weight, g.memory_max, g.pids_current, g.pids_max, g.processes.len()));
+    }
+    out.into_bytes()
+}
+
+fn gen_secpolicy() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (rules, checks, allowed, denied, ops) = crate::fs::secpolicy::stats();
+    let mode = crate::fs::secpolicy::get_mode();
+    out.push_str(&format!("mode: {}\nrules: {}\nchecks: {}\nallowed: {}\ndenied: {}\nops: {}\n",
+        mode.label(), rules, checks, allowed, denied, ops));
+    for r in crate::fs::secpolicy::list_rules() {
+        out.push_str(&format!("  rule#{} {}->{} {} {}\n",
+            r.id, r.subject_label, r.object_label, r.action.label(), r.decision.label()));
+    }
+    out.into_bytes()
+}
+
+fn gen_procstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (count, updates, ops) = crate::fs::procstat::stats();
+    out.push_str(&format!("processes: {}\nupdates: {}\nops: {}\n", count, updates, ops));
+    for p in crate::fs::procstat::list_processes() {
+        out.push_str(&format!("  pid={} {} [{}] cpu={}us mem={} threads={}\n",
+            p.pid, p.name, p.state.label(), p.cpu_time_us, p.memory_bytes, p.threads));
+    }
+    out.into_bytes()
+}
+
+fn gen_kernparam() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (count, lookups, sets, unconsumed, ops) = crate::fs::kernparam::stats();
+    out.push_str(&format!("params: {}\nlookups: {}\nsets: {}\nunconsumed: {}\nops: {}\n",
+        count, lookups, sets, unconsumed, ops));
+    out.push_str(&format!("cmdline: {}\n", crate::fs::kernparam::cmdline()));
+    for p in crate::fs::kernparam::list_params() {
+        let consumer = p.consumed_by.as_deref().unwrap_or("-");
+        out.push_str(&format!("  {}={} [{}] consumer={}\n",
+            p.key, p.value, p.origin.label(), consumer));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8454,6 +8512,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "nameservice" => Ok(gen_nameservice()),
         "oomkiller" => Ok(gen_oomkiller()),
         "blktrace" => Ok(gen_blktrace()),
+        "cgroupfs" => Ok(gen_cgroupfs()),
+        "secpolicy" => Ok(gen_secpolicy()),
+        "procstat" => Ok(gen_procstat()),
+        "kernparam" => Ok(gen_kernparam()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

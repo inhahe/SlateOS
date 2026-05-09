@@ -3470,6 +3470,7 @@ const COMMANDS: &[&str] = &[
     "timesync", "tsync", "kmod", "entropy", "epool", "iosched", "ioq",
     "netmon", "nmon", "groupmgr", "grp", "sysrq", "telemetry", "telem",
     "fscache", "fcache", "nameservice", "nsvc", "oomkiller", "oom", "blktrace", "btrace",
+    "cgroupfs", "cgrp", "secpolicy", "spol", "procstat", "pstat", "kernparam", "kparam",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -5020,6 +5021,10 @@ fn dispatch(line: &str) {
         "nameservice" | "nsvc" => cmd_nameservice(args),
         "oomkiller" | "oom" => cmd_oomkiller(args),
         "blktrace" | "btrace" => cmd_blktrace(args),
+        "cgroupfs" | "cgrp" => cmd_cgroupfs(args),
+        "secpolicy" | "spol" => cmd_secpolicy(args),
+        "procstat" | "pstat" => cmd_procstat(args),
+        "kernparam" | "kparam" => cmd_kernparam(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -48698,6 +48703,396 @@ fn cmd_blktrace(args: &str) {
     }
 }
 
+/// `cgroupfs` / `cgrp` — cgroup v2 resource management.
+fn cmd_cgroupfs(args: &str) {
+    use crate::fs::cgroupfs;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            cgroupfs::init_defaults();
+            let groups = cgroupfs::list_groups();
+            shell_println!("Cgroups ({}):", groups.len());
+            for g in &groups {
+                shell_println!("  {} cpu_w={} mem_max={} pids={}/{} procs={}",
+                    g.path, g.cpu_weight, g.memory_max, g.pids_current, g.pids_max, g.processes.len());
+            }
+        }
+        "create" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            if path.is_empty() {
+                shell_println!("Usage: cgroupfs create <path>");
+                return;
+            }
+            cgroupfs::init_defaults();
+            match cgroupfs::create_group(path) {
+                Ok(()) => shell_println!("Created cgroup: {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            if path.is_empty() {
+                shell_println!("Usage: cgroupfs delete <path>");
+                return;
+            }
+            cgroupfs::init_defaults();
+            match cgroupfs::delete_group(path) {
+                Ok(()) => shell_println!("Deleted cgroup: {}", path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cpu" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            let weight_str = parts.get(2).copied().unwrap_or("0");
+            let weight = weight_str.parse::<u32>().unwrap_or(0);
+            if path.is_empty() || weight == 0 {
+                shell_println!("Usage: cgroupfs cpu <path> <weight 1-10000>");
+                return;
+            }
+            cgroupfs::init_defaults();
+            match cgroupfs::set_cpu_weight(path, weight) {
+                Ok(()) => shell_println!("CPU weight set to {} for {}", weight, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mem" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            let bytes_str = parts.get(2).copied().unwrap_or("0");
+            let bytes = bytes_str.parse::<u64>().unwrap_or(0);
+            if path.is_empty() {
+                shell_println!("Usage: cgroupfs mem <path> <bytes>");
+                return;
+            }
+            cgroupfs::init_defaults();
+            match cgroupfs::set_memory_max(path, bytes) {
+                Ok(()) => shell_println!("Memory max set to {} for {}", bytes, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "addpid" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            let pid_str = parts.get(2).copied().unwrap_or("0");
+            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            if path.is_empty() || pid == 0 {
+                shell_println!("Usage: cgroupfs addpid <path> <pid>");
+                return;
+            }
+            cgroupfs::init_defaults();
+            match cgroupfs::add_pid(path, pid) {
+                Ok(()) => shell_println!("Added PID {} to {}", pid, path),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            cgroupfs::init_defaults();
+            let (count, created, deleted, changes, ops) = cgroupfs::stats();
+            shell_println!("Cgroup stats:");
+            shell_println!("  Groups: {}", count);
+            shell_println!("  Created: {}", created);
+            shell_println!("  Deleted: {}", deleted);
+            shell_println!("  Limit changes: {}", changes);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            cgroupfs::self_test();
+            shell_println!("cgroupfs self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: cgroupfs [list|create <path>|delete <path>|cpu <path> <weight>|mem <path> <bytes>|addpid <path> <pid>|stats|test]");
+        }
+    }
+}
+
+/// `secpolicy` / `spol` — mandatory access control policy.
+fn cmd_secpolicy(args: &str) {
+    use crate::fs::secpolicy;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            secpolicy::init_defaults();
+            let rules = secpolicy::list_rules();
+            shell_println!("Policy rules ({}):", rules.len());
+            for r in &rules {
+                shell_println!("  #{} {}->{} {} {} prio={}",
+                    r.id, r.subject_label, r.object_label, r.action.label(), r.decision.label(), r.priority);
+            }
+        }
+        "mode" => {
+            secpolicy::init_defaults();
+            if let Some(m) = parts.get(1) {
+                let mode = match *m {
+                    "disabled" | "off" => Some(secpolicy::EnforceMode::Disabled),
+                    "permissive" | "perm" => Some(secpolicy::EnforceMode::Permissive),
+                    "enforcing" | "on" => Some(secpolicy::EnforceMode::Enforcing),
+                    _ => None,
+                };
+                match mode {
+                    Some(m) => match secpolicy::set_mode(m) {
+                        Ok(()) => shell_println!("Mode set to: {}", m.label()),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    },
+                    None => shell_println!("Invalid mode. Use: disabled|permissive|enforcing"),
+                }
+            } else {
+                shell_println!("Mode: {}", secpolicy::get_mode().label());
+            }
+        }
+        "check" => {
+            let subj = parts.get(1).copied().unwrap_or("");
+            let obj = parts.get(2).copied().unwrap_or("");
+            let act_str = parts.get(3).copied().unwrap_or("");
+            if subj.is_empty() || obj.is_empty() || act_str.is_empty() {
+                shell_println!("Usage: secpolicy check <subject> <object> <action>");
+                shell_println!("  Actions: read|write|execute|create|delete|network");
+                return;
+            }
+            let action = match act_str {
+                "read" => Some(secpolicy::Action::Read),
+                "write" => Some(secpolicy::Action::Write),
+                "execute" | "exec" => Some(secpolicy::Action::Execute),
+                "create" => Some(secpolicy::Action::Create),
+                "delete" => Some(secpolicy::Action::Delete),
+                "network" | "net" => Some(secpolicy::Action::Network),
+                _ => None,
+            };
+            match action {
+                Some(a) => {
+                    secpolicy::init_defaults();
+                    match secpolicy::check_access(subj, obj, a) {
+                        Ok(d) => shell_println!("Decision: {}", d.label()),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                None => shell_println!("Unknown action: {}", act_str),
+            }
+        }
+        "label" => {
+            let id_str = parts.get(1).copied().unwrap_or("0");
+            let etype = parts.get(2).copied().unwrap_or("");
+            let label = parts.get(3).copied().unwrap_or("");
+            if etype.is_empty() {
+                shell_println!("Usage: secpolicy label <entity_id> <type> [label]");
+                return;
+            }
+            secpolicy::init_defaults();
+            let id = id_str.parse::<u32>().unwrap_or(0);
+            if label.is_empty() {
+                match secpolicy::get_label(id, etype) {
+                    Some(l) => shell_println!("Label for {}:{}: {}", etype, id, l),
+                    None => shell_println!("No label for {}:{}", etype, id),
+                }
+            } else {
+                match secpolicy::set_label(id, etype, label) {
+                    Ok(()) => shell_println!("Label set for {}:{} = {}", etype, id, label),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "stats" => {
+            secpolicy::init_defaults();
+            let (rules, checks, allowed, denied, ops) = secpolicy::stats();
+            shell_println!("Security policy stats:");
+            shell_println!("  Mode: {}", secpolicy::get_mode().label());
+            shell_println!("  Rules: {}", rules);
+            shell_println!("  Checks: {}", checks);
+            shell_println!("  Allowed: {}", allowed);
+            shell_println!("  Denied: {}", denied);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            secpolicy::self_test();
+            shell_println!("secpolicy self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: secpolicy [list|mode [disabled|permissive|enforcing]|check <subj> <obj> <action>|label <id> <type> [label]|stats|test]");
+        }
+    }
+}
+
+/// `procstat` / `pstat` — per-process resource statistics.
+fn cmd_procstat(args: &str) {
+    use crate::fs::procstat;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            procstat::init_defaults();
+            let procs = procstat::list_processes();
+            shell_println!("Processes ({}):", procs.len());
+            for p in &procs {
+                shell_println!("  pid={} {} [{}] cpu={}us mem={} io_r={} io_w={} threads={}",
+                    p.pid, p.name, p.state.label(), p.cpu_time_us, p.memory_bytes,
+                    p.io_read_bytes, p.io_write_bytes, p.threads);
+            }
+        }
+        "get" => {
+            let pid_str = parts.get(1).copied().unwrap_or("0");
+            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            if pid == 0 {
+                shell_println!("Usage: procstat get <pid>");
+                return;
+            }
+            procstat::init_defaults();
+            match procstat::get_process(pid) {
+                Some(p) => {
+                    shell_println!("Process {}:", pid);
+                    shell_println!("  Name: {}", p.name);
+                    shell_println!("  State: {}", p.state.label());
+                    shell_println!("  CPU: {}us (user={}us sys={}us)", p.cpu_time_us, p.user_time_us, p.sys_time_us);
+                    shell_println!("  Memory: {} bytes ({} pages)", p.memory_bytes, p.rss_pages);
+                    shell_println!("  I/O: read={} write={}", p.io_read_bytes, p.io_write_bytes);
+                    shell_println!("  Page faults: {}", p.page_faults);
+                    shell_println!("  Ctx switches: {}", p.ctx_switches);
+                    shell_println!("  Threads: {}", p.threads);
+                }
+                None => shell_println!("Process {} not found", pid),
+            }
+        }
+        "topcpu" => {
+            let n_str = parts.get(1).copied().unwrap_or("5");
+            let n = n_str.parse::<usize>().unwrap_or(0);
+            let n = if n == 0 { 5 } else { n };
+            procstat::init_defaults();
+            let top = procstat::top_cpu(n);
+            shell_println!("Top {} by CPU:", top.len());
+            for p in &top {
+                shell_println!("  pid={} {} cpu={}us", p.pid, p.name, p.cpu_time_us);
+            }
+        }
+        "topmem" => {
+            let n_str = parts.get(1).copied().unwrap_or("5");
+            let n = n_str.parse::<usize>().unwrap_or(0);
+            let n = if n == 0 { 5 } else { n };
+            procstat::init_defaults();
+            let top = procstat::top_mem(n);
+            shell_println!("Top {} by memory:", top.len());
+            for p in &top {
+                shell_println!("  pid={} {} mem={}", p.pid, p.name, p.memory_bytes);
+            }
+        }
+        "register" => {
+            let pid_str = parts.get(1).copied().unwrap_or("0");
+            let name = parts.get(2).copied().unwrap_or("unnamed");
+            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            if pid == 0 {
+                shell_println!("Usage: procstat register <pid> <name>");
+                return;
+            }
+            procstat::init_defaults();
+            match procstat::register(pid, name) {
+                Ok(()) => shell_println!("Registered process {} ({})", pid, name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            procstat::init_defaults();
+            let (count, updates, ops) = procstat::stats();
+            shell_println!("Process stats:");
+            shell_println!("  Tracked: {}", count);
+            shell_println!("  Updates: {}", updates);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            procstat::self_test();
+            shell_println!("procstat self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: procstat [list|get <pid>|topcpu [n]|topmem [n]|register <pid> <name>|stats|test]");
+        }
+    }
+}
+
+/// `kernparam` / `kparam` — kernel boot parameters.
+fn cmd_kernparam(args: &str) {
+    use crate::fs::kernparam;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            kernparam::init_defaults();
+            let params = kernparam::list_params();
+            shell_println!("Kernel parameters ({}):", params.len());
+            for p in &params {
+                let consumer = p.consumed_by.as_deref().unwrap_or("-");
+                shell_println!("  {}={} [{}] consumer={} — {}",
+                    p.key, p.value, p.origin.label(), consumer, p.description);
+            }
+        }
+        "get" => {
+            let key = parts.get(1).copied().unwrap_or("");
+            if key.is_empty() {
+                shell_println!("Usage: kernparam get <key>");
+                return;
+            }
+            kernparam::init_defaults();
+            match kernparam::get(key) {
+                Some(v) => shell_println!("{}={}", key, v),
+                None => shell_println!("Parameter '{}' not found", key),
+            }
+        }
+        "set" => {
+            let key = parts.get(1).copied().unwrap_or("");
+            let val = parts.get(2).copied().unwrap_or("");
+            if key.is_empty() {
+                shell_println!("Usage: kernparam set <key> <value>");
+                return;
+            }
+            kernparam::init_defaults();
+            match kernparam::set(key, val) {
+                Ok(()) => shell_println!("Set {}={}", key, val),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let key = parts.get(1).copied().unwrap_or("");
+            if key.is_empty() {
+                shell_println!("Usage: kernparam remove <key>");
+                return;
+            }
+            kernparam::init_defaults();
+            match kernparam::remove(key) {
+                Ok(()) => shell_println!("Removed: {}", key),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cmdline" => {
+            kernparam::init_defaults();
+            shell_println!("Cmdline: {}", kernparam::cmdline());
+        }
+        "unconsumed" => {
+            kernparam::init_defaults();
+            let uncon = kernparam::unconsumed();
+            shell_println!("Unconsumed parameters ({}):", uncon.len());
+            for p in &uncon {
+                shell_println!("  {}={} [{}]", p.key, p.value, p.origin.label());
+            }
+        }
+        "stats" => {
+            kernparam::init_defaults();
+            let (count, lookups, sets, unconsumed, ops) = kernparam::stats();
+            shell_println!("Kernel parameter stats:");
+            shell_println!("  Parameters: {}", count);
+            shell_println!("  Lookups: {}", lookups);
+            shell_println!("  Sets: {}", sets);
+            shell_println!("  Unconsumed: {}", unconsumed);
+            shell_println!("  Operations: {}", ops);
+        }
+        "test" => {
+            kernparam::self_test();
+            shell_println!("kernparam self-test passed.");
+        }
+        _ => {
+            shell_println!("Usage: kernparam [list|get <key>|set <key> <val>|remove <key>|cmdline|unconsumed|stats|test]");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -57294,7 +57689,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "timesync" | "tsync" | "kmod" | "entropy" | "epool" | "iosched" | "ioq" | "netmon" | "nmon" | "groupmgr" | "grp" | "sysrq" | "telemetry" | "telem" | "fscache" | "fcache" | "nameservice" | "nsvc" | "oomkiller" | "oom" | "blktrace" | "btrace" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "timesync" | "tsync" | "kmod" | "entropy" | "epool" | "iosched" | "ioq" | "netmon" | "nmon" | "groupmgr" | "grp" | "sysrq" | "telemetry" | "telem" | "fscache" | "fcache" | "nameservice" | "nsvc" | "oomkiller" | "oom" | "blktrace" | "btrace" | "cgroupfs" | "cgrp" | "secpolicy" | "spol" | "procstat" | "pstat" | "kernparam" | "kparam" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

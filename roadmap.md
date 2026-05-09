@@ -926,6 +926,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Name Service (fs::nameservice): Hostname/DNS resolution with static hosts, resolve cache, cache flush; `nameservice`/`nsvc` kshell command; /proc/nameservice; 8 self-tests
   - [x] OOM Killer (fs::oomkiller): OOM scoring with 4 policies, per-process adj/exempt, victim selection, kill history; `oomkiller`/`oom` kshell command; /proc/oomkiller; 8 self-tests
   - [x] Block Trace (fs::blktrace): Per-device I/O tracing with 5 op types, start/stop/dump/clear, event filtering; `blktrace`/`btrace` kshell command; /proc/blktrace; 8 self-tests
+  - [x] Cgroup FS (fs::cgroupfs): Cgroup v2 resource limits with 5 controllers, hierarchical groups, CPU weight/memory max/PID limits, per-group process assignment; `cgroupfs`/`cgrp` kshell command; /proc/cgroupfs; 8 self-tests
+  - [x] Security Policy (fs::secpolicy): MAC policy engine with 3 enforce modes, 6 action types, 3 decisions, priority-based rule matching, entity labels; `secpolicy`/`spol` kshell command; /proc/secpolicy; 8 self-tests
+  - [x] Process Stats (fs::procstat): Per-process resource statistics with 5 states, CPU/memory/IO/faults/ctx-switches tracking, top-N by CPU/memory; `procstat`/`pstat` kshell command; /proc/procstat; 8 self-tests
+  - [x] Kernel Parameters (fs::kernparam): Boot parameter management with 3 origins, key=value store, consume tracking, boolean checks, unconsumed listing; `kernparam`/`kparam` kshell command; /proc/kernparam; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

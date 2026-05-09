@@ -273,6 +273,10 @@ const ROOT_FILES: &[&str] = &[
     "gamepadinput",
     "sysrestore",
     "audiomux",
+    "netthrottle",
+    "dumpanalyzer",
+    "memdiag",
+    "parentaltime",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5908,6 +5912,53 @@ fn gen_audiomux() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netthrottle() -> Vec<u8> {
+    use crate::fs::netthrottle;
+    let (rule_count, total_throttled, total_blocked, enabled, ops) = netthrottle::stats();
+    let mut out = String::from("rule_count: ");
+    out.push_str(&format!("{}\n", rule_count));
+    out.push_str(&format!("total_throttled: {}\n", total_throttled));
+    out.push_str(&format!("total_blocked: {}\n", total_blocked));
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_dumpanalyzer() -> Vec<u8> {
+    use crate::fs::dumpanalyzer;
+    let (count, total, kernel, app, ops) = dumpanalyzer::stats();
+    let mut out = String::from("analysis_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("total_analyzed: {}\n", total));
+    out.push_str(&format!("kernel_crashes: {}\n", kernel));
+    out.push_str(&format!("app_crashes: {}\n", app));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_memdiag() -> Vec<u8> {
+    use crate::fs::memdiag;
+    let (test_count, total_tests, correctable, uncorrectable, ops) = memdiag::stats();
+    let mut out = String::from("test_count: ");
+    out.push_str(&format!("{}\n", test_count));
+    out.push_str(&format!("total_tests: {}\n", total_tests));
+    out.push_str(&format!("correctable_errors: {}\n", correctable));
+    out.push_str(&format!("uncorrectable_errors: {}\n", uncorrectable));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_parentaltime() -> Vec<u8> {
+    use crate::fs::parentaltime;
+    let (count, enforcements, warnings, ops) = parentaltime::stats();
+    let mut out = String::from("config_count: ");
+    out.push_str(&format!("{}\n", count));
+    out.push_str(&format!("total_enforcements: {}\n", enforcements));
+    out.push_str(&format!("total_warnings: {}\n", warnings));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6346,6 +6397,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "gamepadinput" => Ok(gen_gamepadinput()),
         "sysrestore" => Ok(gen_sysrestore()),
         "audiomux" => Ok(gen_audiomux()),
+        "netthrottle" => Ok(gen_netthrottle()),
+        "dumpanalyzer" => Ok(gen_dumpanalyzer()),
+        "memdiag" => Ok(gen_memdiag()),
+        "parentaltime" => Ok(gen_parentaltime()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

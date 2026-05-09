@@ -799,6 +799,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Gamepad input (fs::gamepadinput): game controller management with GamepadType (6 types), ConnectionType (3 types), button bitmask input, axis state tracking, dead zone/rumble config, auto player assignment; `gamepadinput`/`gamepad` kshell command; /proc/gamepadinput; 11 self-tests
   - [x] System restore (fs::sysrestore): incremental snapshots with SnapshotType (6 types), rotation policy (max count/size/age), pin/unpin protection, create/restore/delete lifecycle; `sysrestore`/`srestore` kshell command; /proc/sysrestore; 11 self-tests
   - [x] Audio multiplexer (fs::audiomux): per-app audio routing with EndpointType (7 types), stream management, per-stream volume/mute, reroute to different output, default output selection; `audiomux`/`amux` kshell command; /proc/audiomux; 11 self-tests
+  - [x] Network throttle (fs::netthrottle): per-app bandwidth throttling with QosPriority (5 levels), rate limiting, background app blocking, global enable/disable; `netthrottle`/`nthrottle` kshell command; /proc/netthrottle; 11 self-tests
+  - [x] Dump analyzer (fs::dumpanalyzer): crash dump analysis with CrashSeverity (5 levels), FaultType (12 types), stack frame parsing, root cause summary, kernel/app crash tracking; `dumpanalyzer`/`dump` kshell command; /proc/dumpanalyzer; 11 self-tests
+  - [x] Memory diagnostics (fs::memdiag): RAM testing with TestType (5 types), ECC error tracking (correctable/uncorrectable), DIMM slot identification, health summary; `memdiag`/`mdiag` kshell command; /proc/memdiag; 11 self-tests
+  - [x] Parental time (fs::parentaltime): time-based usage restrictions with daily/weekly limits, schedule windows per day, warning threshold, usage recording, enforcement tracking; `parentaltime`/`ptime` kshell command; /proc/parentaltime; 11 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

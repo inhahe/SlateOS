@@ -938,6 +938,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] IPC Log (fs::ipclog): IPC message logging with 6 message types, per-channel stats, PID/channel queries, latency tracking; `ipclog`/`ipcl` kshell command; /proc/ipclog; 8 self-tests
   - [x] NUMA Statistics (fs::numastat): Per-node memory/access tracking, local/remote alloc counting, inter-node distances, migration stats, balance analysis; `numastat`/`nstat` kshell command; /proc/numastat; 8 self-tests
   - [x] Shared Memory (fs::shmem): Named region management with 4 permission levels, attach/detach, auto-delete non-persistent, per-PID queries; `shmem`/`shm` kshell command; /proc/shmem; 8 self-tests
+  - [x] Workqueue Stats (fs::wqstat): Kernel workqueue monitoring with 4 types, enqueue/activate/complete/cancel lifecycle, latency tracking, high watermark; `wqstat`/`wqs` kshell command; /proc/wqstat; 8 self-tests
+  - [x] Slab Stats (fs::slabstat): Slab allocator monitoring with cache create/alloc/free/reclaim, utilization percentages, high watermark, top-N by active; `slabstat`/`slab` kshell command; /proc/slabstat; 8 self-tests
+  - [x] Timer Queue (fs::timerq): Timer management with 4 types (one-shot/periodic/deadline/deferrable), 5 states, fire-expired, overrun tracking, cleanup; `timerq`/`tq` kshell command; /proc/timerq; 8 self-tests
+  - [x] FD Table (fs::fdtable): Per-process file descriptor table with 8 FD types, open/close/dup, FD limits, cloexec support, auto-create tables; `fdtable`/`fdt` kshell command; /proc/fdtable; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

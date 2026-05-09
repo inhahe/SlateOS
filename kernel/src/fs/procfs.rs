@@ -412,6 +412,10 @@ const ROOT_FILES: &[&str] = &[
     "ipclog",
     "numastat",
     "shmem",
+    "wqstat",
+    "slabstat",
+    "timerq",
+    "fdtable",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8062,6 +8066,57 @@ fn gen_shmem() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_wqstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (count, enqueued, completed, cancelled, ops) = crate::fs::wqstat::stats();
+    out.push_str(&format!("workqueues: {}\ntotal_enqueued: {}\ntotal_completed: {}\ncancelled: {}\nops: {}\n",
+        count, enqueued, completed, cancelled, ops));
+    for q in crate::fs::wqstat::list() {
+        out.push_str(&format!("  {} [{}] pend={} active={} done={} lat={}us workers={}\n",
+            q.name, q.wq_type.label(), q.pending, q.active, q.completed, q.avg_latency_us, q.workers));
+    }
+    out.into_bytes()
+}
+
+fn gen_slabstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (count, allocs, frees, reclaims, ops) = crate::fs::slabstat::stats();
+    out.push_str(&format!("caches: {}\ntotal_allocs: {}\ntotal_frees: {}\nreclaims: {}\nops: {}\n",
+        count, allocs, frees, reclaims, ops));
+    for c in crate::fs::slabstat::list() {
+        out.push_str(&format!("  {} size={} active={}/{} util={}% hwm={}\n",
+            c.name, c.object_size, c.active_objects, c.total_objects, c.utilization_pct(), c.high_watermark));
+    }
+    out.into_bytes()
+}
+
+fn gen_timerq() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (total, pending, created, fired, cancelled, overruns, ops) = crate::fs::timerq::stats();
+    out.push_str(&format!("timers: {}\npending: {}\ncreated: {}\nfired: {}\ncancelled: {}\noverruns: {}\nops: {}\n",
+        total, pending, created, fired, cancelled, overruns, ops));
+    for t in crate::fs::timerq::list_pending() {
+        out.push_str(&format!("  #{} {} [{}] deadline={} fires={}\n",
+            t.id, t.name, t.timer_type.label(), t.deadline_ns, t.fire_count));
+    }
+    out.into_bytes()
+}
+
+fn gen_fdtable() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (tables, opens, closes, dups, ops) = crate::fs::fdtable::stats();
+    out.push_str(&format!("tables: {}\ntotal_opens: {}\ntotal_closes: {}\ntotal_dups: {}\nops: {}\n",
+        tables, opens, closes, dups, ops));
+    for (pid, count, max) in crate::fs::fdtable::list_tables() {
+        out.push_str(&format!("  pid={} fds={}/{}\n", pid, count, max));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8639,6 +8694,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "ipclog" => Ok(gen_ipclog()),
         "numastat" => Ok(gen_numastat()),
         "shmem" => Ok(gen_shmem()),
+        "wqstat" => Ok(gen_wqstat()),
+        "slabstat" => Ok(gen_slabstat()),
+        "timerq" => Ok(gen_timerq()),
+        "fdtable" => Ok(gen_fdtable()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -811,6 +811,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] App Store (fs::appstore): application catalog with categories (10 types), install/uninstall/update lifecycle, version publishing, update checking, search by name/description, user reviews with rating, download counting; `appstore`/`store` kshell command; /proc/appstore; 10 self-tests
   - [x] Window Tiling (fs::wintiling): automatic window tiling with 7 layouts (Floating/HorizontalSplit/VerticalSplit/MasterStack/Grid/Monocle/ThreeColumn), workspace management, gap/master-ratio config, floating toggle, cross-workspace moves; `wintiling`/`tile` kshell command; /proc/wintiling; 10 self-tests
   - [x] Pen Input (fs::peninput): stylus/tablet input with pressure (0-4096), tilt (±90°), rotation, 5 pen types, proximity/contact/release/move events, button mapping, event logging; `peninput`/`pen` kshell command; /proc/peninput; 10 self-tests
+  - [x] Brightness (fs::brightness): per-display brightness control with Manual/Automatic/BatterySaver modes, ambient light curve interpolation, dim/undim for idle, brightness up/down steps, min brightness clamping; `brightness`/`bright` kshell command; /proc/brightness; 10 self-tests
+  - [x] Quick Settings (fs::quicksettings): system quick settings panel with 8 default tiles (WiFi/Bluetooth/Airplane/NightLight/Brightness/Volume/DND/BatterySaver), toggle/slider/action types, add/remove/reorder/hide tiles, panel open state; `quicksettings`/`qs` kshell command; /proc/quicksettings; 10 self-tests
+  - [x] Volume OSD (fs::volumeosd): on-screen volume/brightness indicator with 10 OSD types (Volume/Mute/Brightness/Media/Keyboard/Airplane/Custom), configurable position (5 positions), auto-dismiss, enable/disable, history; `volumeosd`/`vosd` kshell command; /proc/volumeosd; 10 self-tests
+  - [x] Network Diagnostics (fs::netdiag): ping/traceroute/DNS lookup with simulated latency, connectivity status tracking (Connected/Limited/NoInternet/Disconnected), result history, hop-by-hop trace analysis; `netdiag`/`ndiag` kshell command; /proc/netdiag; 10 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

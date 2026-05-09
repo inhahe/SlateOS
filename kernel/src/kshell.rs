@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4889,6 +4889,10 @@ fn dispatch(line: &str) {
         "appstore" | "store" => cmd_appstore(args),
         "wintiling" | "tile" => cmd_wintiling(args),
         "peninput" | "pen" => cmd_peninput(args),
+        "brightness" | "bright" => cmd_brightness(args),
+        "quicksettings" | "qs" => cmd_quicksettings(args),
+        "volumeosd" | "vosd" => cmd_volumeosd(args),
+        "netdiag" | "ndiag" => cmd_netdiag(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -35435,6 +35439,363 @@ fn cmd_peninput(args: &str) {
     }
 }
 
+/// `brightness` / `bright` — display brightness control.
+fn cmd_brightness(args: &str) {
+    use crate::fs::brightness;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            brightness::init_defaults();
+            let displays = brightness::list_displays();
+            if displays.is_empty() {
+                shell_println!("No displays.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<6} {:<10} {:<6} {:<6}",
+                    "ID", "Name", "Level", "Mode", "Min", "Dim");
+                for d in &displays {
+                    shell_println!("{:<4} {:<20} {:<6} {:<10} {:<6} {:<6}",
+                        d.id, d.name, d.brightness, d.mode.label(),
+                        d.min_brightness, if d.dimmed { "Yes" } else { "No" });
+                }
+            }
+        }
+        "set" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            let level = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            if level == 0 && parts.get(2).is_none() {
+                shell_println!("Usage: bright set [display_id] <level>");
+            } else {
+                match brightness::set_brightness(id, level) {
+                    Ok(()) => shell_println!("Brightness → {}%", level),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "up" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            let step = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10);
+            match brightness::brightness_up(id, step) {
+                Ok(new) => shell_println!("Brightness → {}%", new),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "down" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            let step = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10);
+            match brightness::brightness_down(id, step) {
+                Ok(new) => shell_println!("Brightness → {}%", new),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mode" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            let mode_str = parts.get(2).copied().unwrap_or("");
+            let mode = match mode_str {
+                "manual" | "man" => brightness::BrightnessMode::Manual,
+                "auto" | "automatic" => brightness::BrightnessMode::Automatic,
+                "battery" | "saver" => brightness::BrightnessMode::BatterySaver,
+                _ => { shell_println!("Modes: manual, auto, battery"); return; }
+            };
+            brightness::set_mode(id, mode).ok();
+            shell_println!("Mode → {}", mode.label());
+        }
+        "dim" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            brightness::dim(id).ok();
+            shell_println!("Display {} dimmed.", id);
+        }
+        "undim" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            brightness::undim(id).ok();
+            shell_println!("Display {} undimmed.", id);
+        }
+        "stats" => {
+            let (count, adj, auto, ops) = brightness::stats();
+            shell_println!("Displays: {}, Adjustments: {}, Auto: {}, Ops: {}", count, adj, auto, ops);
+        }
+        "test" => { brightness::self_test(); shell_println!("Brightness self-test complete."); }
+        "init" => { brightness::init_defaults(); shell_println!("Brightness initialized."); }
+        _ => {
+            shell_println!("brightness (bright) — display brightness");
+            shell_println!("  show / list         List displays");
+            shell_println!("  set [id] <level>    Set brightness");
+            shell_println!("  up [id] [step]      Increase");
+            shell_println!("  down [id] [step]    Decrease");
+            shell_println!("  mode [id] <type>    manual/auto/battery");
+            shell_println!("  dim / undim [id]    Dim for idle");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `quicksettings` / `qs` — quick settings panel.
+fn cmd_quicksettings(args: &str) {
+    use crate::fs::quicksettings;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            quicksettings::init_defaults();
+            let tiles = quicksettings::get_tiles();
+            if tiles.is_empty() {
+                shell_println!("No tiles.");
+            } else {
+                shell_println!("{:<4} {:<18} {:<8} {:<6} {:<20}",
+                    "ID", "Name", "Type", "Value", "Subtitle");
+                for t in &tiles {
+                    let val = match t.tile_type {
+                        quicksettings::TileType::Toggle => {
+                            if t.enabled { String::from("On") } else { String::from("Off") }
+                        }
+                        quicksettings::TileType::Slider => format!("{}%", t.value),
+                        quicksettings::TileType::Action => String::from("—"),
+                    };
+                    shell_println!("{:<4} {:<18} {:<8} {:<6} {:<20}",
+                        t.id, t.name, t.tile_type.label(), val, t.subtitle);
+                }
+            }
+        }
+        "toggle" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match quicksettings::toggle(id) {
+                        Ok(on) => shell_println!("Toggled → {}", if on { "On" } else { "Off" }),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            } else { shell_println!("Usage: qs toggle <tile_id>"); }
+        }
+        "set" => {
+            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            let val = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            if id == 0 { shell_println!("Usage: qs set <tile_id> <value>"); }
+            else {
+                match quicksettings::set_value(id, val) {
+                    Ok(()) => shell_println!("Set to {}%", val),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let type_str = parts.get(2).copied().unwrap_or("toggle");
+            let tile_type = match type_str {
+                "slider" => quicksettings::TileType::Slider,
+                "action" => quicksettings::TileType::Action,
+                _ => quicksettings::TileType::Toggle,
+            };
+            if name.is_empty() {
+                shell_println!("Usage: qs add <name> [toggle|slider|action]");
+            } else {
+                match quicksettings::add_tile(name, name, tile_type) {
+                    Ok(id) => shell_println!("Added tile {} '{}'", id, name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "rm" | "remove" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    quicksettings::remove_tile(id).ok();
+                    shell_println!("Removed tile {}.", id);
+                }
+            } else { shell_println!("Usage: qs rm <id>"); }
+        }
+        "stats" => {
+            let (tiles, toggles, adj, ops) = quicksettings::stats();
+            shell_println!("Tiles: {}, Toggles: {}, Adjustments: {}, Ops: {}", tiles, toggles, adj, ops);
+        }
+        "test" => { quicksettings::self_test(); shell_println!("Quick settings self-test complete."); }
+        "init" => { quicksettings::init_defaults(); shell_println!("Quick settings initialized."); }
+        _ => {
+            shell_println!("quicksettings (qs) — quick settings panel");
+            shell_println!("  show / list         List tiles");
+            shell_println!("  toggle <id>         Toggle on/off");
+            shell_println!("  set <id> <value>    Set slider value");
+            shell_println!("  add <name> [type]   Add tile");
+            shell_println!("  rm <id>             Remove tile");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `volumeosd` / `vosd` — on-screen volume/brightness display.
+fn cmd_volumeosd(args: &str) {
+    use crate::fs::volumeosd;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "active" => {
+            volumeosd::init_defaults();
+            match volumeosd::get_active() {
+                Some(osd) => shell_println!("Active: {} {} — {}% {}",
+                    osd.osd_type.icon(), osd.osd_type.label(), osd.value, osd.label),
+                None => shell_println!("No active OSD."),
+            }
+        }
+        "volume" | "vol" => {
+            let level = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(50);
+            let muted = parts.get(2).copied() == Some("mute");
+            match volumeosd::show_volume(level, muted) {
+                Ok(id) => shell_println!("OSD {} — Volume {}%{}", id, level, if muted { " (muted)" } else { "" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "bright" | "brightness" => {
+            let level = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(50);
+            match volumeosd::show_brightness(level) {
+                Ok(id) => shell_println!("OSD {} — Brightness {}%", id, level),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "custom" => {
+            let label = parts.get(1).copied().unwrap_or("Info");
+            let text = if parts.len() > 2 { parts[2..].join(" ") } else { String::new() };
+            match volumeosd::show(volumeosd::OsdType::Custom, 0, label, &text) {
+                Ok(id) => shell_println!("OSD {} — {}: {}", id, label, text),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "dismiss" => {
+            volumeosd::dismiss().ok();
+            shell_println!("OSD dismissed.");
+        }
+        "position" | "pos" => {
+            let pos_str = parts.get(1).copied().unwrap_or("");
+            let pos = match pos_str {
+                "top" | "tc" => volumeosd::OsdPosition::TopCenter,
+                "tr" => volumeosd::OsdPosition::TopRight,
+                "center" | "c" => volumeosd::OsdPosition::Center,
+                "bottom" | "bc" => volumeosd::OsdPosition::BottomCenter,
+                "bl" => volumeosd::OsdPosition::BottomLeft,
+                _ => { shell_println!("Positions: top, tr, center, bottom, bl"); return; }
+            };
+            volumeosd::set_position(pos).ok();
+            shell_println!("Position → {}", pos.label());
+        }
+        "enable" => { volumeosd::set_enabled(true).ok(); shell_println!("OSD enabled."); }
+        "disable" => { volumeosd::set_enabled(false).ok(); shell_println!("OSD disabled."); }
+        "history" => {
+            let history = volumeosd::list_history(10);
+            if history.is_empty() { shell_println!("No OSD history."); }
+            else {
+                for h in &history {
+                    shell_println!("[{}] {} {}% {}", h.id, h.osd_type.label(), h.value, h.label);
+                }
+            }
+        }
+        "stats" => {
+            let (total, enabled, pos, ops) = volumeosd::stats();
+            shell_println!("Shown: {}, Enabled: {}, Position: {}, Ops: {}", total, enabled, pos, ops);
+        }
+        "test" => { volumeosd::self_test(); shell_println!("Volume OSD self-test complete."); }
+        "init" => { volumeosd::init_defaults(); shell_println!("Volume OSD initialized."); }
+        _ => {
+            shell_println!("volumeosd (vosd) — on-screen display");
+            shell_println!("  show                Active OSD");
+            shell_println!("  vol <level> [mute]  Show volume");
+            shell_println!("  bright <level>      Show brightness");
+            shell_println!("  custom <label> [text] Custom OSD");
+            shell_println!("  dismiss             Hide OSD");
+            shell_println!("  pos <position>      Set position");
+            shell_println!("  enable / disable    Toggle OSD");
+            shell_println!("  history             Recent OSDs");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `netdiag` / `ndiag` — network diagnostics.
+fn cmd_netdiag(args: &str) {
+    use crate::fs::netdiag;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "status" => {
+            netdiag::init_defaults();
+            let status = netdiag::connectivity_check().unwrap_or(netdiag::ConnectivityStatus::Disconnected);
+            shell_println!("Connectivity: {}", status.label());
+            let results = netdiag::list_results(5);
+            if !results.is_empty() {
+                shell_println!("\nRecent:");
+                for r in &results {
+                    shell_println!("  [{}] {} {} — {} ({}us)",
+                        r.id, r.diag_type.label(), r.target, r.status.label(), r.latency_us);
+                }
+            }
+        }
+        "ping" => {
+            let host = parts.get(1).copied().unwrap_or("127.0.0.1");
+            let count = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(4);
+            match netdiag::ping(host, count) {
+                Ok(r) => {
+                    shell_println!("PING {} — {} ({})us", host, r.status.label(), r.latency_us);
+                    shell_println!("{}", r.info);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "trace" | "traceroute" => {
+            let host = parts.get(1).copied().unwrap_or("example.com");
+            match netdiag::traceroute(host) {
+                Ok(r) => {
+                    shell_println!("Traceroute to {} ({} hops):", host, r.hops.len());
+                    for h in &r.hops {
+                        let status = if h.reached { "OK" } else { "***" };
+                        shell_println!("  {:>2}  {:<20} {:<15} {}us {}",
+                            h.hop_number, h.hostname, h.address, h.latency_us, status);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "dns" | "lookup" => {
+            let name = parts.get(1).copied().unwrap_or("localhost");
+            match netdiag::dns_lookup(name) {
+                Ok(r) => shell_println!("{} → {} ({}us)", name, r.resolved, r.latency_us),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "results" => {
+            let count = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+            let results = netdiag::list_results(count);
+            if results.is_empty() { shell_println!("No results."); }
+            else {
+                for r in &results {
+                    shell_println!("[{}] {} {} — {} {}",
+                        r.id, r.diag_type.label(), r.target, r.status.label(), r.info);
+                }
+            }
+        }
+        "clear" => {
+            netdiag::clear_results().ok();
+            shell_println!("Results cleared.");
+        }
+        "stats" => {
+            let (count, pings, traces, lookups, ops) = netdiag::stats();
+            shell_println!("Results: {}, Pings: {}, Traces: {}, Lookups: {}", count, pings, traces, lookups);
+            shell_println!("Ops: {}", ops);
+        }
+        "test" => { netdiag::self_test(); shell_println!("Network diagnostics self-test complete."); }
+        "init" => { netdiag::init_defaults(); shell_println!("Network diagnostics initialized."); }
+        _ => {
+            shell_println!("netdiag (ndiag) — network diagnostics");
+            shell_println!("  status              Connectivity check");
+            shell_println!("  ping <host> [count] Ping host");
+            shell_println!("  trace <host>        Traceroute");
+            shell_println!("  dns <name>          DNS lookup");
+            shell_println!("  results [count]     Recent results");
+            shell_println!("  clear               Clear results");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -44031,7 +44392,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -285,6 +285,10 @@ const ROOT_FILES: &[&str] = &[
     "appstore",
     "wintiling",
     "peninput",
+    "brightness",
+    "quicksettings",
+    "volumeosd",
+    "netdiag",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6063,6 +6067,51 @@ fn gen_peninput() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_brightness() -> Vec<u8> {
+    use crate::fs::brightness;
+    let (displays, adjustments, auto, ops) = brightness::stats();
+    let mut out = String::from("display_count: ");
+    out.push_str(&format!("{}\n", displays));
+    out.push_str(&format!("total_adjustments: {}\n", adjustments));
+    out.push_str(&format!("total_auto: {}\n", auto));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_quicksettings() -> Vec<u8> {
+    use crate::fs::quicksettings;
+    let (tiles, toggles, adjustments, ops) = quicksettings::stats();
+    let mut out = String::from("tile_count: ");
+    out.push_str(&format!("{}\n", tiles));
+    out.push_str(&format!("total_toggles: {}\n", toggles));
+    out.push_str(&format!("total_adjustments: {}\n", adjustments));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_volumeosd() -> Vec<u8> {
+    use crate::fs::volumeosd;
+    let (total, enabled, position, ops) = volumeosd::stats();
+    let mut out = String::from("total_shown: ");
+    out.push_str(&format!("{}\n", total));
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("position: {}\n", position));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_netdiag() -> Vec<u8> {
+    use crate::fs::netdiag;
+    let (results, pings, traces, lookups, ops) = netdiag::stats();
+    let mut out = String::from("result_count: ");
+    out.push_str(&format!("{}\n", results));
+    out.push_str(&format!("total_pings: {}\n", pings));
+    out.push_str(&format!("total_traces: {}\n", traces));
+    out.push_str(&format!("total_lookups: {}\n", lookups));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6513,6 +6562,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "appstore" => Ok(gen_appstore()),
         "wintiling" => Ok(gen_wintiling()),
         "peninput" => Ok(gen_peninput()),
+        "brightness" => Ok(gen_brightness()),
+        "quicksettings" => Ok(gen_quicksettings()),
+        "volumeosd" => Ok(gen_volumeosd()),
+        "netdiag" => Ok(gen_netdiag()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

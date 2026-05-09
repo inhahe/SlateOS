@@ -764,6 +764,35 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
+// system — execute a shell command
+// ---------------------------------------------------------------------------
+
+/// Execute a command using the system shell.
+///
+/// If `command` is NULL, returns whether a shell is available (1 = yes).
+/// Otherwise, attempts to execute the command via `posix_spawn` and
+/// waits for completion.
+///
+/// Note: returns -1 (ENOSYS) since we don't have a shell path
+/// configured yet.
+///
+/// # Safety
+///
+/// `command` must be a valid null-terminated string (or NULL).
+#[unsafe(no_mangle)]
+pub extern "C" fn system(command: *const u8) -> i32 {
+    if command.is_null() {
+        // Check if a shell is available.  We don't have /bin/sh yet.
+        return 0; // 0 = no shell available.
+    }
+
+    // We'd need to fork+exec /bin/sh -c "command" here.
+    // Since our shell infrastructure isn't ready, return -1.
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Character classification (internal helpers)
 // ---------------------------------------------------------------------------
 

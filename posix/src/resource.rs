@@ -1,7 +1,7 @@
 //! POSIX resource limits and usage.
 //!
-//! Implements `getrlimit`, `setrlimit`, `getrusage`, and related
-//! structures and constants.
+//! Implements `getrlimit`, `setrlimit`, `getrusage`, `nice`,
+//! `getpriority`, `setpriority`, and related structures/constants.
 //!
 //! ## Limitations
 //!
@@ -10,6 +10,8 @@
 //!   kernel does not enforce them.
 //! - getrusage returns zeroes for all fields except user/system time
 //!   (which also return zero — no kernel support yet).
+//! - nice/getpriority/setpriority are stubs — the kernel scheduler
+//!   doesn't expose priority control to POSIX yet.
 
 use crate::errno;
 
@@ -236,5 +238,69 @@ pub extern "C" fn getrusage(who: i32, usage: *mut Rusage) -> i32 {
         core::ptr::write_bytes(usage, 0, 1);
     }
 
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Process priority (nice / getpriority / setpriority)
+// ---------------------------------------------------------------------------
+
+/// Process priority target.
+pub const PRIO_PROCESS: i32 = 0;
+/// Process group priority target.
+pub const PRIO_PGRP: i32 = 1;
+/// User priority target.
+pub const PRIO_USER: i32 = 2;
+
+/// Process-local stored nice value.
+///
+/// Not enforced by the kernel — purely for programs that query or
+/// set their own nice value and expect the call to succeed.
+static mut NICE_VALUE: i32 = 0;
+
+/// Adjust the nice value of the calling process.
+///
+/// Returns the new nice value on success.  Since our scheduler doesn't
+/// use nice values, this just stores the value locally.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn nice(inc: i32) -> i32 {
+    // SAFETY: Single-threaded access.
+    let current = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
+    // Clamp to [-20, 19] per POSIX.
+    let new_val = current.saturating_add(inc).clamp(-20, 19);
+    unsafe { core::ptr::addr_of_mut!(NICE_VALUE).write(new_val); }
+    new_val
+}
+
+/// Get the scheduling priority of a process, process group, or user.
+///
+/// Returns the nice value (which can be negative), so callers must
+/// clear errno before calling and check it after.  Returns 0 for
+/// all queries (no kernel support).
+#[unsafe(no_mangle)]
+pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
+    if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    errno::set_errno(0); // Clear errno — return value can be negative.
+    // SAFETY: Single-threaded access.
+    unsafe { core::ptr::addr_of!(NICE_VALUE).read() }
+}
+
+/// Set the scheduling priority of a process, process group, or user.
+///
+/// Stores the value locally but does not affect kernel scheduling.
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
+    if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let val = prio.clamp(-20, 19);
+    // SAFETY: Single-threaded access.
+    unsafe { core::ptr::addr_of_mut!(NICE_VALUE).write(val); }
     0
 }

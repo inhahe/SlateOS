@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4828,6 +4828,11 @@ fn dispatch(line: &str) {
         "printmgr" | "lp" => cmd_printmgr(args),
         "screenrec" | "srec" => cmd_screenrec(args),
         "datausage" | "dusage" => cmd_datausage(args),
+        "mousesettings" | "mouse" => cmd_mousesettings(args),
+        "touchpad" | "tpad" => cmd_touchpad(args),
+        "powerprofile" | "pprofile" => cmd_powerprofile(args),
+        "defaultapps" | "defapp" => cmd_defaultapps(args),
+        "monitors" | "monitor" => cmd_monitors(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -27225,6 +27230,753 @@ fn cmd_datausage(args: &str) {
     }
 }
 
+/// `mousesettings` / `mouse` — mouse pointer and button settings.
+fn cmd_mousesettings(args: &str) {
+    use crate::fs::mousesettings;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (devices, speed, accel, left, natural, ops) = mousesettings::stats();
+            shell_println!("=== Mouse Settings ===");
+            shell_println!("  Devices        : {}", devices);
+            shell_println!("  Speed          : {}", speed);
+            shell_println!("  Acceleration   : {}", accel);
+            shell_println!("  Left-handed    : {}", left);
+            shell_println!("  Natural scroll : {}", natural);
+            shell_println!("  Operations     : {}", ops);
+            if let Ok(cfg) = mousesettings::config() {
+                shell_println!("  Scroll speed   : {}", cfg.scroll_speed);
+                shell_println!("  Scroll method  : {}", cfg.scroll_method.label());
+                shell_println!("  Double-click   : {} ms", cfg.double_click_ms);
+                shell_println!("  Scroll lines   : {}", cfg.scroll_lines);
+            }
+        }
+        "speed" => {
+            if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match mousesettings::set_speed(val) {
+                    Ok(()) => shell_println!("Speed set to {}.", val),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: mouse speed <1-20>");
+            }
+        }
+        "accel" => {
+            match parts.get(1).copied() {
+                Some("flat") => { let _ = mousesettings::set_accel_profile(mousesettings::AccelProfile::Flat); shell_println!("Acceleration: Flat"); }
+                Some("adaptive") => { let _ = mousesettings::set_accel_profile(mousesettings::AccelProfile::Adaptive); shell_println!("Acceleration: Adaptive"); }
+                Some(v) => {
+                    if let Ok(f) = v.parse::<u32>() {
+                        match mousesettings::set_accel_factor(f) {
+                            Ok(()) => shell_println!("Acceleration factor: {}", f),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: mouse accel <flat|adaptive|0-10>");
+                    }
+                }
+                None => shell_println!("Usage: mouse accel <flat|adaptive|0-10>"),
+            }
+        }
+        "lefthanded" => {
+            let val = matches!(parts.get(1).copied(), Some("on") | Some("yes") | Some("true"));
+            let _ = mousesettings::set_left_handed(val);
+            shell_println!("Left-handed: {}", val);
+        }
+        "natural" => {
+            let val = matches!(parts.get(1).copied(), Some("on") | Some("yes") | Some("true"));
+            let _ = mousesettings::set_natural_scroll(val);
+            shell_println!("Natural scroll: {}", val);
+        }
+        "scroll" => {
+            match parts.get(1).copied() {
+                Some("wheel") => { let _ = mousesettings::set_scroll_method(mousesettings::ScrollMethod::Wheel); shell_println!("Scroll: Wheel"); }
+                Some("smooth") => { let _ = mousesettings::set_scroll_method(mousesettings::ScrollMethod::Smooth); shell_println!("Scroll: Smooth"); }
+                Some("none") | Some("off") => { let _ = mousesettings::set_scroll_method(mousesettings::ScrollMethod::None); shell_println!("Scroll: Disabled"); }
+                Some(v) => {
+                    if let Ok(s) = v.parse::<u32>() {
+                        match mousesettings::set_scroll_speed(s) {
+                            Ok(()) => shell_println!("Scroll speed: {}", s),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: mouse scroll <wheel|smooth|none|1-20>");
+                    }
+                }
+                None => shell_println!("Usage: mouse scroll <wheel|smooth|none|speed>"),
+            }
+        }
+        "dblclick" => {
+            if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match mousesettings::set_double_click_ms(val) {
+                    Ok(()) => shell_println!("Double-click interval: {} ms", val),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: mouse dblclick <100-1000>");
+            }
+        }
+        "devices" => {
+            let devices = mousesettings::list_devices();
+            if devices.is_empty() {
+                shell_println!("No mouse devices registered.");
+            } else {
+                for d in &devices {
+                    let status = if d.connected { "connected" } else { "disconnected" };
+                    let wireless = if d.wireless { format!(" wireless batt={}%", d.battery_pct) } else { String::new() };
+                    shell_println!("  [{}] {} — {} buttons, {} DPI, {}{}", d.id, d.name, d.buttons, d.dpi, status, wireless);
+                }
+            }
+        }
+        "stats" => {
+            let (devices, speed, accel, left, natural, ops) = mousesettings::stats();
+            shell_println!("Mouse stats: devices={} speed={} accel={} left={} natural={} ops={}", devices, speed, accel, left, natural, ops);
+        }
+        "test" => {
+            mousesettings::self_test();
+            shell_println!("mousesettings: self-tests completed (see serial).");
+        }
+        "init" => {
+            mousesettings::init_defaults();
+            shell_println!("Mouse settings initialized.");
+        }
+        _ => {
+            shell_println!("mousesettings (mouse) — mouse settings");
+            shell_println!("  show               Current settings");
+            shell_println!("  speed <1-20>       Set pointer speed");
+            shell_println!("  accel <flat|adaptive|0-10>  Acceleration");
+            shell_println!("  lefthanded <on|off>  Swap buttons");
+            shell_println!("  natural <on|off>   Natural scrolling");
+            shell_println!("  scroll <wheel|smooth|none|speed>  Scroll");
+            shell_println!("  dblclick <ms>      Double-click interval");
+            shell_println!("  devices            List mouse devices");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `touchpad` / `tpad` — touchpad settings and gestures.
+fn cmd_touchpad(args: &str) {
+    use crate::fs::touchpad;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (devices, gestures, tap, natural, sens, ops) = touchpad::stats();
+            shell_println!("=== Touchpad Settings ===");
+            shell_println!("  Devices        : {}", devices);
+            shell_println!("  Gestures       : {}", gestures);
+            shell_println!("  Tap to click   : {}", tap);
+            shell_println!("  Natural scroll : {}", natural);
+            shell_println!("  Sensitivity    : {}", sens);
+            shell_println!("  Operations     : {}", ops);
+            if let Ok(cfg) = touchpad::config() {
+                shell_println!("  Enabled        : {}", cfg.enabled);
+                shell_println!("  Scroll method  : {}", cfg.scroll_method.label());
+                shell_println!("  Click method   : {}", cfg.click_method.label());
+                shell_println!("  Disable typing : {}", cfg.disable_while_typing);
+                shell_println!("  Palm rejection : {}", cfg.palm_rejection);
+                shell_println!("  Drag lock      : {}", cfg.drag_lock);
+            }
+        }
+        "on" => {
+            let _ = touchpad::set_enabled(true);
+            shell_println!("Touchpad enabled.");
+        }
+        "off" => {
+            let _ = touchpad::set_enabled(false);
+            shell_println!("Touchpad disabled.");
+        }
+        "tap" => {
+            let val = !matches!(parts.get(1).copied(), Some("off") | Some("no") | Some("false"));
+            let _ = touchpad::set_tap_to_click(val);
+            shell_println!("Tap to click: {}", val);
+        }
+        "natural" => {
+            let val = !matches!(parts.get(1).copied(), Some("off") | Some("no") | Some("false"));
+            let _ = touchpad::set_natural_scroll(val);
+            shell_println!("Natural scroll: {}", val);
+        }
+        "sensitivity" | "sens" => {
+            if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match touchpad::set_sensitivity(val) {
+                    Ok(()) => shell_println!("Sensitivity: {}", val),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: touchpad sensitivity <1-20>");
+            }
+        }
+        "scroll" => {
+            match parts.get(1).copied() {
+                Some("twofinger") | Some("2f") => { let _ = touchpad::set_scroll_method(touchpad::TouchScrollMethod::TwoFinger); shell_println!("Scroll: Two-finger"); }
+                Some("edge") => { let _ = touchpad::set_scroll_method(touchpad::TouchScrollMethod::Edge); shell_println!("Scroll: Edge"); }
+                Some("none") | Some("off") => { let _ = touchpad::set_scroll_method(touchpad::TouchScrollMethod::None); shell_println!("Scroll: Disabled"); }
+                _ => shell_println!("Usage: touchpad scroll <twofinger|edge|none>"),
+            }
+        }
+        "click" => {
+            match parts.get(1).copied() {
+                Some("areas") => { let _ = touchpad::set_click_method(touchpad::ClickMethod::ButtonAreas); shell_println!("Click: Button Areas"); }
+                Some("finger") => { let _ = touchpad::set_click_method(touchpad::ClickMethod::ClickFinger); shell_println!("Click: Click Finger"); }
+                Some("none") => { let _ = touchpad::set_click_method(touchpad::ClickMethod::None); shell_println!("Click: None"); }
+                _ => shell_println!("Usage: touchpad click <areas|finger|none>"),
+            }
+        }
+        "palm" => {
+            match parts.get(1).copied() {
+                Some("on") | Some("yes") => { let _ = touchpad::set_palm_rejection(true); shell_println!("Palm rejection: on"); }
+                Some("off") | Some("no") => { let _ = touchpad::set_palm_rejection(false); shell_println!("Palm rejection: off"); }
+                Some(v) => {
+                    if let Ok(s) = v.parse::<u32>() {
+                        match touchpad::set_palm_sensitivity(s) {
+                            Ok(()) => shell_println!("Palm sensitivity: {}", s),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Usage: touchpad palm <on|off|1-10>");
+                    }
+                }
+                None => shell_println!("Usage: touchpad palm <on|off|1-10>"),
+            }
+        }
+        "gestures" => {
+            let gestures = touchpad::list_gestures();
+            if gestures.is_empty() {
+                shell_println!("No gestures configured.");
+            } else {
+                shell_println!("{:<25} {:<20} {:>7}", "GESTURE", "ACTION", "ENABLED");
+                for g in &gestures {
+                    shell_println!("{:<25} {:<20} {:>7}", g.gesture.label(), g.action.label(), g.enabled);
+                }
+            }
+        }
+        "typing" => {
+            let val = !matches!(parts.get(1).copied(), Some("off") | Some("no") | Some("false"));
+            let _ = touchpad::set_disable_while_typing(val);
+            shell_println!("Disable while typing: {}", val);
+        }
+        "stats" => {
+            let (devices, gestures, tap, natural, sens, ops) = touchpad::stats();
+            shell_println!("Touchpad stats: devices={} gestures={} tap={} natural={} sens={} ops={}", devices, gestures, tap, natural, sens, ops);
+        }
+        "test" => {
+            touchpad::self_test();
+            shell_println!("touchpad: self-tests completed (see serial).");
+        }
+        "init" => {
+            touchpad::init_defaults();
+            shell_println!("Touchpad settings initialized.");
+        }
+        _ => {
+            shell_println!("touchpad (tpad) — touchpad settings");
+            shell_println!("  show                  Current settings");
+            shell_println!("  on / off              Enable/disable");
+            shell_println!("  tap <on|off>          Tap to click");
+            shell_println!("  natural <on|off>      Natural scrolling");
+            shell_println!("  sensitivity <1-20>    Sensitivity");
+            shell_println!("  scroll <twofinger|edge|none>  Scroll method");
+            shell_println!("  click <areas|finger|none>     Click method");
+            shell_println!("  palm <on|off|1-10>    Palm rejection");
+            shell_println!("  gestures              List gesture bindings");
+            shell_println!("  typing <on|off>       Disable while typing");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `powerprofile` / `pprofile` — power profiles management.
+fn cmd_powerprofile(args: &str) {
+    use crate::fs::powerprofile;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (count, active, switches, batt_pct, batt_state, ops) = powerprofile::stats();
+            shell_println!("=== Power Profiles ===");
+            shell_println!("  Active         : {}", active);
+            shell_println!("  Profiles       : {}", count);
+            shell_println!("  Switches       : {}", switches);
+            shell_println!("  Battery        : {}% ({})", batt_pct, batt_state);
+            shell_println!("  CPU governor   : {}", powerprofile::active_cpu_governor().label());
+            shell_println!("  Reduce bg      : {}", powerprofile::should_reduce_background());
+            shell_println!("  No animations  : {}", powerprofile::should_disable_animations());
+            shell_println!("  Operations     : {}", ops);
+        }
+        "list" => {
+            let profiles = powerprofile::list_profiles();
+            let active_name = powerprofile::active_profile_name();
+            for p in &profiles {
+                let active = if p.name == active_name { " *" } else { "" };
+                shell_println!("  {} [{}] cpu={} max={}% boost={} bright={}%{}",
+                    p.name, p.profile_type.label(), p.cpu_governor.label(),
+                    p.cpu_max_pct, p.cpu_boost, p.brightness_pct, active);
+            }
+        }
+        "balanced" => {
+            match powerprofile::set_profile("Balanced") {
+                Ok(()) => shell_println!("Switched to Balanced."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "performance" | "perf" => {
+            match powerprofile::set_profile("Performance") {
+                Ok(()) => shell_println!("Switched to Performance."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "powersaver" | "saver" => {
+            match powerprofile::set_profile("Power Saver") {
+                Ok(()) => shell_println!("Switched to Power Saver."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "set" => {
+            if let Some(name) = parts.get(1) {
+                match powerprofile::set_profile(name) {
+                    Ok(()) => shell_println!("Switched to {}.", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: powerprofile set <name>");
+            }
+        }
+        "create" => {
+            if let Some(name) = parts.get(1) {
+                match powerprofile::create_profile(name) {
+                    Ok(()) => shell_println!("Created profile '{}'.", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: powerprofile create <name>");
+            }
+        }
+        "remove" | "rm" => {
+            if let Some(name) = parts.get(1) {
+                match powerprofile::remove_profile(name) {
+                    Ok(()) => shell_println!("Removed profile '{}'.", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: powerprofile remove <name>");
+            }
+        }
+        "battery" | "batt" => {
+            let bi = powerprofile::battery_info();
+            shell_println!("Battery: {}% — {}", bi.charge_pct, bi.state.label());
+            if bi.minutes_remaining > 0 {
+                shell_println!("  Remaining: {} min", bi.minutes_remaining);
+            }
+            shell_println!("  Health: {}%  Cycles: {}", bi.health_pct, bi.cycle_count);
+        }
+        "brightness" | "bright" => {
+            if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match powerprofile::set_brightness(val) {
+                    Ok(()) => shell_println!("Brightness: {}%", val),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: powerprofile brightness <1-100>");
+            }
+        }
+        "boost" => {
+            let val = !matches!(parts.get(1).copied(), Some("off") | Some("no") | Some("false"));
+            let _ = powerprofile::set_cpu_boost(val);
+            shell_println!("CPU boost: {}", val);
+        }
+        "autoswitch" => {
+            match parts.get(1).copied() {
+                Some("on") | Some("yes") => { let _ = powerprofile::set_auto_switch(true); shell_println!("Auto-switch: on"); }
+                Some("off") | Some("no") => { let _ = powerprofile::set_auto_switch(false); shell_println!("Auto-switch: off"); }
+                Some(v) => {
+                    if let Ok(pct) = v.parse::<u8>() {
+                        let _ = powerprofile::set_auto_switch_threshold(pct);
+                        shell_println!("Auto-switch threshold: {}%", pct);
+                    } else {
+                        shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>");
+                    }
+                }
+                None => shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>"),
+            }
+        }
+        "stats" => {
+            let (count, active, switches, batt, bstate, ops) = powerprofile::stats();
+            shell_println!("Power stats: profiles={} active={} switches={} battery={}% ({}) ops={}", count, active, switches, batt, bstate, ops);
+        }
+        "test" => {
+            powerprofile::self_test();
+            shell_println!("powerprofile: self-tests completed (see serial).");
+        }
+        "init" => {
+            powerprofile::init_defaults();
+            shell_println!("Power profiles initialized.");
+        }
+        _ => {
+            shell_println!("powerprofile (pprofile) — power profiles");
+            shell_println!("  show                  Current profile info");
+            shell_println!("  list                  List all profiles");
+            shell_println!("  balanced              Switch to Balanced");
+            shell_println!("  performance           Switch to Performance");
+            shell_println!("  powersaver            Switch to Power Saver");
+            shell_println!("  set <name>            Switch to named profile");
+            shell_println!("  create <name>         Create custom profile");
+            shell_println!("  remove <name>         Remove custom profile");
+            shell_println!("  battery               Battery info");
+            shell_println!("  brightness <1-100>    Set brightness");
+            shell_println!("  boost <on|off>        CPU boost");
+            shell_println!("  autoswitch <on|off|%> Auto-switch settings");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `defaultapps` / `defapp` — default application management.
+fn cmd_defaultapps(args: &str) {
+    use crate::fs::defaultapps;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (types, cats, overrides, ops) = defaultapps::stats();
+            shell_println!("=== Default Applications ===");
+            shell_println!("  Type mappings    : {}", types);
+            shell_println!("  Category defaults: {}", cats);
+            shell_println!("  User overrides   : {}", overrides);
+            shell_println!("  Operations       : {}", ops);
+        }
+        "list" => {
+            let cats = defaultapps::list_category_defaults(0);
+            if cats.is_empty() {
+                shell_println!("No category defaults configured.");
+            } else {
+                shell_println!("{:<20} {}", "CATEGORY", "APPLICATION");
+                for cd in &cats {
+                    shell_println!("{:<20} {}", cd.category.label(), cd.app_id);
+                }
+            }
+        }
+        "get" => {
+            if let Some(mime) = parts.get(1) {
+                let uid: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                match defaultapps::default_for_type(mime, uid) {
+                    Some(app) => shell_println!("{} → {}", mime, app),
+                    None => shell_println!("No default for '{}'", mime),
+                }
+            } else {
+                shell_println!("Usage: defaultapps get <mime_type> [uid]");
+            }
+        }
+        "set" => {
+            // defapp set <mime> <app> [uid]
+            if parts.len() >= 3 {
+                let mime = parts[1];
+                let app = parts[2];
+                let uid: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                match defaultapps::set_default(mime, app, uid) {
+                    Ok(()) => shell_println!("{} → {}", mime, app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: defaultapps set <mime> <app> [uid]");
+            }
+        }
+        "rm" | "remove" => {
+            if let Some(mime) = parts.get(1) {
+                let uid: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                match defaultapps::remove_default(mime, uid) {
+                    Ok(()) => shell_println!("Removed default for '{}'", mime),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: defaultapps rm <mime> [uid]");
+            }
+        }
+        "category" | "cat" => {
+            // defapp category <cat> <app> [uid]
+            if parts.len() >= 3 {
+                let cat_name = parts[1];
+                let app = parts[2];
+                let uid: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let cat = match cat_name {
+                    "browser" | "web" => Some(defaultapps::AppCategory::WebBrowser),
+                    "email" | "mail" => Some(defaultapps::AppCategory::EmailClient),
+                    "files" | "filemgr" => Some(defaultapps::AppCategory::FileManager),
+                    "editor" | "text" => Some(defaultapps::AppCategory::TextEditor),
+                    "terminal" | "term" => Some(defaultapps::AppCategory::Terminal),
+                    "image" | "viewer" => Some(defaultapps::AppCategory::ImageViewer),
+                    "video" => Some(defaultapps::AppCategory::VideoPlayer),
+                    "music" | "audio" => Some(defaultapps::AppCategory::MusicPlayer),
+                    "pdf" => Some(defaultapps::AppCategory::PdfViewer),
+                    "archive" | "zip" => Some(defaultapps::AppCategory::ArchiveManager),
+                    _ => None,
+                };
+                match cat {
+                    Some(c) => match defaultapps::set_category_default(c, app, uid) {
+                        Ok(()) => shell_println!("{} → {}", c.label(), app),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    },
+                    None => shell_println!("Unknown category '{}'. Try: browser email files editor terminal image video music pdf archive", cat_name),
+                }
+            } else {
+                shell_println!("Usage: defaultapps category <type> <app> [uid]");
+            }
+        }
+        "search" => {
+            if let Some(query) = parts.get(1) {
+                let results = defaultapps::search(query);
+                if results.is_empty() {
+                    shell_println!("No matches for '{}'.", query);
+                } else {
+                    for d in &results {
+                        let user = if d.user_override { format!(" (user {})", d.uid) } else { String::new() };
+                        shell_println!("  {} → {}{}", d.content_type, d.app_id, user);
+                    }
+                }
+            } else {
+                shell_println!("Usage: defaultapps search <query>");
+            }
+        }
+        "stats" => {
+            let (types, cats, overrides, ops) = defaultapps::stats();
+            shell_println!("Default apps stats: types={} categories={} overrides={} ops={}", types, cats, overrides, ops);
+        }
+        "test" => {
+            defaultapps::self_test();
+            shell_println!("defaultapps: self-tests completed (see serial).");
+        }
+        "init" => {
+            defaultapps::init_defaults();
+            shell_println!("Default apps initialized.");
+        }
+        _ => {
+            shell_println!("defaultapps (defapp) — default applications");
+            shell_println!("  show                       Overview");
+            shell_println!("  list                       Category defaults");
+            shell_println!("  get <mime> [uid]           Get default for type");
+            shell_println!("  set <mime> <app> [uid]     Set default for type");
+            shell_println!("  rm <mime> [uid]            Remove default");
+            shell_println!("  category <cat> <app> [uid] Set category default");
+            shell_println!("  search <query>             Search mappings");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `monitors` / `monitor` — multi-monitor layout and configuration.
+fn cmd_monitors(args: &str) {
+    use crate::fs::monitors;
+    use alloc::format;
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "show" | "" => {
+            let (total, enabled, mode, primary_id, ops) = monitors::stats();
+            let (bx, by, bw, bh) = monitors::desktop_bounds();
+            shell_println!("=== Monitor Layout ===");
+            shell_println!("  Monitors  : {} ({} enabled)", total, enabled);
+            shell_println!("  Layout    : {}", mode);
+            shell_println!("  Primary   : #{}", primary_id);
+            shell_println!("  Desktop   : {}x{} at ({},{})", bw, bh, bx, by);
+            shell_println!("  Operations: {}", ops);
+
+            let mons = monitors::list_monitors();
+            for m in &mons {
+                let flags = format!("{}{}",
+                    if m.primary { " [primary]" } else { "" },
+                    if !m.enabled { " [disabled]" } else { "" });
+                shell_println!("  #{} {} — {}x{}@{}Hz pos=({},{}) scale={}% {} rot={}{}",
+                    m.id, m.name, m.width, m.height, m.refresh_hz,
+                    m.x, m.y, m.scale_pct, m.connector.label(),
+                    m.rotation.label(), flags);
+            }
+        }
+        "list" => {
+            let mons = monitors::list_monitors();
+            for m in &mons {
+                let p = if m.primary { "*" } else { " " };
+                shell_println!("{} #{} {} — {}x{}@{}Hz {}", p, m.id, m.name, m.width, m.height, m.refresh_hz, m.connector.label());
+            }
+        }
+        "primary" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match monitors::set_primary(id) {
+                    Ok(()) => shell_println!("Primary display: #{}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors primary <id>");
+            }
+        }
+        "add" => {
+            // monitors add <name> <connector> <output> <width> <height> <hz>
+            if parts.len() >= 7 {
+                let name = parts[1];
+                let conn = match parts[2] {
+                    "hdmi" => monitors::ConnectorType::HDMI,
+                    "dp" => monitors::ConnectorType::DisplayPort,
+                    "vga" => monitors::ConnectorType::VGA,
+                    "dvi" => monitors::ConnectorType::DVI,
+                    "usbc" => monitors::ConnectorType::USBC,
+                    _ => monitors::ConnectorType::HDMI,
+                };
+                let output = parts[3];
+                let w: u32 = parts[4].parse().unwrap_or(1920);
+                let h: u32 = parts[5].parse().unwrap_or(1080);
+                let hz: u32 = parts[6].parse().unwrap_or(60);
+                match monitors::add_monitor(name, conn, output, w, h, hz) {
+                    Ok(id) => shell_println!("Added monitor #{}: {} {}x{}@{}Hz", id, name, w, h, hz),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors add <name> <hdmi|dp|vga|dvi|usbc> <output> <w> <h> <hz>");
+            }
+        }
+        "rm" | "remove" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match monitors::remove_monitor(id) {
+                    Ok(()) => shell_println!("Removed monitor #{}", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors rm <id>");
+            }
+        }
+        "mode" | "res" => {
+            // monitors mode <id> <w> <h> [hz]
+            if parts.len() >= 4 {
+                let id: u32 = parts[1].parse().unwrap_or(0);
+                let w: u32 = parts[2].parse().unwrap_or(0);
+                let h: u32 = parts[3].parse().unwrap_or(0);
+                let hz: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(60);
+                match monitors::set_mode(id, w, h, hz) {
+                    Ok(()) => shell_println!("Monitor #{}: {}x{}@{}Hz", id, w, h, hz),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors mode <id> <width> <height> [hz]");
+            }
+        }
+        "pos" | "position" => {
+            if parts.len() >= 4 {
+                let id: u32 = parts[1].parse().unwrap_or(0);
+                let x: i32 = parts[2].parse().unwrap_or(0);
+                let y: i32 = parts[3].parse().unwrap_or(0);
+                match monitors::set_position(id, x, y) {
+                    Ok(()) => shell_println!("Monitor #{}: position ({},{})", id, x, y),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors pos <id> <x> <y>");
+            }
+        }
+        "scale" => {
+            if parts.len() >= 3 {
+                let id: u32 = parts[1].parse().unwrap_or(0);
+                let pct: u32 = parts[2].parse().unwrap_or(100);
+                match monitors::set_scale(id, pct) {
+                    Ok(()) => shell_println!("Monitor #{}: scale {}%", id, pct),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors scale <id> <pct>");
+            }
+        }
+        "rotate" => {
+            if parts.len() >= 3 {
+                let id: u32 = parts[1].parse().unwrap_or(0);
+                let rot = match parts[2] {
+                    "normal" | "0" => monitors::Rotation::Normal,
+                    "right" | "90" => monitors::Rotation::Right,
+                    "inverted" | "180" => monitors::Rotation::Inverted,
+                    "left" | "270" => monitors::Rotation::Left,
+                    _ => monitors::Rotation::Normal,
+                };
+                match monitors::set_rotation(id, rot) {
+                    Ok(()) => shell_println!("Monitor #{}: rotation {}", id, rot.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors rotate <id> <normal|right|inverted|left>");
+            }
+        }
+        "layout" => {
+            match parts.get(1).copied() {
+                Some("extend") => { let _ = monitors::set_layout_mode(monitors::LayoutMode::Extend); shell_println!("Layout: Extend"); }
+                Some("mirror") => { let _ = monitors::set_layout_mode(monitors::LayoutMode::Mirror); shell_println!("Layout: Mirror"); }
+                Some("single") => { let _ = monitors::set_layout_mode(monitors::LayoutMode::Single); shell_println!("Layout: Single"); }
+                _ => shell_println!("Usage: monitors layout <extend|mirror|single>"),
+            }
+        }
+        "arrange" => {
+            match monitors::auto_arrange() {
+                Ok(()) => shell_println!("Monitors auto-arranged."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                let _ = monitors::set_enabled(id, true);
+                shell_println!("Monitor #{} enabled.", id);
+            } else {
+                shell_println!("Usage: monitors enable <id>");
+            }
+        }
+        "disable" => {
+            if let Some(id) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                match monitors::set_enabled(id, false) {
+                    Ok(()) => shell_println!("Monitor #{} disabled.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: monitors disable <id>");
+            }
+        }
+        "stats" => {
+            let (total, enabled, mode, primary, ops) = monitors::stats();
+            shell_println!("Monitor stats: total={} enabled={} mode={} primary={} ops={}", total, enabled, mode, primary, ops);
+        }
+        "test" => {
+            monitors::self_test();
+            shell_println!("monitors: self-tests completed (see serial).");
+        }
+        "init" => {
+            monitors::init_defaults();
+            shell_println!("Monitor layout initialized.");
+        }
+        _ => {
+            shell_println!("monitors (monitor) — multi-monitor layout");
+            shell_println!("  show                        Layout overview");
+            shell_println!("  list                        List monitors");
+            shell_println!("  primary <id>                Set primary");
+            shell_println!("  add <name> <conn> <out> <w> <h> <hz>  Add monitor");
+            shell_println!("  rm <id>                     Remove monitor");
+            shell_println!("  mode <id> <w> <h> [hz]      Set resolution");
+            shell_println!("  pos <id> <x> <y>            Set position");
+            shell_println!("  scale <id> <pct>            Set scale %");
+            shell_println!("  rotate <id> <dir>           Rotate display");
+            shell_println!("  layout <extend|mirror|single>  Layout mode");
+            shell_println!("  arrange                     Auto-arrange");
+            shell_println!("  enable/disable <id>");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -35821,7 +36573,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

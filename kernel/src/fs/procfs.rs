@@ -224,6 +224,11 @@ const ROOT_FILES: &[&str] = &[
     "printmgr",
     "screenrec",
     "datausage",
+    "mousesettings",
+    "touchpad",
+    "powerprofile",
+    "defaultapps",
+    "monitors",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5013,6 +5018,119 @@ fn gen_datausage() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_mousesettings() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (devices, speed, accel, left, natural, ops) = super::mousesettings::stats();
+    out.push_str(&format!("devices: {}\n", devices));
+    out.push_str(&format!("speed: {}\n", speed));
+    out.push_str(&format!("accel_profile: {}\n", accel));
+    out.push_str(&format!("left_handed: {}\n", left));
+    out.push_str(&format!("natural_scroll: {}\n", natural));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Ok(cfg) = super::mousesettings::config() {
+        out.push_str(&format!("accel_factor: {}\n", cfg.accel_factor));
+        out.push_str(&format!("scroll_speed: {}\n", cfg.scroll_speed));
+        out.push_str(&format!("scroll_method: {}\n", cfg.scroll_method.label()));
+        out.push_str(&format!("double_click_ms: {}\n", cfg.double_click_ms));
+        out.push_str(&format!("scroll_lines: {}\n", cfg.scroll_lines));
+        out.push_str(&format!("middle_click_paste: {}\n", cfg.middle_click_paste));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_touchpad() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (devices, gestures, tap, natural, sens, ops) = super::touchpad::stats();
+    out.push_str(&format!("devices: {}\n", devices));
+    out.push_str(&format!("gestures: {}\n", gestures));
+    out.push_str(&format!("tap_to_click: {}\n", tap));
+    out.push_str(&format!("natural_scroll: {}\n", natural));
+    out.push_str(&format!("sensitivity: {}\n", sens));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    if let Ok(cfg) = super::touchpad::config() {
+        out.push_str(&format!("enabled: {}\n", cfg.enabled));
+        out.push_str(&format!("scroll_method: {}\n", cfg.scroll_method.label()));
+        out.push_str(&format!("click_method: {}\n", cfg.click_method.label()));
+        out.push_str(&format!("disable_while_typing: {}\n", cfg.disable_while_typing));
+        out.push_str(&format!("palm_rejection: {}\n", cfg.palm_rejection));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_powerprofile() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (count, active, switches, batt_pct, batt_state, ops) = super::powerprofile::stats();
+    out.push_str(&format!("profiles: {}\n", count));
+    out.push_str(&format!("active: {}\n", active));
+    out.push_str(&format!("switches: {}\n", switches));
+    out.push_str(&format!("battery_pct: {}\n", batt_pct));
+    out.push_str(&format!("battery_state: {}\n", batt_state));
+    out.push_str(&format!("reduce_background: {}\n", super::powerprofile::should_reduce_background()));
+    out.push_str(&format!("disable_animations: {}\n", super::powerprofile::should_disable_animations()));
+    out.push_str(&format!("cpu_governor: {}\n", super::powerprofile::active_cpu_governor().label()));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_defaultapps() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (types, cats, overrides, ops) = super::defaultapps::stats();
+    out.push_str(&format!("type_mappings: {}\n", types));
+    out.push_str(&format!("category_defaults: {}\n", cats));
+    out.push_str(&format!("user_overrides: {}\n", overrides));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let cat_defaults = super::defaultapps::list_category_defaults(0);
+    if !cat_defaults.is_empty() {
+        out.push_str("categories:\n");
+        for cd in &cat_defaults {
+            out.push_str(&format!("  {}: {}\n", cd.category.label(), cd.app_id));
+        }
+    }
+
+    out.into_bytes()
+}
+
+fn gen_monitors() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (total, enabled, mode, primary_id, ops) = super::monitors::stats();
+    out.push_str(&format!("monitors: {}\n", total));
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("layout_mode: {}\n", mode));
+    out.push_str(&format!("primary_id: {}\n", primary_id));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let (bx, by, bw, bh) = super::monitors::desktop_bounds();
+    out.push_str(&format!("desktop: {}x{} at ({},{})\n", bw, bh, bx, by));
+
+    let monitors = super::monitors::list_monitors();
+    for m in &monitors {
+        let primary = if m.primary { " [primary]" } else { "" };
+        let enabled_str = if m.enabled { "" } else { " [disabled]" };
+        out.push_str(&format!("{}: {} {}x{}@{}Hz pos=({},{}) scale={}% {}{}{}\n",
+            m.id, m.name, m.width, m.height, m.refresh_hz,
+            m.x, m.y, m.scale_pct,
+            m.connector.label(), primary, enabled_str));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5402,6 +5520,11 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "printmgr" => Ok(gen_printmgr()),
         "screenrec" => Ok(gen_screenrec()),
         "datausage" => Ok(gen_datausage()),
+        "mousesettings" => Ok(gen_mousesettings()),
+        "touchpad" => Ok(gen_touchpad()),
+        "powerprofile" => Ok(gen_powerprofile()),
+        "defaultapps" => Ok(gen_defaultapps()),
+        "monitors" => Ok(gen_monitors()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -1,6 +1,19 @@
 //! C standard library conversion functions.
 //!
-//! Implements `atoi`, `atol`, `strtol`, `strtoul`, `abs`, `labs`.
+//! Implements integer and floating-point conversion, absolute value,
+//! integer division structs, sorting, searching, random numbers, and
+//! temporary file creation.
+//!
+//! ## Functions
+//!
+//! - `atoi`, `atol` — quick string→integer
+//! - `strtol`, `strtoul`, `strtoll`, `strtoull` — full string→integer
+//! - `strtod`, `strtof` — string→floating-point
+//! - `abs`, `labs`, `llabs` — absolute value
+//! - `div`, `ldiv`, `lldiv` — integer division with quotient/remainder
+//! - `qsort`, `bsearch` — array sorting/searching
+//! - `srand`, `rand`, `rand_r` — pseudo-random numbers
+//! - `mkstemp`, `tmpfile` — temporary file creation
 //!
 //! These are not strictly POSIX but are required by virtually every
 //! C program and are part of the C standard library.
@@ -185,6 +198,193 @@ pub unsafe extern "C" fn strtoul(
     result
 }
 
+/// Convert a C string to a long long integer (`strtoll`).
+///
+/// Identical to `strtol` — on our platform `long long` and `long`
+/// are both 64-bit.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtoll(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+) -> i64 {
+    unsafe { strtol(nptr, endptr, base) }
+}
+
+/// Convert a C string to an unsigned long long integer (`strtoull`).
+///
+/// Identical to `strtoul` — on our platform `unsigned long long` and
+/// `unsigned long` are both 64-bit.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtoull(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+) -> u64 {
+    unsafe { strtoul(nptr, endptr, base) }
+}
+
+// ---------------------------------------------------------------------------
+// Floating-point conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a C string to a double (`strtod`).
+///
+/// Parses decimal floating-point strings of the form:
+///   `[whitespace][sign]digits[.digits][e[sign]digits]`
+///
+/// Does NOT support hex floats, INF, or NAN literals.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn strtod(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+) -> f64 {
+    if nptr.is_null() {
+        if !endptr.is_null() {
+            unsafe { *endptr = nptr; }
+        }
+        return 0.0;
+    }
+
+    let mut i: usize = 0;
+
+    // Skip whitespace.
+    while is_space(unsafe { *nptr.add(i) }) {
+        i = i.wrapping_add(1);
+    }
+
+    // Sign.
+    let negative = unsafe { *nptr.add(i) } == b'-';
+    if negative || unsafe { *nptr.add(i) } == b'+' {
+        i = i.wrapping_add(1);
+    }
+
+    let start = i;
+
+    // Integer part.
+    let mut int_part: f64 = 0.0;
+    while (unsafe { *nptr.add(i) }).is_ascii_digit() {
+        int_part = int_part * 10.0 + f64::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0'));
+        i = i.wrapping_add(1);
+    }
+
+    // Fractional part.
+    let mut frac_part: f64 = 0.0;
+    if unsafe { *nptr.add(i) } == b'.' {
+        i = i.wrapping_add(1);
+        let mut divisor: f64 = 10.0;
+        while (unsafe { *nptr.add(i) }).is_ascii_digit() {
+            frac_part += f64::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0')) / divisor;
+            divisor *= 10.0;
+            i = i.wrapping_add(1);
+        }
+    }
+
+    // If no digits were parsed, endptr points to start.
+    if i == start {
+        if !endptr.is_null() {
+            unsafe { *endptr = nptr; }
+        }
+        return 0.0;
+    }
+
+    let mut result = int_part + frac_part;
+
+    // Exponent part.
+    let c = unsafe { *nptr.add(i) };
+    if c == b'e' || c == b'E' {
+        i = i.wrapping_add(1);
+        let exp_neg = unsafe { *nptr.add(i) } == b'-';
+        if exp_neg || unsafe { *nptr.add(i) } == b'+' {
+            i = i.wrapping_add(1);
+        }
+
+        let mut exp_val: i32 = 0;
+        while (unsafe { *nptr.add(i) }).is_ascii_digit() {
+            exp_val = exp_val
+                .saturating_mul(10)
+                .saturating_add(i32::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0')));
+            i = i.wrapping_add(1);
+        }
+
+        if exp_neg {
+            exp_val = exp_val.saturating_neg();
+        }
+
+        result *= pow10(exp_val);
+    }
+
+    if !endptr.is_null() {
+        unsafe { *endptr = nptr.add(i); }
+    }
+
+    if negative { -result } else { result }
+}
+
+/// Convert a C string to a float (`strtof`).
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtof(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+) -> f32 {
+    unsafe { strtod(nptr, endptr) as f32 }
+}
+
+/// Convert a C string to a double (`atof`).
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn atof(nptr: *const u8) -> f64 {
+    unsafe { strtod(nptr, core::ptr::null_mut()) }
+}
+
+/// Compute 10^exp using repeated multiplication.
+///
+/// Handles both positive and negative exponents.
+#[allow(clippy::arithmetic_side_effects)]
+fn pow10(mut exp: i32) -> f64 {
+    if exp == 0 {
+        return 1.0;
+    }
+    let neg = exp < 0;
+    if neg {
+        exp = exp.saturating_neg();
+    }
+
+    let mut result: f64 = 1.0;
+    let mut base: f64 = 10.0;
+    let mut e = exp;
+    // Repeated squaring for efficiency.
+    while e > 0 {
+        if e & 1 == 1 {
+            result *= base;
+        }
+        base *= base;
+        e >>= 1;
+    }
+
+    if neg { 1.0 / result } else { result }
+}
+
 // ---------------------------------------------------------------------------
 // Absolute value
 // ---------------------------------------------------------------------------
@@ -199,6 +399,87 @@ pub extern "C" fn abs(j: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn labs(j: i64) -> i64 {
     if j < 0 { j.saturating_neg() } else { j }
+}
+
+/// Compute absolute value of a long long integer.
+///
+/// On our platform `long long` = `i64`, same as `labs`.
+#[unsafe(no_mangle)]
+pub extern "C" fn llabs(j: i64) -> i64 {
+    if j < 0 { j.saturating_neg() } else { j }
+}
+
+// ---------------------------------------------------------------------------
+// Integer division
+// ---------------------------------------------------------------------------
+
+/// Result of integer division (`div_t`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DivT {
+    /// Quotient.
+    pub quot: i32,
+    /// Remainder.
+    pub rem: i32,
+}
+
+/// Result of long integer division (`ldiv_t`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LdivT {
+    /// Quotient.
+    pub quot: i64,
+    /// Remainder.
+    pub rem: i64,
+}
+
+/// Result of long long integer division (`lldiv_t`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LldivT {
+    /// Quotient.
+    pub quot: i64,
+    /// Remainder.
+    pub rem: i64,
+}
+
+/// Compute quotient and remainder simultaneously.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn div(numer: i32, denom: i32) -> DivT {
+    if denom == 0 {
+        return DivT { quot: 0, rem: 0 };
+    }
+    DivT {
+        quot: numer / denom,
+        rem: numer % denom,
+    }
+}
+
+/// Compute quotient and remainder for long integers.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn ldiv(numer: i64, denom: i64) -> LdivT {
+    if denom == 0 {
+        return LdivT { quot: 0, rem: 0 };
+    }
+    LdivT {
+        quot: numer / denom,
+        rem: numer % denom,
+    }
+}
+
+/// Compute quotient and remainder for long long integers.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn lldiv(numer: i64, denom: i64) -> LldivT {
+    if denom == 0 {
+        return LldivT { quot: 0, rem: 0 };
+    }
+    LldivT {
+        quot: numer / denom,
+        rem: numer % denom,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +626,27 @@ pub extern "C" fn rand() -> i32 {
     unsafe { core::ptr::addr_of_mut!(RAND_STATE).write(new_state); }
     // Return upper 31 bits as a non-negative i32.
     ((new_state >> 33) & 0x7FFF_FFFF) as i32
+}
+
+/// Thread-safe pseudo-random number generator.
+///
+/// Uses caller-provided state instead of the global `RAND_STATE`.
+/// The algorithm matches glibc's LCG for compatibility.
+///
+/// # Safety
+///
+/// `seed` must point to a valid `u32`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
+    if seed.is_null() {
+        return 0;
+    }
+    // Use a 32-bit LCG: state = state * 1103515245 + 12345 (POSIX spec).
+    let state = unsafe { *seed };
+    let new_state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+    unsafe { *seed = new_state; }
+    // Return upper bits as a non-negative i32.
+    ((new_state >> 1) & 0x7FFF_FFFF) as i32
 }
 
 /// Maximum value returned by rand().

@@ -5,11 +5,12 @@
 //! these are correct reference implementations.
 //!
 //! Includes: `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`,
-//! `memrchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strcpy`,
-//! `strncpy`, `stpcpy`, `stpncpy`, `strchr`, `strrchr`, `strcat`,
-//! `strncat`, `strstr`, `strspn`, `strcspn`, `strpbrk`, `strtok`,
-//! `strsep`, `strerror`, `strdup`, `strndup`, `bcopy`, `bzero`,
-//! `strcasecmp`, `strncasecmp`
+//! `memrchr`, `memccpy`, `strlen`, `strnlen`, `strcmp`, `strncmp`,
+//! `strcpy`, `strncpy`, `stpcpy`, `stpncpy`, `strchr`, `strrchr`,
+//! `strcat`, `strncat`, `strstr`, `strspn`, `strcspn`, `strpbrk`,
+//! `strtok`, `strtok_r`, `strsep`, `strerror`, `strerror_r`,
+//! `strdup`, `strndup`, `bcopy`, `bzero`, `strcasecmp`, `strncasecmp`,
+//! `strcoll`, `strxfrm`, `strverscmp`
 //!
 //! Exported as `extern "C"` with standard names so the linker finds
 //! them when C code calls `memcpy`, `memset`, `strlen`, etc.
@@ -898,4 +899,156 @@ pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
     // would handle embedded numbers, but this matches the common
     // usage pattern as a strcmp variant.
     unsafe { strcmp(s1, s2) }
+}
+
+/// Reentrant string tokenizer.
+///
+/// Like `strtok`, but uses caller-provided `saveptr` instead of a
+/// static variable, making it thread-safe.
+///
+/// # Safety
+///
+/// `s` (if non-null) and `delim` must be valid null-terminated strings.
+/// `saveptr` must point to a valid `*mut u8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtok_r(
+    s: *mut u8,
+    delim: *const u8,
+    saveptr: *mut *mut u8,
+) -> *mut u8 {
+    if saveptr.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    let start = if s.is_null() {
+        let p = unsafe { *saveptr };
+        if p.is_null() {
+            return core::ptr::null_mut();
+        }
+        p
+    } else {
+        s
+    };
+
+    // Skip leading delimiters.
+    let mut i: usize = 0;
+    loop {
+        let c = unsafe { *start.add(i) };
+        if c == 0 {
+            unsafe { *saveptr = core::ptr::null_mut(); }
+            return core::ptr::null_mut();
+        }
+        if !unsafe { is_delim(c, delim) } {
+            break;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    let token = unsafe { start.add(i) };
+
+    // Find end of token.
+    let mut k: usize = 0;
+    loop {
+        let c = unsafe { *token.add(k) };
+        if c == 0 {
+            unsafe { *saveptr = core::ptr::null_mut(); }
+            return token;
+        }
+        if unsafe { is_delim(c, delim) } {
+            unsafe { *token.add(k) = 0; }
+            unsafe { *saveptr = token.add(k.wrapping_add(1)); }
+            return token;
+        }
+        k = k.wrapping_add(1);
+    }
+}
+
+/// Copy bytes until a given byte is found, or `n` bytes have been copied.
+///
+/// Copies from `src` to `dest`, stopping after the first occurrence
+/// of byte `c` (which IS copied), or after `n` bytes.  Returns a
+/// pointer to the byte after `c` in `dest`, or NULL if `c` was not
+/// found in the first `n` bytes.
+///
+/// # Safety
+///
+/// `dest` must be valid for `n` bytes.  `src` must be valid for `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memccpy(
+    dest: *mut u8,
+    src: *const u8,
+    c: i32,
+    n: usize,
+) -> *mut u8 {
+    let val = c as u8;
+    let mut i: usize = 0;
+    while i < n {
+        let byte = unsafe { *src.add(i) };
+        unsafe { *dest.add(i) = byte; }
+        if byte == val {
+            return unsafe { dest.add(i.wrapping_add(1)) };
+        }
+        i = i.wrapping_add(1);
+    }
+    core::ptr::null_mut()
+}
+
+/// Locale-aware string comparison.
+///
+/// Since we don't have locale support, this is identical to `strcmp`.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcoll(s1: *const u8, s2: *const u8) -> i32 {
+    unsafe { strcmp(s1, s2) }
+}
+
+/// Transform a string for locale-aware comparison.
+///
+/// Copies at most `n` bytes of `src` into `dest` in a form such that
+/// `strcmp` on two transformed strings gives the same result as `strcoll`
+/// on the originals.  Since we have no locale, this is just `strncpy`.
+///
+/// Returns the length of the transformed string (not counting null).
+///
+/// # Safety
+///
+/// `dest` must be valid for `n` bytes.  `src` must be null-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strxfrm(dest: *mut u8, src: *const u8, n: usize) -> usize {
+    let len = unsafe { strlen(src) };
+    if n > 0 {
+        unsafe { strncpy(dest, src, n); }
+    }
+    len
+}
+
+/// Thread-safe version of `strerror`.
+///
+/// Copies the error description into the user-provided buffer.
+/// Returns 0 on success, or `ERANGE` if the buffer is too small.
+///
+/// # Safety
+///
+/// `buf` must be valid for `buflen` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) -> i32 {
+    if buf.is_null() || buflen == 0 {
+        return crate::errno::ERANGE;
+    }
+
+    let msg = strerror(errnum);
+    let msg_len = unsafe { strlen(msg) };
+    let copy_len = if msg_len < buflen { msg_len } else { buflen.wrapping_sub(1) };
+
+    unsafe { memcpy(buf, msg, copy_len); }
+    unsafe { *buf.add(copy_len) = 0; }
+
+    if msg_len >= buflen {
+        crate::errno::ERANGE
+    } else {
+        0
+    }
 }

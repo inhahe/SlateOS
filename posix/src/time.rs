@@ -1,8 +1,9 @@
 //! POSIX time functions.
 //!
-//! Implements `sleep`, `nanosleep`, `clock_gettime`, `gettimeofday`,
-//! `time`, `difftime`, `localtime`, `gmtime`, `mktime`, `asctime`,
-//! `ctime`, `strftime`.
+//! Implements `sleep`, `nanosleep`, `usleep`, `clock_gettime`,
+//! `clock_getres`, `clock`, `gettimeofday`, `time`, `difftime`,
+//! `localtime`, `gmtime`, `mktime`, `asctime`, `ctime`, `strftime`,
+//! `strptime`.
 //!
 //! ## Timezone
 //!
@@ -670,4 +671,182 @@ fn write_dec4(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
     let p2 = write_char(buf, limit, p3, d2);
     let p1 = write_char(buf, limit, p2, d1);
     write_char(buf, limit, p1, d0)
+}
+
+// ---------------------------------------------------------------------------
+// clock — CPU time
+// ---------------------------------------------------------------------------
+
+/// `CLOCKS_PER_SEC` for the `clock()` function.
+///
+/// POSIX requires this to be 1,000,000.
+#[unsafe(no_mangle)]
+pub static CLOCKS_PER_SEC: i64 = 1_000_000;
+
+/// Return an approximation of CPU time used by the process.
+///
+/// Returns microseconds elapsed since an arbitrary point (we use
+/// `CLOCK_MONOTONIC` as a proxy since we don't track per-process
+/// CPU time yet).  Returns -1 on failure.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn clock() -> i64 {
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    if clock_gettime(CLOCK_MONOTONIC, &raw mut ts) != 0 {
+        return -1;
+    }
+    // Convert to microseconds (CLOCKS_PER_SEC = 1_000_000).
+    ts.tv_sec * 1_000_000 + ts.tv_nsec / 1_000
+}
+
+// ---------------------------------------------------------------------------
+// strptime — parse time strings
+// ---------------------------------------------------------------------------
+
+/// Parse a time string according to a format.
+///
+/// Inverse of `strftime`.  Reads from `buf` according to `format`,
+/// filling fields in `tm`.  Returns a pointer to the first character
+/// not consumed, or NULL if the input doesn't match.
+///
+/// Supports: `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%j`, `%n`, `%t`, `%%`.
+///
+/// # Safety
+///
+/// `buf` and `format` must be valid null-terminated strings.
+/// `tm` must point to a valid `Tm`.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn strptime(
+    buf: *const u8,
+    format: *const u8,
+    tm: *mut Tm,
+) -> *const u8 {
+    if buf.is_null() || format.is_null() || tm.is_null() {
+        return core::ptr::null();
+    }
+
+    let mut bi: usize = 0; // Index into buf.
+    let mut fi: usize = 0; // Index into format.
+
+    loop {
+        let fc = unsafe { *format.add(fi) };
+        if fc == 0 {
+            // End of format — success. Return pointer to remaining input.
+            return unsafe { buf.add(bi) };
+        }
+
+        if fc == b'%' {
+            fi = fi.wrapping_add(1);
+            let spec = unsafe { *format.add(fi) };
+            if spec == 0 {
+                return core::ptr::null();
+            }
+            fi = fi.wrapping_add(1);
+
+            match spec {
+                b'Y' => {
+                    // 4-digit year.
+                    let (val, consumed) = parse_int(buf, bi, 4);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_year = val - 1900; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'm' => {
+                    // Month 01-12.
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_mon = val - 1; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'd' => {
+                    // Day 01-31.
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_mday = val; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'H' => {
+                    // Hour 00-23.
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_hour = val; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'M' => {
+                    // Minute 00-59.
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_min = val; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'S' => {
+                    // Second 00-60.
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_sec = val; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'j' => {
+                    // Day of year 001-366.
+                    let (val, consumed) = parse_int(buf, bi, 3);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_yday = val - 1; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'n' | b't' => {
+                    // Skip any whitespace.
+                    while (unsafe { *buf.add(bi) }) == b' '
+                        || (unsafe { *buf.add(bi) }) == b'\t'
+                    {
+                        bi = bi.wrapping_add(1);
+                    }
+                }
+                b'%' => {
+                    // Literal %.
+                    if unsafe { *buf.add(bi) } != b'%' {
+                        return core::ptr::null();
+                    }
+                    bi = bi.wrapping_add(1);
+                }
+                _ => {
+                    // Unknown specifier — fail.
+                    return core::ptr::null();
+                }
+            }
+        } else if fc == b' ' || fc == b'\t' {
+            // Whitespace in format matches any amount of whitespace in buf.
+            while (unsafe { *buf.add(bi) }) == b' '
+                || (unsafe { *buf.add(bi) }) == b'\t'
+            {
+                bi = bi.wrapping_add(1);
+            }
+            fi = fi.wrapping_add(1);
+        } else {
+            // Literal character — must match.
+            if unsafe { *buf.add(bi) } != fc {
+                return core::ptr::null();
+            }
+            bi = bi.wrapping_add(1);
+            fi = fi.wrapping_add(1);
+        }
+    }
+}
+
+/// Parse up to `max_digits` decimal digits from `buf` starting at offset `off`.
+///
+/// Returns (value, number_of_digits_consumed).
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_int(buf: *const u8, off: usize, max_digits: usize) -> (i32, usize) {
+    let mut val: i32 = 0;
+    let mut count: usize = 0;
+    while count < max_digits {
+        let c = unsafe { *buf.add(off.wrapping_add(count)) };
+        if !c.is_ascii_digit() {
+            break;
+        }
+        val = val * 10 + i32::from(c.wrapping_sub(b'0'));
+        count = count.wrapping_add(1);
+    }
+    (val, count)
 }

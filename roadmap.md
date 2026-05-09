@@ -880,6 +880,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] statvfs: statvfs/fstatvfs with reasonable defaults (10 GiB total, 1 GiB free, 4K blocks)
   - [x] wait: C-callable WIFEXITED/WEXITSTATUS/WIFSIGNALED/WTERMSIG/WIFSTOPPED/WSTOPSIG/WCOREDUMP, WNOHANG/WUNTRACED/WCONTINUED constants
   - [x] math: fabs, floor, ceil, round, trunc, fmod, sqrt (Newton-Raphson), exp/exp2, log/log2/log10, pow (integer fast-path + exp*log), sin/cos/tan (Taylor series), atan2, frexp/ldexp/modf, isnan/isinf/isfinite, copysign, fmin/fmax, and f32 variants — all software implementations for no_std
+  - [x] stdlib additions: strtod/strtof/atof (float parsing with exponent support), strtoll/strtoull (64-bit integer parsing), llabs, div/ldiv/lldiv (quotient+remainder structs), rand_r (reentrant PRNG)
+  - [x] string additions: strtok_r (reentrant tokenizer), memccpy (copy-until-byte), strcoll/strxfrm (locale stubs), strerror_r (thread-safe error strings)
+  - [x] time additions: clock (CPU time via CLOCK_MONOTONIC proxy), strptime (parse time strings — %Y/%m/%d/%H/%M/%S/%j/%n/%t/%%), CLOCKS_PER_SEC
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

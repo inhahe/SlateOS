@@ -289,6 +289,10 @@ const ROOT_FILES: &[&str] = &[
     "quicksettings",
     "volumeosd",
     "netdiag",
+    "sharesheet",
+    "oobe",
+    "hdrdisplay",
+    "surroundsound",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6112,6 +6116,53 @@ fn gen_netdiag() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sharesheet() -> Vec<u8> {
+    use alloc::format;
+    use super::sharesheet;
+    let (target_count, total_shares, ops) = sharesheet::stats();
+    let mut out = String::from("target_count: ");
+    out.push_str(&format!("{}\n", target_count));
+    out.push_str(&format!("total_shares: {}\n", total_shares));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_oobe() -> Vec<u8> {
+    use alloc::format;
+    use super::oobe;
+    let (step, completed, skipped, ops) = oobe::stats();
+    let mut out = String::from("current_step: ");
+    out.push_str(&format!("{}\n", step));
+    out.push_str(&format!("completed: {}\n", completed));
+    out.push_str(&format!("skipped_count: {}\n", skipped));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_hdrdisplay() -> Vec<u8> {
+    use alloc::format;
+    use super::hdrdisplay;
+    let (display_count, hdr_enabled, total_switches, ops) = hdrdisplay::stats();
+    let mut out = String::from("display_count: ");
+    out.push_str(&format!("{}\n", display_count));
+    out.push_str(&format!("hdr_enabled_count: {}\n", hdr_enabled));
+    out.push_str(&format!("total_switches: {}\n", total_switches));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_surroundsound() -> Vec<u8> {
+    use alloc::format;
+    use super::surroundsound;
+    let (config_count, total_configs, total_cals, ops) = surroundsound::stats();
+    let mut out = String::from("config_count: ");
+    out.push_str(&format!("{}\n", config_count));
+    out.push_str(&format!("total_configs: {}\n", total_configs));
+    out.push_str(&format!("total_calibrations: {}\n", total_cals));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6566,6 +6617,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "quicksettings" => Ok(gen_quicksettings()),
         "volumeosd" => Ok(gen_volumeosd()),
         "netdiag" => Ok(gen_netdiag()),
+        "sharesheet" => Ok(gen_sharesheet()),
+        "oobe" => Ok(gen_oobe()),
+        "hdrdisplay" => Ok(gen_hdrdisplay()),
+        "surroundsound" => Ok(gen_surroundsound()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

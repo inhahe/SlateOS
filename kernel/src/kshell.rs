@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4893,6 +4893,10 @@ fn dispatch(line: &str) {
         "quicksettings" | "qs" => cmd_quicksettings(args),
         "volumeosd" | "vosd" => cmd_volumeosd(args),
         "netdiag" | "ndiag" => cmd_netdiag(args),
+        "sharesheet" | "ssheet" => cmd_sharesheet(args),
+        "oobe" | "setup" => cmd_oobe(args),
+        "hdrdisplay" | "hdr" => cmd_hdrdisplay(args),
+        "surroundsound" | "ssound" => cmd_surroundsound(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -35796,6 +35800,493 @@ fn cmd_netdiag(args: &str) {
     }
 }
 
+/// `sharesheet` / `ssheet` — cross-app content sharing.
+fn cmd_sharesheet(args: &str) {
+    use crate::fs::sharesheet;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            sharesheet::init_defaults();
+            shell_println!("Share sheet initialized");
+        }
+        "list" => {
+            let targets = sharesheet::list_targets();
+            if targets.is_empty() {
+                shell_println!("No share targets registered");
+            } else {
+                shell_println!("{:<4} {:<15} {:<20} {:<6} {}", "ID", "App", "Display Name", "Uses", "Types");
+                for t in &targets {
+                    let types: Vec<&str> = t.supported_types.iter().map(|ct| ct.label()).collect();
+                    shell_println!("{:<4} {:<15} {:<20} {:<6} {}", t.id, t.app_name, t.display_name, t.use_count, types.join(", "));
+                }
+            }
+        }
+        "targets" => {
+            let ct = match parts.get(1).copied().unwrap_or("text") {
+                "url" => sharesheet::ContentType::Url,
+                "image" | "img" => sharesheet::ContentType::Image,
+                "file" => sharesheet::ContentType::File,
+                "video" => sharesheet::ContentType::Video,
+                "audio" => sharesheet::ContentType::Audio,
+                "contact" => sharesheet::ContentType::Contact,
+                "location" | "loc" => sharesheet::ContentType::Location,
+                _ => sharesheet::ContentType::Text,
+            };
+            let targets = sharesheet::get_targets(ct);
+            if targets.is_empty() {
+                shell_println!("No targets for {}", ct.label());
+            } else {
+                shell_println!("Targets for {}:", ct.label());
+                for t in &targets {
+                    shell_println!("  #{}: {} (uses: {})", t.id, t.display_name, t.use_count);
+                }
+            }
+        }
+        "share" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: sharesheet share <target_id> <data...>");
+                return;
+            }
+            let tid: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid target ID"); return; }
+            };
+            let data: String = parts[2..].join(" ");
+            match sharesheet::share_to(tid, sharesheet::ContentType::Text, &data) {
+                Ok(aid) => shell_println!("Shared action #{} to target #{}", aid, tid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "register" => {
+            let name = parts.get(1).copied().unwrap_or("custom");
+            let display = parts.get(2).copied().unwrap_or(name);
+            match sharesheet::register_target(name, display, alloc::vec![sharesheet::ContentType::Text, sharesheet::ContentType::Url]) {
+                Ok(id) => shell_println!("Registered target #{}: {}", id, display),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unregister" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid target ID"); return; }
+            };
+            match sharesheet::unregister_target(id) {
+                Ok(()) => shell_println!("Unregistered target #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "history" => {
+            let count: usize = parts.get(1).unwrap_or(&"10").parse().unwrap_or(10);
+            let history = sharesheet::list_history(count);
+            if history.is_empty() {
+                shell_println!("No share history");
+            } else {
+                for h in &history {
+                    shell_println!("  #{}: {} → {} ({})", h.id, h.content_type.label(), h.target_name, h.data_preview);
+                }
+            }
+        }
+        "stats" => {
+            let (targets, shares, ops) = sharesheet::stats();
+            shell_println!("Targets: {}, Total shares: {}, Ops: {}", targets, shares, ops);
+        }
+        "test" => sharesheet::self_test(),
+        _ => {
+            shell_println!("Usage: sharesheet <command>");
+            shell_println!("  list                List all targets");
+            shell_println!("  targets [type]      Targets for content type");
+            shell_println!("  share <id> <data>   Share text to target");
+            shell_println!("  register <app> [name]  Register target");
+            shell_println!("  unregister <id>     Remove target");
+            shell_println!("  history [count]     Recent shares");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `oobe` / `setup` — out-of-box experience setup wizard.
+fn cmd_oobe(args: &str) {
+    use crate::fs::oobe;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            oobe::init_defaults();
+            shell_println!("OOBE initialized");
+        }
+        "status" => {
+            let step = oobe::current_step();
+            let completed = oobe::is_completed();
+            shell_println!("Current step: {} ({})", step.label(), step.step_number());
+            shell_println!("Completed: {}", completed);
+            let skipped = oobe::skipped_steps();
+            if !skipped.is_empty() {
+                let names: Vec<&str> = skipped.iter().map(|s| s.label()).collect();
+                shell_println!("Skipped: {}", names.join(", "));
+            }
+        }
+        "next" | "advance" => {
+            match oobe::advance() {
+                Ok(step) => shell_println!("Advanced to: {} (step {})", step.label(), step.step_number()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "back" => {
+            match oobe::go_back() {
+                Ok(step) => shell_println!("Went back to: {} (step {})", step.label(), step.step_number()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "skip" => {
+            match oobe::skip() {
+                Ok(step) => shell_println!("Skipped to: {} (step {})", step.label(), step.step_number()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "lang" => {
+            let language = parts.get(1).copied().unwrap_or("en-US");
+            let region = parts.get(2).copied().unwrap_or("US");
+            match oobe::set_language(language, region) {
+                Ok(()) => shell_println!("Language: {}, Region: {}", language, region),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "keyboard" | "kb" => {
+            let layout = parts.get(1).copied().unwrap_or("us");
+            match oobe::set_keyboard(layout) {
+                Ok(()) => shell_println!("Keyboard layout: {}", layout),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "user" => {
+            let username = parts.get(1).copied().unwrap_or("admin");
+            let hostname = parts.get(2).copied().unwrap_or("");
+            match oobe::set_user(username, hostname) {
+                Ok(()) => shell_println!("User: {}, Host: {}", username, if hostname.is_empty() { "(default)" } else { hostname }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "network" | "wifi" => {
+            let ssid = parts.get(1).copied().unwrap_or("");
+            match oobe::set_network(ssid) {
+                Ok(()) => shell_println!("WiFi SSID: {}", if ssid.is_empty() { "(none)" } else { ssid }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "privacy" => {
+            let diag = parts.get(1).copied().unwrap_or("off") == "on";
+            let loc = parts.get(2).copied().unwrap_or("off") == "on";
+            let upd = parts.get(3).copied().unwrap_or("on") == "on";
+            match oobe::set_privacy(diag, loc, upd) {
+                Ok(()) => shell_println!("Diagnostics: {}, Location: {}, Auto-updates: {}", diag, loc, upd),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "theme" => {
+            let t = parts.get(1).copied().unwrap_or("Default");
+            match oobe::set_theme(t) {
+                Ok(()) => shell_println!("Theme: {}", t),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "choices" => {
+            match oobe::get_choices() {
+                Some(c) => {
+                    shell_println!("Language: {} ({})", c.language, c.region);
+                    shell_println!("Keyboard: {}", c.keyboard_layout);
+                    shell_println!("User: {} @ {}", c.username, c.hostname);
+                    shell_println!("WiFi: {}", if c.wifi_ssid.is_empty() { "(none)" } else { &c.wifi_ssid });
+                    shell_println!("Diagnostics: {}, Location: {}, Updates: {}", c.send_diagnostics, c.location_services, c.auto_updates);
+                    shell_println!("Theme: {}", c.theme);
+                }
+                None => shell_println!("OOBE not initialized"),
+            }
+        }
+        "complete" => {
+            match oobe::force_complete() {
+                Ok(()) => shell_println!("OOBE force-completed"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (step, completed, skipped, ops) = oobe::stats();
+            shell_println!("Step: {}, Completed: {}, Skipped: {}, Ops: {}", step, completed, skipped, ops);
+        }
+        "test" => oobe::self_test(),
+        _ => {
+            shell_println!("Usage: oobe <command>");
+            shell_println!("  status              Current state");
+            shell_println!("  next / advance      Go to next step");
+            shell_println!("  back                Go to previous step");
+            shell_println!("  skip                Skip current step");
+            shell_println!("  lang <lang> [region] Set language");
+            shell_println!("  keyboard <layout>   Set keyboard");
+            shell_println!("  user <name> [host]  Set user account");
+            shell_println!("  network <ssid>      Set WiFi");
+            shell_println!("  privacy <d> <l> <u> Set privacy (on/off)");
+            shell_println!("  theme <name>        Set theme");
+            shell_println!("  choices             Show all choices");
+            shell_println!("  complete            Force complete");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `hdrdisplay` / `hdr` — HDR display management.
+fn cmd_hdrdisplay(args: &str) {
+    use crate::fs::hdrdisplay;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            hdrdisplay::init_defaults();
+            shell_println!("HDR display initialized");
+        }
+        "list" => {
+            let displays = hdrdisplay::list_displays();
+            if displays.is_empty() {
+                shell_println!("No HDR displays");
+            } else {
+                for d in &displays {
+                    let standards: Vec<&str> = d.supported_standards.iter().map(|s| s.label()).collect();
+                    shell_println!("#{}: {} [{}]", d.id, d.name, if d.hdr_enabled { d.active_standard.label() } else { "SDR" });
+                    shell_println!("    Peak: {} nits, Depth: {}-bit, Color: {}", d.peak_nits, d.bit_depth, d.color_space.label());
+                    shell_println!("    Tone map: {}, SDR boost: {}%, Supported: {}", d.tone_mapping.label(), d.sdr_boost, standards.join(", "));
+                }
+            }
+        }
+        "enable" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let std = match parts.get(2).copied().unwrap_or("hdr10") {
+                "hdr10plus" | "hdr10+" => hdrdisplay::HdrStandard::Hdr10Plus,
+                "dolbyvision" | "dv" => hdrdisplay::HdrStandard::DolbyVision,
+                "hlg" => hdrdisplay::HdrStandard::Hlg,
+                _ => hdrdisplay::HdrStandard::Hdr10,
+            };
+            match hdrdisplay::enable_hdr(id, std) {
+                Ok(()) => shell_println!("HDR enabled on display #{}: {}", id, std.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            match hdrdisplay::disable_hdr(id) {
+                Ok(()) => shell_println!("HDR disabled on display #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "tonemap" | "tm" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let tm = match parts.get(2).copied().unwrap_or("auto") {
+                "aces" | "filmic" => hdrdisplay::ToneMapping::AcesFilmic,
+                "reinhard" => hdrdisplay::ToneMapping::Reinhard,
+                "hable" => hdrdisplay::ToneMapping::Hable,
+                "none" | "off" => hdrdisplay::ToneMapping::None,
+                _ => hdrdisplay::ToneMapping::Auto,
+            };
+            match hdrdisplay::set_tone_mapping(id, tm) {
+                Ok(()) => shell_println!("Tone mapping: {}", tm.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "sdrboost" | "boost" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let boost: u32 = parts.get(2).unwrap_or(&"50").parse().unwrap_or(50);
+            match hdrdisplay::set_sdr_boost(id, boost) {
+                Ok(()) => shell_println!("SDR boost: {}%", boost.min(100)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "colorspace" | "cs" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid display ID"); return; }
+            };
+            let cs = match parts.get(2).copied().unwrap_or("srgb") {
+                "bt2020" | "2020" => hdrdisplay::ColorSpace::Bt2020,
+                "dcip3" | "p3" => hdrdisplay::ColorSpace::DciP3,
+                "adobergb" | "adobe" => hdrdisplay::ColorSpace::AdobeRgb,
+                _ => hdrdisplay::ColorSpace::Srgb,
+            };
+            match hdrdisplay::set_color_space(id, cs) {
+                Ok(()) => shell_println!("Color space: {}", cs.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "register" => {
+            let name = parts.get(1).copied().unwrap_or("Monitor");
+            let nits: u32 = parts.get(2).unwrap_or(&"1000").parse().unwrap_or(1000);
+            match hdrdisplay::register_display(name, nits, alloc::vec![hdrdisplay::HdrStandard::Hdr10, hdrdisplay::HdrStandard::Hlg]) {
+                Ok(id) => shell_println!("Registered display #{}: {} ({} nits)", id, name, nits),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, enabled, switches, ops) = hdrdisplay::stats();
+            shell_println!("Displays: {}, HDR enabled: {}, Switches: {}, Ops: {}", count, enabled, switches, ops);
+        }
+        "test" => hdrdisplay::self_test(),
+        _ => {
+            shell_println!("Usage: hdrdisplay <command>");
+            shell_println!("  list                   List displays");
+            shell_println!("  enable <id> [standard] Enable HDR");
+            shell_println!("  disable <id>           Disable HDR");
+            shell_println!("  tonemap <id> <algo>    Set tone mapping");
+            shell_println!("  sdrboost <id> <0-100>  SDR brightness boost");
+            shell_println!("  colorspace <id> <cs>   Set color space");
+            shell_println!("  register <name> [nits] Register display");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `surroundsound` / `ssound` — spatial audio and surround configuration.
+fn cmd_surroundsound(args: &str) {
+    use crate::fs::surroundsound;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "init" => {
+            surroundsound::init_defaults();
+            shell_println!("Surround sound initialized");
+        }
+        "list" => {
+            let configs = surroundsound::list_configs();
+            if configs.is_empty() {
+                shell_println!("No surround configs");
+            } else {
+                for c in &configs {
+                    shell_println!("#{}: {} — {} ({} channels)", c.id, c.device_name, c.layout.label(), c.layout.channel_count());
+                    shell_println!("    Virtual surround: {}, Crossover: {} Hz, LFE: {}", c.virtual_surround, c.crossover_hz, c.lfe_enabled);
+                    let speakers: Vec<&str> = c.speakers.iter().map(|s| s.channel.label()).collect();
+                    shell_println!("    Speakers: {}", speakers.join(", "));
+                }
+            }
+        }
+        "create" => {
+            let name = parts.get(1).copied().unwrap_or("Speaker");
+            let layout = match parts.get(2).copied().unwrap_or("stereo") {
+                "mono" | "1.0" => surroundsound::SpeakerLayout::Mono,
+                "2.1" => surroundsound::SpeakerLayout::Surround21,
+                "5.1" => surroundsound::SpeakerLayout::Surround51,
+                "7.1" => surroundsound::SpeakerLayout::Surround71,
+                "atmos" | "7.1.4" => surroundsound::SpeakerLayout::Atmos714,
+                _ => surroundsound::SpeakerLayout::Stereo,
+            };
+            match surroundsound::create_config(name, layout) {
+                Ok(id) => shell_println!("Created config #{}: {} ({})", id, name, layout.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "layout" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            let layout = match parts.get(2).copied().unwrap_or("stereo") {
+                "mono" | "1.0" => surroundsound::SpeakerLayout::Mono,
+                "2.1" => surroundsound::SpeakerLayout::Surround21,
+                "5.1" => surroundsound::SpeakerLayout::Surround51,
+                "7.1" => surroundsound::SpeakerLayout::Surround71,
+                "atmos" | "7.1.4" => surroundsound::SpeakerLayout::Atmos714,
+                _ => surroundsound::SpeakerLayout::Stereo,
+            };
+            match surroundsound::set_layout(id, layout) {
+                Ok(()) => shell_println!("Config #{} → {}", id, layout.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "calibrate" | "cal" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            let ch = match parts.get(2).copied().unwrap_or("center") {
+                "fl" | "frontleft" => surroundsound::SpeakerChannel::FrontLeft,
+                "fr" | "frontright" => surroundsound::SpeakerChannel::FrontRight,
+                "sub" | "subwoofer" => surroundsound::SpeakerChannel::Subwoofer,
+                "rl" | "rearleft" => surroundsound::SpeakerChannel::RearLeft,
+                "rr" | "rearright" => surroundsound::SpeakerChannel::RearRight,
+                "sl" | "sideleft" => surroundsound::SpeakerChannel::SideLeft,
+                "sr" | "sideright" => surroundsound::SpeakerChannel::SideRight,
+                _ => surroundsound::SpeakerChannel::Center,
+            };
+            let trim: i32 = parts.get(3).unwrap_or(&"0").parse().unwrap_or(0);
+            let dist: u32 = parts.get(4).unwrap_or(&"200").parse().unwrap_or(200);
+            match surroundsound::calibrate_speaker(id, ch, trim, dist) {
+                Ok(()) => shell_println!("Calibrated {} on #{}: trim={} cb, dist={} cm", ch.label(), id, trim.clamp(-600, 600), dist),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "virtual" | "vs" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            let enabled = parts.get(2).copied().unwrap_or("on") != "off";
+            match surroundsound::set_virtual_surround(id, enabled) {
+                Ok(()) => shell_println!("Virtual surround #{}: {}", id, if enabled { "on" } else { "off" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "crossover" | "xo" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            let hz: u32 = parts.get(2).unwrap_or(&"80").parse().unwrap_or(80);
+            match surroundsound::set_crossover(id, hz) {
+                Ok(()) => shell_println!("Crossover #{}: {} Hz", id, hz.clamp(40, 200)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid config ID"); return; }
+            };
+            match surroundsound::remove_config(id) {
+                Ok(()) => shell_println!("Removed config #{}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (configs, total, cals, ops) = surroundsound::stats();
+            shell_println!("Configs: {}, Total: {}, Calibrations: {}, Ops: {}", configs, total, cals, ops);
+        }
+        "test" => surroundsound::self_test(),
+        _ => {
+            shell_println!("Usage: surroundsound <command>");
+            shell_println!("  list                   List configs");
+            shell_println!("  create <name> <layout> Create config");
+            shell_println!("  layout <id> <layout>   Change layout");
+            shell_println!("  calibrate <id> <ch> <trim> <dist>");
+            shell_println!("  virtual <id> [on|off]  Virtual surround");
+            shell_println!("  crossover <id> <hz>    Set crossover freq");
+            shell_println!("  remove <id>            Remove config");
+            shell_println!("  Layouts: mono, stereo, 2.1, 5.1, 7.1, atmos");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -44392,7 +44883,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

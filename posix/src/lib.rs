@@ -102,6 +102,7 @@ pub mod locale;
 pub mod mman;
 pub mod pipe;
 pub mod poll;
+pub mod printf;
 pub mod pthread;
 pub mod process;
 pub mod pwd;

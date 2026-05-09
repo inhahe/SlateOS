@@ -791,6 +791,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Network shares (fs::netshare): SMB/NFS mount management with ShareProtocol (6 types), MountState tracking, auto-mount on login, I/O accounting, duplicate mount point rejection; `netshare`/`nshare` kshell command; /proc/netshare; 11 self-tests
   - [x] Startup repair (fs::startuprepair): boot diagnostics with CheckCategory (8 types), CheckResult (Pass/Warn/Fail/Repaired/Skipped), repair sessions, auto-repair on failed boot threshold, 7 standard checks; `startuprepair`/`srepair` kshell command; /proc/startuprepair; 11 self-tests
   - [x] Remote assist (fs::remoteassist): remote assistance sessions with AssistMode (ViewOnly/FullControl/PromptedControl), invitation code generation, helper connect, grant/revoke control, file transfer tracking, clipboard sharing; `remoteassist`/`rassist` kshell command; /proc/remoteassist; 11 self-tests
+  - [x] Task monitor (fs::taskmon): process monitoring with TaskState (5 states), TaskPriority (6 levels), per-task CPU/memory tracking, kill/suspend/resume, SystemResources summary, default kernel/init/kshell tasks; `taskmon`/`tmon` kshell command; /proc/taskmon; 11 self-tests
+  - [x] Print queue (fs::printqueue): print job queue with JobStatus (6 states), PageSize (6 types), multi-printer support, submit/cancel/complete jobs, pause/resume printer, clear completed; `printqueue`/`pqueue` kshell command; /proc/printqueue; 11 self-tests
+  - [x] Service manager (fs::servicemgr): system service lifecycle with ServiceState (6 states), StartupType (4 types), start/stop/restart, dependency tracking, auto-restart, find by name; `servicemgr`/`svcmgr` kshell command; /proc/servicemgr; 11 self-tests
+  - [x] Hardware monitor (fs::hwmonitor): sensor monitoring with SensorType (6 types), millidegree/millivolt integer precision, per-sensor min/max/threshold tracking, alert generation, inverted fan speed thresholds; `hwmonitor`/`hwmon` kshell command; /proc/hwmonitor; 11 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

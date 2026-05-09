@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4869,6 +4869,10 @@ fn dispatch(line: &str) {
         "netshare" | "nshare" => cmd_netshare(args),
         "startuprepair" | "srepair" => cmd_startuprepair(args),
         "remoteassist" | "rassist" => cmd_remoteassist(args),
+        "taskmon" | "tmon" => cmd_taskmon(args),
+        "printqueue" | "pqueue" => cmd_printqueue(args),
+        "servicemgr" | "svcmgr" => cmd_servicemgr(args),
+        "hwmonitor" | "hwmon" => cmd_hwmonitor(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -32849,6 +32853,525 @@ fn cmd_remoteassist(args: &str) {
     }
 }
 
+/// `taskmon` / `tmon` — process monitoring and task management.
+fn cmd_taskmon(args: &str) {
+    use crate::fs::taskmon;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            taskmon::init_defaults();
+            let tasks = taskmon::list_tasks();
+            if tasks.is_empty() {
+                shell_println!("No tasks.");
+            } else {
+                shell_println!("{:<6} {:<16} {:<10} {:<12} {:<8} {:<10} {:<8}", "PID", "Name", "State", "Priority", "CPU%", "Mem(KB)", "Threads");
+                for t in &tasks {
+                    let cpu_int = t.cpu_percent / 100;
+                    let cpu_frac = t.cpu_percent % 100;
+                    shell_println!("{:<6} {:<16} {:<10} {:<12} {}.{:02}    {:<10} {:<8}",
+                        t.pid, t.name, t.state.label(), t.priority.label(), cpu_int, cpu_frac, t.memory_kb, t.threads);
+                }
+            }
+            let res = taskmon::get_resources();
+            shell_println!("\nProcesses: {}, Threads: {}, Memory: {}/{} KB",
+                res.process_count, res.thread_count, res.used_memory_kb, res.total_memory_kb);
+        }
+        "kill" => {
+            if let Some(pid_str) = parts.get(1) {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    match taskmon::kill_task(pid) {
+                        Ok(()) => shell_println!("Killed task {}", pid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid PID."); }
+            } else { shell_println!("Usage: tmon kill <pid>"); }
+        }
+        "suspend" | "stop" => {
+            if let Some(pid_str) = parts.get(1) {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    match taskmon::suspend_task(pid) {
+                        Ok(()) => shell_println!("Suspended task {}", pid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid PID."); }
+            } else { shell_println!("Usage: tmon suspend <pid>"); }
+        }
+        "resume" => {
+            if let Some(pid_str) = parts.get(1) {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    match taskmon::resume_task(pid) {
+                        Ok(()) => shell_println!("Resumed task {}", pid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid PID."); }
+            } else { shell_println!("Usage: tmon resume <pid>"); }
+        }
+        "priority" | "prio" => {
+            let pid_str = parts.get(1).copied().unwrap_or("");
+            let prio_str = parts.get(2).copied().unwrap_or("");
+            if pid_str.is_empty() || prio_str.is_empty() {
+                shell_println!("Usage: tmon priority <pid> <realtime|high|normal|below|low|idle>");
+            } else if let Ok(pid) = pid_str.parse::<u32>() {
+                let prio = match prio_str {
+                    "realtime" | "rt" => taskmon::TaskPriority::RealTime,
+                    "high" | "h" => taskmon::TaskPriority::High,
+                    "normal" | "n" => taskmon::TaskPriority::Normal,
+                    "below" | "bn" => taskmon::TaskPriority::BelowNormal,
+                    "low" | "l" => taskmon::TaskPriority::Low,
+                    "idle" | "i" => taskmon::TaskPriority::Idle,
+                    _ => { shell_println!("Unknown priority: {}", prio_str); return; }
+                };
+                match taskmon::set_priority(pid, prio) {
+                    Ok(()) => shell_println!("Set PID {} priority to {}", pid, prio.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Invalid PID."); }
+        }
+        "register" | "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: tmon register <name> [parent_pid]");
+            } else {
+                let ppid = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                match taskmon::register_task(name, taskmon::TaskPriority::Normal, ppid, "user") {
+                    Ok(pid) => shell_println!("Registered '{}' as PID {}", name, pid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "info" => {
+            if let Some(pid_str) = parts.get(1) {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    match taskmon::get_task(pid) {
+                        Ok(t) => {
+                            shell_println!("PID {}:", t.pid);
+                            shell_println!("  Name:     {}", t.name);
+                            shell_println!("  State:    {}", t.state.label());
+                            shell_println!("  Priority: {}", t.priority.label());
+                            shell_println!("  CPU:      {}.{:02}%", t.cpu_percent / 100, t.cpu_percent % 100);
+                            shell_println!("  Memory:   {} KB", t.memory_kb);
+                            shell_println!("  Threads:  {}", t.threads);
+                            shell_println!("  Parent:   {}", t.parent_pid);
+                            shell_println!("  User:     {}", t.user);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid PID."); }
+            } else { shell_println!("Usage: tmon info <pid>"); }
+        }
+        "stats" => {
+            let (count, created, killed, suspended, ops) = taskmon::stats();
+            shell_println!("Tasks: {}, Created: {}, Killed: {}, Suspended: {}", count, created, killed, suspended);
+            shell_println!("Ops: {}", ops);
+        }
+        "test" => { taskmon::self_test(); shell_println!("Task monitor self-test complete."); }
+        "init" => { taskmon::init_defaults(); shell_println!("Task monitor initialized."); }
+        _ => {
+            shell_println!("taskmon (tmon) — process monitoring");
+            shell_println!("  show / list           List processes");
+            shell_println!("  info <pid>            Process details");
+            shell_println!("  kill <pid>            Kill process");
+            shell_println!("  suspend <pid>         Suspend process");
+            shell_println!("  resume <pid>          Resume process");
+            shell_println!("  priority <pid> <p>    Set priority");
+            shell_println!("  register <name>       Register task");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `printqueue` / `pqueue` — print job queue management.
+fn cmd_printqueue(args: &str) {
+    use crate::fs::printqueue;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "printers" => {
+            printqueue::init_defaults();
+            let printers = printqueue::list_printers();
+            if printers.is_empty() {
+                shell_println!("No printers.");
+            } else {
+                shell_println!("{:<4} {:<30} {:<8} {:<6}", "ID", "Name", "Paused", "Jobs");
+                for (id, name, paused, jobs) in &printers {
+                    shell_println!("{:<4} {:<30} {:<8} {:<6}", id, name, paused, jobs);
+                }
+            }
+        }
+        "jobs" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match printqueue::get_jobs(id) {
+                        Ok(jobs) => {
+                            if jobs.is_empty() {
+                                shell_println!("No jobs for printer {}.", id);
+                            } else {
+                                shell_println!("{:<4} {:<20} {:<10} {:<10} {:<6} {:<6}", "ID", "Document", "User", "Status", "Pages", "Copies");
+                                for j in &jobs {
+                                    shell_println!("{:<4} {:<20} {:<10} {:<10} {:<6} {:<6}",
+                                        j.id, j.document_name, j.user, j.status.label(), j.pages, j.copies);
+                                }
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid printer ID."); }
+            } else { shell_println!("Usage: pqueue jobs <printer_id>"); }
+        }
+        "add" | "addprinter" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: pqueue add <printer_name>");
+            } else {
+                match printqueue::add_printer(name) {
+                    Ok(id) => shell_println!("Added printer '{}' (id={})", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "submit" | "print" => {
+            let printer_str = parts.get(1).copied().unwrap_or("");
+            let doc = parts.get(2).copied().unwrap_or("document.pdf");
+            let pages_str = parts.get(3).copied().unwrap_or("1");
+            if printer_str.is_empty() {
+                shell_println!("Usage: pqueue submit <printer_id> [document] [pages]");
+            } else if let Ok(pid) = printer_str.parse::<u32>() {
+                let pages = pages_str.parse::<u32>().unwrap_or(1);
+                match printqueue::submit_job(pid, doc, "user", pages, 1, printqueue::PageSize::A4, false, false, 1024) {
+                    Ok(jid) => shell_println!("Submitted job {} to printer {}", jid, pid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Invalid printer ID."); }
+        }
+        "cancel" => {
+            let printer_str = parts.get(1).copied().unwrap_or("");
+            let job_str = parts.get(2).copied().unwrap_or("");
+            if printer_str.is_empty() || job_str.is_empty() {
+                shell_println!("Usage: pqueue cancel <printer_id> <job_id>");
+            } else if let (Ok(pid), Ok(jid)) = (printer_str.parse::<u32>(), job_str.parse::<u32>()) {
+                match printqueue::cancel_job(pid, jid) {
+                    Ok(()) => shell_println!("Cancelled job {}", jid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Invalid ID(s)."); }
+        }
+        "complete" => {
+            let printer_str = parts.get(1).copied().unwrap_or("");
+            let job_str = parts.get(2).copied().unwrap_or("");
+            if printer_str.is_empty() || job_str.is_empty() {
+                shell_println!("Usage: pqueue complete <printer_id> <job_id>");
+            } else if let (Ok(pid), Ok(jid)) = (printer_str.parse::<u32>(), job_str.parse::<u32>()) {
+                match printqueue::complete_job(pid, jid) {
+                    Ok(()) => shell_println!("Completed job {}", jid),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Invalid ID(s)."); }
+        }
+        "pause" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match printqueue::pause_printer(id) {
+                        Ok(()) => shell_println!("Paused printer {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: pqueue pause <printer_id>"); }
+        }
+        "resume" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match printqueue::resume_printer(id) {
+                        Ok(()) => shell_println!("Resumed printer {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: pqueue resume <printer_id>"); }
+        }
+        "clear" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match printqueue::clear_completed(id) {
+                        Ok(n) => shell_println!("Cleared {} completed jobs.", n),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: pqueue clear <printer_id>"); }
+        }
+        "stats" => {
+            let (printers, jobs, pages, active, ops) = printqueue::stats();
+            shell_println!("Printers: {}, Total jobs: {}, Total pages: {}", printers, jobs, pages);
+            shell_println!("Active jobs: {}, Ops: {}", active, ops);
+        }
+        "test" => { printqueue::self_test(); shell_println!("Print queue self-test complete."); }
+        "init" => { printqueue::init_defaults(); shell_println!("Print queue initialized."); }
+        _ => {
+            shell_println!("printqueue (pqueue) — print job queue");
+            shell_println!("  show / printers              List printers");
+            shell_println!("  jobs <printer_id>            List jobs");
+            shell_println!("  add <name>                   Add printer");
+            shell_println!("  submit <pid> [doc] [pages]   Submit job");
+            shell_println!("  cancel <pid> <jid>           Cancel job");
+            shell_println!("  complete <pid> <jid>         Complete job");
+            shell_println!("  pause / resume <pid>         Pause/resume");
+            shell_println!("  clear <pid>                  Clear done jobs");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `servicemgr` / `svcmgr` — system service management.
+fn cmd_servicemgr(args: &str) {
+    use crate::fs::servicemgr;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            servicemgr::init_defaults();
+            let services = servicemgr::list_services();
+            if services.is_empty() {
+                shell_println!("No services registered.");
+            } else {
+                shell_println!("{:<4} {:<16} {:<20} {:<10} {:<16}", "ID", "Name", "Display Name", "State", "Startup");
+                for s in &services {
+                    shell_println!("{:<4} {:<16} {:<20} {:<10} {:<16}",
+                        s.id, s.name, s.display_name, s.state.label(), s.startup_type.label());
+                }
+            }
+        }
+        "running" => {
+            let running = servicemgr::list_running();
+            if running.is_empty() {
+                shell_println!("No running services.");
+            } else {
+                for s in &running {
+                    shell_println!("  [{}] {} ({})", s.id, s.name, s.display_name);
+                }
+            }
+        }
+        "start" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match servicemgr::start_service(id) {
+                        Ok(()) => shell_println!("Started service {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: svcmgr start <id>"); }
+        }
+        "stop" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match servicemgr::stop_service(id) {
+                        Ok(()) => shell_println!("Stopped service {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: svcmgr stop <id>"); }
+        }
+        "restart" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match servicemgr::restart_service(id) {
+                        Ok(()) => shell_println!("Restarted service {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: svcmgr restart <id>"); }
+        }
+        "startup" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let type_str = parts.get(2).copied().unwrap_or("");
+            if id_str.is_empty() || type_str.is_empty() {
+                shell_println!("Usage: svcmgr startup <id> <auto|manual|disabled|delayed>");
+            } else if let Ok(id) = id_str.parse::<u32>() {
+                let st = match type_str {
+                    "auto" | "automatic" => servicemgr::StartupType::Automatic,
+                    "manual" => servicemgr::StartupType::Manual,
+                    "disabled" | "off" => servicemgr::StartupType::Disabled,
+                    "delayed" => servicemgr::StartupType::DelayedAutomatic,
+                    _ => { shell_println!("Unknown type: {}", type_str); return; }
+                };
+                match servicemgr::set_startup_type(id, st) {
+                    Ok(()) => shell_println!("Set startup type to {}", st.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Invalid ID."); }
+        }
+        "register" | "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let display = parts.get(2).copied().unwrap_or(name);
+            if name.is_empty() {
+                shell_println!("Usage: svcmgr register <name> [display_name]");
+            } else {
+                match servicemgr::register_service(name, display, "", servicemgr::StartupType::Manual) {
+                    Ok(id) => shell_println!("Registered service '{}' (id={})", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "info" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match servicemgr::get_service(id) {
+                        Ok(s) => {
+                            shell_println!("Service #{}", s.id);
+                            shell_println!("  Name:        {}", s.name);
+                            shell_println!("  Display:     {}", s.display_name);
+                            shell_println!("  Description: {}", if s.description.is_empty() { "(none)" } else { &s.description });
+                            shell_println!("  State:       {}", s.state.label());
+                            shell_println!("  Startup:     {}", s.startup_type.label());
+                            shell_println!("  PID:         {}", s.pid);
+                            shell_println!("  Restarts:    {}", s.restart_count);
+                            shell_println!("  Auto-restart: {}", s.auto_restart);
+                            if !s.depends_on.is_empty() {
+                                shell_println!("  Depends on: {:?}", s.depends_on);
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: svcmgr info <id>"); }
+        }
+        "find" => {
+            if let Some(name) = parts.get(1) {
+                match servicemgr::find_by_name(name) {
+                    Ok(s) => shell_println!("[{}] {} — {} ({})", s.id, s.name, s.state.label(), s.startup_type.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: svcmgr find <name>"); }
+        }
+        "stats" => {
+            let (total, running, starts, stops, failures, ops) = servicemgr::stats();
+            shell_println!("Services: {}, Running: {}", total, running);
+            shell_println!("Starts: {}, Stops: {}, Failures: {}, Ops: {}", starts, stops, failures, ops);
+        }
+        "test" => { servicemgr::self_test(); shell_println!("Service manager self-test complete."); }
+        "init" => { servicemgr::init_defaults(); shell_println!("Service manager initialized."); }
+        _ => {
+            shell_println!("servicemgr (svcmgr) — system service management");
+            shell_println!("  show / list            List services");
+            shell_println!("  running                Running services");
+            shell_println!("  info <id>              Service details");
+            shell_println!("  find <name>            Find by name");
+            shell_println!("  start / stop <id>      Start/stop");
+            shell_println!("  restart <id>           Restart service");
+            shell_println!("  startup <id> <type>    Set startup type");
+            shell_println!("  register <name>        Register service");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `hwmonitor` / `hwmon` — hardware monitoring.
+fn cmd_hwmonitor(args: &str) {
+    use crate::fs::hwmonitor;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "sensors" => {
+            hwmonitor::init_defaults();
+            let sensors = hwmonitor::list_sensors();
+            if sensors.is_empty() {
+                shell_println!("No sensors.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<12} {:<10} {:<8}", "ID", "Name", "Type", "Value", "Status");
+                for s in &sensors {
+                    let val_str = match s.sensor_type {
+                        hwmonitor::SensorType::Temperature => format!("{}.{} °C", s.value / 1000, (s.value % 1000) / 100),
+                        hwmonitor::SensorType::Voltage => format!("{}.{:03} V", s.value / 1000, s.value % 1000),
+                        hwmonitor::SensorType::Power => format!("{}.{} W", s.value / 1000, (s.value % 1000) / 100),
+                        _ => format!("{} {}", s.value, s.sensor_type.unit()),
+                    };
+                    shell_println!("{:<4} {:<20} {:<12} {:<10} {:<8}",
+                        s.id, s.name, s.sensor_type.label(), val_str, s.status.label());
+                }
+            }
+        }
+        "components" | "comp" => {
+            let comps = hwmonitor::list_components();
+            if comps.is_empty() {
+                shell_println!("No components.");
+            } else {
+                for c in &comps {
+                    shell_println!("[{}] {} ({}) — {} sensor(s)", c.id, c.name, c.component_type, c.sensors.len());
+                }
+            }
+        }
+        "alerts" => {
+            let limit = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+            let alerts = hwmonitor::get_alerts(limit);
+            if alerts.is_empty() {
+                shell_println!("No alerts.");
+            } else {
+                for a in &alerts {
+                    let level = if a.is_critical { "CRITICAL" } else { "WARNING" };
+                    shell_println!("  [{}] {} — value={}, threshold={}", level, a.sensor_name, a.value, a.threshold);
+                }
+            }
+        }
+        "clearalerts" => {
+            let n = hwmonitor::clear_alerts();
+            shell_println!("Cleared {} alert(s).", n);
+        }
+        "update" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let val_str = parts.get(2).copied().unwrap_or("");
+            if id_str.is_empty() || val_str.is_empty() {
+                shell_println!("Usage: hwmon update <sensor_id> <value>");
+            } else if let (Ok(id), Ok(val)) = (id_str.parse::<u32>(), val_str.parse::<i64>()) {
+                match hwmonitor::update_sensor(id, val) {
+                    Ok(Some(true)) => shell_println!("CRITICAL: Sensor {} value {} exceeds critical threshold!", id, val),
+                    Ok(Some(false)) => shell_println!("WARNING: Sensor {} value {} exceeds warning threshold.", id, val),
+                    Ok(None) => shell_println!("Sensor {} updated to {}. Status: Normal.", id, val),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Invalid arguments."); }
+        }
+        "info" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match hwmonitor::get_sensor(id) {
+                        Ok(s) => {
+                            shell_println!("Sensor #{}", s.id);
+                            shell_println!("  Name:     {}", s.name);
+                            shell_println!("  Type:     {}", s.sensor_type.label());
+                            shell_println!("  Value:    {} {}", s.value, s.sensor_type.unit());
+                            shell_println!("  Min:      {} {}", s.min_value, s.sensor_type.unit());
+                            shell_println!("  Max:      {} {}", s.max_value, s.sensor_type.unit());
+                            shell_println!("  Warning:  {}", s.warning_threshold);
+                            shell_println!("  Critical: {}", s.critical_threshold);
+                            shell_println!("  Status:   {}", s.status.label());
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: hwmon info <sensor_id>"); }
+        }
+        "stats" => {
+            let (sensors, components, readings, alerts, ops) = hwmonitor::stats();
+            shell_println!("Sensors: {}, Components: {}", sensors, components);
+            shell_println!("Readings: {}, Alerts: {}, Ops: {}", readings, alerts, ops);
+        }
+        "test" => { hwmonitor::self_test(); shell_println!("Hardware monitor self-test complete."); }
+        "init" => { hwmonitor::init_defaults(); shell_println!("Hardware monitor initialized."); }
+        _ => {
+            shell_println!("hwmonitor (hwmon) — hardware monitoring");
+            shell_println!("  show / sensors         List sensors");
+            shell_println!("  components             List components");
+            shell_println!("  info <id>              Sensor details");
+            shell_println!("  update <id> <value>    Update sensor");
+            shell_println!("  alerts [limit]         Show alerts");
+            shell_println!("  clearalerts            Clear alerts");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -41445,7 +41968,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

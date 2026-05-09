@@ -265,6 +265,10 @@ const ROOT_FILES: &[&str] = &[
     "netshare",
     "startuprepair",
     "remoteassist",
+    "taskmon",
+    "printqueue",
+    "servicemgr",
+    "hwmonitor",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5803,6 +5807,55 @@ fn gen_remoteassist() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_taskmon() -> Vec<u8> {
+    use crate::fs::taskmon;
+    let (task_count, total_created, total_killed, total_suspended, ops) = taskmon::stats();
+    let mut out = String::from("task_count: ");
+    out.push_str(&format!("{}\n", task_count));
+    out.push_str(&format!("total_created: {}\n", total_created));
+    out.push_str(&format!("total_killed: {}\n", total_killed));
+    out.push_str(&format!("total_suspended: {}\n", total_suspended));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_printqueue() -> Vec<u8> {
+    use crate::fs::printqueue;
+    let (printer_count, total_jobs, total_pages, active_jobs, ops) = printqueue::stats();
+    let mut out = String::from("printer_count: ");
+    out.push_str(&format!("{}\n", printer_count));
+    out.push_str(&format!("total_jobs: {}\n", total_jobs));
+    out.push_str(&format!("total_pages: {}\n", total_pages));
+    out.push_str(&format!("active_jobs: {}\n", active_jobs));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_servicemgr() -> Vec<u8> {
+    use crate::fs::servicemgr;
+    let (total_count, running_count, total_starts, total_stops, total_failures, ops) = servicemgr::stats();
+    let mut out = String::from("service_count: ");
+    out.push_str(&format!("{}\n", total_count));
+    out.push_str(&format!("running: {}\n", running_count));
+    out.push_str(&format!("total_starts: {}\n", total_starts));
+    out.push_str(&format!("total_stops: {}\n", total_stops));
+    out.push_str(&format!("total_failures: {}\n", total_failures));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_hwmonitor() -> Vec<u8> {
+    use crate::fs::hwmonitor;
+    let (sensor_count, component_count, total_readings, total_alerts, ops) = hwmonitor::stats();
+    let mut out = String::from("sensor_count: ");
+    out.push_str(&format!("{}\n", sensor_count));
+    out.push_str(&format!("component_count: {}\n", component_count));
+    out.push_str(&format!("total_readings: {}\n", total_readings));
+    out.push_str(&format!("total_alerts: {}\n", total_alerts));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6233,6 +6286,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "netshare" => Ok(gen_netshare()),
         "startuprepair" => Ok(gen_startuprepair()),
         "remoteassist" => Ok(gen_remoteassist()),
+        "taskmon" => Ok(gen_taskmon()),
+        "printqueue" => Ok(gen_printqueue()),
+        "servicemgr" => Ok(gen_servicemgr()),
+        "hwmonitor" => Ok(gen_hwmonitor()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

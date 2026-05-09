@@ -249,6 +249,10 @@ const ROOT_FILES: &[&str] = &[
     "dictation",
     "screenreader",
     "langpack",
+    "spellcheck",
+    "screentime",
+    "disksmart",
+    "magnifier",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5562,6 +5566,66 @@ fn gen_langpack() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_spellcheck() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (dicts, personal, checks, misspellings, corrections, ops) = super::spellcheck::stats();
+    out.push_str(&format!("dictionaries: {}\n", dicts));
+    out.push_str(&format!("personal_words: {}\n", personal));
+    out.push_str(&format!("total_checks: {}\n", checks));
+    out.push_str(&format!("misspellings: {}\n", misspellings));
+    out.push_str(&format!("corrections: {}\n", corrections));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_screentime() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (app_count, active_secs, idle_secs, switches, focus_events, ops) = super::screentime::stats();
+    out.push_str(&format!("tracked_apps: {}\n", app_count));
+    out.push_str(&format!("active_secs_today: {}\n", active_secs));
+    out.push_str(&format!("idle_secs_today: {}\n", idle_secs));
+    out.push_str(&format!("switches_today: {}\n", switches));
+    out.push_str(&format!("total_focus_events: {}\n", focus_events));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_disksmart() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (drives, good, warn, checks, alerts, ops) = super::disksmart::stats();
+    out.push_str(&format!("drives: {}\n", drives));
+    out.push_str(&format!("healthy: {}\n", good));
+    out.push_str(&format!("warnings: {}\n", warn));
+    out.push_str(&format!("total_checks: {}\n", checks));
+    out.push_str(&format!("total_alerts: {}\n", alerts));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_magnifier() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (enabled, zoom, mode, filter, changes, ops) = super::magnifier::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("zoom_pct: {}\n", zoom));
+    out.push_str(&format!("mode: {}\n", mode));
+    out.push_str(&format!("color_filter: {}\n", filter));
+    out.push_str(&format!("zoom_changes: {}\n", changes));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5976,6 +6040,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dictation" => Ok(gen_dictation()),
         "screenreader" => Ok(gen_screenreader()),
         "langpack" => Ok(gen_langpack()),
+        "spellcheck" => Ok(gen_spellcheck()),
+        "screentime" => Ok(gen_screentime()),
+        "disksmart" => Ok(gen_disksmart()),
+        "magnifier" => Ok(gen_magnifier()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

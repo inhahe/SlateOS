@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4853,6 +4853,10 @@ fn dispatch(line: &str) {
         "dictation" | "dict" => cmd_dictation(args),
         "screenreader" | "sr" => cmd_screenreader(args),
         "langpack" | "lpack" => cmd_langpack(args),
+        "spellcheck" | "spell" => cmd_spellcheck(args),
+        "screentime" | "stime" => cmd_screentime(args),
+        "disksmart" | "smart" => cmd_disksmart(args),
+        "magnifier" | "mag" => cmd_magnifier(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -31248,6 +31252,402 @@ fn cmd_langpack(args: &str) {
     }
 }
 
+/// `spellcheck` / `spell` — system spell checker.
+fn cmd_spellcheck(args: &str) {
+    use crate::fs::spellcheck;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (dicts, personal, checks, misspellings, corrections, _) = spellcheck::stats();
+            shell_println!("Spell Checker");
+            shell_println!("  Dictionaries: {}", dicts);
+            shell_println!("  Personal:     {} words", personal);
+            shell_println!("  Checks:       {}", checks);
+            shell_println!("  Misspellings: {}", misspellings);
+            shell_println!("  Corrections:  {}", corrections);
+        }
+        "check" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: spell check <word>");
+                return;
+            }
+            let result = spellcheck::check_word(parts[1]);
+            shell_println!("{}: {}", parts[1], result.label());
+            if result == spellcheck::CheckResult::Misspelled {
+                let suggestions = spellcheck::suggest(parts[1]);
+                if !suggestions.is_empty() {
+                    shell_println!("  Suggestions: {}", suggestions.join(", "));
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: spell add <word>");
+                return;
+            }
+            match spellcheck::add_personal(parts[1]) {
+                Ok(()) => shell_println!("Added '{}' to personal dictionary.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: spell remove <word>");
+                return;
+            }
+            match spellcheck::remove_personal(parts[1]) {
+                Ok(()) => shell_println!("Removed '{}' from personal dictionary.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "ignore" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: spell ignore <word>");
+                return;
+            }
+            match spellcheck::ignore_word(parts[1]) {
+                Ok(()) => shell_println!("Ignoring '{}'.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "personal" => {
+            let words = spellcheck::list_personal();
+            if words.is_empty() {
+                shell_println!("Personal dictionary is empty.");
+            } else {
+                shell_println!("Personal dictionary ({} words):", words.len());
+                for w in &words {
+                    shell_println!("  {}", w);
+                }
+            }
+        }
+        "dicts" => {
+            let dicts = spellcheck::list_dictionaries();
+            shell_println!("{:<12} {:<8} {}", "Language", "Words", "Active");
+            for d in &dicts {
+                shell_println!("{:<12} {:<8} {}", d.language, d.word_count, if d.active { "*" } else { "" });
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match spellcheck::set_enabled(on) {
+                Ok(()) => shell_println!("Spell checker {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (dicts, personal, checks, misspellings, corrections, ops) = spellcheck::stats();
+            shell_println!("Dicts: {}  Personal: {}  Checks: {}  Misspelled: {}  Corrections: {}  Ops: {}",
+                dicts, personal, checks, misspellings, corrections, ops);
+        }
+        "test" => { spellcheck::self_test(); shell_println!("Spell check self-test complete."); }
+        "init" => { spellcheck::init_defaults(); shell_println!("Spell checker initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("spellcheck (spell) — system spell checker");
+            shell_println!("  show               Overview");
+            shell_println!("  check <word>        Check a word");
+            shell_println!("  add <word>          Add to personal dictionary");
+            shell_println!("  remove <word>       Remove from personal dictionary");
+            shell_println!("  ignore <word>       Ignore a word");
+            shell_println!("  personal            List personal dictionary");
+            shell_println!("  dicts               List dictionaries");
+            shell_println!("  enable/disable      Toggle");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'spell help' for usage."); }
+    }
+}
+
+/// `screentime` / `stime` — screen time and app usage tracking.
+fn cmd_screentime(args: &str) {
+    use crate::fs::screentime;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (apps, active, idle, switches, _, _) = screentime::stats();
+            let active_mins = active / 60;
+            let idle_mins = idle / 60;
+            shell_println!("Screen Time (Today)");
+            shell_println!("  Active:       {} min", active_mins);
+            shell_println!("  Idle:         {} min", idle_mins);
+            shell_println!("  App switches: {}", switches);
+            shell_println!("  Tracked apps: {}", apps);
+            shell_println!("  State:        {}", screentime::activity_state().label());
+        }
+        "apps" => {
+            let apps = screentime::app_usage();
+            if apps.is_empty() {
+                shell_println!("No app usage data.");
+            } else {
+                shell_println!("{:<24} {:>10} {:>8}", "App", "Focus(s)", "Count");
+                for a in &apps {
+                    shell_println!("{:<24} {:>10} {:>8}", a.app_name, a.focus_secs, a.focus_count);
+                }
+            }
+        }
+        "today" => {
+            let s = screentime::today_summary();
+            shell_println!("Today: {} min active, {} min idle, {} switches",
+                s.active_secs / 60, s.idle_secs / 60, s.app_switches);
+            shell_println!("  Top app: {} ({} min)", s.top_app, s.top_app_secs / 60);
+        }
+        "limit" => {
+            if parts.len() < 2 {
+                let limits = screentime::get_limits();
+                if limits.daily_limit_mins == 0 {
+                    shell_println!("No daily limit set.");
+                } else {
+                    shell_println!("Daily limit: {} min", limits.daily_limit_mins);
+                    shell_println!("Exceeded: {}", if screentime::limit_exceeded() { "yes" } else { "no" });
+                }
+                return;
+            }
+            let mins: u32 = match parts[1].parse() {
+                Ok(m) => m,
+                Err(_) => { shell_println!("Invalid minutes."); return; }
+            };
+            match screentime::set_daily_limit(mins) {
+                Ok(()) => shell_println!("Daily limit set to {} min.", mins),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match screentime::set_enabled(on) {
+                Ok(()) => shell_println!("Screen time tracking {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reset" => {
+            match screentime::reset_daily() {
+                Ok(()) => shell_println!("Daily counters reset."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (apps, active, idle, switches, focus_events, ops) = screentime::stats();
+            shell_println!("Apps: {}  Active: {}s  Idle: {}s  Switches: {}  Focus: {}  Ops: {}",
+                apps, active, idle, switches, focus_events, ops);
+        }
+        "test" => { screentime::self_test(); shell_println!("Screen time self-test complete."); }
+        "init" => { screentime::init_defaults(); shell_println!("Screen time initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("screentime (stime) — app usage and screen time tracking");
+            shell_println!("  show               Today's overview");
+            shell_println!("  apps               Per-app usage breakdown");
+            shell_println!("  today              Daily summary");
+            shell_println!("  limit [mins]       Get/set daily limit");
+            shell_println!("  enable/disable     Toggle tracking");
+            shell_println!("  reset              Reset daily counters");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'stime help' for usage."); }
+    }
+}
+
+/// `disksmart` / `smart` — disk S.M.A.R.T. health monitoring.
+fn cmd_disksmart(args: &str) {
+    use crate::fs::disksmart;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (drives, good, warn, checks, alerts, _) = disksmart::stats();
+            shell_println!("Disk S.M.A.R.T. Health");
+            shell_println!("  Drives:     {}", drives);
+            shell_println!("  Healthy:    {}", good);
+            shell_println!("  Warnings:   {}", warn);
+            shell_println!("  Checks:     {}", checks);
+            shell_println!("  Alerts:     {}", alerts);
+        }
+        "list" => {
+            let drives = disksmart::list_drives();
+            if drives.is_empty() {
+                shell_println!("No drives monitored.");
+            } else {
+                shell_println!("{:<14} {:<28} {:<8} {:<8} {:<6} {}",
+                    "Device", "Model", "Health", "Temp", "Wear%", "Hours");
+                for d in &drives {
+                    shell_println!("{:<14} {:<28} {:<8} {:<8} {:<6} {}",
+                        d.device, d.model, d.health.label(),
+                        format!("{}°C", d.temperature_c), d.wear_level_pct, d.power_on_hours);
+                }
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: smart info <device>");
+                return;
+            }
+            match disksmart::get_drive(parts[1]) {
+                Ok(d) => {
+                    shell_println!("Drive: {} ({})", d.model, d.device);
+                    shell_println!("  Serial:       {}", d.serial);
+                    shell_println!("  Firmware:     {}", d.firmware);
+                    shell_println!("  Interface:    {}", d.interface.label());
+                    shell_println!("  Capacity:     {} GiB", d.capacity_bytes / (1024 * 1024 * 1024));
+                    shell_println!("  Health:       {}", d.health.label());
+                    shell_println!("  Temperature:  {}°C", d.temperature_c);
+                    shell_println!("  Power-on:     {} hours", d.power_on_hours);
+                    shell_println!("  Power cycles: {}", d.power_cycles);
+                    shell_println!("  Reallocated:  {}", d.reallocated_sectors);
+                    shell_println!("  Pending:      {}", d.pending_sectors);
+                    shell_println!("  Wear level:   {}%", d.wear_level_pct);
+                    if !d.last_test_result.is_empty() {
+                        shell_println!("  Last test:    {}", d.last_test_result);
+                    }
+                    if !d.attributes.is_empty() {
+                        shell_println!("  Attributes:");
+                        for a in &d.attributes {
+                            shell_println!("    [{:>3}] {:<30} val={:<4} worst={:<4} thresh={:<4} raw={}",
+                                a.id, a.name, a.current, a.worst, a.threshold, a.raw_value);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            let alerts = disksmart::check_thresholds();
+            if alerts == 0 {
+                shell_println!("All drives healthy — no alerts.");
+            } else {
+                shell_println!("{} alert(s) detected!", alerts);
+            }
+        }
+        "stats" => {
+            let (drives, good, warn, checks, alerts, ops) = disksmart::stats();
+            shell_println!("Drives: {}  Good: {}  Warn: {}  Checks: {}  Alerts: {}  Ops: {}",
+                drives, good, warn, checks, alerts, ops);
+        }
+        "test" => { disksmart::self_test(); shell_println!("Disk S.M.A.R.T. self-test complete."); }
+        "init" => { disksmart::init_defaults(); shell_println!("Disk S.M.A.R.T. initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("disksmart (smart) — disk health monitoring");
+            shell_println!("  show               Overview");
+            shell_println!("  list               List monitored drives");
+            shell_println!("  info <device>       Detailed drive info");
+            shell_println!("  check              Run threshold check");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'smart help' for usage."); }
+    }
+}
+
+/// `magnifier` / `mag` — accessibility screen magnification.
+fn cmd_magnifier(args: &str) {
+    use crate::fs::magnifier;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (enabled, zoom, mode, filter, changes, _) = magnifier::stats();
+            shell_println!("Magnifier: {}", if enabled { "enabled" } else { "disabled" });
+            shell_println!("  Zoom:    {}%", zoom);
+            shell_println!("  Mode:    {}", mode);
+            shell_println!("  Filter:  {}", filter);
+            shell_println!("  Changes: {}", changes);
+            let vp = magnifier::get_viewport();
+            shell_println!("  Viewport: {}x{} at ({},{})", vp.width, vp.height, vp.x, vp.y);
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match magnifier::set_enabled(on) {
+                Ok(()) => shell_println!("Magnifier {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "zoom" => {
+            if parts.len() < 2 {
+                shell_println!("Zoom: {}%", magnifier::zoom_level());
+                return;
+            }
+            match parts[1] {
+                "in" | "+" => {
+                    match magnifier::zoom_in() {
+                        Ok(level) => shell_println!("Zoomed in to {}%.", level),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                "out" | "-" => {
+                    match magnifier::zoom_out() {
+                        Ok(level) => shell_println!("Zoomed out to {}%.", level),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+                _ => {
+                    let pct: u32 = match parts[1].parse() {
+                        Ok(v) => v,
+                        Err(_) => { shell_println!("Invalid zoom level."); return; }
+                    };
+                    match magnifier::set_zoom(pct) {
+                        Ok(()) => shell_println!("Zoom set to {}%.", magnifier::zoom_level()),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                }
+            }
+        }
+        "mode" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: mag mode <fullscreen|lens|docked>");
+                return;
+            }
+            let mode = match parts[1] {
+                "fullscreen" | "full" => magnifier::MagMode::FullScreen,
+                "lens" => magnifier::MagMode::Lens,
+                "docked" | "dock" => magnifier::MagMode::Docked,
+                _ => { shell_println!("Unknown mode: {}", parts[1]); return; }
+            };
+            match magnifier::set_mode(mode) {
+                Ok(()) => shell_println!("Mode set to {}.", mode.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "filter" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: mag filter <none|inverted|grayscale|highcontrast|yellowblack|whiteblack>");
+                return;
+            }
+            let f = match parts[1] {
+                "none" => magnifier::ColorFilter::None,
+                "inverted" | "invert" => magnifier::ColorFilter::Inverted,
+                "grayscale" | "gray" => magnifier::ColorFilter::GrayScale,
+                "highcontrast" | "hc" => magnifier::ColorFilter::HighContrast,
+                "yellowblack" | "yb" => magnifier::ColorFilter::YellowOnBlack,
+                "whiteblack" | "wb" => magnifier::ColorFilter::WhiteOnBlack,
+                _ => { shell_println!("Unknown filter: {}", parts[1]); return; }
+            };
+            match magnifier::set_color_filter(f) {
+                Ok(()) => shell_println!("Color filter set to {}.", f.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (enabled, zoom, mode, filter, changes, ops) = magnifier::stats();
+            shell_println!("Enabled: {}  Zoom: {}%  Mode: {}  Filter: {}  Changes: {}  Ops: {}",
+                enabled, zoom, mode, filter, changes, ops);
+        }
+        "test" => { magnifier::self_test(); shell_println!("Magnifier self-test complete."); }
+        "init" => { magnifier::init_defaults(); shell_println!("Magnifier initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("magnifier (mag) — screen magnification");
+            shell_println!("  show               Overview");
+            shell_println!("  enable/disable     Toggle magnifier");
+            shell_println!("  zoom [in|out|N]    Get/set zoom level");
+            shell_println!("  mode <type>        Set view mode");
+            shell_println!("  filter <type>      Set color filter");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'mag help' for usage."); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -39844,7 +40244,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

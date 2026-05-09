@@ -1476,6 +1476,121 @@ pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// socketpair
+// ---------------------------------------------------------------------------
+
+/// Create a pair of connected sockets.
+///
+/// Stub: returns -1/ENOSYS.  Our kernel doesn't yet support
+/// connected socket pairs (used for Unix domain IPC).
+#[unsafe(no_mangle)]
+pub extern "C" fn socketpair(
+    _domain: i32,
+    _sock_type: i32,
+    _protocol: i32,
+    sv: *mut [i32; 2],
+) -> i32 {
+    let _ = sv;
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
+// sendmsg / recvmsg
+// ---------------------------------------------------------------------------
+
+/// Scatter/gather I/O vector.
+#[repr(C)]
+pub struct Iovec {
+    /// Base address of the buffer.
+    pub iov_base: *mut u8,
+    /// Length of the buffer in bytes.
+    pub iov_len: usize,
+}
+
+/// Message header for `sendmsg`/`recvmsg`.
+#[repr(C)]
+pub struct Msghdr {
+    /// Optional address (sendto/recvfrom target).
+    pub msg_name: *mut u8,
+    /// Length of `msg_name`.
+    pub msg_namelen: SocklenT,
+    /// Scatter/gather array.
+    pub msg_iov: *mut Iovec,
+    /// Number of elements in `msg_iov`.
+    pub msg_iovlen: usize,
+    /// Ancillary data (cmsghdr chain).
+    pub msg_control: *mut u8,
+    /// Length of `msg_control`.
+    pub msg_controllen: usize,
+    /// Flags on received message.
+    pub msg_flags: i32,
+}
+
+/// Control message header (ancillary data).
+#[repr(C)]
+pub struct Cmsghdr {
+    /// Length of this control message (including header).
+    pub cmsg_len: usize,
+    /// Originating protocol level.
+    pub cmsg_level: i32,
+    /// Protocol-specific type.
+    pub cmsg_type: i32,
+}
+
+/// Send a message on a socket using a message header.
+///
+/// Stub: sends only the first iov element using `send`.
+/// Ancillary data is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize {
+    if msg.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let m = unsafe { &*msg };
+    if m.msg_iov.is_null() || m.msg_iovlen == 0 {
+        return 0;
+    }
+
+    // Send the first iov element.
+    // SAFETY: msg_iov is non-null, msg_iovlen > 0.
+    let iov = unsafe { &*m.msg_iov };
+    unsafe { send(fd, iov.iov_base, iov.iov_len, flags) }
+}
+
+/// Receive a message from a socket using a message header.
+///
+/// Stub: receives into the first iov element using `recv`.
+/// Ancillary data is not populated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
+    if msg.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let m = unsafe { &mut *msg };
+    if m.msg_iov.is_null() || m.msg_iovlen == 0 {
+        return 0;
+    }
+
+    // Receive into the first iov element.
+    let iov = unsafe { &*m.msg_iov };
+    let ret = unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) };
+
+    m.msg_flags = 0;
+    m.msg_controllen = 0;
+
+    ret
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
 /// Parse a numeric port string to u16.
 fn parse_port_string(s: *const u8) -> u16 {
     if s.is_null() {

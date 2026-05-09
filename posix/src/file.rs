@@ -1193,6 +1193,42 @@ pub extern "C" fn umask(_cmask: ModeT) -> ModeT {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// posix_fadvise — file access advice
+// ---------------------------------------------------------------------------
+
+/// Normal access pattern (no special advice).
+pub const POSIX_FADV_NORMAL: i32 = 0;
+/// Sequential access pattern.
+pub const POSIX_FADV_SEQUENTIAL: i32 = 2;
+/// Random access pattern.
+pub const POSIX_FADV_RANDOM: i32 = 1;
+/// Data will be accessed once.
+pub const POSIX_FADV_NOREUSE: i32 = 5;
+/// Data will be accessed soon.
+pub const POSIX_FADV_WILLNEED: i32 = 3;
+/// Data will not be accessed soon.
+pub const POSIX_FADV_DONTNEED: i32 = 4;
+
+/// Advise the kernel about file access patterns.
+///
+/// Stub: always returns 0 (success).  The kernel doesn't use file
+/// access hints yet, but programs that call `posix_fadvise` should
+/// not fail.
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_fadvise(_fd: Fd, _offset: OffT, _len: OffT, _advice: i32) -> i32 {
+    0 // Succeed silently — advice is purely advisory.
+}
+
+/// Preallocate file space.
+///
+/// Stub: returns 0 without actually preallocating.  The filesystem
+/// layer doesn't support preallocation yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_fallocate(_fd: Fd, _offset: OffT, _len: OffT) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
 // flock — advisory file locking
 // ---------------------------------------------------------------------------
 

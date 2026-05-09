@@ -32,10 +32,18 @@
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
 //!   `setjmp`/`longjmp`, `qsort`, `bsearch`, `atoi`/`strtol`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
+//! - **Formatted Output**: `printf`, `fprintf`, `sprintf`, `snprintf`
+//!   (via assembly trampoline for C variadic capture)
+//! - **Pattern Matching**: `fnmatch` (shell wildcards), `glob`/`globfree`
+//!   (pathname expansion)
 //! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`
 //! - **System**: `uname`
+//! - **Logging**: `openlog`, `syslog`, `closelog`, `setlogmask`
+//! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,
+//!   `getlogin`, password/group enumeration
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
-//!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`
+//!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
+//!   `basename`, `dirname`, `getopt`, `pathconf`, `confstr`
 //!
 //! ## Error Handling
 //!
@@ -93,6 +101,7 @@ pub mod fcntl;
 pub mod fcntl_ops;
 pub mod fnmatch;
 pub mod getopt;
+pub mod glob;
 pub mod libgen;
 pub mod ioctl;
 pub mod malloc;
@@ -115,6 +124,7 @@ pub mod stdio;
 pub mod stdlib;
 pub mod string;
 pub mod syscall;
+pub mod syslog;
 pub mod time;
 pub mod types;
 pub mod resource;

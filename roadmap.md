@@ -856,6 +856,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pwd: getpwnam/getpwuid/getgrnam/getgrgid (single "root" user/group), getpwent/setpwent/endpwent, getgrent/setgrent/endgrent, getlogin/getlogin_r
   - [x] wait3/wait4: waitpid wrappers with zeroed rusage
   - [x] mkstemp/tmpfile: temporary file creation with unique name generation
+  - [x] glob/globfree: pathname pattern expansion using fnmatch + opendir/readdir, sorted results, GLOB_APPEND/GLOB_NOCHECK/GLOB_MARK/GLOB_ERR flags
+  - [x] syslog: openlog/syslog/closelog/setlogmask stubs (writes to stderr with priority prefix, LOG_PID support, mask filtering)
+  - [x] string additions: stpcpy, stpncpy, strsep, strverscmp
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

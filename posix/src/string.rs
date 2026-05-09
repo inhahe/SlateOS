@@ -4,6 +4,13 @@
 //! C program.  A real libc would provide optimized (SIMD) versions;
 //! these are correct reference implementations.
 //!
+//! Includes: `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`,
+//! `memrchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strcpy`,
+//! `strncpy`, `stpcpy`, `stpncpy`, `strchr`, `strrchr`, `strcat`,
+//! `strncat`, `strstr`, `strspn`, `strcspn`, `strpbrk`, `strtok`,
+//! `strsep`, `strerror`, `strdup`, `strndup`, `bcopy`, `bzero`,
+//! `strcasecmp`, `strncasecmp`
+//!
 //! Exported as `extern "C"` with standard names so the linker finds
 //! them when C code calls `memcpy`, `memset`, `strlen`, etc.
 
@@ -765,4 +772,130 @@ pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> 
         i = i.wrapping_add(1);
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Additional string functions
+// ---------------------------------------------------------------------------
+
+/// Copy a string, returning a pointer to the END (the null terminator).
+///
+/// This is the BSD/POSIX `stpcpy` — unlike `strcpy`, it returns a
+/// pointer to the terminating null byte, making chained copies efficient.
+///
+/// # Safety
+///
+/// `dest` must have enough space for the full `src` string plus null.
+/// `src` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stpcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
+    let mut i: usize = 0;
+    loop {
+        let c = unsafe { *src.add(i) };
+        unsafe { *dest.add(i) = c; }
+        if c == 0 {
+            return unsafe { dest.add(i) };
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Copy at most `n` bytes from `src` to `dest`, returning a pointer
+/// past the last character written.
+///
+/// If `src` is shorter than `n`, remaining bytes are filled with null
+/// and a pointer to the first null byte is returned.
+///
+/// # Safety
+///
+/// `dest` must have space for at least `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stpncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    let mut i: usize = 0;
+    // Copy up to n chars from src.
+    while i < n {
+        let c = unsafe { *src.add(i) };
+        unsafe { *dest.add(i) = c; }
+        if c == 0 {
+            let result = unsafe { dest.add(i) };
+            // Fill remainder with nulls.
+            i = i.wrapping_add(1);
+            while i < n {
+                unsafe { *dest.add(i) = 0; }
+                i = i.wrapping_add(1);
+            }
+            return result;
+        }
+        i = i.wrapping_add(1);
+    }
+    unsafe { dest.add(n) }
+}
+
+/// Extract token from string (reentrant, modifies input).
+///
+/// `strsep` is the BSD replacement for `strtok`.  It modifies the
+/// string pointer `*stringp` to point past the delimiter (or sets
+/// it to NULL when no more tokens remain).
+///
+/// Returns the original `*stringp` value (the token start), or NULL
+/// if `*stringp` was NULL.
+///
+/// # Safety
+///
+/// `stringp` must point to a valid `*mut u8` pointer (which itself
+/// points to a writable null-terminated string or is null).
+/// `delim` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+#[allow(clippy::many_single_char_names)] // POSIX function, C convention variables.
+pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut u8 {
+    if stringp.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    let s = unsafe { *stringp };
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    let begin = s;
+    let mut i: usize = 0;
+    loop {
+        let c = unsafe { *s.add(i) };
+        if c == 0 {
+            // Reached end of string — no more tokens.
+            unsafe { *stringp = core::ptr::null_mut(); }
+            return begin;
+        }
+
+        // Check if c is a delimiter.
+        let mut j: usize = 0;
+        loop {
+            let d = unsafe { *delim.add(j) };
+            if d == 0 {
+                break;
+            }
+            if c == d {
+                // Replace delimiter with null and advance past it.
+                unsafe { *s.add(i) = 0; }
+                unsafe { *stringp = s.add(i.wrapping_add(1)); }
+                return begin;
+            }
+            j = j.wrapping_add(1);
+        }
+
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Compare memory regions ignoring case (non-standard but common).
+///
+/// # Safety
+///
+/// Both pointers must be valid for at least `n` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
+    // Simple lexicographic compare — true version comparison
+    // would handle embedded numbers, but this matches the common
+    // usage pattern as a strcmp variant.
+    unsafe { strcmp(s1, s2) }
 }

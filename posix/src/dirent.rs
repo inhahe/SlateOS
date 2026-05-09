@@ -1,6 +1,8 @@
 //! POSIX directory entry functions.
 //!
-//! Implements `opendir`, `readdir`, `closedir` for directory iteration.
+//! Implements `opendir`, `readdir`, `closedir`, `rewinddir`,
+//! `seekdir`, `telldir`, `dirfd`, and `alphasort` for directory
+//! iteration.
 //!
 //! Our kernel provides `SYS_FS_LIST_DIR` which returns the full directory
 //! listing at once (not incremental).  We buffer the results and return
@@ -9,7 +11,7 @@
 //! ## Limitations
 //!
 //! - Maximum 256 entries per directory (kernel buffer limit).
-//! - No `seekdir`/`telldir` support.
+//! - `dirfd` returns -1 (entire directory is buffered at opendir time).
 
 use crate::errno;
 use crate::syscall::*;
@@ -176,6 +178,81 @@ pub extern "C" fn closedir(dirp: *mut Dir) -> i32 {
 
     free_dir(dirp);
     0
+}
+
+/// Reset a directory stream to the beginning.
+#[unsafe(no_mangle)]
+pub extern "C" fn rewinddir(dirp: *mut Dir) {
+    if dirp.is_null() {
+        return;
+    }
+    // SAFETY: dirp is valid (caller contract).
+    unsafe { (*dirp).pos = 0; }
+}
+
+/// Return the current position in the directory stream.
+///
+/// The returned value can be passed to `seekdir` to return to this
+/// position.  In our implementation, the position is simply the entry
+/// index.
+#[unsafe(no_mangle)]
+pub extern "C" fn telldir(dirp: *mut Dir) -> i64 {
+    if dirp.is_null() {
+        return -1;
+    }
+    // SAFETY: dirp is valid.
+    unsafe { (*dirp).pos as i64 }
+}
+
+/// Set the position of the directory stream.
+#[unsafe(no_mangle)]
+pub extern "C" fn seekdir(dirp: *mut Dir, loc: i64) {
+    if dirp.is_null() || loc < 0 {
+        return;
+    }
+    // SAFETY: dirp is valid.
+    unsafe {
+        let max = (*dirp).count;
+        (*dirp).pos = if (loc as usize) > max { max } else { loc as usize };
+    }
+}
+
+/// Get the file descriptor associated with a directory stream.
+///
+/// Stub: returns -1 since our Dir doesn't keep an open fd (the entire
+/// listing is buffered at opendir time).
+#[unsafe(no_mangle)]
+pub extern "C" fn dirfd(_dirp: *mut Dir) -> i32 {
+    // Our implementation reads the full directory at open time and
+    // doesn't hold an open fd.  Return -1 (invalid fd).
+    -1
+}
+
+/// Compare two directory entries alphabetically by name.
+///
+/// Suitable as a comparator for `scandir`.
+#[unsafe(no_mangle)]
+pub extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dirent) -> i32 {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    // SAFETY: a and b point to valid Dirent pointers.
+    let da = unsafe { &**a };
+    let db = unsafe { &**b };
+
+    // Compare d_name byte by byte.
+    let mut i: usize = 0;
+    loop {
+        let ca = da.d_name.get(i).copied().unwrap_or(0);
+        let cb = db.d_name.get(i).copied().unwrap_or(0);
+        if ca != cb {
+            return i32::from(ca).wrapping_sub(i32::from(cb));
+        }
+        if ca == 0 {
+            return 0;
+        }
+        i = i.wrapping_add(1);
+    }
 }
 
 // ---------------------------------------------------------------------------

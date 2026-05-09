@@ -386,6 +386,16 @@ pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
     tm_to_secs(t)
 }
 
+/// Convert broken-down UTC time to seconds since epoch.
+///
+/// Like `mktime` but always interprets the Tm as UTC (no timezone
+/// adjustment).  Since our OS is always UTC, this is identical to
+/// `mktime`.
+#[unsafe(no_mangle)]
+pub extern "C" fn timegm(tm: *mut Tm) -> TimeT {
+    mktime(tm)
+}
+
 /// Convert broken-down time to string.
 ///
 /// Returns a pointer to a static string in the format

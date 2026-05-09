@@ -132,3 +132,62 @@ pub extern "C" fn sched_rr_get_interval(
     }
     0
 }
+
+// ---------------------------------------------------------------------------
+// CPU affinity (Linux extensions — stubs)
+// ---------------------------------------------------------------------------
+
+/// CPU set size constant (matches Linux for x86_64).
+pub const CPU_SETSIZE: usize = 1024;
+
+/// CPU set type: bitmask of CPUs.
+///
+/// Stores CPU_SETSIZE bits in an array of u64s.  Each bit represents
+/// one CPU.  Bit N = 1 means CPU N is in the set.
+#[repr(C)]
+pub struct CpuSetT {
+    /// Bitmask storage (1024 bits = 128 bytes = 16 x u64).
+    pub bits: [u64; 16],
+}
+
+/// Get the CPU affinity mask for a process.
+///
+/// Stub: returns a mask with CPU 0 set (single-CPU assumption).
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_getaffinity(
+    _pid: i32,
+    cpusetsize: usize,
+    mask: *mut CpuSetT,
+) -> i32 {
+    if mask.is_null() || cpusetsize < core::mem::size_of::<CpuSetT>() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // SAFETY: mask is non-null and cpusetsize is large enough.
+    unsafe {
+        // Zero the mask first.
+        let bytes = mask.cast::<u8>();
+        let mut i: usize = 0;
+        while i < core::mem::size_of::<CpuSetT>() {
+            *bytes.add(i) = 0;
+            i = i.wrapping_add(1);
+        }
+        // Set CPU 0.
+        (*mask).bits[0] = 1;
+    }
+
+    0
+}
+
+/// Set the CPU affinity mask for a process.
+///
+/// Stub: always succeeds (ignores the mask).
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_setaffinity(
+    _pid: i32,
+    _cpusetsize: usize,
+    _mask: *const CpuSetT,
+) -> i32 {
+    0
+}

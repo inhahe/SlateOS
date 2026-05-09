@@ -764,6 +764,27 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
+// mkostemp — mkstemp with flags
+// ---------------------------------------------------------------------------
+
+/// Create a unique temporary file with additional open flags.
+///
+/// Like `mkstemp` but `flags` can include `O_CLOEXEC`, `O_APPEND`,
+/// etc.  Currently, the flags are accepted but not enforced (our open
+/// implementation doesn't support `O_CLOEXEC`).
+///
+/// # Safety
+///
+/// `template` must be a writable null-terminated string with at least
+/// 6 trailing 'X' characters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkostemp(template: *mut u8, _flags: i32) -> i32 {
+    // Flags like O_CLOEXEC are accepted but not enforced — just
+    // delegate to mkstemp which does all the work.
+    unsafe { mkstemp(template) }
+}
+
+// ---------------------------------------------------------------------------
 // mkdtemp — create a unique temporary directory
 // ---------------------------------------------------------------------------
 

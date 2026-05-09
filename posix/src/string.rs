@@ -733,6 +733,38 @@ pub unsafe extern "C" fn bzero(s: *mut u8, n: usize) {
     unsafe { memset(s, 0, n); }
 }
 
+// ---------------------------------------------------------------------------
+// ffs / ffsl / ffsll — find first set bit
+// ---------------------------------------------------------------------------
+
+/// Find the first set bit in an integer.
+///
+/// Returns the 1-based position of the least significant set bit,
+/// or 0 if `i` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn ffs(i: i32) -> i32 {
+    if i == 0 {
+        return 0;
+    }
+    // trailing_zeros gives 0-based position; POSIX wants 1-based.
+    ((i as u32).trailing_zeros() as i32).wrapping_add(1)
+}
+
+/// Find the first set bit in a long integer.
+#[unsafe(no_mangle)]
+pub extern "C" fn ffsl(i: i64) -> i32 {
+    if i == 0 {
+        return 0;
+    }
+    ((i as u64).trailing_zeros() as i32).wrapping_add(1)
+}
+
+/// Find the first set bit in a long long integer.
+#[unsafe(no_mangle)]
+pub extern "C" fn ffsll(i: i64) -> i32 {
+    ffsl(i)
+}
+
 /// Compare two strings, case-insensitive.
 ///
 /// # Safety

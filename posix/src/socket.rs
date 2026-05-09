@@ -62,6 +62,15 @@ pub const IPPROTO_IP: i32 = 0;
 pub const INADDR_ANY: u32 = 0;
 /// Loopback address (127.0.0.1).
 pub const INADDR_LOOPBACK: u32 = 0x7F00_0001;
+/// Broadcast address (255.255.255.255).
+pub const INADDR_BROADCAST: u32 = 0xFFFF_FFFF;
+/// Invalid/sentinel address.
+pub const INADDR_NONE: u32 = 0xFFFF_FFFF;
+
+/// Max string length for an IPv4 address ("255.255.255.255\0").
+pub const INET_ADDRSTRLEN: usize = 16;
+/// Max string length for an IPv6 address.
+pub const INET6_ADDRSTRLEN: usize = 46;
 
 /// Shut down reading.
 pub const SHUT_RD: i32 = 0;

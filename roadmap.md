@@ -967,6 +967,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fdatasync/syncfs: stubs (writes are synchronous), sendfile (userspace read+write loop)
   - [x] clock_settime (stub EPERM), clock_nanosleep (relative + absolute time, TIMER_ABSTIME)
   - [x] posix_madvise: POSIX_MADV_* constants + stub (returns 0); memfd_create stub (ENOSYS)
+  - [x] ffs/ffsl/ffsll: find first set bit (trailing_zeros + 1)
+  - [x] timegm: inverse of gmtime (identical to mktime — we're always UTC)
+  - [x] INET_ADDRSTRLEN/INET6_ADDRSTRLEN/INADDR_BROADCAST/INADDR_NONE constants
+  - [x] sched_getaffinity/sched_setaffinity: CPU affinity stubs (single-CPU mask), CpuSetT struct
+  - [x] mkostemp: mkstemp with additional open flags (flags accepted, not enforced)
+  - [x] posix_spawn_file_actions: init/destroy/addclose/adddup2/addopen stubs; posix_spawnattr: init/destroy/setflags/getflags stubs
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

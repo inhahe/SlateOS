@@ -33,6 +33,122 @@ use crate::syscall::*;
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
+// posix_spawn_file_actions — stub API
+// ---------------------------------------------------------------------------
+
+/// Opaque file actions object for `posix_spawn`.
+///
+/// Our implementation ignores file actions during spawn, so this is
+/// just a placeholder to satisfy the ABI.  The struct stores nothing.
+#[repr(C)]
+pub struct PosixSpawnFileActionsT {
+    _pad: [u8; 80], // Match glibc struct size.
+}
+
+/// Initialize a file actions object.
+///
+/// Always succeeds (no resources to allocate).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_init(
+    _acts: *mut PosixSpawnFileActionsT,
+) -> i32 {
+    0
+}
+
+/// Destroy a file actions object.
+///
+/// Always succeeds (no resources to free).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_destroy(
+    _acts: *mut PosixSpawnFileActionsT,
+) -> i32 {
+    0
+}
+
+/// Add a close action (ignored during spawn).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addclose(
+    _acts: *mut PosixSpawnFileActionsT,
+    _fd: Fd,
+) -> i32 {
+    0
+}
+
+/// Add a dup2 action (ignored during spawn).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_adddup2(
+    _acts: *mut PosixSpawnFileActionsT,
+    _fd: Fd,
+    _newfd: Fd,
+) -> i32 {
+    0
+}
+
+/// Add an open action (ignored during spawn).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addopen(
+    _acts: *mut PosixSpawnFileActionsT,
+    _fd: Fd,
+    _path: *const u8,
+    _oflag: i32,
+    _mode: ModeT,
+) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
+// posix_spawnattr — stub API
+// ---------------------------------------------------------------------------
+
+/// Opaque spawn attributes object.
+///
+/// Stores nothing — all spawn attributes are ignored.
+#[repr(C)]
+pub struct PosixSpawnattrT {
+    _pad: [u8; 336], // Match glibc struct size.
+}
+
+/// Initialize a spawn attributes object.
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_init(
+    _attr: *mut PosixSpawnattrT,
+) -> i32 {
+    0
+}
+
+/// Destroy a spawn attributes object.
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_destroy(
+    _attr: *mut PosixSpawnattrT,
+) -> i32 {
+    0
+}
+
+/// Set flags on a spawn attributes object (ignored).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setflags(
+    _attr: *mut PosixSpawnattrT,
+    _flags: i16,
+) -> i32 {
+    0
+}
+
+/// Get flags from a spawn attributes object.
+///
+/// Always returns 0 (no flags set).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_getflags(
+    _attr: *const PosixSpawnattrT,
+    flags: *mut i16,
+) -> i32 {
+    if !flags.is_null() {
+        // SAFETY: flags is non-null (checked above).
+        unsafe { *flags = 0; }
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // posix_spawn
 // ---------------------------------------------------------------------------
 

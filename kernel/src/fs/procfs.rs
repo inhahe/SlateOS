@@ -261,6 +261,10 @@ const ROOT_FILES: &[&str] = &[
     "displaycolor",
     "syslog",
     "inputa11y",
+    "driverupdate",
+    "netshare",
+    "startuprepair",
+    "remoteassist",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5752,6 +5756,53 @@ fn gen_inputa11y() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_driverupdate() -> Vec<u8> {
+    use crate::fs::driverupdate;
+    let (driver_count, update_count, total_updates, total_rollbacks, ops) = driverupdate::stats();
+    let mut out = String::from("driver_count: ");
+    out.push_str(&format!("{}\n", driver_count));
+    out.push_str(&format!("updates_available: {}\n", update_count));
+    out.push_str(&format!("total_updates: {}\n", total_updates));
+    out.push_str(&format!("total_rollbacks: {}\n", total_rollbacks));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_netshare() -> Vec<u8> {
+    use crate::fs::netshare;
+    let (share_count, connected_count, total_mounts, total_errors, ops) = netshare::stats();
+    let mut out = String::from("share_count: ");
+    out.push_str(&format!("{}\n", share_count));
+    out.push_str(&format!("connected: {}\n", connected_count));
+    out.push_str(&format!("total_mounts: {}\n", total_mounts));
+    out.push_str(&format!("total_errors: {}\n", total_errors));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_startuprepair() -> Vec<u8> {
+    use crate::fs::startuprepair;
+    let (session_count, total_checks, total_repairs, failed_boots, ops) = startuprepair::stats();
+    let mut out = String::from("session_count: ");
+    out.push_str(&format!("{}\n", session_count));
+    out.push_str(&format!("total_checks: {}\n", total_checks));
+    out.push_str(&format!("total_repairs: {}\n", total_repairs));
+    out.push_str(&format!("failed_boots: {}\n", failed_boots));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_remoteassist() -> Vec<u8> {
+    use crate::fs::remoteassist;
+    let (active_sessions, total_sessions, total_files, ops) = remoteassist::stats();
+    let mut out = String::from("active_sessions: ");
+    out.push_str(&format!("{}\n", active_sessions));
+    out.push_str(&format!("total_sessions: {}\n", total_sessions));
+    out.push_str(&format!("total_files: {}\n", total_files));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6178,6 +6229,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "displaycolor" => Ok(gen_displaycolor()),
         "syslog" => Ok(gen_syslog()),
         "inputa11y" => Ok(gen_inputa11y()),
+        "driverupdate" => Ok(gen_driverupdate()),
+        "netshare" => Ok(gen_netshare()),
+        "startuprepair" => Ok(gen_startuprepair()),
+        "remoteassist" => Ok(gen_remoteassist()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

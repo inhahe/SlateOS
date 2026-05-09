@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4865,6 +4865,10 @@ fn dispatch(line: &str) {
         "displaycolor" | "dcolor" => cmd_displaycolor(args),
         "syslog" | "slog" => cmd_syslog(args),
         "inputa11y" | "ia11y" => cmd_inputa11y(args),
+        "driverupdate" | "dupdate" => cmd_driverupdate(args),
+        "netshare" | "nshare" => cmd_netshare(args),
+        "startuprepair" | "srepair" => cmd_startuprepair(args),
+        "remoteassist" | "rassist" => cmd_remoteassist(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -32409,6 +32413,442 @@ fn cmd_inputa11y(args: &str) {
     }
 }
 
+/// `driverupdate` / `dupdate` — driver version and update management.
+fn cmd_driverupdate(args: &str) {
+    use crate::fs::driverupdate;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            driverupdate::init_defaults();
+            let drivers = driverupdate::list_drivers();
+            if drivers.is_empty() {
+                shell_println!("No drivers registered.");
+            } else {
+                shell_println!("{:<4} {:<30} {:<10} {:<10} {:<16}", "ID", "Name", "Version", "Category", "Status");
+                for d in &drivers {
+                    shell_println!("{:<4} {:<30} {:<10} {:<10} {:<16}",
+                        d.id, d.name, d.version, d.category.label(), d.status.label());
+                }
+                let avail = driverupdate::updates_available();
+                if avail > 0 {
+                    shell_println!("\n{} update(s) available.", avail);
+                }
+            }
+        }
+        "register" | "add" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            let ver = parts.get(2).copied().unwrap_or("1.0.0");
+            if name.is_empty() {
+                shell_println!("Usage: dupdate register <name> [version]");
+            } else {
+                match driverupdate::register_driver(name, driverupdate::DriverCategory::Other, ver, "User") {
+                    Ok(id) => shell_println!("Registered driver '{}' v{} (id={})", name, ver, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "update" | "install" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match driverupdate::install_update(id) {
+                        Ok(()) => {
+                            if let Ok(d) = driverupdate::get_driver(id) {
+                                shell_println!("Updated '{}' to v{}", d.name, d.version);
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: dupdate install <id>"); }
+        }
+        "rollback" | "revert" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match driverupdate::rollback(id) {
+                        Ok(()) => {
+                            if let Ok(d) = driverupdate::get_driver(id) {
+                                shell_println!("Rolled back '{}' to v{}", d.name, d.version);
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: dupdate rollback <id>"); }
+        }
+        "setupdate" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let ver = parts.get(2).copied().unwrap_or("");
+            if id_str.is_empty() || ver.is_empty() {
+                shell_println!("Usage: dupdate setupdate <id> <version>");
+            } else if let Ok(id) = id_str.parse::<u32>() {
+                match driverupdate::set_available_update(id, ver) {
+                    Ok(()) => shell_println!("Update v{} staged for driver {}", ver, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Invalid ID."); }
+        }
+        "info" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match driverupdate::get_driver(id) {
+                        Ok(d) => {
+                            shell_println!("Driver #{}", d.id);
+                            shell_println!("  Name:      {}", d.name);
+                            shell_println!("  Category:  {}", d.category.label());
+                            shell_println!("  Version:   {}", d.version);
+                            shell_println!("  Previous:  {}", if d.previous_version.is_empty() { "none" } else { &d.previous_version });
+                            shell_println!("  Available: {}", if d.available_version.is_empty() { "none" } else { &d.available_version });
+                            shell_println!("  Status:    {}", d.status.label());
+                            shell_println!("  Provider:  {}", d.provider);
+                            shell_println!("  Auto-update: {}", d.auto_update);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: dupdate info <id>"); }
+        }
+        "stats" => {
+            let (count, updates, total_updates, total_rollbacks, ops) = driverupdate::stats();
+            shell_println!("Drivers: {}, Updates available: {}", count, updates);
+            shell_println!("Total updates: {}, Total rollbacks: {}, Ops: {}", total_updates, total_rollbacks, ops);
+        }
+        "test" => { driverupdate::self_test(); shell_println!("Driver update self-test complete."); }
+        "init" => { driverupdate::init_defaults(); shell_println!("Driver update initialized."); }
+        _ => {
+            shell_println!("driverupdate (dupdate) — driver update management");
+            shell_println!("  show / list          List drivers");
+            shell_println!("  info <id>            Driver details");
+            shell_println!("  register <name> [v]  Register driver");
+            shell_println!("  setupdate <id> <v>   Stage update");
+            shell_println!("  install <id>         Install update");
+            shell_println!("  rollback <id>        Rollback driver");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `netshare` / `nshare` — network share management.
+fn cmd_netshare(args: &str) {
+    use crate::fs::netshare;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            netshare::init_defaults();
+            let shares = netshare::list_shares();
+            if shares.is_empty() {
+                shell_println!("No network shares mounted.");
+            } else {
+                shell_println!("{:<4} {:<8} {:<16} {:<20} {:<16} {:<12}", "ID", "Proto", "Host", "Remote", "Mount", "State");
+                for s in &shares {
+                    shell_println!("{:<4} {:<8} {:<16} {:<20} {:<16} {:<12}",
+                        s.id, s.protocol.label(), s.host, s.remote_path, s.mount_point, s.state.label());
+                }
+            }
+        }
+        "mount" | "add" => {
+            let host = parts.get(1).copied().unwrap_or("");
+            let remote = parts.get(2).copied().unwrap_or("/");
+            let mountpt = parts.get(3).copied().unwrap_or("");
+            if host.is_empty() || mountpt.is_empty() {
+                shell_println!("Usage: nshare mount <host> <remote_path> <mount_point> [user]");
+            } else {
+                let user = parts.get(4).copied().unwrap_or("guest");
+                match netshare::mount(netshare::ShareProtocol::Smb3, host, remote, mountpt, user, false, false) {
+                    Ok(id) => shell_println!("Mounted {}:{} at {} (id={})", host, remote, mountpt, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "unmount" | "umount" | "remove" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match netshare::unmount(id) {
+                        Ok(()) => shell_println!("Unmounted share {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: nshare unmount <id>"); }
+        }
+        "info" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match netshare::get_share(id) {
+                        Ok(s) => {
+                            shell_println!("Share #{}", s.id);
+                            shell_println!("  Protocol:  {}", s.protocol.label());
+                            shell_println!("  Host:      {}", s.host);
+                            shell_println!("  Remote:    {}", s.remote_path);
+                            shell_println!("  Mount:     {}", s.mount_point);
+                            shell_println!("  User:      {}", s.username);
+                            shell_println!("  State:     {}", s.state.label());
+                            shell_println!("  Auto-mount: {}", s.auto_mount);
+                            shell_println!("  Read-only: {}", s.read_only);
+                            shell_println!("  Read: {} B, Written: {} B", s.bytes_read, s.bytes_written);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: nshare info <id>"); }
+        }
+        "auto" => {
+            let shares = netshare::auto_mount_shares();
+            if shares.is_empty() {
+                shell_println!("No auto-mount shares.");
+            } else {
+                for s in &shares {
+                    shell_println!("  [{}] {}:{} → {}", s.id, s.host, s.remote_path, s.mount_point);
+                }
+            }
+        }
+        "stats" => {
+            let (count, connected, mounts, errors, ops) = netshare::stats();
+            shell_println!("Shares: {}, Connected: {}", count, connected);
+            shell_println!("Total mounts: {}, Errors: {}, Ops: {}", mounts, errors, ops);
+        }
+        "test" => { netshare::self_test(); shell_println!("Net share self-test complete."); }
+        "init" => { netshare::init_defaults(); shell_println!("Net share initialized."); }
+        _ => {
+            shell_println!("netshare (nshare) — network share management");
+            shell_println!("  show / list              List shares");
+            shell_println!("  mount <host> <path> <mp> Mount share");
+            shell_println!("  unmount <id>             Unmount share");
+            shell_println!("  info <id>                Share details");
+            shell_println!("  auto                     Auto-mount list");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `startuprepair` / `srepair` — boot diagnostics and repair.
+fn cmd_startuprepair(args: &str) {
+    use crate::fs::startuprepair;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            startuprepair::init_defaults();
+            let sessions = startuprepair::list_sessions();
+            if sessions.is_empty() {
+                shell_println!("No repair sessions.");
+            } else {
+                shell_println!("{:<4} {:<6} {:<8} {:<10}", "ID", "Checks", "Auto", "Completed");
+                for s in &sessions {
+                    let completed = if s.completed_ns > 0 { "yes" } else { "no" };
+                    shell_println!("{:<4} {:<6} {:<8} {:<10}",
+                        s.session_id, s.checks.len(), s.auto_triggered, completed);
+                }
+            }
+        }
+        "run" | "scan" => {
+            startuprepair::init_defaults();
+            match startuprepair::run_all_checks() {
+                Ok(sid) => {
+                    shell_println!("Repair session {} completed.", sid);
+                    if let Ok(session) = startuprepair::get_session(sid) {
+                        for c in &session.checks {
+                            shell_println!("  [{}] {} — {} — {}",
+                                c.result.label(), c.category.label(), c.description, c.detail);
+                        }
+                        let passed = session.checks.iter().filter(|c| c.result == startuprepair::CheckResult::Pass).count();
+                        let failed = session.checks.iter().filter(|c| c.result == startuprepair::CheckResult::Fail).count();
+                        let repaired = session.checks.iter().filter(|c| c.result == startuprepair::CheckResult::Repaired).count();
+                        shell_println!("\n{} passed, {} failed, {} repaired", passed, failed, repaired);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "session" | "info" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match startuprepair::get_session(id) {
+                        Ok(session) => {
+                            shell_println!("Session #{}", session.session_id);
+                            shell_println!("  Auto-triggered: {}", session.auto_triggered);
+                            shell_println!("  Completed: {}", session.completed_ns > 0);
+                            shell_println!("  Checks:");
+                            for c in &session.checks {
+                                shell_println!("    [{}] {} — {}", c.result.label(), c.category.label(), c.description);
+                                if !c.detail.is_empty() { shell_println!("          {}", c.detail); }
+                            }
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: srepair session <id>"); }
+        }
+        "failboot" => {
+            match startuprepair::record_failed_boot() {
+                Ok(needs_repair) => {
+                    if needs_repair {
+                        shell_println!("Auto-repair threshold reached! Run 'srepair run'.");
+                    } else {
+                        shell_println!("Failed boot recorded.");
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "resetboots" => {
+            match startuprepair::reset_failed_boots() {
+                Ok(()) => shell_println!("Failed boot counter reset."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (sessions, checks, repairs, failed, ops) = startuprepair::stats();
+            shell_println!("Sessions: {}, Checks: {}, Repairs: {}", sessions, checks, repairs);
+            shell_println!("Failed boots: {}, Ops: {}", failed, ops);
+        }
+        "test" => { startuprepair::self_test(); shell_println!("Startup repair self-test complete."); }
+        "init" => { startuprepair::init_defaults(); shell_println!("Startup repair initialized."); }
+        _ => {
+            shell_println!("startuprepair (srepair) — boot diagnostics");
+            shell_println!("  show / list          List sessions");
+            shell_println!("  run / scan           Run all checks");
+            shell_println!("  session <id>         Session details");
+            shell_println!("  failboot             Record failed boot");
+            shell_println!("  resetboots           Reset fail counter");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `remoteassist` / `rassist` — remote assistance sessions.
+fn cmd_remoteassist(args: &str) {
+    use crate::fs::remoteassist;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" | "list" => {
+            remoteassist::init_defaults();
+            let sessions = remoteassist::list_sessions();
+            if sessions.is_empty() {
+                shell_println!("No remote assist sessions.");
+            } else {
+                shell_println!("{:<4} {:<8} {:<12} {:<14} {:<10} {:<10}", "ID", "Code", "State", "Mode", "Host", "Helper");
+                for s in &sessions {
+                    shell_println!("{:<4} {:<8} {:<12} {:<14} {:<10} {:<10}",
+                        s.id, s.code, s.state.label(), s.mode.label(),
+                        s.host_name, if s.helper_name.is_empty() { "-" } else { &s.helper_name });
+                }
+            }
+        }
+        "invite" | "create" => {
+            remoteassist::init_defaults();
+            let host = parts.get(1).copied().unwrap_or("User");
+            let mode_str = parts.get(2).copied().unwrap_or("view");
+            let mode = match mode_str {
+                "full" => remoteassist::AssistMode::FullControl,
+                "prompt" => remoteassist::AssistMode::PromptedControl,
+                _ => remoteassist::AssistMode::ViewOnly,
+            };
+            match remoteassist::create_invitation(host, mode, 3600) {
+                Ok((id, code)) => shell_println!("Invitation created: code={} (session {}, mode={})", code, id, mode.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "connect" | "join" => {
+            let code = parts.get(1).copied().unwrap_or("");
+            let helper = parts.get(2).copied().unwrap_or("Helper");
+            if code.is_empty() {
+                shell_println!("Usage: rassist connect <code> [helper_name]");
+            } else {
+                match remoteassist::connect(code, helper) {
+                    Ok(id) => shell_println!("Connected to session {} as '{}'", id, helper),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "grant" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match remoteassist::grant_control(id) {
+                        Ok(()) => shell_println!("Full control granted for session {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: rassist grant <id>"); }
+        }
+        "revoke" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match remoteassist::revoke_control(id) {
+                        Ok(()) => shell_println!("Control revoked for session {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: rassist revoke <id>"); }
+        }
+        "pause" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match remoteassist::pause_session(id) {
+                        Ok(()) => shell_println!("Session {} paused", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: rassist pause <id>"); }
+        }
+        "resume" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match remoteassist::resume_session(id) {
+                        Ok(()) => shell_println!("Session {} resumed", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: rassist resume <id>"); }
+        }
+        "end" | "stop" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match remoteassist::end_session(id) {
+                        Ok(()) => shell_println!("Session {} ended", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid ID."); }
+            } else { shell_println!("Usage: rassist end <id>"); }
+        }
+        "clipboard" | "clip" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            let on_off = parts.get(2).copied().unwrap_or("on");
+            if let Ok(id) = id_str.parse::<u32>() {
+                let shared = on_off != "off";
+                match remoteassist::set_clipboard_sharing(id, shared) {
+                    Ok(()) => shell_println!("Clipboard sharing {}", if shared { "enabled" } else { "disabled" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: rassist clipboard <id> [on|off]"); }
+        }
+        "stats" => {
+            let (active, total, files, ops) = remoteassist::stats();
+            shell_println!("Active: {}, Total sessions: {}", active, total);
+            shell_println!("Files transferred: {}, Ops: {}", files, ops);
+        }
+        "test" => { remoteassist::self_test(); shell_println!("Remote assist self-test complete."); }
+        "init" => { remoteassist::init_defaults(); shell_println!("Remote assist initialized."); }
+        _ => {
+            shell_println!("remoteassist (rassist) — remote assistance");
+            shell_println!("  show / list            List sessions");
+            shell_println!("  invite [host] [mode]   Create invitation");
+            shell_println!("  connect <code> [name]  Join session");
+            shell_println!("  grant <id>             Grant control");
+            shell_println!("  revoke <id>            Revoke control");
+            shell_println!("  pause / resume <id>    Pause/resume");
+            shell_println!("  end <id>               End session");
+            shell_println!("  clipboard <id> [on|off] Clipboard sharing");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -41005,7 +41445,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

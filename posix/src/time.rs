@@ -98,6 +98,19 @@ pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
     0
 }
 
+/// Sleep for a specified number of microseconds.
+///
+/// This is obsolete in POSIX.1-2008 (use `nanosleep` instead) but
+/// many programs still use it.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn usleep(usec: u32) -> i32 {
+    let ns: u64 = u64::from(usec).saturating_mul(1_000);
+    let ret = syscall1(SYS_SLEEP, ns);
+    if ret < 0 { -1 } else { 0 }
+}
+
 /// Get time from a specific clock.
 ///
 /// Currently only `CLOCK_MONOTONIC` is supported (maps to our
@@ -124,6 +137,29 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
                 {
                     (*tp).tv_sec = (ns / 1_000_000_000) as TimeT;
                     (*tp).tv_nsec = (ns % 1_000_000_000) as i64;
+                }
+            }
+            0
+        }
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
+}
+
+/// Get the resolution of a clock.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
+    match clk_id {
+        CLOCK_MONOTONIC | CLOCK_REALTIME => {
+            if !res.is_null() {
+                // Our kernel timer resolution is 1 nanosecond (TSC-based).
+                unsafe {
+                    (*res).tv_sec = 0;
+                    (*res).tv_nsec = 1;
                 }
             }
             0

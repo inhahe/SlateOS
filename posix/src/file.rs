@@ -1192,6 +1192,36 @@ pub extern "C" fn umask(_cmask: ModeT) -> ModeT {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// flock — advisory file locking
+// ---------------------------------------------------------------------------
+
+/// Lock operation: shared (read) lock.
+pub const LOCK_SH: i32 = 1;
+/// Lock operation: exclusive (write) lock.
+pub const LOCK_EX: i32 = 2;
+/// Lock operation: unlock.
+pub const LOCK_UN: i32 = 8;
+/// Lock operation modifier: non-blocking.
+pub const LOCK_NB: i32 = 4;
+
+/// Apply or remove an advisory lock on an open file.
+///
+/// Stub: always succeeds.  Our OS does not yet implement file locking
+/// at the kernel level.  Programs that call `flock` at startup for
+/// lock files will proceed normally (the lock is advisory and not
+/// enforced).
+#[unsafe(no_mangle)]
+pub extern "C" fn flock(_fd: Fd, _operation: i32) -> i32 {
+    // Advisory locking not yet implemented in the kernel.
+    // Return success so programs that create lock files don't fail.
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
 /// Translate POSIX open flags to our native flag word.
 fn translate_open_flags(posix_flags: i32) -> u64 {
     let mut native: u64 = 0;

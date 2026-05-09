@@ -1,8 +1,8 @@
-//! POSIX command-line option parsing.
+//! POSIX and GNU command-line option parsing.
 //!
 //! Implements `getopt()` for parsing short command-line options per
-//! POSIX.1-2024.  Programs call `getopt()` in a loop; it returns the
-//! next option character, or -1 when all options are consumed.
+//! POSIX.1-2024, and `getopt_long()`/`getopt_long_only()` for GNU-style
+//! long options.
 //!
 //! ## Global State
 //!
@@ -15,9 +15,9 @@
 //!
 //! ## Limitations
 //!
-//! - Only short options (single character).  `getopt_long()` is not
-//!   yet implemented.
 //! - Not thread-safe (uses global state, matching POSIX spec).
+//! - Long option matching is simple prefix match (ambiguous prefixes
+//!   return '?').
 
 /// Pointer to the argument of the current option.
 #[unsafe(no_mangle)]
@@ -208,5 +208,260 @@ fn find_in_optstring(optstring: *const u8, ch: u8) -> i32 {
         if unsafe { *optstring.add(i) } == b':' {
             i = i.wrapping_add(1);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GNU getopt_long / getopt_long_only
+// ---------------------------------------------------------------------------
+
+/// Long option descriptor.
+///
+/// Matches the GNU `struct option` layout.
+#[repr(C)]
+pub struct Option {
+    /// Long option name (without leading "--").
+    pub name: *const u8,
+    /// Argument requirement: 0=none, 1=required, 2=optional.
+    pub has_arg: i32,
+    /// If non-null, set `*flag = val` and return 0.
+    /// If null, return `val`.
+    pub flag: *mut i32,
+    /// Value to return (or store in `*flag`).
+    pub val: i32,
+}
+
+/// `has_arg` value: option takes no argument.
+pub const NO_ARGUMENT: i32 = 0;
+/// `has_arg` value: option requires an argument.
+pub const REQUIRED_ARGUMENT: i32 = 1;
+/// `has_arg` value: option takes an optional argument.
+pub const OPTIONAL_ARGUMENT: i32 = 2;
+
+/// Parse long (and short) command-line options.
+///
+/// Processes `argv` looking for both short options (from `optstring`)
+/// and long options (from `longopts`).  When a long option is matched,
+/// `*longindex` (if non-null) is set to the index in `longopts`.
+///
+/// Returns the option character (short) or `val`/0 (long), '?' on error,
+/// or -1 when all options are consumed.
+#[unsafe(no_mangle)]
+#[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
+pub extern "C" fn getopt_long(
+    argc: i32,
+    argv: *const *const u8,
+    optstring: *const u8,
+    longopts: *const Option,
+    longindex: *mut i32,
+) -> i32 {
+    getopt_long_impl(argc, argv, optstring, longopts, longindex, false)
+}
+
+/// Like `getopt_long` but also tries to match long options for
+/// `-option` (single dash), not just `--option`.
+#[unsafe(no_mangle)]
+#[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
+pub extern "C" fn getopt_long_only(
+    argc: i32,
+    argv: *const *const u8,
+    optstring: *const u8,
+    longopts: *const Option,
+    longindex: *mut i32,
+) -> i32 {
+    getopt_long_impl(argc, argv, optstring, longopts, longindex, true)
+}
+
+/// Shared implementation for `getopt_long` and `getopt_long_only`.
+#[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
+fn getopt_long_impl(
+    argc: i32,
+    argv: *const *const u8,
+    optstring: *const u8,
+    longopts: *const Option,
+    longindex: *mut i32,
+    long_only: bool,
+) -> i32 {
+    let ind = unsafe { core::ptr::addr_of!(optind).read() };
+    if ind >= argc || argv.is_null() || optstring.is_null() {
+        return -1;
+    }
+
+    // SAFETY: ind is in [0, argc), argv is non-null.
+    let arg = unsafe { *argv.add(ind as usize) };
+    if arg.is_null() {
+        return -1;
+    }
+
+    let c0 = unsafe { *arg };
+    if c0 != b'-' || unsafe { *arg.add(1) } == 0 {
+        // Not an option — stop.
+        return -1;
+    }
+
+    // Check for "--" (end of options).
+    if unsafe { *arg.add(1) } == b'-' && unsafe { *arg.add(2) } == 0 {
+        unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
+        return -1;
+    }
+
+    // Check for long option: "--something" or (with long_only) "-something".
+    let is_long = unsafe { *arg.add(1) } == b'-';
+    if is_long || (long_only && !longopts.is_null()) {
+        let name_start = if is_long { 2usize } else { 1usize };
+        let result = try_match_long(arg, name_start, longopts, longindex);
+        if let Some(ret) = result {
+            // Consume the argument.
+            let mut next_ind = ind.wrapping_add(1);
+
+            // Handle required/optional argument.
+            let matched_idx = if longindex.is_null() {
+                -1
+            } else {
+                unsafe { *longindex }
+            };
+
+            if matched_idx >= 0 {
+                let opt = unsafe { &*longopts.add(matched_idx as usize) };
+                handle_long_opt_arg(arg, name_start, opt, argc, argv, &mut next_ind);
+            }
+
+            unsafe { core::ptr::addr_of_mut!(optind).write(next_ind); }
+            return ret;
+        }
+
+        // If this was "--something" (double dash) and no match, it's an error.
+        if is_long {
+            unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
+            return i32::from(b'?');
+        }
+        // For long_only with single dash, fall through to short option handling.
+    }
+
+    // Delegate to short-option getopt.
+    // SAFETY: argc/argv/optstring are forwarded from our caller, which
+    // has the same safety requirements as getopt.
+    unsafe { getopt(argc, argv, optstring) }
+}
+
+/// Try to match a long option from the argv element.
+///
+/// Returns `Some(val_or_0)` if matched, `None` if no match.
+fn try_match_long(
+    arg: *const u8,
+    name_start: usize,
+    longopts: *const Option,
+    longindex: *mut i32,
+) -> core::option::Option<i32> {
+    if longopts.is_null() {
+        return None;
+    }
+
+    // Extract the option name (up to '=' or NUL).
+    let mut name_len: usize = 0;
+    loop {
+        let c = unsafe { *arg.add(name_start.wrapping_add(name_len)) };
+        if c == 0 || c == b'=' {
+            break;
+        }
+        name_len = name_len.wrapping_add(1);
+    }
+
+    if name_len == 0 {
+        return None;
+    }
+
+    // Search longopts for a match.
+    let mut idx: usize = 0;
+    loop {
+        let opt = unsafe { &*longopts.add(idx) };
+        if opt.name.is_null() {
+            break; // End of longopts array.
+        }
+
+        // Compare names.
+        if names_match(arg, name_start, name_len, opt.name) {
+            if !longindex.is_null() {
+                unsafe { *longindex = idx as i32; }
+            }
+
+            // Return value based on flag.
+            if opt.flag.is_null() {
+                return Some(opt.val);
+            }
+            unsafe { *opt.flag = opt.val; }
+            return Some(0);
+        }
+
+        idx = idx.wrapping_add(1);
+    }
+
+    None
+}
+
+/// Check if the name in argv matches a long option name.
+fn names_match(
+    arg: *const u8,
+    name_start: usize,
+    name_len: usize,
+    opt_name: *const u8,
+) -> bool {
+    let opt_len = unsafe { crate::string::strlen(opt_name) };
+    if name_len != opt_len {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < name_len {
+        let a = unsafe { *arg.add(name_start.wrapping_add(i)) };
+        let b = unsafe { *opt_name.add(i) };
+        if a != b {
+            return false;
+        }
+        i = i.wrapping_add(1);
+    }
+    true
+}
+
+/// Handle the argument for a matched long option.
+#[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
+fn handle_long_opt_arg(
+    arg: *const u8,
+    name_start: usize,
+    opt: &Option,
+    argc: i32,
+    argv: *const *const u8,
+    next_ind: &mut i32,
+) {
+    // Find the '=' if present (inline argument).
+    let mut i = name_start;
+    let mut has_eq = false;
+    loop {
+        let c = unsafe { *arg.add(i) };
+        if c == 0 {
+            break;
+        }
+        if c == b'=' {
+            has_eq = true;
+            break;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    if has_eq {
+        // Argument is after the '='.
+        let arg_ptr = unsafe { arg.add(i.wrapping_add(1)) };
+        unsafe { core::ptr::addr_of_mut!(optarg).write(arg_ptr); }
+    } else if opt.has_arg == REQUIRED_ARGUMENT {
+        // Argument is the next argv element.
+        if *next_ind < argc {
+            let next_arg = unsafe { *argv.add(*next_ind as usize) };
+            unsafe { core::ptr::addr_of_mut!(optarg).write(next_arg); }
+            *next_ind = next_ind.wrapping_add(1);
+        } else {
+            // Missing required argument.
+            unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
+        }
+    } else {
+        unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
     }
 }

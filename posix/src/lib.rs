@@ -30,6 +30,7 @@
 //! - **Signals**: Stub constants and handlers (partial)
 //! - **Threads**: `pthread` stubs, working mutex ops
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
+//!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`,
 //!   `setjmp`/`longjmp`, `qsort`, `bsearch`, `atoi`/`strtol`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
 //! - **Formatted Output**: `printf`, `fprintf`, `sprintf`, `snprintf`
@@ -62,8 +63,8 @@
 //!   variants)
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
-//!   `basename`, `dirname`, `getopt`, `pathconf`, `confstr`,
-//!   `strlcpy`, `strlcat`, `mkdtemp`
+//!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,
+//!   `pathconf`, `confstr`, `strlcpy`, `strlcat`, `mkdtemp`, `flock`
 //!
 //! ## Error Handling
 //!

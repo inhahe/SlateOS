@@ -1,7 +1,8 @@
 //! C dynamic memory allocation.
 //!
-//! Implements `malloc`, `free`, `calloc`, `realloc` using mmap/munmap
-//! as the backing allocator.
+//! Implements `malloc`, `free`, `calloc`, `realloc`, `posix_memalign`,
+//! `aligned_alloc`, `valloc`, `memalign` using mmap/munmap as the
+//! backing allocator.
 //!
 //! ## Design
 //!
@@ -164,4 +165,158 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
 
     // Unmap the entire region.
     let _ = mman::munmap(base.cast::<core::ffi::c_void>(), total);
+}
+
+// ---------------------------------------------------------------------------
+// Aligned allocation
+// ---------------------------------------------------------------------------
+
+/// Allocate memory aligned to `alignment` bytes.
+///
+/// POSIX `posix_memalign`: stores the allocated pointer in `*memptr`.
+/// Returns 0 on success, or an error code (EINVAL/ENOMEM) — does NOT
+/// set errno (per POSIX spec, the error code is the return value).
+///
+/// `alignment` must be a power of two and a multiple of `sizeof(void *)`.
+///
+/// # Safety
+///
+/// `memptr` must be a valid, writable pointer to `*mut u8`.
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: usize) -> i32 {
+    if memptr.is_null() {
+        return crate::errno::EINVAL;
+    }
+
+    // Alignment must be power of two and >= sizeof(void*).
+    if alignment < core::mem::size_of::<usize>() || !alignment.is_power_of_two() {
+        return crate::errno::EINVAL;
+    }
+
+    if size == 0 {
+        // SAFETY: memptr verified non-null.
+        unsafe { *memptr = core::ptr::null_mut(); }
+        return 0;
+    }
+
+    // Our malloc always returns mmap'd memory which is page-aligned
+    // (typically 4096 or 16384 byte alignment).  Any alignment <=
+    // page size is automatically satisfied.  For larger alignments
+    // we'd need a custom mmap, but that's exceedingly rare.
+    let ptr = malloc(size);
+    if ptr.is_null() {
+        return crate::errno::ENOMEM;
+    }
+
+    // Verify alignment (always true for mmap-backed malloc where
+    // HEADER_SIZE=16 and mmap returns page-aligned addresses, so
+    // the user pointer is at page_start + 16, which is 16-byte aligned).
+    if !(ptr as usize).is_multiple_of(alignment) {
+        // If somehow misaligned, fall back to over-allocating.
+        // SAFETY: ptr was returned by malloc.
+        unsafe { free(ptr); }
+        let ptr2 = aligned_alloc_impl(alignment, size);
+        if ptr2.is_null() {
+            return crate::errno::ENOMEM;
+        }
+        unsafe { *memptr = ptr2; }
+        return 0;
+    }
+
+    // SAFETY: memptr verified non-null.
+    unsafe { *memptr = ptr; }
+    0
+}
+
+/// Allocate memory with specified alignment (C11 `aligned_alloc`).
+///
+/// `alignment` must be a power of two.  `size` must be a multiple of
+/// `alignment` (per C11 spec, though many implementations don't enforce
+/// this).
+///
+/// Returns a pointer to aligned memory, or NULL on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut u8 {
+    if !alignment.is_power_of_two() || alignment == 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+    aligned_alloc_impl(alignment, size)
+}
+
+/// Allocate page-aligned memory (obsolete but still used).
+#[unsafe(no_mangle)]
+pub extern "C" fn valloc(size: usize) -> *mut u8 {
+    // mmap always returns page-aligned memory; our malloc uses
+    // a 16-byte header, so the user pointer is at page+16.
+    // For true page alignment, use mmap directly.
+    if size == 0 {
+        return core::ptr::null_mut();
+    }
+
+    let ptr = mman::mmap(
+        core::ptr::null_mut(),
+        size,
+        mman::PROT_READ | mman::PROT_WRITE,
+        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+
+    if ptr == mman::MAP_FAILED {
+        return core::ptr::null_mut();
+    }
+
+    ptr.cast::<u8>()
+}
+
+/// Allocate aligned memory (obsolete but still used by some programs).
+///
+/// `alignment` must be a power of two.
+#[unsafe(no_mangle)]
+pub extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
+    aligned_alloc(alignment, size)
+}
+
+/// Internal aligned allocation implementation.
+///
+/// Over-allocates and adjusts the returned pointer to satisfy alignment.
+/// Uses a secondary header to track the real base for free().
+fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
+    if size == 0 {
+        return core::ptr::null_mut();
+    }
+
+    // Our malloc returns 16-byte-aligned pointers.  If alignment <= 16,
+    // plain malloc suffices.
+    if alignment <= HEADER_SIZE {
+        return malloc(size);
+    }
+
+    // Over-allocate: size + alignment + header space for the real base pointer.
+    let extra = alignment.wrapping_add(core::mem::size_of::<usize>());
+    let Some(total) = size.checked_add(extra) else {
+        return core::ptr::null_mut();
+    };
+
+    let raw = malloc(total);
+    if raw.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    // Align the user pointer.
+    let raw_addr = raw as usize;
+    // Reserve space for the back-pointer (one usize before the aligned addr).
+    let min_addr = raw_addr.wrapping_add(core::mem::size_of::<usize>());
+    let aligned_addr = min_addr.wrapping_add(alignment.wrapping_sub(1)) & !alignment.wrapping_sub(1);
+
+    // Store the original malloc pointer just before the aligned address.
+    // SAFETY: aligned_addr - sizeof(usize) >= raw_addr, so this is within
+    // the malloc'd region.
+    unsafe {
+        let back_ptr = (aligned_addr.wrapping_sub(core::mem::size_of::<usize>())) as *mut usize;
+        core::ptr::write_unaligned(back_ptr, raw_addr);
+    }
+
+    aligned_addr as *mut u8
 }

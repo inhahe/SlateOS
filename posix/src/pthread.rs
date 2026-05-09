@@ -30,6 +30,8 @@
 //! - Detached thread stacks are leaked (no cleanup notification).
 //! - `pthread_cancel` is not implemented.
 //! - Mutex is a spinlock (no futex-based blocking).
+//! - Condition variables use spin-yield (1ms intervals) watching a
+//!   generation counter.  Correct but not efficient.
 //! - Thread attributes (`pthread_attr_t`) are ignored; stack size is
 //!   fixed at 64 KiB.
 
@@ -56,6 +58,29 @@ pub struct PthreadMutexT {
 
 /// Pthread mutex attribute type.
 pub type PthreadMutexattrT = [u8; 8];
+
+/// Pthread condition variable type — basic implementation.
+///
+/// Uses a generation counter so `pthread_cond_signal` can wake
+/// threads spinning on `pthread_cond_wait`.
+#[repr(C)]
+pub struct PthreadCondT {
+    /// Generation counter — incremented on each signal/broadcast.
+    generation: AtomicI32,
+    // Padding to match typical libc struct size.
+    _pad: [u8; 44],
+}
+
+/// Pthread condition variable attribute type.
+pub type PthreadCondattrT = [u8; 8];
+
+/// Static initializer for `pthread_cond_t`.
+#[allow(clippy::declare_interior_mutable_const)]
+#[unsafe(no_mangle)]
+pub static PTHREAD_COND_INITIALIZER: PthreadCondT = PthreadCondT {
+    generation: AtomicI32::new(0),
+    _pad: [0; 44],
+};
 
 /// Pthread once control type — thread-safe via atomic flag.
 #[repr(C)]
@@ -558,4 +583,138 @@ pub unsafe extern "C" fn pthread_setspecific(key: PthreadKeyT, value: *mut u8) -
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_key_delete(_key: PthreadKeyT) -> i32 {
     0 // No-op: we don't reclaim key indices.
+}
+
+// ---------------------------------------------------------------------------
+// Condition variables
+// ---------------------------------------------------------------------------
+
+/// Initialize a condition variable.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cond_init(
+    cond: *mut PthreadCondT,
+    _attr: *const PthreadCondattrT,
+) -> i32 {
+    if cond.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: cond is non-null.
+    unsafe {
+        let c = &mut *cond;
+        c.generation = AtomicI32::new(0);
+    }
+    0
+}
+
+/// Destroy a condition variable.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cond_destroy(_cond: *mut PthreadCondT) -> i32 {
+    0 // No resources to free.
+}
+
+/// Wait on a condition variable.
+///
+/// Atomically releases `mutex`, waits for a signal/broadcast on `cond`,
+/// then re-acquires `mutex`.  Uses a spin-yield loop watching the
+/// generation counter — not ideal but correct.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cond_wait(
+    cond: *mut PthreadCondT,
+    mutex: *mut PthreadMutexT,
+) -> i32 {
+    if cond.is_null() || mutex.is_null() {
+        return errno::EINVAL;
+    }
+
+    // SAFETY: Both pointers verified non-null.
+    let c = unsafe { &*cond };
+    let current_gen = c.generation.load(Ordering::Acquire);
+
+    // Release the mutex while waiting.
+    // SAFETY: mutex verified non-null above.
+    unsafe { pthread_mutex_unlock(mutex); }
+
+    // Spin-yield until the generation changes (signal/broadcast happened).
+    while c.generation.load(Ordering::Acquire) == current_gen {
+        core::hint::spin_loop();
+        // Yield the CPU to avoid burning cycles.
+        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000); // 1ms yield.
+    }
+
+    // Re-acquire the mutex.
+    // SAFETY: mutex verified non-null above.
+    unsafe { pthread_mutex_lock(mutex); }
+    0
+}
+
+/// Wait on a condition variable with a timeout.
+///
+/// Like `pthread_cond_wait` but returns `ETIMEDOUT` if the absolute
+/// time `abstime` passes before a signal.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cond_timedwait(
+    cond: *mut PthreadCondT,
+    mutex: *mut PthreadMutexT,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if cond.is_null() || mutex.is_null() || abstime.is_null() {
+        return errno::EINVAL;
+    }
+
+    let c = unsafe { &*cond };
+    let current_gen = c.generation.load(Ordering::Acquire);
+
+    // SAFETY: mutex verified non-null above.
+    unsafe { pthread_mutex_unlock(mutex); }
+
+    // Get current time to compute deadline.
+    let deadline = unsafe { (*abstime).tv_sec };
+    let mut now_ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+    let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
+
+    let mut timed_out = false;
+    while c.generation.load(Ordering::Acquire) == current_gen {
+        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
+        if now_ts.tv_sec >= deadline {
+            timed_out = true;
+            break;
+        }
+        core::hint::spin_loop();
+        let _ = syscall::syscall1(syscall::SYS_SLEEP, 1_000_000); // 1ms yield.
+    }
+
+    // SAFETY: mutex verified non-null above.
+    unsafe { pthread_mutex_lock(mutex); }
+    if timed_out { errno::ETIMEDOUT } else { 0 }
+}
+
+/// Signal (wake one waiter on) a condition variable.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cond_signal(cond: *mut PthreadCondT) -> i32 {
+    if cond.is_null() {
+        return errno::EINVAL;
+    }
+    // Bump generation counter — any waiter spinning on it will notice.
+    let c = unsafe { &*cond };
+    c.generation.fetch_add(1, Ordering::Release);
+    0
+}
+
+/// Broadcast (wake all waiters on) a condition variable.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
+    // Same as signal — our spin-based implementation wakes all waiters
+    // since they all see the generation change.
+    pthread_cond_signal(cond)
+}
+
+// ---------------------------------------------------------------------------
+// sched_yield — voluntarily yield the CPU
+// ---------------------------------------------------------------------------
+
+/// Yield the processor to another thread/process.
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_yield() -> i32 {
+    let _ = syscall::syscall1(syscall::SYS_SLEEP, 0);
+    0
 }

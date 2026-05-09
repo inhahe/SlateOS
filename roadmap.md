@@ -897,6 +897,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] resource additions: nice/getpriority/setpriority (stored locally, clamped to [-20,19], not kernel-enforced), PRIO_PROCESS/PRIO_PGRP/PRIO_USER constants
   - [x] stdlib additions: system() stub (returns ENOSYS — no shell yet)
   - [x] signal improvements: signal() now stores handlers (was returning SIG_ERR), sigaction struct and function (examine/change signal actions), sigprocmask succeeds silently (was ENOSYS), sigsuspend returns EINTR (correct POSIX), sigpending (empty set), SA_RESTART/SA_NOCLDSTOP/SA_SIGINFO flags
+  - [x] pthread condition variables: pthread_cond_init/destroy/wait/timedwait/signal/broadcast (generation counter + spin-yield), PthreadCondT struct, PTHREAD_COND_INITIALIZER
+  - [x] sched_yield (yield CPU via SYS_SLEEP(0))
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

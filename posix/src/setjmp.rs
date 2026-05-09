@@ -4,6 +4,10 @@
 //! callee-saved registers and return address into a `jmp_buf`, and
 //! `longjmp` restores them to perform a non-local jump.
 //!
+//! Also provides `sigsetjmp`/`siglongjmp` (aliased to `setjmp`/`longjmp`
+//! since our OS doesn't deliver signals and the signal mask doesn't
+//! need saving/restoring) and `_setjmp`/`_longjmp` (BSD aliases).
+//!
 //! ## Register Layout (x86_64 SysV ABI)
 //!
 //! Callee-saved registers that must be preserved:
@@ -84,4 +88,37 @@ global_asm!(
     // Restore stack pointer and jump to saved return address.
     "    mov rsp, [rdi + 48]",        // RSP = env[6]
     "    jmp [rdi + 56]",             // JMP to env[7] (RIP)
+
+    // ---------------------------------------------------------------
+    // sigsetjmp / siglongjmp — aliases for setjmp / longjmp
+    //
+    // Our OS doesn't deliver Unix signals, so there is no signal mask
+    // to save/restore.  sigsetjmp(env, savemask) ignores savemask and
+    // behaves identically to setjmp.
+    // ---------------------------------------------------------------
+    ".global sigsetjmp",
+    ".type sigsetjmp, @function",
+    "sigsetjmp:",
+    "    jmp setjmp",
+
+    ".global siglongjmp",
+    ".type siglongjmp, @function",
+    "siglongjmp:",
+    "    jmp longjmp",
+
+    // ---------------------------------------------------------------
+    // _setjmp / _longjmp — BSD aliases (no signal mask saving)
+    // ---------------------------------------------------------------
+    ".global _setjmp",
+    ".type _setjmp, @function",
+    "_setjmp:",
+    "    jmp setjmp",
+
+    ".global _longjmp",
+    ".type _longjmp, @function",
+    "_longjmp:",
+    "    jmp longjmp",
 );
+
+/// `sigjmp_buf` — same as `jmp_buf` since we don't save signal masks.
+pub type SigjmpBuf = JmpBuf;

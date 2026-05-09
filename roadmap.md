@@ -939,6 +939,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] sched: POSIX scheduling stubs — sched_getscheduler/setscheduler/getparam/setparam/get_priority_min/get_priority_max/rr_get_interval
   - [x] socketpair stub, sendmsg/recvmsg (Msghdr/Iovec/Cmsghdr structs, delegates to send/recv for first iov)
   - [x] posix_fadvise/posix_fallocate stubs (advisory, always succeed)
+  - [x] sigsetjmp/siglongjmp/_setjmp/_longjmp: assembly aliases (jmp to setjmp/longjmp), SigjmpBuf type alias
+  - [x] daemon: best-effort daemonize (chdir /, close fds, setsid — no fork), getloadavg stub (returns 0.0)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

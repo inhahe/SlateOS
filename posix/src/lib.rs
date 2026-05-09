@@ -64,7 +64,8 @@
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,
-//!   `pathconf`, `confstr`, `strlcpy`, `strlcat`, `mkdtemp`, `flock`
+//!   `pathconf`, `confstr`, `strlcpy`, `strlcat`, `mkdtemp`, `flock`,
+//!   `daemon`, `getloadavg`
 //!
 //! ## Error Handling
 //!

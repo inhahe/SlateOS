@@ -1,8 +1,8 @@
 //! POSIX unistd.h equivalents — miscellaneous functions.
 //!
 //! Functions that don't fit neatly into another category: `getcwd`,
-//! `chdir`, `isatty`, `getuid`, `getgid`, `sysconf`, `write` to
-//! stdout/stderr.
+//! `chdir`, `isatty`, `getuid`, `getgid`, `sysconf`, `daemon`,
+//! `getloadavg`, `write` to stdout/stderr.
 //!
 //! ## Current Working Directory
 //!
@@ -673,6 +673,83 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
     }
 
     resolved_path
+}
+
+// ---------------------------------------------------------------------------
+// daemon
+// ---------------------------------------------------------------------------
+
+/// Detach from the controlling terminal and run in the background.
+///
+/// If `nochdir` is 0, changes the working directory to `/`.
+/// If `noclose` is 0, redirects stdin/stdout/stderr to `/dev/null`
+/// (stubbed — we don't have `/dev/null`, so we just close them).
+///
+/// Our OS doesn't have `fork()`, so this is a best-effort stub that
+/// performs the CWD change and fd redirection but cannot actually
+/// create a background process.  Programs that call `daemon()` will
+/// continue running in the foreground.
+///
+/// Returns 0 on success, -1 on error with errno set.
+#[unsafe(no_mangle)]
+pub extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
+    // Change CWD to root unless suppressed.
+    if nochdir == 0 {
+        let root = b"/\0";
+        let ret = chdir(root.as_ptr());
+        if ret < 0 {
+            return -1;
+        }
+    }
+
+    // Close standard fds unless suppressed.
+    // A real daemon would reopen them to /dev/null, but we don't have
+    // /dev/null yet.  Closing them prevents accidental terminal output.
+    if noclose == 0 {
+        crate::file::close(STDIN_FILENO);
+        crate::file::close(STDOUT_FILENO);
+        crate::file::close(STDERR_FILENO);
+    }
+
+    // Cannot fork — we stay in the same process.  Call setsid() to
+    // create a new session (best effort at detaching).
+    let _ = crate::process::setsid();
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// getloadavg
+// ---------------------------------------------------------------------------
+
+/// Get system load averages.
+///
+/// Fills `loadavg` with up to `nelem` load average values (1-min,
+/// 5-min, 15-min).  Returns the number of samples stored, or -1 on
+/// error.
+///
+/// Stub: returns synthetic idle-system values (0.0) since our OS
+/// doesn't track load averages yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
+    if loadavg.is_null() || nelem <= 0 {
+        return -1;
+    }
+
+    // Clamp to 3 (POSIX defines at most 3 load averages).
+    let count = if nelem > 3 { 3 } else { nelem };
+
+    let mut i: i32 = 0;
+    while i < count {
+        // SAFETY: loadavg is valid for at least nelem elements (caller
+        // contract), and i < count <= nelem.
+        unsafe {
+            *loadavg.add(i as usize) = 0.0;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    count
 }
 
 // ---------------------------------------------------------------------------

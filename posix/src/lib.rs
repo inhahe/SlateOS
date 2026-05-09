@@ -95,6 +95,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 pub mod assert;
 pub mod crt;
 pub mod ctype;
+pub mod dlfcn;
 pub mod environ;
 pub mod errno;
 pub mod fcntl;
@@ -114,6 +115,7 @@ pub mod poll;
 pub mod printf;
 pub mod pthread;
 pub mod regex;
+pub mod semaphore;
 pub mod process;
 pub mod pwd;
 pub mod setjmp;

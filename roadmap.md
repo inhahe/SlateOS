@@ -862,6 +862,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] regex: regcomp/regexec/regfree/regerror — compiled regex with BRE and ERE (REG_EXTENDED), case-insensitive (REG_ICASE), anchors, character classes, groups, alternation, quantifiers (*+?), REG_NEWLINE support
   - [x] stdio additions: fdopen, freopen, ungetc (per-fd pushback buffer), getc/putc, setvbuf/setbuf (stubs), popen/pclose (stubs), BUFSIZ/_IONBF/_IOLBF/_IOFBF constants
   - [x] time: gmtime/localtime/mktime (epoch↔broken-down conversion), asctime/ctime (formatted string), strftime (%Y%m%d%H%M%S%A%a%B%b%c%p%j%n%t%%), difftime; all UTC (no timezone)
+  - [x] dlfcn: dlopen/dlsym/dlclose/dlerror stubs (dynamic linking not supported, returns descriptive errors)
+  - [x] semaphore: unnamed sem_init/sem_wait/sem_trywait/sem_post/sem_getvalue/sem_destroy (atomic CAS + spin-yield); named sem_open/sem_close/sem_unlink stubs (ENOSYS)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

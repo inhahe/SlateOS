@@ -883,6 +883,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] stdlib additions: strtod/strtof/atof (float parsing with exponent support), strtoll/strtoull (64-bit integer parsing), llabs, div/ldiv/lldiv (quotient+remainder structs), rand_r (reentrant PRNG)
   - [x] string additions: strtok_r (reentrant tokenizer), memccpy (copy-until-byte), strcoll/strxfrm (locale stubs), strerror_r (thread-safe error strings)
   - [x] time additions: clock (CPU time via CLOCK_MONOTONIC proxy), strptime (parse time strings — %Y/%m/%d/%H/%M/%S/%j/%n/%t/%%), CLOCKS_PER_SEC
+  - [x] scanf: sscanf via assembly trampoline — %d/%i/%u/%x/%o/%s/%c/%f/%lf/%n, width limits, assignment suppression (%*), length modifiers (l/ll/h/hh), literal matching
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

@@ -34,6 +34,8 @@
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
 //! - **Formatted Output**: `printf`, `fprintf`, `sprintf`, `snprintf`
 //!   (via assembly trampoline for C variadic capture)
+//! - **Formatted Input**: `sscanf` (string scanning with `%d`/`%u`/`%x`/
+//!   `%o`/`%s`/`%c`/`%f`/`%n`, width limits, assignment suppression)
 //! - **Pattern Matching**: `fnmatch` (shell wildcards), `glob`/`globfree`
 //!   (pathname expansion)
 //! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`
@@ -121,6 +123,7 @@ pub mod poll;
 pub mod printf;
 pub mod pthread;
 pub mod regex;
+pub mod scanf;
 pub mod semaphore;
 pub mod process;
 pub mod pwd;

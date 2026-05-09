@@ -321,6 +321,10 @@ const ROOT_FILES: &[&str] = &[
     "recentsearch",
     "sysmaint",
     "multiclip",
+    "focussession",
+    "quicknote",
+    "colorscheme",
+    "appcompat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6559,6 +6563,82 @@ fn gen_multiclip() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_focussession() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Focus Session ===\n");
+    let state = super::focussession::current_state();
+    out.push_str(&format!("state: {}\n", state.label()));
+    if let Some(cfg) = super::focussession::get_config() {
+        out.push_str(&format!("focus_mins: {}\n", cfg.focus_mins));
+        out.push_str(&format!("short_break_mins: {}\n", cfg.short_break_mins));
+        out.push_str(&format!("long_break_mins: {}\n", cfg.long_break_mins));
+        out.push_str(&format!("sessions_before_long: {}\n", cfg.sessions_before_long));
+        out.push_str(&format!("block_notifications: {}\n", cfg.block_notifications));
+    }
+    let (sessions, abandoned, focus_mins, ops) = super::focussession::stats();
+    out.push_str(&format!("total_sessions: {}\n", sessions));
+    out.push_str(&format!("total_abandoned: {}\n", abandoned));
+    out.push_str(&format!("total_focus_mins: {}\n", focus_mins));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_quicknote() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Quick Notes ===\n");
+    let (notes, pinned, created, edits, ops) = super::quicknote::stats();
+    out.push_str(&format!("notes: {}\n", notes));
+    out.push_str(&format!("pinned: {}\n", pinned));
+    out.push_str(&format!("total_created: {}\n", created));
+    out.push_str(&format!("total_edits: {}\n", edits));
+    let recent = super::quicknote::list(5);
+    for n in &recent {
+        let trunc: String = n.content.chars().take(40).collect();
+        out.push_str(&format!("  [{}] {} — {}\n", n.id, n.title, trunc));
+    }
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_colorscheme() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Color Scheme ===\n");
+    if let Some(active) = super::colorscheme::get_active() {
+        out.push_str(&format!("active: {} (id={})\n", active.name, active.id));
+        out.push_str(&format!("mode: {:?}\n", active.mode));
+        out.push_str(&format!("accent: {}\n", active.accent));
+    }
+    let schemes = super::colorscheme::list_schemes();
+    out.push_str(&format!("scheme_count: {}\n", schemes.len()));
+    for s in &schemes {
+        out.push_str(&format!("  [{}] {} ({:?})\n", s.id, s.name, s.mode));
+    }
+    let (count, changes, ops) = super::colorscheme::stats();
+    out.push_str(&format!("total_changes: {}\n", changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_appcompat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== App Compatibility ===\n");
+    let (profiles, launches, shim_acts, ops) = super::appcompat::stats();
+    out.push_str(&format!("profiles: {}\n", profiles));
+    out.push_str(&format!("total_launches: {}\n", launches));
+    out.push_str(&format!("total_shim_activations: {}\n", shim_acts));
+    let list = super::appcompat::list_profiles();
+    for p in &list {
+        out.push_str(&format!("  {} — {:?} shims={} enabled={}\n",
+            p.app_name, p.compat_level, p.shims.len(), p.enabled));
+    }
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7045,6 +7125,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "recentsearch" => Ok(gen_recentsearch()),
         "sysmaint" => Ok(gen_sysmaint()),
         "multiclip" => Ok(gen_multiclip()),
+        "focussession" => Ok(gen_focussession()),
+        "quicknote" => Ok(gen_quicknote()),
+        "colorscheme" => Ok(gen_colorscheme()),
+        "appcompat" => Ok(gen_appcompat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4847,6 +4847,10 @@ fn dispatch(line: &str) {
         "location" | "loc" => cmd_location(args),
         "diskencrypt" | "dencrypt" => cmd_diskencrypt(args),
         "pkgmgr" | "pkg" => cmd_pkgmgr(args),
+        "remotedesktop" | "rdp" => cmd_remotedesktop(args),
+        "restorepoint" | "rpoint" => cmd_restorepoint(args),
+        "battery" | "batt" => cmd_battery(args),
+        "dictation" | "dict" => cmd_dictation(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -30548,6 +30552,428 @@ fn cmd_pkgmgr(args: &str) {
     }
 }
 
+/// `remotedesktop` / `rdp` — remote desktop management.
+fn cmd_remotedesktop(args: &str) {
+    use crate::fs::remotedesktop;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (active, total, enabled, port, _) = remotedesktop::stats();
+            shell_println!("Remote Desktop: {} (port {})", if enabled { "enabled" } else { "disabled" }, port);
+            shell_println!("  Active sessions: {}  Total: {}", active, total);
+            let sessions = remotedesktop::list_sessions();
+            for s in &sessions {
+                shell_println!("  {}: {} {} → {} [{}]", s.id, s.direction.label(),
+                    s.protocol.label(), s.remote_host, s.state.label());
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match remotedesktop::set_enabled(on) {
+                Ok(()) => shell_println!("Remote desktop {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "port" => {
+            if parts.len() < 2 { shell_println!("Usage: rdp port <port>"); return; }
+            let port: u16 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid port"); return; } };
+            match remotedesktop::set_port(port) {
+                Ok(()) => shell_println!("Port set to {}.", port),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "connect" => {
+            if parts.len() < 2 { shell_println!("Usage: rdp connect <host> [port] [rdp|vnc]"); return; }
+            let host = parts[1];
+            let port: u16 = if parts.len() > 2 { parts[2].parse().unwrap_or(3389) } else { 3389 };
+            let proto = if parts.len() > 3 {
+                match parts[3] { "vnc" => remotedesktop::RdProtocol::Vnc, _ => remotedesktop::RdProtocol::Rdp }
+            } else { remotedesktop::RdProtocol::Rdp };
+            match remotedesktop::connect(host, port, proto) {
+                Ok(id) => shell_println!("Connecting to {} (session {})...", host, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disconnect" => {
+            if parts.len() < 2 { shell_println!("Usage: rdp disconnect <id>"); return; }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match remotedesktop::disconnect(id) {
+                Ok(()) => shell_println!("Session {} disconnected.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "quality" => {
+            if parts.len() < 2 { shell_println!("Usage: rdp quality <low|medium|high|adaptive>"); return; }
+            let q = match parts[1] {
+                "low" => remotedesktop::QualityPreset::Low,
+                "medium" => remotedesktop::QualityPreset::Medium,
+                "high" => remotedesktop::QualityPreset::High,
+                "adaptive" => remotedesktop::QualityPreset::Adaptive,
+                _ => { shell_println!("Unknown quality preset"); return; }
+            };
+            match remotedesktop::set_quality(q) {
+                Ok(()) => shell_println!("Quality set to {}.", q.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (active, total, enabled, port, ops) = remotedesktop::stats();
+            shell_println!("Enabled: {}  Port: {}  Active: {}  Total: {}  Ops: {}", enabled, port, active, total, ops);
+        }
+        "test" => { remotedesktop::self_test(); shell_println!("Remote desktop self-test complete."); }
+        "init" => { remotedesktop::init_defaults(); shell_println!("Remote desktop initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("remotedesktop (rdp) — remote desktop");
+            shell_println!("  show                  Status and sessions");
+            shell_println!("  enable/disable        Toggle server");
+            shell_println!("  port <port>           Set listening port");
+            shell_println!("  connect <host> [port] Connect to remote");
+            shell_println!("  disconnect <id>       Disconnect session");
+            shell_println!("  quality <preset>      Set quality");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'rdp help' for usage."); }
+    }
+}
+
+/// `restorepoint` / `rpoint` — system restore points.
+fn cmd_restorepoint(args: &str) {
+    use crate::fs::restorepoint;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let points = restorepoint::list_points();
+            if points.is_empty() {
+                shell_println!("No restore points.");
+            } else {
+                shell_println!("{:<4} {:<30} {:<16} {}", "ID", "Description", "Type", "Status");
+                for p in &points {
+                    shell_println!("{:<4} {:<30} {:<16} {}", p.id, p.description, p.restore_type.label(), p.status.label());
+                }
+            }
+            let space = restorepoint::total_space_used();
+            shell_println!("Total space: {} bytes", space);
+        }
+        "create" => {
+            if parts.len() < 2 { shell_println!("Usage: rpoint create <description> [type]"); return; }
+            let desc = parts[1..].join(" ");
+            let rtype = restorepoint::RestoreType::Manual;
+            match restorepoint::create(&desc, rtype) {
+                Ok(id) => shell_println!("Restore point {} created.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            if parts.len() < 2 { shell_println!("Usage: rpoint delete <id>"); return; }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match restorepoint::delete(id) {
+                Ok(()) => shell_println!("Restore point {} deleted.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "restore" => {
+            if parts.len() < 2 { shell_println!("Usage: rpoint restore <id>"); return; }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match restorepoint::restore(id) {
+                Ok(p) => shell_println!("Restoring from '{}' (point {})...", p.description, p.id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            if parts.len() < 2 { shell_println!("Usage: rpoint info <id>"); return; }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match restorepoint::get_point(id) {
+                Ok(p) => {
+                    shell_println!("Restore Point #{}", p.id);
+                    shell_println!("  Description: {}", p.description);
+                    shell_println!("  Type:        {}", p.restore_type.label());
+                    shell_println!("  Status:      {}", p.status.label());
+                    shell_println!("  Size:        {} bytes", p.size_bytes);
+                    shell_println!("  OS version:  {}", p.os_version);
+                    shell_println!("  FS snapshot: {}", p.has_fs_snapshot);
+                    shell_println!("  Config snap: {}", p.has_config_snapshot);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "auto" => {
+            if parts.len() < 2 { shell_println!("Usage: rpoint auto <on|off>"); return; }
+            let on = matches!(parts[1], "on" | "true" | "yes");
+            match restorepoint::set_auto_create(on) {
+                Ok(()) => shell_println!("Auto-create {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, created, restored, space, ops) = restorepoint::stats();
+            shell_println!("Points: {}  Created: {}  Restored: {}  Space: {} B  Ops: {}",
+                count, created, restored, space, ops);
+        }
+        "test" => { restorepoint::self_test(); shell_println!("Restore point self-test complete."); }
+        "init" => { restorepoint::init_defaults(); shell_println!("Restore points initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("restorepoint (rpoint) — system restore points");
+            shell_println!("  show                List restore points");
+            shell_println!("  create <desc>       Create restore point");
+            shell_println!("  delete <id>         Delete point");
+            shell_println!("  restore <id>        Restore from point");
+            shell_println!("  info <id>           Point details");
+            shell_println!("  auto on|off         Auto-create toggle");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'rpoint help' for usage."); }
+    }
+}
+
+/// `battery` / `batt` — battery and UPS management.
+fn cmd_battery(args: &str) {
+    use crate::fs::battery;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let sources = battery::list_sources();
+            if sources.is_empty() {
+                shell_println!("No power sources.");
+            } else {
+                for s in &sources {
+                    shell_println!("{}: {} ({}) {}% [{}]", s.id, s.name,
+                        s.source_type.label(), s.charge_pct, s.state.label());
+                    if s.source_type == battery::PowerSourceType::Battery {
+                        if s.time_remaining_min > 0 {
+                            shell_println!("  Remaining: {} min", s.time_remaining_min);
+                        }
+                        shell_println!("  Health: {}  Cycles: {}  Temp: {}°C",
+                            s.health.label(), s.cycle_count, s.temperature_mc / 1000);
+                        shell_println!("  Capacity: {}/{} mWh (design: {} mWh)",
+                            s.energy_remaining_mwh, s.full_charge_capacity_mwh, s.design_capacity_mwh);
+                    }
+                }
+            }
+        }
+        "info" => {
+            if parts.len() < 2 { shell_println!("Usage: batt info <id>"); return; }
+            let id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid ID"); return; } };
+            match battery::get_source(id) {
+                Ok(s) => {
+                    shell_println!("Power Source {}: {}", s.id, s.name);
+                    shell_println!("  Type:         {}", s.source_type.label());
+                    shell_println!("  State:        {}", s.state.label());
+                    shell_println!("  Charge:       {}%", s.charge_pct);
+                    shell_println!("  Remaining:    {} min", s.time_remaining_min);
+                    shell_println!("  Rate:         {} mW", s.power_rate_mw);
+                    shell_println!("  Voltage:      {} mV", s.voltage_mv);
+                    shell_println!("  Health:       {}", s.health.label());
+                    shell_println!("  Cycles:       {}", s.cycle_count);
+                    shell_println!("  Temperature:  {} m°C", s.temperature_mc);
+                    shell_println!("  Manufacturer: {}", s.manufacturer);
+                    shell_println!("  Model:        {}", s.model);
+                    shell_println!("  Serial:       {}", s.serial);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "ac" => {
+            if parts.len() < 2 { shell_println!("Usage: batt ac <on|off>"); return; }
+            let on = matches!(parts[1], "on" | "true" | "connected");
+            match battery::set_ac_connected(on) {
+                Ok(()) => shell_println!("AC power: {}", if on { "connected" } else { "disconnected" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "alert" => {
+            if parts.len() < 3 {
+                match battery::get_alerts() {
+                    Ok(a) => {
+                        shell_println!("Alerts:");
+                        shell_println!("  Low:      {}%", a.low_pct);
+                        shell_println!("  Critical: {}%  Action: {}", a.critical_pct, a.critical_action);
+                        shell_println!("  Charge limit: {} ({}%)",
+                            if a.charge_limit_enabled { "on" } else { "off" }, a.charge_limit_pct);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+                return;
+            }
+            match parts[1] {
+                "low" => {
+                    let pct: u8 = match parts[2].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid %"); return; } };
+                    battery::set_low_threshold(pct).ok();
+                    shell_println!("Low threshold set to {}%.", pct);
+                }
+                "critical" => {
+                    let pct: u8 = match parts[2].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid %"); return; } };
+                    battery::set_critical_threshold(pct).ok();
+                    shell_println!("Critical threshold set to {}%.", pct);
+                }
+                "action" => {
+                    battery::set_critical_action(parts[2]).ok();
+                    shell_println!("Critical action set to '{}'.", parts[2]);
+                }
+                _ => shell_println!("Usage: batt alert low|critical|action <value>"),
+            }
+        }
+        "limit" => {
+            if parts.len() < 2 { shell_println!("Usage: batt limit <on|off> [pct]"); return; }
+            let on = matches!(parts[1], "on" | "true" | "yes");
+            let pct: u8 = if parts.len() > 2 { parts[2].parse().unwrap_or(80) } else { 80 };
+            match battery::set_charge_limit(on, pct) {
+                Ok(()) => shell_println!("Charge limit: {} ({}%)", if on { "on" } else { "off" }, pct),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, pct, state, cycles, alerts, ops) = battery::stats();
+            shell_println!("Sources: {}  Charge: {}%  State: {}  Cycles: {}  Alerts: {}  Ops: {}",
+                count, pct, state, cycles, alerts, ops);
+        }
+        "test" => { battery::self_test(); shell_println!("Battery self-test complete."); }
+        "init" => { battery::init_defaults(); shell_println!("Battery manager initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("battery (batt) — power source management");
+            shell_println!("  show              All power sources");
+            shell_println!("  info <id>         Source details");
+            shell_println!("  ac on|off         Simulate AC state");
+            shell_println!("  alert [low|critical|action <val>]");
+            shell_println!("  limit on|off [%]  Charge limit");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'batt help' for usage."); }
+    }
+}
+
+/// `dictation` / `dict` — speech-to-text dictation.
+fn cmd_dictation(args: &str) {
+    use crate::fs::dictation;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (state, lang, transcriptions, words, vocab, _) = dictation::stats();
+            shell_println!("Dictation: {} ({})", state, if dictation::is_enabled() { "enabled" } else { "disabled" });
+            shell_println!("  Language:       {}", lang);
+            shell_println!("  Transcriptions: {}", transcriptions);
+            shell_println!("  Total words:    {}", words);
+            shell_println!("  Custom vocab:   {} entries", vocab);
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match dictation::set_enabled(on) {
+                Ok(()) => shell_println!("Dictation {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "start" => {
+            match dictation::start_listening() {
+                Ok(()) => shell_println!("Dictation started — listening..."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stop" => {
+            match dictation::stop_listening() {
+                Ok(()) => shell_println!("Dictation stopped."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pause" => { dictation::pause().ok(); shell_println!("Dictation paused."); }
+        "resume" => { dictation::resume().ok(); shell_println!("Dictation resumed."); }
+        "lang" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: dict lang <en-us|en-gb|de|fr|es|ja|ko|zh|pt|it>");
+                return;
+            }
+            let lang = match parts[1] {
+                "en-us" | "en" => dictation::DictationLanguage::EnUs,
+                "en-gb" => dictation::DictationLanguage::EnGb,
+                "de" => dictation::DictationLanguage::DeDE,
+                "fr" => dictation::DictationLanguage::FrFR,
+                "es" => dictation::DictationLanguage::EsES,
+                "ja" => dictation::DictationLanguage::JaJP,
+                "ko" => dictation::DictationLanguage::KoKR,
+                "zh" => dictation::DictationLanguage::ZhCN,
+                "pt" => dictation::DictationLanguage::PtBR,
+                "it" => dictation::DictationLanguage::ItIT,
+                _ => { shell_println!("Unknown language: {}", parts[1]); return; }
+            };
+            match dictation::set_language(lang) {
+                Ok(()) => shell_println!("Language set to {}.", lang.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "vocab" => {
+            if parts.len() < 2 {
+                let vocab = dictation::list_vocab();
+                if vocab.is_empty() {
+                    shell_println!("No custom vocabulary.");
+                } else {
+                    for v in &vocab {
+                        shell_println!("  {} ({})", v.phrase, v.phonetic);
+                    }
+                }
+            } else if parts.len() >= 3 && parts[1] == "add" {
+                let phonetic = if parts.len() > 3 { parts[3..].join(" ") } else { String::new() };
+                match dictation::add_vocab(parts[2], &phonetic) {
+                    Ok(()) => shell_println!("Added '{}' to vocabulary.", parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else if parts.len() >= 3 && parts[1] == "remove" {
+                match dictation::remove_vocab(parts[2]) {
+                    Ok(()) => shell_println!("Removed '{}' from vocabulary.", parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: dict vocab [add <word> [phonetic] | remove <word>]");
+            }
+        }
+        "recent" => {
+            let count: usize = if parts.len() > 1 { parts[1].parse().unwrap_or(5) } else { 5 };
+            let recent = dictation::recent_transcriptions(count);
+            if recent.is_empty() {
+                shell_println!("No recent transcriptions.");
+            } else {
+                for t in &recent {
+                    shell_println!("  #{}: \"{}\" ({}% conf, {}ms)", t.id, t.text, t.confidence, t.duration_ms);
+                }
+            }
+        }
+        "history" => {
+            if parts.len() > 1 && parts[1] == "clear" {
+                match dictation::clear_history() {
+                    Ok(n) => shell_println!("Cleared {} transcriptions.", n),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: dict history clear");
+            }
+        }
+        "stats" => {
+            let (state, lang, transcriptions, words, vocab, ops) = dictation::stats();
+            shell_println!("State: {}  Lang: {}  Transcriptions: {}  Words: {}  Vocab: {}  Ops: {}",
+                state, lang, transcriptions, words, vocab, ops);
+        }
+        "test" => { dictation::self_test(); shell_println!("Dictation self-test complete."); }
+        "init" => { dictation::init_defaults(); shell_println!("Dictation initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("dictation (dict) — speech-to-text input");
+            shell_println!("  show                Overview");
+            shell_println!("  enable/disable      Toggle dictation");
+            shell_println!("  start/stop/pause    Control listening");
+            shell_println!("  lang <code>         Set language");
+            shell_println!("  vocab [add|remove]  Custom vocabulary");
+            shell_println!("  recent [n]          Recent transcriptions");
+            shell_println!("  history clear       Clear history");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'dict help' for usage."); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -39144,7 +39570,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

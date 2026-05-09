@@ -243,6 +243,10 @@ const ROOT_FILES: &[&str] = &[
     "location",
     "diskencrypt",
     "pkgmgr",
+    "remotedesktop",
+    "restorepoint",
+    "battery",
+    "dictation",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5449,6 +5453,83 @@ fn gen_pkgmgr() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_remotedesktop() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (active, total, enabled, port, ops) = super::remotedesktop::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("port: {}\n", port));
+    out.push_str(&format!("active_sessions: {}\n", active));
+    out.push_str(&format!("total_connections: {}\n", total));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let sessions = super::remotedesktop::list_sessions();
+    for s in &sessions {
+        out.push_str(&format!("{}: {} {} [{}] {}\n",
+            s.id, s.direction.label(), s.remote_host,
+            s.state.label(), s.protocol.label()));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_restorepoint() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (count, created, restored, space, ops) = super::restorepoint::stats();
+    out.push_str(&format!("points: {}\n", count));
+    out.push_str(&format!("total_created: {}\n", created));
+    out.push_str(&format!("total_restored: {}\n", restored));
+    out.push_str(&format!("space_bytes: {}\n", space));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let points = super::restorepoint::list_points();
+    for p in points.iter().take(10) {
+        out.push_str(&format!("{}: {} [{}] {}\n",
+            p.id, p.description, p.restore_type.label(), p.status.label()));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_battery() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (count, pct, state_label, cycles, alerts, ops) = super::battery::stats();
+    out.push_str(&format!("sources: {}\n", count));
+    out.push_str(&format!("charge_pct: {}\n", pct));
+    out.push_str(&format!("state: {}\n", state_label));
+    out.push_str(&format!("cycle_count: {}\n", cycles));
+    out.push_str(&format!("alerts: {}\n", alerts));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let sources = super::battery::list_sources();
+    for s in &sources {
+        out.push_str(&format!("{}: {} ({}) {}% [{}]\n",
+            s.id, s.name, s.source_type.label(), s.charge_pct, s.state.label()));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_dictation() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (state_label, lang_code, transcriptions, words, vocab, ops) = super::dictation::stats();
+    out.push_str(&format!("state: {}\n", state_label));
+    out.push_str(&format!("language: {}\n", lang_code));
+    out.push_str(&format!("transcriptions: {}\n", transcriptions));
+    out.push_str(&format!("total_words: {}\n", words));
+    out.push_str(&format!("custom_vocab: {}\n", vocab));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5857,6 +5938,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "location" => Ok(gen_location()),
         "diskencrypt" => Ok(gen_diskencrypt()),
         "pkgmgr" => Ok(gen_pkgmgr()),
+        "remotedesktop" => Ok(gen_remotedesktop()),
+        "restorepoint" => Ok(gen_restorepoint()),
+        "battery" => Ok(gen_battery()),
+        "dictation" => Ok(gen_dictation()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -757,6 +757,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Multi-monitor layout (fs::monitors): display arrangement with hotplug, ConnectorType (HDMI/DP/VGA/DVI/USBC/Thunderbolt/Internal/Virtual), Rotation (Normal/Right/Inverted/Left), LayoutMode (Extend/Mirror/Single), per-monitor resolution/refresh/scale/position, desktop_bounds() and monitor_at_point() for compositor, auto_arrange(); `monitors`/`monitor` kshell command; /proc/monitors; 11 self-tests
   - [x] Firewall settings (fs::fwsettings): inbound/outbound rules with Direction/Protocol/Port/Action filtering, NetworkZone (Home/Work/Public), per-app permissions (allow/block outbound/inbound), check_allowed() for network stack integration, stealth mode, 4 default rules (DHCP/DNS/Ping/PublicBlock); `fwsettings`/`firewall` kshell command; /proc/fwsettings; 11 self-tests
   - [x] System update manager (fs::updatemgr): update lifecycle (Available→Downloading→Downloaded→Installing→Installed/Failed/Deferred), UpdateSeverity (Critical/Important/Recommended/Optional), UpdateType (Security/BugFix/Feature/Driver/System/Application), UpdateChannel (Stable/Beta/Nightly), auto-check/download/install config, active hours, battery/metered deferral; `updatemgr`/`updates` kshell command; /proc/updatemgr; 11 self-tests
+  - [x] Notification preferences (fs::notifprefs): per-app notification config with BannerStyle (Full/Brief/None), NotifPriority (Critical/High/Normal/Low/Silent), LockScreenVisibility, sound per-app, DND override, grouping; GlobalNotifConfig with position/dismiss timeout/max visible; should_show() and should_play_sound() for notifcenter integration; `notifprefs`/`nprefs` kshell command; /proc/notifprefs; 11 self-tests
+  - [x] Network file sharing (fs::fileshare): ShareProtocol (Smb/Nfs/WebDav/Sftp), local shares with access control and guest access, remote share mounting with auto-mount, per-share enable/browseable settings, connected user tracking; `fileshare`/`share` kshell command; /proc/fileshare; 11 self-tests
+  - [x] Parental controls (fs::parental): child account management with FilterLevel (None/Light/Moderate/Strict), AppRestrictionMode (AllowAll/AllowList/BlockAll), web filtering, per-day schedule with start/end hours and max minutes, daily time limits with usage tracking, check_app_allowed/check_time_allowed/check_web_allowed enforcement hooks; `parental`/`pctl` kshell command; /proc/parental; 11 self-tests
+  - [x] Audio device management (fs::audiodevice): input/output/duplex device tracking, AudioDeviceType (Speakers/Microphone/Headphones/Usb/Bluetooth/Hdmi/Virtual/ExternalDac), SampleRate/BitDepth/Channels/Latency per device, default device selection with auto-switch on hotplug, volume/mute per device; `audiodevice`/`adev` kshell command; /proc/audiodevice; 11 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)
@@ -800,8 +804,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Fcntl: O_* flags, SEEK_*, access mode flags, S_IF* file type bits
   - [x] Fd table: userspace fd→handle mapping (File/Pipe/Console), 256 entries, fds 0/1/2 pre-initialized
   - [x] pipe/pipe2 via SYS_PIPE_CREATE with fd table integration
-  - [x] posix_spawn/posix_spawnp via SYS_FS_READ_FILE + SYS_PROCESS_SPAWN
-  - [x] execve via SYS_FS_READ_FILE + SYS_PROCESS_EXEC (real implementation, not stub)
+  - [x] posix_spawn/posix_spawnp via SYS_FS_READ_FILE + SYS_PROCESS_SPAWN (spawnp: PATH search with env fallback to /bin:/usr/bin)
+  - [x] execve/execvp via SYS_FS_READ_FILE + SYS_PROCESS_EXEC (execvp: PATH search like posix_spawnp)
+  - [x] realpath: resolve_path + stat verification (no symlink following)
   - [x] fcntl: F_GETFD/F_SETFD/F_GETFL/F_SETFL/F_DUPFD/F_DUPFD_CLOEXEC
   - [x] read/write/close dispatch by handle type (File→SYS_FS_*, Pipe→SYS_PIPE_*, Console→SYS_CONSOLE_*)
   - [x] Strings extended: strcat, strncat, strstr, strspn, strcspn, strpbrk, strtok, strdup (via mmap), strerror

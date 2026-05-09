@@ -235,6 +235,10 @@ const ROOT_FILES: &[&str] = &[
     "fileshare",
     "parental",
     "audiodevice",
+    "sessionmgr",
+    "crashreport",
+    "netproxy",
+    "fileversion",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5266,6 +5270,89 @@ fn gen_audiodevice() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sessionmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (session_count, login_count, lock_count, active_uid, ops) = super::sessionmgr::stats();
+    out.push_str(&format!("sessions: {}\n", session_count));
+    out.push_str(&format!("total_logins: {}\n", login_count));
+    out.push_str(&format!("total_locks: {}\n", lock_count));
+    out.push_str(&format!("active_uid: {}\n", active_uid));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let sessions = super::sessionmgr::list_sessions();
+    for s in &sessions {
+        let active = if s.is_active { " *active" } else { "" };
+        out.push_str(&format!("{}: {} ({}) {} [{}]{}\n",
+            s.id, s.username, s.uid, s.session_type.label(),
+            s.state.label(), active));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_crashreport() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (report_count, total_crashes, fatal_count, enabled, ops) = super::crashreport::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("reports: {}\n", report_count));
+    out.push_str(&format!("total_crashes: {}\n", total_crashes));
+    out.push_str(&format!("fatal_crashes: {}\n", fatal_count));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let reports = super::crashreport::list_reports();
+    for r in reports.iter().take(20) {
+        out.push_str(&format!("{}: pid={} {} {} [{}]\n",
+            r.id, r.pid, r.process_name, r.signal.label(),
+            r.severity.label()));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_netproxy() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (proxy_count, bypass_count, mode_label, app_overrides, ops) = super::netproxy::stats();
+    out.push_str(&format!("mode: {}\n", mode_label));
+    out.push_str(&format!("proxies: {}\n", proxy_count));
+    out.push_str(&format!("bypass_rules: {}\n", bypass_count));
+    out.push_str(&format!("app_overrides: {}\n", app_overrides));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let proxies = super::netproxy::list_proxies();
+    for p in &proxies {
+        let en = if p.enabled { "" } else { " [disabled]" };
+        out.push_str(&format!("{}: {}:{}{}\n", p.protocol.label(), p.host, p.port, en));
+    }
+
+    out.into_bytes()
+}
+
+fn gen_fileversion() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (ver_count, file_count, captured, restored, watch_count, ops) = super::fileversion::stats();
+    out.push_str(&format!("versions: {}\n", ver_count));
+    out.push_str(&format!("versioned_files: {}\n", file_count));
+    out.push_str(&format!("total_captured: {}\n", captured));
+    out.push_str(&format!("total_restored: {}\n", restored));
+    out.push_str(&format!("watched_paths: {}\n", watch_count));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    let watches = super::fileversion::list_watches();
+    for w in &watches {
+        out.push_str(&format!("{}: {}\n", w.path, w.policy.label()));
+    }
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -5666,6 +5753,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fileshare" => Ok(gen_fileshare()),
         "parental" => Ok(gen_parental()),
         "audiodevice" => Ok(gen_audiodevice()),
+        "sessionmgr" => Ok(gen_sessionmgr()),
+        "crashreport" => Ok(gen_crashreport()),
+        "netproxy" => Ok(gen_netproxy()),
+        "fileversion" => Ok(gen_fileversion()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

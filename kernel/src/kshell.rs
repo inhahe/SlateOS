@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4839,6 +4839,10 @@ fn dispatch(line: &str) {
         "fileshare" | "share" => cmd_fileshare(args),
         "parental" | "pctl" => cmd_parental(args),
         "audiodevice" | "adev" => cmd_audiodevice(args),
+        "sessionmgr" | "session" => cmd_sessionmgr(args),
+        "crashreport" | "crash" => cmd_crashreport(args),
+        "netproxy" | "proxy" => cmd_netproxy(args),
+        "fileversion" | "fver" => cmd_fileversion(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -29229,6 +29233,681 @@ fn cmd_audiodevice(args: &str) {
     }
 }
 
+/// `sessionmgr` / `session` — user session management.
+fn cmd_sessionmgr(args: &str) {
+    use crate::fs::sessionmgr;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let sessions = sessionmgr::list_sessions();
+            if sessions.is_empty() {
+                shell_println!("No active sessions.");
+            } else {
+                shell_println!("{:<4} {:<12} {:<6} {:<10} {:<10} {}", "ID", "User", "UID", "Type", "State", "");
+                for s in &sessions {
+                    let active = if s.is_active { " *" } else { "" };
+                    shell_println!("{:<4} {:<12} {:<6} {:<10} {:<10}{}",
+                        s.id, s.username, s.uid, s.session_type.label(),
+                        s.state.label(), active);
+                }
+            }
+        }
+        "login" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: session login <uid> <username> [type]");
+                return;
+            }
+            let uid: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid UID"); return; }
+            };
+            let username = parts[2];
+            let stype = if parts.len() > 3 {
+                match parts[3] {
+                    "console" => sessionmgr::SessionType::Console,
+                    "remote" => sessionmgr::SessionType::Remote,
+                    "greeter" => sessionmgr::SessionType::Greeter,
+                    _ => sessionmgr::SessionType::Graphical,
+                }
+            } else {
+                sessionmgr::SessionType::Graphical
+            };
+            match sessionmgr::create_session(uid, username, stype, ":0", "tty1") {
+                Ok(id) => shell_println!("Session {} created for {} (uid={})", id, username, uid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "logout" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: session logout <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid session ID"); return; }
+            };
+            match sessionmgr::destroy_session(id) {
+                Ok(()) => shell_println!("Session {} terminated.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "switch" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: session switch <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid session ID"); return; }
+            };
+            match sessionmgr::switch_session(id) {
+                Ok(()) => shell_println!("Switched to session {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "lock" => {
+            match sessionmgr::lock_session() {
+                Ok(()) => shell_println!("Session locked."),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unlock" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: session unlock <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid session ID"); return; }
+            };
+            match sessionmgr::unlock_session(id) {
+                Ok(()) => shell_println!("Session {} unlocked.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "active" => {
+            match sessionmgr::active_session() {
+                Some(s) => shell_println!("Active: {} ({}) uid={} [{}]", s.username, s.session_type.label(), s.uid, s.state.label()),
+                None => shell_println!("No active session."),
+            }
+        }
+        "timeout" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: session timeout <seconds>  (0 = disable)");
+                return;
+            }
+            let secs: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid seconds"); return; }
+            };
+            match sessionmgr::set_lock_timeout(secs) {
+                Ok(()) => shell_println!("Lock timeout set to {} seconds.", secs),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: session info <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid session ID"); return; }
+            };
+            match sessionmgr::get_session(id) {
+                Ok(s) => {
+                    shell_println!("Session {}: {} (uid={})", s.id, s.username, s.uid);
+                    shell_println!("  Type:    {}", s.session_type.label());
+                    shell_println!("  State:   {}", s.state.label());
+                    shell_println!("  Display: {}", s.display);
+                    shell_println!("  TTY:     {}", s.tty);
+                    shell_println!("  Active:  {}", s.is_active);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (count, logins, locks, active_uid, ops) = sessionmgr::stats();
+            shell_println!("Sessions: {}  Logins: {}  Locks: {}  Active UID: {}  Ops: {}", count, logins, locks, active_uid, ops);
+        }
+        "test" => {
+            sessionmgr::self_test();
+            shell_println!("Session manager self-test complete.");
+        }
+        "init" => {
+            sessionmgr::init_defaults();
+            shell_println!("Session manager initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("sessionmgr (session) — user session management");
+            shell_println!("  show               List sessions");
+            shell_println!("  login <uid> <name>  Create session");
+            shell_println!("  logout <id>         End session");
+            shell_println!("  switch <id>         Switch to session");
+            shell_println!("  lock / unlock <id>  Lock/unlock screen");
+            shell_println!("  active              Show active session");
+            shell_println!("  info <id>           Session details");
+            shell_println!("  timeout <secs>      Set lock timeout");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'session help' for usage.");
+        }
+    }
+}
+
+/// `crashreport` / `crash` — crash report management.
+fn cmd_crashreport(args: &str) {
+    use crate::fs::crashreport;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let reports = crashreport::list_reports();
+            if reports.is_empty() {
+                shell_println!("No crash reports.");
+            } else {
+                shell_println!("{:<4} {:<6} {:<16} {:<12} {:<10} {}", "ID", "PID", "Process", "Signal", "Severity", "Status");
+                for r in reports.iter().take(20) {
+                    shell_println!("{:<4} {:<6} {:<16} {:<12} {:<10} {}",
+                        r.id, r.pid, r.process_name, r.signal.label(),
+                        r.severity.label(), r.status.label());
+                }
+                if reports.len() > 20 {
+                    shell_println!("... and {} more", reports.len() - 20);
+                }
+            }
+        }
+        "detail" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: crash detail <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match crashreport::get_report(id) {
+                Ok(r) => {
+                    shell_println!("Crash Report #{}", r.id);
+                    shell_println!("  Process:  {} (pid={})", r.process_name, r.pid);
+                    shell_println!("  Signal:   {}", r.signal.label());
+                    shell_println!("  Severity: {}", r.severity.label());
+                    shell_println!("  Status:   {}", r.status.label());
+                    if r.fault_address != 0 {
+                        shell_println!("  Fault:    0x{:016x}", r.fault_address);
+                    }
+                    if r.instruction_pointer != 0 {
+                        shell_println!("  IP:       0x{:016x}", r.instruction_pointer);
+                    }
+                    if !r.stack_trace.is_empty() {
+                        shell_println!("  Stack trace ({} frames):", r.stack_trace.len());
+                        for (i, addr) in r.stack_trace.iter().enumerate() {
+                            shell_println!("    #{}: 0x{:016x}", i, addr);
+                        }
+                    }
+                    if !r.modules.is_empty() {
+                        shell_println!("  Modules: {}", r.modules.join(", "));
+                    }
+                    if !r.description.is_empty() {
+                        shell_println!("  Note: {}", r.description);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: crash delete <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            match crashreport::delete_report(id) {
+                Ok(()) => shell_println!("Report {} deleted.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "clear" => {
+            match crashreport::clear_reports() {
+                Ok(n) => shell_println!("Cleared {} reports.", n),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "describe" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: crash describe <id> <text...>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID"); return; }
+            };
+            let desc = parts[2..].join(" ");
+            match crashreport::set_description(id, &desc) {
+                Ok(()) => shell_println!("Description set for report {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match crashreport::set_enabled(on) {
+                Ok(()) => shell_println!("Crash reporting {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "autosubmit" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: crash autosubmit <on|off>");
+                return;
+            }
+            let on = matches!(parts[1], "on" | "true" | "yes" | "1");
+            match crashreport::set_auto_submit(on) {
+                Ok(()) => shell_println!("Auto-submit {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "summary" => {
+            let (fatal, non_fatal, hang, kernel) = crashreport::count_by_severity();
+            shell_println!("Fatal: {}  Non-fatal: {}  Hang: {}  Kernel: {}", fatal, non_fatal, hang, kernel);
+        }
+        "stats" => {
+            let (count, total, fatal, enabled, ops) = crashreport::stats();
+            shell_println!("Reports: {}  Total crashes: {}  Fatal: {}  Enabled: {}  Ops: {}",
+                count, total, fatal, enabled, ops);
+        }
+        "test" => {
+            crashreport::self_test();
+            shell_println!("Crash report self-test complete.");
+        }
+        "init" => {
+            crashreport::init_defaults();
+            shell_println!("Crash reporter initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("crashreport (crash) — crash report management");
+            shell_println!("  show                  List reports");
+            shell_println!("  detail <id>           Report details + stack trace");
+            shell_println!("  delete <id>           Delete report");
+            shell_println!("  describe <id> <text>  Add description");
+            shell_println!("  clear                 Clear all reports");
+            shell_println!("  summary               Count by severity");
+            shell_println!("  enable/disable        Toggle reporting");
+            shell_println!("  autosubmit on|off     Auto-submit toggle");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'crash help' for usage.");
+        }
+    }
+}
+
+/// `netproxy` / `proxy` — network proxy settings.
+fn cmd_netproxy(args: &str) {
+    use crate::fs::netproxy;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let mode = netproxy::get_mode().unwrap_or(netproxy::ProxyMode::None);
+            shell_println!("Proxy mode: {}", mode.label());
+            let proxies = netproxy::list_proxies();
+            if proxies.is_empty() {
+                shell_println!("No proxies configured.");
+            } else {
+                for p in &proxies {
+                    let en = if p.enabled { "" } else { " [disabled]" };
+                    let auth = if p.auth_required { format!(" (auth: {})", p.username) } else { String::new() };
+                    shell_println!("  {}: {}:{}{}{}", p.protocol.label(), p.host, p.port, auth, en);
+                }
+            }
+            let bypass = netproxy::list_bypass();
+            if !bypass.is_empty() {
+                shell_println!("Bypass rules:");
+                for b in &bypass {
+                    shell_println!("  {} — {}", b.pattern, b.description);
+                }
+            }
+        }
+        "mode" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: proxy mode <none|manual|auto|detect>");
+                return;
+            }
+            let mode = match parts[1] {
+                "none" | "off" => netproxy::ProxyMode::None,
+                "manual" => netproxy::ProxyMode::Manual,
+                "auto" | "pac" => netproxy::ProxyMode::Auto,
+                "detect" | "wpad" => netproxy::ProxyMode::SystemDetect,
+                _ => { shell_println!("Unknown mode: {}", parts[1]); return; }
+            };
+            match netproxy::set_mode(mode) {
+                Ok(()) => shell_println!("Proxy mode set to {}.", mode.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "set" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: proxy set <http|https|socks4|socks5|ftp> <host> <port>");
+                return;
+            }
+            let proto = match parts[1] {
+                "http" => netproxy::ProxyProtocol::Http,
+                "https" => netproxy::ProxyProtocol::Https,
+                "socks4" => netproxy::ProxyProtocol::Socks4,
+                "socks5" | "socks" => netproxy::ProxyProtocol::Socks5,
+                "ftp" => netproxy::ProxyProtocol::Ftp,
+                _ => { shell_println!("Unknown protocol: {}", parts[1]); return; }
+            };
+            let host = parts[2];
+            let port: u16 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid port"); return; }
+            };
+            match netproxy::set_proxy(proto, host, port) {
+                Ok(()) => shell_println!("Proxy set: {} → {}:{}", proto.label(), host, port),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: proxy remove <http|https|socks4|socks5|ftp>");
+                return;
+            }
+            let proto = match parts[1] {
+                "http" => netproxy::ProxyProtocol::Http,
+                "https" => netproxy::ProxyProtocol::Https,
+                "socks4" => netproxy::ProxyProtocol::Socks4,
+                "socks5" | "socks" => netproxy::ProxyProtocol::Socks5,
+                "ftp" => netproxy::ProxyProtocol::Ftp,
+                _ => { shell_println!("Unknown protocol: {}", parts[1]); return; }
+            };
+            match netproxy::remove_proxy(proto) {
+                Ok(()) => shell_println!("Proxy removed for {}.", proto.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "pac" => {
+            if parts.len() < 2 {
+                let url = netproxy::get_pac_url().unwrap_or_default();
+                if url.is_empty() {
+                    shell_println!("No PAC URL configured.");
+                } else {
+                    shell_println!("PAC URL: {}", url);
+                }
+            } else {
+                match netproxy::set_pac_url(parts[1]) {
+                    Ok(()) => shell_println!("PAC URL set to {}", parts[1]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+        }
+        "bypass" => {
+            if parts.len() < 2 {
+                let rules = netproxy::list_bypass();
+                for b in &rules {
+                    shell_println!("  {} — {}", b.pattern, b.description);
+                }
+            } else if parts.len() >= 3 && parts[1] == "add" {
+                let desc = if parts.len() > 3 { parts[3..].join(" ") } else { String::new() };
+                match netproxy::add_bypass(parts[2], &desc) {
+                    Ok(()) => shell_println!("Bypass added: {}", parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else if parts.len() >= 3 && parts[1] == "remove" {
+                match netproxy::remove_bypass(parts[2]) {
+                    Ok(()) => shell_println!("Bypass removed: {}", parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: proxy bypass [add <pattern> [desc] | remove <pattern>]");
+            }
+        }
+        "resolve" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: proxy resolve <host> [http|https]");
+                return;
+            }
+            let proto = if parts.len() > 2 {
+                match parts[2] {
+                    "https" => netproxy::ProxyProtocol::Https,
+                    _ => netproxy::ProxyProtocol::Http,
+                }
+            } else {
+                netproxy::ProxyProtocol::Http
+            };
+            match netproxy::resolve_proxy(parts[1], proto) {
+                netproxy::ProxyResolution::Proxy { host, port, protocol } => {
+                    shell_println!("→ Proxy: {} {}:{}", protocol.label(), host, port);
+                }
+                netproxy::ProxyResolution::Direct => {
+                    shell_println!("→ Direct connection (no proxy)");
+                }
+            }
+        }
+        "stats" => {
+            let (proxies, bypass, mode, overrides, ops) = netproxy::stats();
+            shell_println!("Mode: {}  Proxies: {}  Bypass: {}  App overrides: {}  Ops: {}",
+                mode, proxies, bypass, overrides, ops);
+        }
+        "test" => {
+            netproxy::self_test();
+            shell_println!("Proxy self-test complete.");
+        }
+        "init" => {
+            netproxy::init_defaults();
+            shell_println!("Proxy settings initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("netproxy (proxy) — network proxy settings");
+            shell_println!("  show                             Current config");
+            shell_println!("  mode <none|manual|auto|detect>   Set proxy mode");
+            shell_println!("  set <proto> <host> <port>        Add/update proxy");
+            shell_println!("  remove <proto>                   Remove proxy");
+            shell_println!("  pac [url]                        Show/set PAC URL");
+            shell_println!("  bypass [add|remove <pattern>]    Bypass rules");
+            shell_println!("  resolve <host> [proto]           Test resolution");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'proxy help' for usage.");
+        }
+    }
+}
+
+/// `fileversion` / `fver` — file versioning and history.
+fn cmd_fileversion(args: &str) {
+    use crate::fs::fileversion;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (ver_count, file_count, captured, restored, watch_count, ops) = fileversion::stats();
+            shell_println!("File Versioning");
+            shell_println!("  Versions stored:  {}", ver_count);
+            shell_println!("  Files versioned:  {}", file_count);
+            shell_println!("  Total captured:   {}", captured);
+            shell_println!("  Total restored:   {}", restored);
+            shell_println!("  Watched paths:    {}", watch_count);
+            shell_println!("  Storage used:     {} bytes", fileversion::total_storage());
+        }
+        "list" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fver list <path>");
+                return;
+            }
+            let versions = fileversion::list_versions(parts[1]);
+            if versions.is_empty() {
+                shell_println!("No versions for '{}'.", parts[1]);
+            } else {
+                shell_println!("{:<6} {:<4} {:<8} {}", "ID", "Ver", "Size", "Comment");
+                for v in &versions {
+                    shell_println!("{:<6} v{:<3} {:<8} {}", v.id, v.version, v.size, v.comment);
+                }
+            }
+        }
+        "detail" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fver detail <version_id>");
+                return;
+            }
+            let id: u64 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid version ID"); return; }
+            };
+            match fileversion::get_version(id) {
+                Ok(v) => {
+                    shell_println!("Version #{} of {}", v.id, v.path);
+                    shell_println!("  Version:  v{}", v.version);
+                    shell_println!("  Size:     {} bytes", v.size);
+                    shell_println!("  Checksum: 0x{:016x}", v.checksum);
+                    shell_println!("  User:     uid={}", v.uid);
+                    if !v.comment.is_empty() {
+                        shell_println!("  Comment:  {}", v.comment);
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "comment" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: fver comment <version_id> <text...>");
+                return;
+            }
+            let id: u64 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid version ID"); return; }
+            };
+            let text = parts[2..].join(" ");
+            match fileversion::set_version_comment(id, &text) {
+                Ok(()) => shell_println!("Comment set on version {}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "restore" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fver restore <version_id>");
+                return;
+            }
+            let id: u64 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid version ID"); return; }
+            };
+            match fileversion::restore_version(id) {
+                Ok(v) => shell_println!("Restored version {} of {} ({} bytes)", v.version, v.path, v.size),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fver delete <version_id>");
+                return;
+            }
+            let id: u64 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid version ID"); return; }
+            };
+            match fileversion::delete_version(id) {
+                Ok(()) => shell_println!("Version {} deleted.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "purge" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: fver purge <path>");
+                return;
+            }
+            match fileversion::purge_file_versions(parts[1]) {
+                Ok(n) => shell_println!("Purged {} versions of {}.", n, parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "watch" => {
+            if parts.len() < 2 {
+                let watches = fileversion::list_watches();
+                if watches.is_empty() {
+                    shell_println!("No watched paths.");
+                } else {
+                    for w in &watches {
+                        shell_println!("  {} — {}", w.path, w.policy.label());
+                    }
+                }
+            } else if parts.len() >= 3 && parts[1] == "add" {
+                let policy = if parts.len() > 3 {
+                    match parts[3] {
+                        "all" => fileversion::VersionPolicy::KeepAll,
+                        "disabled" | "off" => fileversion::VersionPolicy::Disabled,
+                        n => match n.parse::<u32>() {
+                            Ok(v) => fileversion::VersionPolicy::KeepLast(v),
+                            Err(_) => fileversion::VersionPolicy::KeepLast(10),
+                        },
+                    }
+                } else {
+                    fileversion::VersionPolicy::KeepLast(10)
+                };
+                match fileversion::add_watch(parts[2], policy) {
+                    Ok(()) => shell_println!("Watch added: {} ({})", parts[2], policy.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else if parts.len() >= 3 && parts[1] == "remove" {
+                match fileversion::remove_watch(parts[2]) {
+                    Ok(()) => shell_println!("Watch removed: {}", parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: fver watch [add <path> [policy] | remove <path>]");
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match fileversion::set_enabled(on) {
+                Ok(()) => shell_println!("File versioning {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (ver_count, file_count, captured, restored, watch_count, ops) = fileversion::stats();
+            shell_println!("Versions: {}  Files: {}  Captured: {}  Restored: {}  Watches: {}  Ops: {}",
+                ver_count, file_count, captured, restored, watch_count, ops);
+        }
+        "test" => {
+            fileversion::self_test();
+            shell_println!("File versioning self-test complete.");
+        }
+        "init" => {
+            fileversion::init_defaults();
+            shell_println!("File versioning initialized.");
+        }
+        "help" | _ if sub == "help" => {
+            shell_println!("fileversion (fver) — file version history");
+            shell_println!("  show                    Overview");
+            shell_println!("  list <path>             Versions of a file");
+            shell_println!("  detail <id>             Version details");
+            shell_println!("  comment <id> <text>     Add comment");
+            shell_println!("  restore <id>            Restore version");
+            shell_println!("  delete <id>             Delete version");
+            shell_println!("  purge <path>            Delete all versions");
+            shell_println!("  watch [add|remove]      Watch paths");
+            shell_println!("  enable/disable          Toggle versioning");
+            shell_println!("  stats / test / init");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", sub);
+            shell_println!("Use 'fver help' for usage.");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -37825,7 +38504,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

@@ -341,6 +341,10 @@ const ROOT_FILES: &[&str] = &[
     "applaunch",
     "sysprofiler",
     "clipsync",
+    "netusage",
+    "touchscreen",
+    "diskquota",
+    "appdefaults",
     "columnview",
     "pathbar",
     "viewstate",
@@ -6966,6 +6970,65 @@ fn gen_clipsync() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netusage() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (app_count, iface_count, total_sent, total_received, total_connections, cap_warnings, ops) = super::netusage::stats();
+    out.push_str("subsystem: netusage\n");
+    out.push_str(&format!("app_count: {}\n", app_count));
+    out.push_str(&format!("interface_count: {}\n", iface_count));
+    out.push_str(&format!("total_bytes_sent: {}\n", total_sent));
+    out.push_str(&format!("total_bytes_received: {}\n", total_received));
+    out.push_str(&format!("total_connections: {}\n", total_connections));
+    out.push_str(&format!("cap_warnings: {}\n", cap_warnings));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_touchscreen() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (device_count, gesture_count, total_touches, total_gestures, calibrations, ops) = super::touchscreen::stats();
+    out.push_str("subsystem: touchscreen\n");
+    out.push_str(&format!("device_count: {}\n", device_count));
+    out.push_str(&format!("gesture_count: {}\n", gesture_count));
+    out.push_str(&format!("total_touches: {}\n", total_touches));
+    out.push_str(&format!("total_gestures: {}\n", total_gestures));
+    out.push_str(&format!("calibrations: {}\n", calibrations));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_diskquota() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (entry_count, total_checks, total_denials, total_warnings, ops) = super::diskquota::stats();
+    out.push_str("subsystem: diskquota\n");
+    out.push_str(&format!("entry_count: {}\n", entry_count));
+    out.push_str(&format!("total_checks: {}\n", total_checks));
+    out.push_str(&format!("total_denials: {}\n", total_denials));
+    out.push_str(&format!("total_warnings: {}\n", total_warnings));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_appdefaults() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (app_count, total_reads, total_writes, total_resets, ops) = super::appdefaults::stats();
+    out.push_str("subsystem: appdefaults\n");
+    out.push_str(&format!("app_count: {}\n", app_count));
+    out.push_str(&format!("total_reads: {}\n", total_reads));
+    out.push_str(&format!("total_writes: {}\n", total_writes));
+    out.push_str(&format!("total_resets: {}\n", total_resets));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7472,6 +7535,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "applaunch" => Ok(gen_applaunch()),
         "sysprofiler" => Ok(gen_sysprofiler()),
         "clipsync" => Ok(gen_clipsync()),
+        "netusage" => Ok(gen_netusage()),
+        "touchscreen" => Ok(gen_touchscreen()),
+        "diskquota" => Ok(gen_diskquota()),
+        "appdefaults" => Ok(gen_appdefaults()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

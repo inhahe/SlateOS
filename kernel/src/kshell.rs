@@ -3454,6 +3454,7 @@ const COMMANDS: &[&str] = &[
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "usbpolicy", "usbpol", "applaunch", "alaunch", "sysprofiler", "sprof", "clipsync", "clsync",
+    "netusage", "nusage", "touchscreen", "tscreen", "diskquota", "dquota", "appdefaults", "adef",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4946,6 +4947,10 @@ fn dispatch(line: &str) {
         "applaunch" | "alaunch" => cmd_applaunch(args),
         "sysprofiler" | "sprof" => cmd_sysprofiler(args),
         "clipsync" | "clsync" => cmd_clipsync(args),
+        "netusage" | "nusage" => cmd_netusage(args),
+        "touchscreen" | "tscreen" => cmd_touchscreen(args),
+        "diskquota" | "dquota" => cmd_diskquota(args),
+        "appdefaults" | "adef" => cmd_appdefaults(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -42435,6 +42440,650 @@ fn parse_sync_content_type(s: &str) -> crate::fs::clipsync::SyncContentType {
     }
 }
 
+/// `netusage` / `nusage` — network usage monitor.
+fn cmd_netusage(args: &str) {
+    use crate::fs::netusage;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "record" => {
+            // record <app> <iface> <up|down> <bytes>
+            if parts.len() < 5 {
+                shell_println!("Usage: netusage record <app> <iface> <up|down> <bytes>");
+                return;
+            }
+            let app = parts[1];
+            let iface = parts[2];
+            let dir = if parts[3] == "up" || parts[3] == "upload" {
+                netusage::Direction::Upload
+            } else {
+                netusage::Direction::Download
+            };
+            let bytes = parts[4].parse::<u64>().unwrap_or(0);
+            match netusage::record_traffic(app, iface, dir, bytes) {
+                Ok(()) => shell_println!("Recorded {} bytes {} for '{}'", bytes, dir.label(), app),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "connect" => {
+            if let Some(app) = parts.get(1) {
+                match netusage::record_connection(app) {
+                    Ok(()) => shell_println!("Connection recorded for '{}'", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: netusage connect <app>");
+            }
+        }
+        "cap" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: netusage cap <app> <bytes|none>");
+                return;
+            }
+            let app = parts[1];
+            let cap = if parts[2] == "none" || parts[2] == "off" {
+                None
+            } else {
+                Some(parts[2].parse::<u64>().unwrap_or(0))
+            };
+            match netusage::set_cap(app, cap) {
+                Ok(()) => match cap {
+                    Some(b) => shell_println!("Cap for '{}': {} bytes", app, b),
+                    None => shell_println!("Cap removed for '{}'", app),
+                },
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "app" | "get" => {
+            if let Some(app) = parts.get(1) {
+                match netusage::get_app_usage(app) {
+                    Some(u) => {
+                        shell_println!("  {} — sent={} recv={} conns={}", u.app_name, u.bytes_sent, u.bytes_received, u.connections);
+                        if let Some(cap) = u.cap_bytes {
+                            let total = u.bytes_sent + u.bytes_received;
+                            let pct = if cap > 0 { total * 100 / cap } else { 0 };
+                            shell_println!("  Cap: {} bytes ({}% used){}", cap, pct, if u.cap_warned { " ⚠ EXCEEDED" } else { "" });
+                        }
+                    }
+                    None => shell_println!("No usage data for '{}'", app),
+                }
+            } else {
+                shell_println!("Usage: netusage app <name>");
+            }
+        }
+        "top" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let top = netusage::top_apps(max);
+            if top.is_empty() {
+                shell_println!("No usage data");
+            } else {
+                for (i, a) in top.iter().enumerate() {
+                    let total = a.bytes_sent + a.bytes_received;
+                    shell_println!("  {}. {} — {} bytes (↑{} ↓{})", i + 1, a.app_name, total, a.bytes_sent, a.bytes_received);
+                }
+            }
+        }
+        "ifaces" | "interfaces" => {
+            let ifaces = netusage::list_interfaces();
+            for i in &ifaces {
+                shell_println!("  {} [{}] — ↑{} bytes ({} pkts) ↓{} bytes ({} pkts)", i.name, i.iface_type.label(), i.bytes_sent, i.packets_sent, i.bytes_received, i.packets_received);
+            }
+        }
+        "add" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: netusage add <name> <type>");
+                return;
+            }
+            let itype = parse_interface_type(parts[2]);
+            match netusage::add_interface(parts[1], itype) {
+                Ok(()) => shell_println!("Added interface '{}' [{}]", parts[1], itype.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reset" => {
+            match netusage::reset_all() {
+                Ok(()) => shell_println!("All usage stats reset"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (apps, ifaces, sent, recv, conns, warnings, ops) = netusage::stats();
+            shell_println!("Network Usage: {} apps, {} interfaces", apps, ifaces);
+            shell_println!("  Sent: {} | Received: {} | Connections: {}", sent, recv, conns);
+            shell_println!("  Cap warnings: {} | Ops: {}", warnings, ops);
+        }
+        "test" => {
+            netusage::self_test();
+            shell_println!("netusage self-test complete");
+        }
+        "init" => {
+            netusage::init_defaults();
+            shell_println!("netusage initialised");
+        }
+        _ => {
+            shell_println!("netusage — network usage monitor");
+            shell_println!("  record <app> <iface> <up|down> <bytes>  Record traffic");
+            shell_println!("  connect <app>                           Record connection");
+            shell_println!("  cap <app> <bytes|none>                  Set data cap");
+            shell_println!("  app <name>                              Show app usage");
+            shell_println!("  top [n]                                 Top apps by usage");
+            shell_println!("  ifaces                                  List interfaces");
+            shell_println!("  add <name> <type>                       Add interface");
+            shell_println!("  reset                                   Reset all stats");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_interface_type(s: &str) -> crate::fs::netusage::InterfaceType {
+    use crate::fs::netusage::InterfaceType;
+    match s.to_lowercase().as_str() {
+        "ethernet" | "eth" => InterfaceType::Ethernet,
+        "wifi" | "wlan" => InterfaceType::Wifi,
+        "cellular" | "cell" => InterfaceType::Cellular,
+        "vpn" => InterfaceType::Vpn,
+        "loopback" | "lo" => InterfaceType::Loopback,
+        _ => InterfaceType::Other,
+    }
+}
+
+/// `touchscreen` / `tscreen` — touchscreen settings.
+fn cmd_touchscreen(args: &str) {
+    use crate::fs::touchscreen;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "add" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: touchscreen add <name> <max_touches>");
+                return;
+            }
+            let name = parts[1];
+            let touches = parts[2].parse::<u8>().unwrap_or(10);
+            match touchscreen::add_device(name, touches) {
+                Ok(id) => shell_println!("Added touchscreen #{}: {} ({} touches)", id, name, touches),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match touchscreen::remove_device(id) {
+                        Ok(()) => shell_println!("Removed device #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid device ID");
+                }
+            } else {
+                shell_println!("Usage: touchscreen remove <id>");
+            }
+        }
+        "calibrate" | "cal" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match touchscreen::calibrate(id) {
+                        Ok(()) => shell_println!("Calibrated device #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid device ID");
+                }
+            } else {
+                shell_println!("Usage: touchscreen calibrate <device_id>");
+            }
+        }
+        "sensitivity" | "sens" => {
+            if let Some(v) = parts.get(1) {
+                if let Ok(val) = v.parse::<u32>() {
+                    match touchscreen::set_sensitivity(val) {
+                        Ok(()) => shell_println!("Sensitivity: {}", val),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid value (1-100)");
+                }
+            } else {
+                shell_println!("Sensitivity: {}", touchscreen::get_sensitivity());
+            }
+        }
+        "palm" => {
+            if let Some(v) = parts.get(1) {
+                let on = *v == "on" || *v == "true" || *v == "yes";
+                match touchscreen::set_palm_rejection(on) {
+                    Ok(()) => shell_println!("Palm rejection: {}", if on { "ON" } else { "OFF" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: touchscreen palm <on|off>");
+            }
+        }
+        "sound" => {
+            if let Some(v) = parts.get(1) {
+                let on = *v == "on" || *v == "true";
+                match touchscreen::set_touch_sound(on) {
+                    Ok(()) => shell_println!("Touch sound: {}", if on { "ON" } else { "OFF" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: touchscreen sound <on|off>");
+            }
+        }
+        "vibration" | "haptic" => {
+            if let Some(v) = parts.get(1) {
+                let on = *v == "on" || *v == "true";
+                match touchscreen::set_touch_vibration(on) {
+                    Ok(()) => shell_println!("Touch vibration: {}", if on { "ON" } else { "OFF" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: touchscreen vibration <on|off>");
+            }
+        }
+        "gesture" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: touchscreen gesture <type> <action>");
+                return;
+            }
+            let gtype = parse_gesture_type(parts[1]);
+            let action = parts[2..].join(" ");
+            match touchscreen::set_gesture(gtype, &action) {
+                Ok(id) => shell_println!("Gesture #{}: {} → {}", id, gtype.label(), action),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "gestures" => {
+            let gestures = touchscreen::list_gestures();
+            if gestures.is_empty() {
+                shell_println!("No gesture bindings");
+            } else {
+                for g in &gestures {
+                    let en = if g.enabled { "ON" } else { "OFF" };
+                    shell_println!("  #{}: {} [{}] → {} (triggers={})", g.id, g.gesture.label(), en, g.action, g.trigger_count);
+                }
+            }
+        }
+        "devices" | "list" => {
+            let devices = touchscreen::list_devices();
+            if devices.is_empty() {
+                shell_println!("No touchscreen devices");
+            } else {
+                for d in &devices {
+                    let cal = if d.calibrated { "calibrated" } else { "uncalibrated" };
+                    let en = if d.enabled { "ON" } else { "OFF" };
+                    shell_println!("  #{}: {} [{}] {} max_touches={}", d.id, d.name, en, cal, d.max_touches);
+                }
+            }
+        }
+        "stats" => {
+            let (devices, gestures, touches, gest_count, cals, ops) = touchscreen::stats();
+            shell_println!("Touchscreen: {} devices, {} gestures", devices, gestures);
+            shell_println!("  Touches: {} | Gestures: {} | Calibrations: {} | Ops: {}", touches, gest_count, cals, ops);
+        }
+        "test" => {
+            touchscreen::self_test();
+            shell_println!("touchscreen self-test complete");
+        }
+        "init" => {
+            touchscreen::init_defaults();
+            shell_println!("touchscreen initialised");
+        }
+        _ => {
+            shell_println!("touchscreen — touchscreen input settings");
+            shell_println!("  add <name> <touches>      Add device");
+            shell_println!("  remove <id>               Remove device");
+            shell_println!("  calibrate <id>            Calibrate device");
+            shell_println!("  sensitivity [1-100]       Set/show sensitivity");
+            shell_println!("  palm <on|off>             Palm rejection");
+            shell_println!("  sound <on|off>            Touch sound");
+            shell_println!("  vibration <on|off>        Touch vibration");
+            shell_println!("  gesture <type> <action>   Set gesture binding");
+            shell_println!("  gestures                  List gestures");
+            shell_println!("  devices                   List devices");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_gesture_type(s: &str) -> crate::fs::touchscreen::GestureType {
+    use crate::fs::touchscreen::GestureType;
+    match s.to_lowercase().as_str() {
+        "tap" => GestureType::Tap,
+        "doubletap" | "dtap" => GestureType::DoubleTap,
+        "longpress" | "lpress" => GestureType::LongPress,
+        "swipe" => GestureType::Swipe,
+        "pinch" => GestureType::Pinch,
+        "rotate" => GestureType::Rotate,
+        "3swipe" | "threefingerswipe" => GestureType::ThreeFingerSwipe,
+        "4swipe" | "fourfingerswipe" => GestureType::FourFingerSwipe,
+        "edge" | "edgeswipe" => GestureType::EdgeSwipe,
+        _ => GestureType::Tap,
+    }
+}
+
+/// `diskquota` / `dquota` — disk quota management.
+fn cmd_diskquota(args: &str) {
+    use crate::fs::diskquota;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "set" => {
+            // set <name> <user|group> <soft_bytes> <hard_bytes>
+            if parts.len() < 5 {
+                shell_println!("Usage: diskquota set <name> <user|group> <soft> <hard>");
+                return;
+            }
+            let name = parts[1];
+            let target = if parts[2] == "group" {
+                diskquota::QuotaTarget::Group
+            } else {
+                diskquota::QuotaTarget::User
+            };
+            let soft = parts[3].parse::<u64>().unwrap_or(0);
+            let hard = parts[4].parse::<u64>().unwrap_or(0);
+            match diskquota::set_quota(name, target, soft, hard) {
+                Ok(id) => shell_println!("Quota #{} for {} '{}': soft={} hard={}", id, target.label(), name, soft, hard),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "files" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: diskquota files <name> <user|group> <soft> <hard>");
+                return;
+            }
+            let name = parts[1];
+            let target = if parts[2] == "group" {
+                diskquota::QuotaTarget::Group
+            } else {
+                diskquota::QuotaTarget::User
+            };
+            let soft = parts[3].parse::<u64>().unwrap_or(0);
+            let hard = parts[4].parse::<u64>().unwrap_or(0);
+            match diskquota::set_file_limits(name, target, soft, hard) {
+                Ok(()) => shell_println!("File limits for {} '{}': soft={} hard={}", target.label(), name, soft, hard),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "check" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: diskquota check <name> <user|group> <bytes>");
+                return;
+            }
+            let name = parts[1];
+            let target = if parts[2] == "group" {
+                diskquota::QuotaTarget::Group
+            } else {
+                diskquota::QuotaTarget::User
+            };
+            let bytes = parts[3].parse::<u64>().unwrap_or(0);
+            match diskquota::check_quota(name, target, bytes) {
+                Ok(allowed) => shell_println!("{} write of {} bytes: {}", name, bytes, if allowed { "ALLOWED" } else { "DENIED" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "update" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: diskquota update <name> <user|group> <bytes_delta> [file_delta]");
+                return;
+            }
+            let name = parts[1];
+            let target = if parts[2] == "group" {
+                diskquota::QuotaTarget::Group
+            } else {
+                diskquota::QuotaTarget::User
+            };
+            let bdelta = parts[3].parse::<i64>().unwrap_or(0);
+            let fdelta = parts.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            match diskquota::update_usage(name, target, bdelta, fdelta) {
+                Ok(()) => shell_println!("Updated {} '{}': bytes={:+} files={:+}", target.label(), name, bdelta, fdelta),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: diskquota remove <name> <user|group>");
+                return;
+            }
+            let name = parts[1];
+            let target = if parts[2] == "group" {
+                diskquota::QuotaTarget::Group
+            } else {
+                diskquota::QuotaTarget::User
+            };
+            match diskquota::remove_quota(name, target) {
+                Ok(()) => shell_println!("Removed quota for {} '{}'", target.label(), name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "get" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: diskquota get <name> <user|group>");
+                return;
+            }
+            let name = parts[1];
+            let target = if parts[2] == "group" {
+                diskquota::QuotaTarget::Group
+            } else {
+                diskquota::QuotaTarget::User
+            };
+            match diskquota::get_quota(name, target) {
+                Some(q) => {
+                    shell_println!("  {} '{}' [{}]", q.target_type.label(), q.name, q.status().label());
+                    shell_println!("  Bytes: {} / {} (soft) / {} (hard)", q.bytes_used, q.soft_limit_bytes, q.hard_limit_bytes);
+                    shell_println!("  Files: {}", q.file_count);
+                }
+                None => shell_println!("No quota for {} '{}'", target.label(), name),
+            }
+        }
+        "list" => {
+            let quotas = diskquota::list_quotas();
+            if quotas.is_empty() {
+                shell_println!("No quotas configured");
+            } else {
+                for q in &quotas {
+                    let pct = if q.hard_limit_bytes > 0 { q.bytes_used * 100 / q.hard_limit_bytes } else { 0 };
+                    shell_println!("  #{}: {} '{}' [{}] — {} / {} ({}%)", q.id, q.target_type.label(), q.name, q.status().label(), q.bytes_used, q.hard_limit_bytes, pct);
+                }
+            }
+        }
+        "enable" | "on" => {
+            match diskquota::set_enabled(true) {
+                Ok(()) => shell_println!("Quota enforcement enabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" | "off" => {
+            match diskquota::set_enabled(false) {
+                Ok(()) => shell_println!("Quota enforcement disabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (entries, checks, denials, warnings, ops) = diskquota::stats();
+            shell_println!("Disk Quota: {} entries, {} checks", entries, checks);
+            shell_println!("  Denials: {} | Warnings: {} | Ops: {}", denials, warnings, ops);
+        }
+        "test" => {
+            diskquota::self_test();
+            shell_println!("diskquota self-test complete");
+        }
+        "init" => {
+            diskquota::init_defaults();
+            shell_println!("diskquota initialised");
+        }
+        _ => {
+            shell_println!("diskquota — disk quota management");
+            shell_println!("  set <name> <user|group> <soft> <hard>  Set quota");
+            shell_println!("  files <name> <type> <soft> <hard>      Set file limits");
+            shell_println!("  check <name> <type> <bytes>            Check write");
+            shell_println!("  update <name> <type> <delta> [fdelta]  Update usage");
+            shell_println!("  get <name> <type>                      Show quota");
+            shell_println!("  remove <name> <type>                   Remove quota");
+            shell_println!("  list                                   List all");
+            shell_println!("  enable / disable                       Toggle enforcement");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+/// `appdefaults` / `adef` — per-app default settings.
+fn cmd_appdefaults(args: &str) {
+    use crate::fs::appdefaults;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "get" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appdefaults get <app> <key>");
+                return;
+            }
+            match appdefaults::get(parts[1], parts[2]) {
+                Ok(Some(v)) => shell_println!("  {}.{} = {} ({})", parts[1], parts[2], v.display_value(), v.type_label()),
+                Ok(None) => shell_println!("  {}.{} not set", parts[1], parts[2]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "set" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: appdefaults set <app> <key> <value> [type]");
+                return;
+            }
+            let app = parts[1];
+            let key = parts[2];
+            let raw = parts[3];
+            let ptype = parts.get(4).copied().unwrap_or("auto");
+            let value = match ptype {
+                "int" | "i" => {
+                    if let Ok(v) = raw.parse::<i64>() {
+                        appdefaults::PrefValue::IntVal(v)
+                    } else {
+                        shell_println!("Invalid integer");
+                        return;
+                    }
+                }
+                "bool" | "b" => {
+                    let v = raw == "true" || raw == "yes" || raw == "1" || raw == "on";
+                    appdefaults::PrefValue::BoolVal(v)
+                }
+                "string" | "s" => appdefaults::PrefValue::StringVal(alloc::string::String::from(raw)),
+                _ => {
+                    // Auto-detect.
+                    if raw == "true" || raw == "false" {
+                        appdefaults::PrefValue::BoolVal(raw == "true")
+                    } else if let Ok(v) = raw.parse::<i64>() {
+                        appdefaults::PrefValue::IntVal(v)
+                    } else {
+                        appdefaults::PrefValue::StringVal(alloc::string::String::from(raw))
+                    }
+                }
+            };
+            match appdefaults::set(app, key, value) {
+                Ok(()) => shell_println!("Set {}.{} = {}", app, key, raw),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" | "del" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: appdefaults delete <app> <key>");
+                return;
+            }
+            match appdefaults::delete(parts[1], parts[2]) {
+                Ok(()) => shell_println!("Deleted {}.{}", parts[1], parts[2]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "reset" => {
+            if let Some(app) = parts.get(1) {
+                match appdefaults::reset(app) {
+                    Ok(()) => shell_println!("Reset all prefs for '{}'", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: appdefaults reset <app>");
+            }
+        }
+        "remove" => {
+            if let Some(app) = parts.get(1) {
+                match appdefaults::remove_app(app) {
+                    Ok(()) => shell_println!("Removed app '{}'", app),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: appdefaults remove <app>");
+            }
+        }
+        "show" => {
+            if let Some(app) = parts.get(1) {
+                match appdefaults::get_app_prefs(app) {
+                    Some(prefs) => {
+                        shell_println!("  {} ({} entries, r={} w={})", prefs.app_name, prefs.entries.len(), prefs.total_reads, prefs.total_writes);
+                        for e in &prefs.entries {
+                            shell_println!("    {} = {} ({})", e.key, e.value.display_value(), e.value.type_label());
+                        }
+                    }
+                    None => shell_println!("No prefs for '{}'", app),
+                }
+            } else {
+                shell_println!("Usage: appdefaults show <app>");
+            }
+        }
+        "apps" | "list" => {
+            let apps = appdefaults::list_apps();
+            if apps.is_empty() {
+                shell_println!("No apps with preferences");
+            } else {
+                for app in &apps {
+                    let keys = appdefaults::list_keys(app);
+                    shell_println!("  {} ({} keys)", app, keys.len());
+                }
+            }
+        }
+        "keys" => {
+            if let Some(app) = parts.get(1) {
+                let keys = appdefaults::list_keys(app);
+                if keys.is_empty() {
+                    shell_println!("No keys for '{}'", app);
+                } else {
+                    for k in &keys {
+                        shell_println!("  {}", k);
+                    }
+                }
+            } else {
+                shell_println!("Usage: appdefaults keys <app>");
+            }
+        }
+        "stats" => {
+            let (apps, reads, writes, resets, ops) = appdefaults::stats();
+            shell_println!("App Defaults: {} apps", apps);
+            shell_println!("  Reads: {} | Writes: {} | Resets: {} | Ops: {}", reads, writes, resets, ops);
+        }
+        "test" => {
+            appdefaults::self_test();
+            shell_println!("appdefaults self-test complete");
+        }
+        "init" => {
+            appdefaults::init_defaults();
+            shell_println!("appdefaults initialised");
+        }
+        _ => {
+            shell_println!("appdefaults — per-app default settings");
+            shell_println!("  get <app> <key>                  Read preference");
+            shell_println!("  set <app> <key> <value> [type]   Write preference");
+            shell_println!("  delete <app> <key>               Delete preference");
+            shell_println!("  show <app>                       Show all prefs");
+            shell_println!("  reset <app>                      Clear app prefs");
+            shell_println!("  remove <app>                     Remove app entry");
+            shell_println!("  apps                             List apps");
+            shell_println!("  keys <app>                       List keys");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -51031,7 +51680,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

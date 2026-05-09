@@ -867,6 +867,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] App Launcher (fs::applaunch): search-based application launcher with scoring (name/keyword/prefix/usage boost), 7 result types, launch history tracking, top-launched ranking, 500-item limit; `applaunch`/`alaunch` kshell command; /proc/applaunch; 8 self-tests
   - [x] System Profiler (fs::sysprofiler): detailed hardware/software inventory with 10 section types, key-value entries, text summary generation, section refresh tracking; `sysprofiler`/`sprof` kshell command; /proc/sysprofiler; 8 self-tests
   - [x] Clipboard Sync (fs::clipsync): cross-device clipboard synchronization with content type filtering, size limits, device pairing with send/receive/bidirectional modes, encrypted transfer, sync queue; `clipsync`/`clsync` kshell command; /proc/clipsync; 8 self-tests
+  - [x] Network Usage (fs::netusage): per-app bandwidth tracking with upload/download stats, data caps with warning system, per-interface traffic stats, top-apps ranking, connection counting; `netusage`/`nusage` kshell command; /proc/netusage; 8 self-tests
+  - [x] Touchscreen (fs::touchscreen): touchscreen input settings with 9 gesture types, device calibration, sensitivity (1-100), palm rejection, touch sound/vibration, custom gesture bindings; `touchscreen`/`tscreen` kshell command; /proc/touchscreen; 8 self-tests
+  - [x] Disk Quota (fs::diskquota): per-user/group storage limits with soft/hard byte and file limits, grace periods, quota status tracking, usage delta updates; `diskquota`/`dquota` kshell command; /proc/diskquota; 8 self-tests
+  - [x] App Defaults (fs::appdefaults): per-application settings registry with string/int/bool value types, auto-type detection, per-app read/write tracking, reset/remove operations; `appdefaults`/`adef` kshell command; /proc/appdefaults; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)
